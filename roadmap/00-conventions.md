@@ -35,7 +35,10 @@ stack so that generated code is consistent:
 | Configuration | Env vars parsed with **caarlos0/env**; shared helper for the `*_FILE` convention | see §8 |
 | Lint / format | **gofumpt** + **golangci-lint** | Config at repo root; `forbidigo` rules ban float use in money paths (§6) |
 | Tests | **go test**; **testcontainers-go** for Postgres/TimescaleDB | Integration tests must run against real Postgres, not mocks |
-| Containerization | **Docker**, one multi-stage root `Dockerfile` (`ARG CMD`) → static binary on distroless, one image per service | Dev stack via `docker compose` in `deploy/compose/` |
+| Containerization | **Docker**, one multi-stage root `Dockerfile` (`ARG CMD`) → static binary on distroless, one image per service | The same images run in dev and prod |
+| Dev environment | **kind** + **kustomize** (`kubectl apply -k`); **Tilt** for the build → `kind load` → redeploy loop | Cluster config `deploy/kind/kind.yaml`; manifests under `deploy/kubernetes/` (§2) — the dev stack runs on Kubernetes from day one, dev/prod share the same kustomize base |
+| Routing / ingress | **Gateway API** implemented by **Envoy Gateway**: one `Gateway`, per-service `HTTPRoute`/`GRPCRoute`, `TCPRoute` for Postgres in dev | The identical Gateway + routes in dev and prod; only hostnames and TLS issuer differ per overlay. No per-service NodePorts or port-forwards |
+| Dev hostnames & TLS | **nip.io** wildcard DNS (`*.tally.127-0-0-1.nip.io` → 127.0.0.1) + **cert-manager** with a self-signed CA `ClusterIssuer` | Real URLs and HTTPS in dev without `/etc/hosts` edits; prod swaps hostnames and issuer (e.g. ACME), nothing else |
 | CI | **GitHub Actions** | `lint` → `vet` → `test`, on every PR |
 
 Dependency versions are pinned in `go.mod`/`go.sum`; this document intentionally does not pin
@@ -62,8 +65,9 @@ tally/
 ├── README.md                      # concept document (do not modify casually)
 ├── roadmap/                       # these documents
 ├── go.mod / go.sum                # single module: github.com/b42labs/tally
-├── Makefile                       # dev entry points: make up / test / lint / migrate
+├── Makefile                       # dev entry points: make up / dev / test / lint / migrate
 ├── Dockerfile                     # multi-stage, ARG CMD → builds ./cmd/${CMD}; one image per service
+├── Tiltfile                       # dev loop: docker_build → kind load → redeploy on change
 ├── api/
 │   └── reporting/openapi.yaml     # Reporting API contract (oapi-codegen input)
 ├── cmd/
@@ -100,12 +104,20 @@ tally/
 │   └── engine/
 ├── pricing/                       # versioned pricing model YAML files (Phase 3)
 ├── deploy/
-│   ├── compose/                   # local dev stack
-│   │   ├── docker-compose.yaml
-│   │   ├── victoriametrics/scrape.yaml
-│   │   ├── otel-collector/config.yaml
-│   │   └── grafana/               # Phase 2: provisioning + dashboards JSON
-│   └── kubernetes/                # manifests/helm — added when first deployed to k8s
+│   ├── kind/
+│   │   └── kind.yaml              # kind cluster config: pinned node image; ports 80/443/5432 → Gateway
+│   └── kubernetes/
+│       ├── base/                  # kustomize base — one directory per component
+│       │   ├── kustomization.yaml
+│       │   ├── gateway/           # GatewayClass + Gateway (http/https/postgres) + wildcard Certificate
+│       │   ├── timescaledb/       # StatefulSet + PVC + Service + TCPRoute
+│       │   ├── victoriametrics/   # StatefulSet + scrape.yaml ConfigMap + HTTPRoute
+│       │   ├── otel-collector/    # Deployment + config.yaml ConfigMap + HTTPRoute/GRPCRoute
+│       │   ├── reporting-api/     # Deployment + Service + HTTPRoute
+│       │   └── grafana/           # Phase 2: provisioning + dashboards JSON (ConfigMaps) + HTTPRoute
+│       └── overlays/
+│           ├── dev/               # kind: namespace tally, nip.io hostnames, self-signed CA, replicas: 1
+│           └── prod/              # real hostnames + issuer; added when first deployed to a real cluster
 └── .github/workflows/ci.yaml
 ```
 
@@ -290,7 +302,8 @@ Single implementation in `internal/core/money`:
 - Common variables (every service): `TALLY_LOG_LEVEL` (default `INFO`),
   `TALLY_HTTP_PORT` (service default), `TALLY_METRICS_ENABLED` (default `true`).
 - Secrets (DB URLs, tokens) are env vars too; support the `*_FILE` convention
-  (`TALLY_DB_URL_FILE=/run/secrets/db-url`) for container-mounted secrets.
+  (`TALLY_DB_URL_FILE=/run/secrets/db-url`) for file-mounted secrets (Kubernetes Secret
+  volumes).
 - Every service ships a `.env.example` listing all variables with defaults and comments.
 
 ---

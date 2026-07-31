@@ -64,7 +64,7 @@ across month boundaries; 501 for historic `at`.
 
 ### WP 2.2 – Grafana deployment & provisioning
 
-**Create** `deploy/compose/grafana/`:
+**Create** `deploy/kubernetes/base/grafana/`:
 
 ```
 grafana/
@@ -78,12 +78,16 @@ grafana/
     └── reconciliation-drift.json
 ```
 
-Add `grafana` service to `docker-compose.yaml` (image `grafana/grafana`, anonymous viewer
-access for dev, admin password via env). Kubernetes deployment of the same provisioning tree
-follows whenever `deploy/kubernetes/` materializes.
+Add a `grafana` component to the kustomize base: Deployment (image `grafana/grafana`),
+provisioning tree and dashboard JSON mounted from ConfigMaps (`configMapGenerator` — editing
+a dashboard file re-rolls the pod), admin password from a Secret, Service, and an
+`HTTPRoute` on the existing Gateway — dev hostname `grafana.tally.127-0-0-1.nip.io`,
+`GF_SERVER_ROOT_URL` derived from the route hostname. The dev overlay enables anonymous
+viewer access. No new host ports and no cluster changes — the route is live as soon as it
+is applied. The same base deploys unchanged to a real cluster via the prod overlay.
 
-**Acceptance criteria**: `make up` → Grafana at `:3000` shows all four dashboards with data
-from the dev stack.
+**Acceptance criteria**: `make up` → `https://grafana.tally.127-0-0-1.nip.io` shows all
+four dashboards with data from the dev cluster.
 
 ---
 
@@ -137,9 +141,13 @@ template variables `$platform`, `$cloud` (multi-select, sourced from
 
 ### WP 2.4 – Alerting (vmalert + Alertmanager)
 
-**Create** `deploy/compose/vmalert/rules.yaml`, `deploy/compose/alertmanager/config.yaml`; add
-both services to compose (`vmalert` flags: `-datasource.url=http://victoriametrics:8428
--notifier.url=http://alertmanager:9093 -rule=/etc/vmalert/rules.yaml`).
+**Create** `deploy/kubernetes/base/vmalert/rules.yaml`,
+`deploy/kubernetes/base/alertmanager/config.yaml`; add both as components to the kustomize
+base — Deployment + config ConfigMap + Service each (`vmalert` flags:
+`-datasource.url=http://victoriametrics:8428
+-notifier.url=http://alertmanager:9093 -rule=/etc/vmalert/rules.yaml` — the in-cluster
+Service names resolve as-is). Both UIs get `HTTPRoute`s on the existing Gateway for
+debugging: `vmalert.tally.127-0-0-1.nip.io`, `alertmanager.tally.127-0-0-1.nip.io`.
 
 Rules (`groups: [{name: tally, interval: 1m, rules: [...]}]`):
 
@@ -197,14 +205,15 @@ Alertmanager: single default receiver (webhook/email placeholder) + route `sever
 with tighter repeat interval; receiver endpoints are deployment-specific (env-substituted).
 
 **Tests / verification**: `vmalert -dryRun` on the rules file in CI; a scripted drill
-(`docs/drills/phase2.md`) that stops the collector on the dev stack and observes
+(`docs/drills/phase2.md`) that scales the collector to zero on the dev cluster
+(`kubectl -n tally scale deployment/... --replicas=0`) and observes
 `TallyCloudEventsSilent` firing.
 
 ---
 
 ## Phase exit criteria
 
-1. Four dashboards provisioned from the repo, rendering on the dev stack.
+1. Four dashboards provisioned from the repo, rendering on the dev cluster.
 2. All vmalert rules load (`-dryRun` in CI); the collector-silent drill fires and resolves.
 3. Aggregation endpoints documented in OpenAPI and covered by RBAC tests.
 4. Runbook stubs in `docs/runbooks/` for the three critical alerts (`TallyCloudEventsSilent`,

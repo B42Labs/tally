@@ -55,34 +55,73 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
 
 ---
 
-### WP 1.1 – Repository scaffolding & dev stack
+### WP 1.1 – Repository scaffolding & dev cluster
 
 **Create**
 
 - `go.mod` / `go.sum` (module `github.com/b42labs/tally`, toolchain pinned), root
   `.golangci.yml` (incl. the conventions-§6 `forbidigo` money rules), root `Dockerfile`
   (multi-stage, `ARG CMD` → builds `./cmd/${CMD}` into a distroless image)
-- `Makefile` targets: `up` / `down` (compose stack), `test`, `lint` (golangci-lint),
-  `fmt` (gofumpt), `migrate` (goose up, both chains), `generate` (oapi-codegen, sqlc)
-- `deploy/compose/docker-compose.yaml` with services:
-  - `timescaledb` — image `timescale/timescaledb:latest-pg16`, DB `tally_reporting`,
-    healthcheck `pg_isready`
-  - `victoriametrics` — image `victoriametrics/victoria-metrics`, args
-    `-retentionPeriod=13 -promscrape.config=/etc/vm/scrape.yaml`, mount
-    `deploy/compose/victoriametrics/scrape.yaml`
-  - `otel-collector` — image `otel/opentelemetry-collector-contrib`, mount
-    `deploy/compose/otel-collector/config.yaml`
-  - `reporting-api` — built from the root `Dockerfile` with `CMD=tally-reporting`,
-    depends on `timescaledb`
+- `Makefile` targets: `up` (create the kind cluster if absent → install the pinned
+  Envoy Gateway and cert-manager release manifests → build images → `kind load
+  docker-image` → `kubectl apply -k deploy/kubernetes/overlays/dev` → wait for rollout),
+  `down` (delete the kind cluster), `dev` (`tilt up`), `ca` (print the dev CA certificate
+  for local trust), `test`, `lint` (golangci-lint), `fmt` (gofumpt), `migrate` (goose up,
+  both chains), `generate` (oapi-codegen, sqlc); add-on versions are pinned in the Makefile
+- `deploy/kind/kind.yaml` — cluster name `tally`, pinned `kindest/node` image, and exactly
+  three `extraPortMappings`: `80`, `443`, `5432`, wired to the Envoy proxy Service (fixed
+  NodePorts, pinned via an `EnvoyProxy` config in the dev overlay). **All** traffic enters
+  through the Gateway — no per-service host ports.
+- `deploy/kubernetes/base/gateway/` — `GatewayClass` `tally` (Envoy Gateway controller) and
+  one `Gateway` `tally` with listeners `http` (:80, `RequestRedirect` → https), `https`
+  (:443, wildcard certificate from a cert-manager `Certificate`), `postgres` (:5432, TCP;
+  Gateway API experimental channel for `TCPRoute`). Dev hostname scheme
+  `*.tally.127-0-0-1.nip.io` — nip.io resolves it to `127.0.0.1`, so dev has real URLs
+  without `/etc/hosts` edits.
+- `deploy/kubernetes/base/` (kustomize base) with components:
+  - `timescaledb/` — StatefulSet, image `timescale/timescaledb:latest-pg16`, DB
+    `tally_reporting`, PVC, readiness probe `pg_isready`, Service, `TCPRoute` on the
+    `postgres` listener → dev: `db.tally.127-0-0-1.nip.io:5432` (hostname is cosmetic —
+    TCP routing is by listener port)
+  - `victoriametrics/` — StatefulSet, image `victoriametrics/victoria-metrics`, args
+    `-retentionPeriod=13 -promscrape.config=/etc/vm/scrape.yaml`, scrape config mounted
+    from a ConfigMap (source file `deploy/kubernetes/base/victoriametrics/scrape.yaml`,
+    via `configMapGenerator`), PVC, Service, `HTTPRoute` → dev:
+    `vm.tally.127-0-0-1.nip.io`
+  - `otel-collector/` — Deployment, image `otel/opentelemetry-collector-contrib`, config
+    mounted from a ConfigMap (source file
+    `deploy/kubernetes/base/otel-collector/config.yaml`), Service; `HTTPRoute` → dev:
+    `otlp.tally.127-0-0-1.nip.io` (OTLP/HTTP, :4318) and `GRPCRoute` → dev:
+    `otlp-grpc.tally.127-0-0-1.nip.io` (OTLP/gRPC, :4317)
+  - `reporting-api/` — Deployment, image built from the root `Dockerfile` with
+    `CMD=tally-reporting`; liveness `/healthz`, readiness `/readyz`; DB URL from a Secret
+    via the `*_FILE` convention (conventions §8); init container waiting on TimescaleDB
+    readiness; Service, `HTTPRoute` → dev: `api.tally.127-0-0-1.nip.io`
+- `deploy/kubernetes/overlays/dev/` — namespace `tally`, nip.io hostname patches on all
+  routes, self-signed CA `ClusterIssuer` (cert-manager), `EnvoyProxy` config pinning the
+  proxy Service NodePorts to match `kind.yaml`, dev-only Secret values, `replicas: 1`
+  everywhere; the prod overlay later swaps hostnames and issuer — Gateway and routes stay
+  identical
+- `Tiltfile` — `docker_build` per service image (root `Dockerfile`, `ARG CMD`),
+  `k8s_yaml(kustomize('deploy/kubernetes/overlays/dev'))`, resource grouping with the
+  nip.io URLs attached as resource links (no port-forwards needed — the Gateway serves
+  them); `tilt up` gives rebuild-on-change and streamed logs for all services
 - `.github/workflows/ci.yaml`: `golangci-lint run` → `go vet ./...` → `go test ./...`
-  (testcontainers-based integration tests included)
+  (testcontainers-based integration tests included — CI needs Docker, not kind)
 - `.env.example` files per service
 
 **Acceptance criteria**
 
-- `make up` brings up TimescaleDB, VictoriaMetrics, OTel Collector; `make test` runs an empty
-  test suite green in CI.
-- `docker compose ps` shows all services healthy.
+- `make up` creates the kind cluster, installs Envoy Gateway + cert-manager, and deploys
+  the dev overlay; `kubectl get pods -n tally` shows all pods `Ready` (TimescaleDB,
+  VictoriaMetrics, OTel Collector, Reporting API); the `Gateway` reports `Programmed`.
+- `https://vm.tally.127-0-0-1.nip.io` serves the VictoriaMetrics UI (`curl --cacert
+  <(make -s ca)` verifies cleanly; plain `http://` redirects to `https://`).
+- `psql "host=db.tally.127-0-0-1.nip.io port=5432 ..."` reaches TimescaleDB through the
+  Gateway's TCP listener (prerequisite for `make migrate`).
+- `tilt up` turns green for every resource; changing Go code rebuilds and redeploys the
+  affected service automatically.
+- `make test` runs an empty test suite green in CI.
 
 ---
 
@@ -331,7 +370,9 @@ setup, request-ID middleware.
 `TALLY_REPORTING_AUTH_MODE=enforced|disabled`, `TALLY_REPORTING_INTERNAL_TOKEN`,
 `TALLY_INGEST_REQUIRE_SIZE_SCHEMA=false`, `TALLY_REPORTING_CLOUDS_CONFIG=/etc/tally/clouds.yaml`.
 
-**Acceptance criteria**: `make migrate` creates the schema on the compose stack; hypertable +
+**Acceptance criteria**: `make migrate` creates the schema on the dev cluster (reaching
+TimescaleDB through the Gateway's `postgres` listener at `db.tally.127-0-0-1.nip.io:5432`);
+`GET https://api.tally.127-0-0-1.nip.io/healthz` returns 200 through the Gateway; hypertable +
 compression policy verified in an integration test (`SELECT * FROM timescaledb_information.hypertables`).
 
 ---
@@ -845,8 +886,10 @@ diff scenario wired through the WP 1.10 framework with this adapter mocked at th
 
 ### WP 1.14 – Metrics pipeline: Ceilometer → OTel → VictoriaMetrics, DB exporter
 
-**Create/modify**: `deploy/compose/otel-collector/config.yaml`,
-`deploy/compose/victoriametrics/scrape.yaml`, docs under `docs/openstack-metrics.md`.
+**Create/modify**: `deploy/kubernetes/base/otel-collector/config.yaml`,
+`deploy/kubernetes/base/victoriametrics/scrape.yaml` (both are ConfigMap sources — a change
+re-rolls the pods via kustomize's generated ConfigMap names), docs under
+`docs/openstack-metrics.md`.
 
 OTel Collector config (universal middleware for all providers):
 
@@ -909,8 +952,10 @@ scrape_configs:
 4. Gaps → decide extend-upstream vs. supplement with a small custom exporter; record the
    decision in `docs/openstack-metrics.md`.
 
-**Acceptance criteria**: on the dev stack, a metric pushed via OTLP appears in VictoriaMetrics
-(`/api/v1/query`); scrape configs load without error; evaluation doc committed.
+**Acceptance criteria**: on the dev cluster, a metric pushed to
+`https://otlp.tally.127-0-0-1.nip.io` (OTLP/HTTP through the Gateway) appears in
+VictoriaMetrics (`https://vm.tally.127-0-0-1.nip.io/api/v1/query`); scrape configs load
+without error; evaluation doc committed.
 
 ---
 
