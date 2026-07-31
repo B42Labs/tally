@@ -27,7 +27,8 @@ the concept declares billing-critical (collector outage, schema drift, reconcili
 
 ### WP 2.1 – Reporting API: aggregation & stats endpoints
 
-**Create** `routers/stats.py` + service module (SQL against `events` / `current_resources`).
+**Create** stats handlers in `internal/reporting/httpapi` + `internal/reporting/stats`
+service module (SQL against `events` / `current_resources`).
 
 ```
 GET /api/v1/stats/resources?group_by=cloud,resource_type[,state|platform|project_id]&at=<ts>
@@ -43,7 +44,7 @@ GET /api/v1/stats/events?group_by=cloud,event_type[,source]&from=&to=&interval=1
 
 GET /api/v1/projects/{id}/summary?from=&to=
     → per resource_type within the window, derived from the event history via
-      tally_core.timeline (clipped to [from, to)):
+      internal/core/timeline (clipped to [from, to)):
       { "project": {...}, "resource_types": [
           { "resource_type": "instance",
             "active_now": 5, "created": 2, "deleted": 1,

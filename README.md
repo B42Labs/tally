@@ -354,7 +354,7 @@ Synthetic events are marked with `source: "reconciliation"` and carry a determin
   is invisible. Keep sync intervals short and alert when a cloud's event ingestion rate drops
   to zero (collector outage indicator).
 
-**Technology**: Python with FastAPI (rapid development, async support, automatic OpenAPI documentation).
+**Technology**: Go — single static binary, low operational footprint, native Prometheus/OpenStack/Kubernetes ecosystem. The REST API is specified contract-first as an OpenAPI document from which server stubs and types are generated.
 
 TimescaleDB extension is used for automatic partitioning, native compression on event data, and optimized time-range queries.
 
@@ -747,8 +747,8 @@ Applies the pricing model to usage records. This is a pure calculation step with
 
 #### Money & Rounding (normative)
 
-- All monetary computation uses **decimal arithmetic** (PostgreSQL `NUMERIC`, Python `decimal`)
-  — binary floats are forbidden wherever money is computed or stored.
+- All monetary computation uses **decimal arithmetic** (PostgreSQL `NUMERIC`, decimal types in
+  application code) — binary floats are forbidden wherever money is computed or stored.
 - Per-dimension costs are computed at full precision and rounded **half-up to 2 decimal places
   per dimension per usage record** (matching the examples below). Aggregates (per resource, per
   project, per period) are sums of the rounded values — totals always equal the sum of their
@@ -1324,7 +1324,7 @@ openstack_keystone_projects_total 42
 ```
 
 **Implementation details**:
-- Technology: Python or Go
+- Technology: Go for any custom or supplementary exporter; the existing third-party exporter can run as-is (independent container that only needs to expose Prometheus metrics)
 - Configurable: Which OpenStack services/databases to connect to
 - Polling interval: Configurable (recommendation: 60s)
 - Health/ready endpoints for Kubernetes

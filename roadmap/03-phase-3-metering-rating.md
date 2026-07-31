@@ -5,7 +5,7 @@
 
 ## Goal
 
-A production **Metering & Rating Engine** (`services/engine`, package `tally_engine`) that:
+A production **Metering & Rating Engine** (`cmd/tally-engine` + `internal/engine`) that:
 
 1. **Meters** usage per resource per UTC calendar month into neutral units
    (splits on `size`/`state`/`project_id` changes; invariant-checked),
@@ -169,8 +169,9 @@ WP3.1 skeleton+CLI ─▶ WP3.2 reporting source ─▶ WP3.3 metering ─▶ WP
 
 ### WP 3.1 – Engine skeleton, DB, CLI
 
-**Create** `services/engine/` per conventions layout; Alembic migration 0001 (schema above);
-Typer CLI `tally-engine` with commands (implemented across the WPs):
+**Create** `cmd/tally-engine` + `internal/engine` per conventions layout; goose migration 0001
+(`migrations/engine/0001_init.sql`, schema above); cobra CLI `tally-engine` with subcommands
+(implemented across the WPs):
 
 ```
 tally-engine periods list
@@ -191,8 +192,9 @@ tally-engine tick                      # scheduler entrypoint (CronJob, hourly)
 
 ### WP 3.2 – Reporting source (read-only access layer)
 
-**Create** `reporting_source.py`. All queries run inside one `REPEATABLE READ` transaction per
-run (consistent snapshot, D3). The snapshot start time is recorded in `runs.stats.snapshot_at`.
+**Create** `internal/engine/source`. All queries run inside one `REPEATABLE READ` transaction
+per run (consistent snapshot, D3). The snapshot start time is recorded in
+`runs.stats.snapshot_at`.
 
 Candidate resources for a period (uses the projection as index — rows are never deleted):
 
@@ -222,30 +224,38 @@ within/after period); snapshot isolation (concurrent insert not visible mid-run)
 
 ### WP 3.3 – Metering
 
-**Create** `metering.py` (uses `tally_core.timeline`).
+**Create** `internal/engine/metering` (uses `internal/core/timeline`).
 
-```python
-def meter_resource(events, period_from, period_to) -> list[UsageDraft]:
-    tl = build_timeline(events)
-    drafts = []
-    for iv in tl.intervals:
-        start = max(iv.start, period_from)
-        end   = min(iv.end or period_to, period_to)
-        if start >= end: continue                       # outside period
-        seconds = int((end - start).total_seconds())
-        usage = {"minutes": minutes(seconds),            # Decimal, 4 dp
-                 "count": 1, **iv.size}                  # D9: size fields verbatim
-        drafts.append(UsageDraft(state=iv.state, project_id=iv.project_id,
-                                 from_ts=start, to_ts=end, seconds=seconds, usage=usage))
-    return drafts
+```go
+func MeterResource(events []event.Stored, periodFrom, periodTo time.Time) []UsageDraft {
+	tl := timeline.Build(events)
+	var drafts []UsageDraft
+	for _, iv := range tl.Intervals {
+		start := laterOf(iv.Start, periodFrom)
+		end := earlierOf(coalesce(iv.End, periodTo), periodTo)
+		if !start.Before(end) {
+			continue // outside period
+		}
+		seconds := int64(end.Sub(start) / time.Second)
+		usage := mergeUsage(map[string]any{
+			"minutes": money.Minutes(seconds), // Decimal, 4 dp
+			"count":   1,
+		}, iv.Size) // D9: size fields verbatim
+		drafts = append(drafts, UsageDraft{
+			State: iv.State, ProjectID: iv.ProjectID,
+			FromTS: start, ToTS: end, Seconds: seconds, Usage: usage,
+		})
+	}
+	return drafts
+}
 ```
 
-Splitting needs no extra code: `build_timeline` already splits exactly on billable changes
+Splitting needs no extra code: `timeline.Build` already splits exactly on billable changes
 (state, size, project_id) — the concept's split table (resize, shelve, retype, transfer,
 worker.scale, hibernate, push, …) is covered generically.
 
-**Invariants** (`invariants.py`) — checked per resource per period; any violation ⇒ run status
-`failed` with a violation report in `runs.stats`, **no partial output kept**:
+**Invariants** (`internal/engine/invariants`) — checked per resource per period; any violation
+⇒ run status `failed` with a violation report in `runs.stats`, **no partial output kept**:
 
 1. **No gaps/overlaps**: drafts sorted by `from_ts`; `draft[i].to_ts == draft[i+1].from_ts`.
 2. **Coverage**: `sum(seconds) == overlap_seconds(lifetime, period)` where lifetime =
@@ -271,7 +281,7 @@ ownership transfer (usage before T on old `project_id`, after T on new — two d
 
 ### WP 3.4 – Counter metrics
 
-**Create** `counters.py`; config file `counter-sources.yaml`:
+**Create** `internal/engine/counters`; config file `counter-sources.yaml`:
 
 ```yaml
 sources:
@@ -304,7 +314,7 @@ sources:
 
 ### WP 3.5 – Pricing model
 
-**Create** `pricing.py` + `pricing/` directory at repo root; the concept §3.4 YAML (versions,
+**Create** `internal/engine/pricing` + `pricing/` directory at repo root; the concept §3.4 YAML (versions,
 `valid_from`, `currency`, `pricing.<platform>.<resource_type>.dimensions[]`,
 `state_modifiers`, `type_modifiers`) is the format. Validation schema
 (`pricing.schema.json`, JSON Schema 2020-12) — core constraints:
@@ -312,7 +322,8 @@ sources:
 - `version` (string, required, unique), `valid_from` (date-time), `currency` (ISO 4217),
 - each dimension: `metric` (string), `type` (`"time_gauge" | "counter"`), exactly one of
   `price_per_unit_hour` (time_gauge) / `price_per_unit` (counter); prices are **strings or
-  numbers parsed as Decimal — never float** (use YAML → str → Decimal),
+  numbers parsed as Decimal — never float** (decode YAML scalars into `string`, then
+  `decimal.NewFromString` — never through `float64`),
 - `state_modifiers` / `type_modifiers`: map string → Decimal ≥ 0.
 
 `pricing import`: validate → insert (`INSERT` only; **re-importing an existing version with
@@ -325,22 +336,27 @@ boundary `valid_from == period_from`.
 
 ### WP 3.6 – Rating
 
-**Create** `rating.py`. Pure function over usage records + pricing document — no I/O.
+**Create** `internal/engine/rating`. Pure function over usage records + pricing document —
+no I/O.
 
 Per usage record, per dimension of `pricing[platform][resource_type].dimensions`:
 
-```python
-state_mod = Decimal(state_modifiers.get(record.state, "1"))
-type_mod  = Decimal(type_modifiers.get(str(record.usage.get("type", "")), "1"))
+```go
+stateMod := modifierOr1(pm.StateModifiers, record.State)
+typeMod := modifierOr1(pm.TypeModifiers, record.Usage.String("type"))
 
-if dim.type == "time_gauge":
-    qty  = Decimal(str(record.usage.get(dim.metric, 0)))       # e.g. vcpus; count; size_gb
-    cost = (record.usage["minutes"] / 60) * qty * dim.price_per_unit_hour * state_mod * type_mod
-elif dim.type == "counter":
-    qty  = Decimal(str(record.usage.get(dim.metric, 0)))
-    cost = qty * dim.price_per_unit                             # modifiers do NOT apply
+var cost decimal.Decimal
+switch dim.Type {
+case "time_gauge":
+	qty := record.Usage.Decimal(dim.Metric) // e.g. vcpus; count; size_gb — missing key = 0
+	cost = money.Div(record.Usage.Decimal("minutes"), dec(60)).
+		Mul(qty).Mul(dim.PricePerUnitHour).Mul(stateMod).Mul(typeMod)
+case "counter":
+	qty := record.Usage.Decimal(dim.Metric)
+	cost = qty.Mul(dim.PricePerUnit) // modifiers do NOT apply
+}
 
-amount = round_money(cost)                                      # half-up, 2 dp — per dimension per record
+amount := money.Round2(cost) // half-up, 2 dp — per dimension per record
 ```
 
 - Missing metric key → amount `0.00` (still emitted: traceability, e.g. free `pulls`).
@@ -363,7 +379,7 @@ Volume type modifier: hdd 200 GB, 288 h → `288 × 200 × 0.0001 × 0.5 = 2.88`
 
 ### WP 3.7 – Attribution & project statements
 
-**Create** `attribution.py`, `statements.py`.
+**Create** `internal/engine/attribution`, `internal/engine/statements`.
 
 1. Map usage/rated records to **registry projects** via `(cloud, project_id)` =
    `(projects.cloud, projects.external_id)`. Unregistered project ids: billed standalone +
@@ -389,7 +405,7 @@ Volume type modifier: hdd 200 GB, 288 h → `288 × 200 × 0.0001 × 0.5 = 2.88`
 
 ### WP 3.8 – Billing period lifecycle & runs
 
-**Create** `runs.py`, `scheduler.py`.
+**Create** `internal/engine/runs`, `internal/engine/scheduler`.
 
 Run orchestration (`tally-engine run`):
 
@@ -430,7 +446,7 @@ tick state machine (freeze time via injected `now()`).
 
 ### WP 3.9 – Corrections
 
-**Create** `corrections.py`.
+**Create** `internal/engine/corrections`.
 
 Late-event detection (`tally-engine detect-late --period`), against the Reporting DB:
 
@@ -466,7 +482,7 @@ Running `correct` again immediately → zero deltas, no rows.
 
 ### WP 3.10 – Export / ERP integration
 
-**Create** `export/` (`json.py`, `csv.py`, protocol `BillingExporter`).
+**Create** `internal/engine/export` (JSON + CSV writers, interface `BillingExporter`).
 
 - `tally-engine export --run <id> --format json --out ./out/` → one
   `statement-{project}.json` per project (the WP 3.7 document) + `run.json` (run metadata,
@@ -475,16 +491,16 @@ Running `correct` again immediately → zero deltas, no rows.
   platform, resource_type, resource_id, project_id, state, from_ts, to_ts, dimension,
   quantity, amount, currency` — one row per rated record; corrections export `deltas.csv`
   from `correction_deltas` (credit/debit line items referencing the original run).
-- `BillingExporter` protocol (`export(run) -> None`) so an ERP adapter (SFTP drop, REST push)
-  can be added without touching the engine; file export is the MVP implementation.
+- `BillingExporter` interface (`Export(ctx, run) error`) so an ERP adapter (SFTP drop, REST
+  push) can be added without touching the engine; file export is the MVP implementation.
 - Money serialization per conventions §6 (2 dp preserved).
 
 **Tests**: golden file comparison for both formats over the WP 3.11 fixture set.
 
 ### WP 3.11 – Golden test suite (phase gate)
 
-**Create** `services/engine/tests/golden/` — end-to-end: seeded Reporting DB (events) + pricing
-YAML → `run` → assert exact usage minutes, per-dimension amounts, statement totals:
+**Create** `internal/engine/testdata/golden/` — end-to-end: seeded Reporting DB (events) +
+pricing YAML → `run` → assert exact usage minutes, per-dimension amounts, statement totals:
 
 | Golden case | Source | Asserts |
 |---|---|---|
@@ -523,5 +539,6 @@ YAML → `run` → assert exact usage minutes, per-dimension amounts, statement 
   clouds' events at once. If replay-from-genesis becomes slow (years of data), add periodic
   per-resource snapshots — *documented future optimization, not built now*.
 - **Decimal ↔ JSONB**: PostgreSQL JSONB numbers are arbitrary-precision — always bind
-  usage/money values as `Decimal` (asyncpg does this for NUMERIC; for JSONB serialize via
-  the `tally_core.money` encoder), never through `float` round-trips.
+  usage/money values as `decimal.Decimal` (pgx handles `NUMERIC` via the shopspring codec;
+  for JSONB serialize via the `internal/core/money` marshaller), never through `float64`
+  round-trips.

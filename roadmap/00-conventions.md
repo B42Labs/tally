@@ -7,88 +7,97 @@ instead of repeating it. If code and this document disagree, the code is wrong.
 
 ## 1. Technology stack (binding decisions)
 
-The concept leaves some technology choices open ("Python or Go"). This roadmap fixes them so
-that generated code is consistent:
+The concept fixes the implementation language as **Go**; this roadmap fixes the rest of the
+stack so that generated code is consistent:
 
 | Concern | Decision | Notes |
 |---|---|---|
-| Language (all services) | **Python ≥ 3.12** | One language across the monorepo; oslo.messaging (OpenStack) is Python-only anyway |
-| Web framework | **FastAPI** (latest 0.x) + Uvicorn | Automatic OpenAPI docs, Pydantic integration |
-| Data validation | **Pydantic v2** | All wire schemas are Pydantic models |
-| ORM / DB access | **SQLAlchemy 2.0 (async) + asyncpg** | Textual SQL is allowed (and expected) for TimescaleDB-specific DDL, advisory locks, and hot-path queries |
-| Migrations | **Alembic** | One migration chain per service database |
+| Language (all services) | **Go ≥ 1.25** (toolchain pinned in `go.mod`) | One language across the monorepo. OpenStack's oslo notifications are consumed directly over AMQP (WP 1.12) — no Python dependency |
+| Module layout | **Single Go module** `github.com/b42labs/tally` | Binaries under `cmd/`, all shared code under `internal/` (see §2) |
+| HTTP server | **net/http + chi** router | Middlewares: request ID, auth, RFC 9457 errors |
+| API contract | **Contract-first OpenAPI 3.1**: `api/<service>/openapi.yaml`; types + server interfaces generated with **oapi-codegen**; request validation via the kin-openapi middleware | Replaces FastAPI's code-first OpenAPI — the endpoint specs in these documents are the contract, the YAML is their machine-readable form |
+| Data validation | Generated request types + explicit `Validate()` methods for cross-field rules | Wire schemas live in the OpenAPI document |
+| DB access | **pgx v5** (no ORM); **sqlc** for typed static queries | Textual SQL is the norm (TimescaleDB DDL, advisory locks, hot-path queries) — exactly what sqlc consumes |
+| Migrations | **goose**, plain SQL files embedded via `embed.FS` | One migration chain per service database (`migrations/reporting/`, `migrations/engine/`) |
 | Databases | **PostgreSQL 16 + TimescaleDB 2.x** (Reporting API), **PostgreSQL 16** plain (Engine) | Use the `timescale/timescaledb:latest-pg16` image for dev |
 | Metrics store | **VictoriaMetrics single-node** | `-retentionPeriod=13` (months) |
 | Metrics pipeline | **OpenTelemetry Collector (contrib)** | OTLP in, Prometheus Remote Write out |
-| Service metrics | **prometheus-client** | Every service exposes `/metrics` |
-| Logging | **structlog**, JSON to stdout | Fields: `timestamp`, `level`, `event`, `service`, plus context |
-| CLI | **Typer** | Engine and admin CLIs |
-| HTTP client | **httpx** (async) | Collectors, reconciliation adapters, VM queries |
-| JSON Schema validation | **jsonschema** (draft 2020-12) | Resource-type `size` schemas, pricing model validation |
-| Dependency management | **uv** with a workspace at repo root | Each package has its own `pyproject.toml`; `uv.lock` at root |
-| Lint / format | **ruff** (lint + format) | Config at repo root |
-| Type checking | **mypy --strict** | Per-package |
-| Tests | **pytest + pytest-asyncio**, **testcontainers** for Postgres/TimescaleDB | Integration tests must run against real Postgres, not SQLite |
-| Containerization | **Docker**, multi-stage builds, one image per service | Dev stack via `docker compose` in `deploy/compose/` |
-| CI | **GitHub Actions** | `lint` → `typecheck` → `test` per package, on every PR |
+| Service metrics | **prometheus/client_golang** | Every service exposes `/metrics` |
+| Logging | **log/slog** (stdlib), JSON handler to stdout | Fields: `time`, `level`, `msg`, `service`, plus context |
+| CLI | **cobra** | Engine and admin CLIs |
+| HTTP client | **net/http**; **hashicorp/go-retryablehttp** for collectors and reconciliation adapters | VM queries, event delivery |
+| OpenStack SDK | **gophercloud v2** + `gophercloud/utils` (clouds.yaml) | Reconciliation adapter (WP 1.13) |
+| Kubernetes client | **client-go** + Gardener typed API (`github.com/gardener/gardener`) | Gardener watch (Phase 4) |
+| JSON Schema validation | **santhosh-tekuri/jsonschema** v6 (draft 2020-12) | Resource-type `size` schemas, pricing model validation |
+| Decimal arithmetic | **shopspring/decimal**, wrapped by `internal/core/money` | The only rounding/division entry points live in that package (§6) |
+| Collector outbox | **modernc.org/sqlite** (CGO-free SQLite), WAL mode | Keeps collector binaries statically cross-compilable |
+| YAML | **gopkg.in/yaml.v3** | clouds.yaml, pricing models, counter sources |
+| Configuration | Env vars parsed with **caarlos0/env**; shared helper for the `*_FILE` convention | see §8 |
+| Lint / format | **gofumpt** + **golangci-lint** | Config at repo root; `forbidigo` rules ban float use in money paths (§6) |
+| Tests | **go test**; **testcontainers-go** for Postgres/TimescaleDB | Integration tests must run against real Postgres, not mocks |
+| Containerization | **Docker**, one multi-stage root `Dockerfile` (`ARG CMD`) → static binary on distroless, one image per service | Dev stack via `docker compose` in `deploy/compose/` |
+| CI | **GitHub Actions** | `lint` → `vet` → `test`, on every PR |
 
-Version pins live in `pyproject.toml` files; this document intentionally does not pin exact
-minor versions.
+Dependency versions are pinned in `go.mod`/`go.sum`; this document intentionally does not pin
+exact minor versions.
+
+> **Decision note (2026-07, language switch)**: earlier drafts fixed Python/FastAPI, mainly
+> because oslo.messaging (OpenStack's notification bus client) is Python-only. That argument is
+> resolved: oslo notifications are plain JSON in an `oslo.message` envelope on RabbitMQ — the
+> collector consumes them directly with an AMQP client (see WP 1.12). Everything else favors
+> Go: static single-binary collectors on control planes, gophercloud, client-go for the
+> Gardener watch, first-class Prometheus tooling, and a surrounding ecosystem
+> (VictoriaMetrics, OTel Collector, Grafana) that is itself Go-native.
 
 ---
 
 ## 2. Repository layout (binding)
 
+One Go module at the repo root (`github.com/b42labs/tally`); every binary is a `cmd/` package,
+every shared implementation lives under `internal/` (nothing is importable from outside the
+repo — deliberate: the wire contracts, not Go APIs, are the public interface).
+
 ```
 tally/
 ├── README.md                      # concept document (do not modify casually)
 ├── roadmap/                       # these documents
-├── pyproject.toml                 # uv workspace root (members below)
-├── uv.lock
+├── go.mod / go.sum                # single module: github.com/b42labs/tally
 ├── Makefile                       # dev entry points: make up / test / lint / migrate
-├── libs/
-│   ├── tally-collector/           # Phase 4: shared collector runtime  →  import tally_collector
-│   └── tally-core/                # shared package  →  import tally_core
-│       └── src/tally_core/
-│           ├── schemas/           # Event, EventBatch, payload envelope, common enums
-│           ├── timeline.py        # event → interval folding (shared by API & engine)
-│           ├── money.py           # Decimal helpers, rounding
-│           ├── ids.py             # deterministic event-id hashing
-│           └── testing/           # provider conformance test kit, fixtures
-├── services/
-│   ├── reporting-api/             # →  import tally_reporting
-│   │   ├── alembic/
-│   │   └── src/tally_reporting/
-│   │       ├── main.py            # FastAPI app factory
-│   │       ├── config.py
-│   │       ├── db.py
-│   │       ├── models.py          # SQLAlchemy models
-│   │       ├── auth.py
-│   │       ├── audit.py
-│   │       ├── projection.py      # current_resources incremental update + replay
-│   │       ├── metrics.py         # prometheus counters/gauges
-│   │       ├── routers/
-│   │       │   ├── events.py
-│   │       │   ├── resources.py
-│   │       │   ├── resource_types.py
-│   │       │   ├── projects.py
-│   │       │   ├── stats.py       # Phase 2
-│   │       │   └── internal.py    # /internal/sync, health
-│   │       └── reconciliation/
-│   │           ├── framework.py   # adapter protocol, diff engine, synthetic events
-│   │           └── adapters/
-│   │               ├── openstack.py            # Phase 1
-│   │               ├── hetzner.py              # Phase 4
-│   │               └── ...
-│   └── engine/                    # Phase 3  →  import tally_engine
-│       ├── alembic/
-│       └── src/tally_engine/
-├── providers/
-│   ├── openstack/
-│   │   └── event-collector/       # →  import tally_openstack_collector
-│   ├── hetzner/                   # Phase 4
-│   ├── gardener/                  # Phase 4
-│   └── harbor/                    # Phase 4
+├── Dockerfile                     # multi-stage, ARG CMD → builds ./cmd/${CMD}; one image per service
+├── api/
+│   └── reporting/openapi.yaml     # Reporting API contract (oapi-codegen input)
+├── cmd/
+│   ├── tally-reporting/           # Reporting API server
+│   ├── tally-reporting-admin/     # admin CLI (cobra)
+│   ├── tally-engine/              # Phase 3: engine CLI + scheduler
+│   ├── tally-openstack-collector/ # Phase 1: OpenStack event collector
+│   └── ...                        # Phase 4: further collectors/exporters
+├── internal/
+│   ├── core/                      # shared domain library (no I/O)
+│   │   ├── event/                 # Event, payload envelope, Categorize()
+│   │   ├── timeline/              # event → interval folding (shared by API & engine)
+│   │   ├── money/                 # decimal helpers, rounding, JSON encoding
+│   │   ├── ids/                   # deterministic event-id hashing
+│   │   └── testkit/               # provider conformance test kit, fixtures
+│   ├── reporting/                 # Reporting API service
+│   │   ├── config/  store/  auth/  audit/
+│   │   ├── httpapi/               # handlers: events, resources, resource types,
+│   │   │                          #   projects, stats (Phase 2), internal/sync, health
+│   │   ├── ingest/                # ingestion pipeline
+│   │   ├── projection/            # current_resources incremental update + replay
+│   │   ├── metrics/               # prometheus counters/gauges
+│   │   └── reconciliation/        # adapter interface, diff engine, synthetic events
+│   │       └── adapters/          # openstack (Phase 1), hetzner (Phase 4), ...
+│   ├── engine/                    # Phase 3: metering & rating engine
+│   ├── collector/                 # Phase 4: shared collector runtime (outbox, sender)
+│   └── providers/
+│       ├── openstack/             # oslo AMQP consumer + mapping (WP 1.12)
+│       ├── hetzner/               # Phase 4
+│       ├── gardener/              # Phase 4
+│       └── harbor/                # Phase 4
+├── migrations/
+│   ├── reporting/                 # goose SQL chain (embedded via embed.FS)
+│   └── engine/
 ├── pricing/                       # versioned pricing model YAML files (Phase 3)
 ├── deploy/
 │   ├── compose/                   # local dev stack
@@ -102,9 +111,12 @@ tally/
 
 Naming rules:
 
-- Directory names use `kebab-case`, Python packages use `snake_case` with `tally_` prefix.
+- Binary/directory names under `cmd/` use `kebab-case`; Go package names are short, lower-case,
+  no underscores (`timeline`, `httpapi`, `projection`).
 - All API routes live under `/api/v1/...`; internal-only routes under `/internal/...`.
 - Database identifiers use `snake_case`.
+- Test fixtures live in `testdata/` next to their package (Go convention); golden files under
+  `testdata/golden/`.
 
 ---
 
@@ -151,7 +163,8 @@ Rules:
 - `event_id` comes from the provider's native event/action ID where one exists
   (oslo.messaging `message_id`, Hetzner action ID). Otherwise it is the deterministic hash
   `sha256("{cloud}:{resource_id}:{event_type}:{timestamp_iso}")`, hex, prefixed with the
-  platform name (`tally_core.ids.deterministic_event_id()` is the single implementation).
+  platform name (`internal/core/ids.DeterministicEventID()` is the single implementation;
+  the canonical timestamp rendering is RFC 3339 UTC, `time.RFC3339Nano`).
 - Duplicate = same `(event_id, timestamp)`. Ingestion is idempotent; replaying a batch is safe.
 - Reusing an `event_id` with a *different* timestamp is a provider bug; the API cannot detect it
   cheaply (PK includes the hypertable partition column) and providers must not do it.
@@ -184,12 +197,17 @@ provider-specific code. Collectors do the provider→normalized mapping; the cor
 
 The core derives the *effect* of an event purely from its `event_type`:
 
-```python
-def categorize(event_type: str) -> Literal["CREATE", "DELETE", "UPDATE"]:
-    parts = event_type.split(".")
-    if "create" in parts: return "CREATE"
-    if "delete" in parts: return "DELETE"
-    return "UPDATE"
+```go
+func Categorize(eventType string) Category { // CREATE | DELETE | UPDATE
+	parts := strings.Split(eventType, ".")
+	if slices.Contains(parts, "create") {
+		return CategoryCreate
+	}
+	if slices.Contains(parts, "delete") {
+		return CategoryDelete
+	}
+	return CategoryUpdate
+}
 ```
 
 - `CREATE` sets `created_at = timestamp` and requires `payload.size` + `payload.state`.
@@ -205,7 +223,7 @@ def categorize(event_type: str) -> Literal["CREATE", "DELETE", "UPDATE"]:
 ## 5. Timeline & interval semantics (normative)
 
 Used by the projection replay (Phase 1), the lifecycle endpoint (Phase 1), and the metering
-engine (Phase 3). One shared implementation: `tally_core/timeline.py`.
+engine (Phase 3). One shared implementation: `internal/core/timeline`.
 
 - Events of one resource are ordered by **`(timestamp, received_at, event_id)`** — a total,
   deterministic order even for equal timestamps.
@@ -224,20 +242,26 @@ engine (Phase 3). One shared implementation: `tally_core/timeline.py`.
 
 ## 6. Money & rounding (normative)
 
-Single implementation in `tally_core/money.py`:
+Single implementation in `internal/core/money`:
 
-- All money math uses `decimal.Decimal` with a context of 28 significant digits.
-  **`float` is forbidden** anywhere money, prices, or usage quantities are computed or stored —
-  enforce with a lint rule / code-review checklist item.
+- All money math uses `decimal.Decimal` (shopspring/decimal). **`float32`/`float64` are
+  forbidden** anywhere money, prices, or usage quantities are computed, stored, or serialized —
+  enforced with `forbidigo` lint rules (no `decimal.NewFromFloat`, no `InexactFloat64` in money
+  paths) plus a code-review checklist item. Decimals are constructed from strings or integers
+  only.
+- Divisions always go through the `money` helpers, which use explicit-precision
+  `DivRound(…, 28)`; the package-level `decimal.DivisionPrecision` variable is never relied on.
 - Database storage: `NUMERIC` (money: `NUMERIC(14,2)`); never `real`/`double precision`.
-- Rounding mode: **`ROUND_HALF_UP`**.
+  pgx maps `NUMERIC` ↔ `decimal.Decimal` via the pgx-shopspring-decimal codec.
+- Rounding mode: **`ROUND_HALF_UP`** (ties away from zero) — `money.Round2()` is the single
+  rounding entry point (shopspring's `Round` has exactly these semantics).
 - Per-dimension costs are computed at full precision, then rounded half-up to **2 decimal
   places per dimension per usage record**. All aggregates (resource, project, period) are sums
   of the rounded values — a total always equals the sum of its visible line items.
 - One currency per pricing-model version (initially `EUR`). Never aggregate across currencies.
 - JSON serialization: monetary and usage decimals are rendered as JSON numbers with their full
-  quantized precision (e.g. `19.20` → `19.2` is *not* acceptable in exports; use a custom
-  encoder that preserves 2 decimal places for money).
+  quantized precision (e.g. `19.20` → `19.2` is *not* acceptable in exports; the `money`
+  package provides a marshaller that preserves 2 decimal places for money).
 
 ---
 
@@ -251,7 +275,7 @@ Single implementation in `tally_core/money.py`:
 - **Timestamps**: ISO 8601 UTC (`2026-03-01T00:00:00Z`) everywhere, in and out.
 - **Pagination**: `?limit=` (default 100, max 1000) and `?cursor=` (opaque, base64 of the last
   sort key). List responses: `{ "items": [...], "next_cursor": "..." | null }`.
-- **Auth**: `Authorization: Bearer <token>` (details in Phase 1 WP 1.9).
+- **Auth**: `Authorization: Bearer <token>` (details in Phase 1 WP 1.4).
 - **Health**: every service exposes `GET /healthz` (liveness) and `GET /readyz` (readiness)
   without auth; semantics per the concept (§3.2).
 - **Metrics**: every service exposes `GET /metrics` (Prometheus exposition) without auth,
@@ -262,7 +286,7 @@ Single implementation in `tally_core/money.py`:
 ## 8. Configuration conventions
 
 - Configuration exclusively via environment variables, prefix `TALLY_`, parsed with
-  `pydantic-settings` in each service's `config.py`.
+  `caarlos0/env` in each service's `config` package.
 - Common variables (every service): `TALLY_LOG_LEVEL` (default `INFO`),
   `TALLY_HTTP_PORT` (service default), `TALLY_METRICS_ENABLED` (default `true`).
 - Secrets (DB URLs, tokens) are env vars too; support the `*_FILE` convention
@@ -278,16 +302,18 @@ Single implementation in `tally_core/money.py`:
   dedup, projection replay, reconciliation diffing, metering runs.
 - **Golden tests**: the worked examples from the concept are encoded with **exact** expected
   values (they are reproduced in the phase documents). Golden test fixtures live as JSON files
-  under `<package>/tests/golden/`.
-- **Conformance kit** (`tally_core.testing`): reusable assertions every provider collector must
-  pass (schema validity, deterministic `event_id`s, payload envelope rules, buffering behavior).
+  under `testdata/golden/` next to their package.
+- **Conformance kit** (`internal/core/testkit`): reusable assertions every provider collector
+  must pass (schema validity, deterministic `event_id`s, payload envelope rules, buffering
+  behavior).
 - Every WP's acceptance criteria list the tests that must exist; CI runs them all.
 
 ---
 
 ## 10. Guardrails for code generation (read before every WP)
 
-1. **Never** use `float` for money, prices, or usage quantities. `Decimal` + `NUMERIC` only.
+1. **Never** use `float32`/`float64` for money, prices, or usage quantities.
+   `decimal.Decimal` + `NUMERIC` only.
 2. **Never** update or delete rows in `events` — append-only, unlimited retention. Corrections
    happen via new events and correction runs, not edits.
 3. **Never** treat `current_resources` as a source of truth — it must be rebuildable from

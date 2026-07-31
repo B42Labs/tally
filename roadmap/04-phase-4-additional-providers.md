@@ -16,36 +16,39 @@ each has its own exit checklist.
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | Before the first new provider: extract the generic collector runtime (outbox, sender, health, metrics) from `tally_openstack_collector` into `libs/tally-collector` | Five providers must not copy-paste buffering/delivery code |
+| D1 | Before the first new provider: extract the generic collector runtime (outbox, sender, health, metrics) from the OpenStack collector into `internal/collector` | Five providers must not copy-paste buffering/delivery code |
 | D2 | Polling collectors (Hetzner/STACKIT/IONOS) persist their **cursor in the same SQLite DB as the outbox**, updated in the same transaction as the outbox insert | Restart-safe exactly-once *mapping* (delivery stays at-least-once; `event_id` dedup covers the rest) |
 | D3 | STACKIT and IONOS event-API specifics are marked `VERIFY` — the WP starts with a documented API verification step | Concept relies on audit/activity APIs whose exact shape must be confirmed against current vendor docs |
-| D4 | Gardener collector = Kubernetes watch on `Shoot` resources (party: `kubernetes` Python client), cursor = `resourceVersion` | Gardener has no message bus to consume; the API server watch is the native event source |
+| D4 | Gardener collector = Kubernetes watch on `Shoot` resources (client-go + the Gardener typed API `github.com/gardener/gardener/pkg/apis/core/v1beta1`), cursor = `resourceVersion` | Gardener has no message bus to consume; the API server watch is the native event source — and Gardener's own Go API types remove all schema guesswork |
 | D5 | Harbor collector = **webhook receiver** (push/delete) + periodic storage poll; pulls are counted from webhook events | Harbor natively pushes webhooks; polling alone would miss short-lived tags |
-| D6 | Every provider ships golden mapping fixtures + must pass the `tally_core.testing` conformance kit before its first deploy | Uniform quality gate |
+| D6 | Every provider ships golden mapping fixtures + must pass the `internal/core/testkit` conformance kit before its first deploy | Uniform quality gate |
 
 ---
 
-## WP 4.0 – Shared collector runtime `libs/tally-collector`
+## WP 4.0 – Shared collector runtime `internal/collector`
 
-**Create** package `tally_collector`; refactor `tally_openstack_collector` onto it (behavior
+**Create** package `internal/collector`; refactor the OpenStack collector onto it (behavior
 unchanged — its Phase-1 tests must stay green).
 
 Components:
 
-- `Outbox` — SQLite (WAL) queue as specified in Phase 1 WP 1.12, plus a `cursors` table:
+- `Outbox` — SQLite (WAL, modernc.org/sqlite) queue as specified in Phase 1 WP 1.12, plus a
+  `cursors` table:
   `cursors(name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`.
 - `Sender` — batch delivery loop (≤500, id order, exponential backoff 1 s→300 s + jitter,
   delete on HTTP 200) against `POST /api/v1/events`.
-- `CollectorApp` — wiring: config (env prefix per provider), structlog, `/healthz`, `/metrics`
+- `App` — wiring: config (env prefix per provider), slog, `/healthz`, `/metrics`
   (`tally_collector_*` metric family from WP 1.12), graceful shutdown (flush, close SQLite).
-- `PollingSource` base for cursor-based collectors:
+- `PollingSource` interface for cursor-based collectors:
 
-  ```python
-  class PollingSource(Protocol):
-      cursor_name: str
-      async def poll(self, cursor: str | None) -> tuple[list[Event], str | None]:
-          """Return (mapped events, new cursor). Runtime persists outbox rows and the
-          cursor in ONE SQLite transaction, then sleeps poll_interval."""
+  ```go
+  type PollingSource interface {
+  	CursorName() string
+  	// Poll returns (mapped events, new cursor). The runtime persists outbox
+  	// rows and the cursor in ONE SQLite transaction, then sleeps the poll
+  	// interval.
+  	Poll(ctx context.Context, cursor string) (events []event.Event, newCursor string, err error)
+  }
   ```
 
 **Acceptance**: OpenStack collector runs on the shared runtime; conformance kit green;
@@ -55,8 +58,10 @@ kill/restart tests (buffer + cursor survive) pass at the library level.
 
 ## WP 4.1 – Hetzner Cloud provider
 
-Package `providers/hetzner/` → `tally_hetzner_collector`, `tally_hetzner_exporter`; adapter
-`reconciliation/adapters/hetzner.py`. API: `https://api.hetzner.cloud/v1`, token auth.
+Package `internal/providers/hetzner` (+ `cmd/tally-hetzner-collector`,
+`cmd/tally-hetzner-exporter`); adapter
+`internal/reporting/reconciliation/adapters/hetzner.go`. API: `https://api.hetzner.cloud/v1`,
+token auth.
 
 ### Resource types & size schemas (register via `PUT /api/v1/resource-types/hetzner/...`)
 
@@ -88,7 +93,7 @@ Package `providers/hetzner/` → `tally_hetzner_collector`, `tally_hetzner_expor
 - `project_id`: Hetzner has projects at the API-token level, not in resources — the collector
   is configured with `TALLY_HC_PROJECT_ID` (one collector instance per Hetzner project;
   document this in the provider README).
-- Mapping table (`mapping.py`, data-driven like OpenStack):
+- Mapping table (data-driven like OpenStack):
 
 | Hetzner action | tally event_type | payload |
 |---|---|---|
@@ -137,7 +142,8 @@ metering golden test: upgrade cx21→cx31 on 03-15 ⇒ minutes 20160/24480 (conc
 
 ## WP 4.2 – STACKIT provider
 
-Package `providers/stackit/`. **Step 0 (`VERIFY`, D3)**: confirm against current STACKIT docs —
+Package `internal/providers/stackit` (+ `cmd/tally-stackit-collector`,
+`cmd/tally-stackit-exporter`). **Step 0 (`VERIFY`, D3)**: confirm against current STACKIT docs —
 (a) which audit/activity API exposes resource lifecycle events, its pagination + retention;
 (b) whether compute/volume APIs are OpenStack-compatible enough to reuse the OpenStack
 exporter/adapter code paths. Write the findings to `providers/stackit/README.md` **before**
@@ -152,7 +158,7 @@ implementing; adjust the mapping below accordingly.
   `server.power_on/.power_off`, `volume.*`, `database.*`, `kubernetes_cluster.create/.delete/
   .scale`.
 - Exporter + reconciliation adapter: poll the resource APIs (reuse OpenStack code where
-  Step 0 confirmed compatibility, e.g. via openstacksdk pointed at STACKIT endpoints).
+  Step 0 confirmed compatibility, e.g. via gophercloud pointed at STACKIT endpoints).
 - Pricing section `stackit:` per concept §3.4; scrape job with static labels.
 
 **Exit checklist**: Step-0 verification doc committed; then same gates as WP 4.1 (conformance,
@@ -162,7 +168,8 @@ restart drill, recon drill, one metering golden: resize mid-month).
 
 ## WP 4.3 – IONOS Cloud provider
 
-Package `providers/ionos/`. **Step 0 (`VERIFY`, D3)**: confirm the request/audit API
+Package `internal/providers/ionos` (+ `cmd/tally-ionos-collector`,
+`cmd/tally-ionos-exporter`). **Step 0 (`VERIFY`, D3)**: confirm the request/audit API
 (`https://api.ionos.com/docs/cloud/v6/` — requests endpoint) for lifecycle tracking: filtering,
 ordering, retention, and whether request status exposes completion timestamps.
 
@@ -184,14 +191,15 @@ ordering, retention, and whether request status exposes completion timestamps.
 
 ## WP 4.4 – Gardener integration (service provider + cross-platform relations)
 
-Package `providers/gardener/` → `tally_gardener_collector`, `tally_gardener_exporter`.
+Package `internal/providers/gardener` (+ `cmd/tally-gardener-collector`,
+`cmd/tally-gardener-exporter`).
 
 ### Event collector (D4)
 
-- Watch `shoots.core.gardener.cloud/v1beta1` across configured namespaces (kubeconfig via
-  `TALLY_GD_KUBECONFIG`); cursor = last `resourceVersion` (persisted via WP 4.0); on watch
-  expiry (410 Gone) → relist and reconcile-diff against a local shoot snapshot (also in
-  SQLite) so no transition is lost.
+- Watch `shoots.core.gardener.cloud/v1beta1` across configured namespaces via client-go with
+  the Gardener typed clientset (kubeconfig via `TALLY_GD_KUBECONFIG`); cursor = last
+  `resourceVersion` (persisted via WP 4.0); on watch expiry (410 Gone) → relist and
+  reconcile-diff against a local shoot snapshot (also in SQLite) so no transition is lost.
 - Derive events from spec/status transitions:
 
 | Transition | tally event_type | payload |
@@ -246,12 +254,12 @@ with relation closed in April).
 
 ## WP 4.5 – Harbor integration (counter-based usage)
 
-Package `providers/harbor/` → `tally_harbor_collector` (webhook receiver + poller),
-`tally_harbor_exporter`.
+Package `internal/providers/harbor` (+ `cmd/tally-harbor-collector` — webhook receiver +
+poller — and `cmd/tally-harbor-exporter`).
 
 ### Event collector (D5 — hybrid)
 
-- **Webhook receiver** (FastAPI, `POST /webhook`, secret-token auth): Harbor project webhooks
+- **Webhook receiver** (net/http, `POST /webhook`, secret-token auth): Harbor project webhooks
   for `PUSH_ARTIFACT`, `DELETE_ARTIFACT`, `PULL_ARTIFACT`. Mapping:
 
 | Harbor webhook | tally event_type | payload |

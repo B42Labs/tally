@@ -13,9 +13,10 @@ At the end of Phase 1:
    reconciliation framework — all authenticated and audit-logged.
 2. The **Project Registry** (part of the Reporting API) manages projects and temporally valid
    relations.
-3. The **OpenStack provider** is fully integrated: `openstack-event-collector` (oslo.messaging →
-   Tally events, buffered at-least-once), reconciliation adapter, Ceilometer → OTel Collector →
-   VictoriaMetrics pipeline, and the OpenStack DB exporter deployed.
+3. The **OpenStack provider** is fully integrated: `openstack-event-collector` (oslo
+   notifications via AMQP → Tally events, buffered at-least-once), reconciliation adapter,
+   Ceilometer → OTel Collector → VictoriaMetrics pipeline, and the OpenStack DB exporter
+   deployed.
 4. A **vertical slice** proves one resource type (OpenStack instance) end-to-end:
    event → usage record → rated record, with exact golden numbers.
 
@@ -44,7 +45,7 @@ engine (Phase 3 — only the throwaway vertical-slice prototype here), non-OpenS
 Implement in numerical order. Each WP states files, contract, acceptance criteria.
 
 ```
-WP1.1 scaffolding ─▶ WP1.2 tally-core ─▶ WP1.3 API skeleton+DB ─▶ WP1.4 auth/audit
+WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ WP1.4 auth/audit
   ─▶ WP1.5 resource-type registry ─▶ WP1.6 ingestion ─▶ WP1.7 projection
   ─▶ WP1.8 query endpoints ─▶ WP1.9 project registry ─▶ WP1.10 reconciliation framework
   ─▶ WP1.11 service metrics ─▶ WP1.12 openstack-event-collector
@@ -58,10 +59,11 @@ WP1.1 scaffolding ─▶ WP1.2 tally-core ─▶ WP1.3 API skeleton+DB ─▶ WP
 
 **Create**
 
-- `pyproject.toml` (uv workspace: `libs/tally-core`, `services/reporting-api`,
-  `providers/openstack/event-collector`), `uv.lock`, root `ruff.toml`, `mypy.ini`
-- `Makefile` targets: `up` / `down` (compose stack), `test`, `lint`, `typecheck`,
-  `migrate` (alembic upgrade head), `fmt`
+- `go.mod` / `go.sum` (module `github.com/b42labs/tally`, toolchain pinned), root
+  `.golangci.yml` (incl. the conventions-§6 `forbidigo` money rules), root `Dockerfile`
+  (multi-stage, `ARG CMD` → builds `./cmd/${CMD}` into a distroless image)
+- `Makefile` targets: `up` / `down` (compose stack), `test`, `lint` (golangci-lint),
+  `fmt` (gofumpt), `migrate` (goose up, both chains), `generate` (oapi-codegen, sqlc)
 - `deploy/compose/docker-compose.yaml` with services:
   - `timescaledb` — image `timescale/timescaledb:latest-pg16`, DB `tally_reporting`,
     healthcheck `pg_isready`
@@ -70,8 +72,10 @@ WP1.1 scaffolding ─▶ WP1.2 tally-core ─▶ WP1.3 API skeleton+DB ─▶ WP
     `deploy/compose/victoriametrics/scrape.yaml`
   - `otel-collector` — image `otel/opentelemetry-collector-contrib`, mount
     `deploy/compose/otel-collector/config.yaml`
-  - `reporting-api` — built from `services/reporting-api/Dockerfile`, depends on `timescaledb`
-- `.github/workflows/ci.yaml`: matrix over packages → `uv sync`, `ruff check`, `mypy`, `pytest`
+  - `reporting-api` — built from the root `Dockerfile` with `CMD=tally-reporting`,
+    depends on `timescaledb`
+- `.github/workflows/ci.yaml`: `golangci-lint run` → `go vet ./...` → `go test ./...`
+  (testcontainers-based integration tests included)
 - `.env.example` files per service
 
 **Acceptance criteria**
@@ -82,101 +86,114 @@ WP1.1 scaffolding ─▶ WP1.2 tally-core ─▶ WP1.3 API skeleton+DB ─▶ WP
 
 ---
 
-### WP 1.2 – Shared core library `libs/tally-core`
+### WP 1.2 – Shared core library `internal/core`
 
-**Create** `src/tally_core/`:
+**Create** `internal/core/...`:
 
-`schemas/event.py` — Pydantic v2 models:
+`event` — wire types + validation:
 
-```python
-class PayloadEnvelope(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    state: str | None = None
-    size: dict[str, Any] | None = None
-    provider: dict[str, Any] | None = None
+```go
+type PayloadEnvelope struct {
+	State    *string        `json:"state,omitempty"`    // resource state AT/AFTER the event
+	Size     map[string]any `json:"size,omitempty"`     // full-replacement size object
+	Provider map[string]any `json:"provider,omitempty"` // raw provider data (audit only)
+	// unknown extra fields are preserved on round-trip (custom (Un)MarshalJSON)
+}
 
-class Event(BaseModel):
-    event_id: str = Field(min_length=1, max_length=256)
-    timestamp: AwareDatetime            # normalized to UTC in a validator
-    event_type: str = Field(pattern=r"^[a-z0-9_]+(\.[a-z0-9_]+)+$")
-    platform: str
-    cloud: str
-    resource_type: str
-    resource_id: str
-    project_id: str
-    source: Literal["collector", "reconciliation"] = "collector"
-    payload: PayloadEnvelope = PayloadEnvelope()
+type Event struct {
+	EventID      string          `json:"event_id"`      // 1..256 chars
+	Timestamp    time.Time       `json:"timestamp"`     // RFC 3339 with offset; normalized to UTC
+	EventType    string          `json:"event_type"`    // ^[a-z0-9_]+(\.[a-z0-9_]+)+$
+	Platform     string          `json:"platform"`
+	Cloud        string          `json:"cloud"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	ProjectID    string          `json:"project_id"`
+	Source       Source          `json:"source"`        // "collector" (default) | "reconciliation"
+	Payload      PayloadEnvelope `json:"payload"`
+}
 
-def categorize(event_type: str) -> Literal["CREATE", "DELETE", "UPDATE"]: ...
+// Stored pairs an Event with its server-side received_at (ordering tiebreaker).
+type Stored struct {
+	Event
+	ReceivedAt time.Time
+}
+
+func (e *Event) Validate() error           // field rules + cross-field rules below
+func Categorize(eventType string) Category // CREATE | DELETE | UPDATE (conventions §4.2)
 ```
 
-Cross-field validation (as model validators): `CREATE` events require `payload.state` and
+Cross-field validation (inside `Validate()`): `CREATE` events require `payload.state` and
 `payload.size`; every event requires `payload.state` except `DELETE`.
 
-`ids.py`:
+`ids`:
 
-```python
-def deterministic_event_id(platform: str, cloud: str, resource_id: str,
-                           event_type: str, timestamp: datetime) -> str:
-    raw = f"{cloud}:{resource_id}:{event_type}:{timestamp.astimezone(UTC).isoformat()}"
-    return f"{platform}-{hashlib.sha256(raw.encode()).hexdigest()}"
+```go
+func DeterministicEventID(platform, cloud, resourceID, eventType string, ts time.Time) string {
+	raw := cloud + ":" + resourceID + ":" + eventType + ":" + ts.UTC().Format(time.RFC3339Nano)
+	sum := sha256.Sum256([]byte(raw))
+	return platform + "-" + hex.EncodeToString(sum[:])
+}
 
-def synthetic_event_id(sync_run_id: str, cloud: str, resource_type: str,
-                       resource_id: str, kind: str) -> str:
-    raw = f"{sync_run_id}:{cloud}:{resource_type}:{resource_id}:{kind}"
-    return f"recon-{hashlib.sha256(raw.encode()).hexdigest()}"
+func SyntheticEventID(syncRunID, cloud, resourceType, resourceID, kind string) string {
+	raw := syncRunID + ":" + cloud + ":" + resourceType + ":" + resourceID + ":" + kind
+	sum := sha256.Sum256([]byte(raw))
+	return "recon-" + hex.EncodeToString(sum[:])
+}
 ```
 
-`timeline.py` — the shared folding algorithm (conventions §5):
+`timeline` — the shared folding algorithm (conventions §5):
 
-```python
-@dataclass(frozen=True)
-class Interval:
-    start: datetime          # inclusive
-    end: datetime | None     # exclusive; None = open (resource still in this config)
-    state: str
-    size: dict[str, Any]
-    project_id: str
+```go
+type Interval struct {
+	Start     time.Time      // inclusive
+	End       *time.Time     // exclusive; nil = open (resource still in this config)
+	State     string
+	Size      map[string]any
+	ProjectID string
+}
 
-@dataclass(frozen=True)
-class Timeline:
-    intervals: list[Interval]
-    created_at: datetime | None      # ts of first CREATE (None if history starts mid-life)
-    deleted_at: datetime | None      # ts of the DELETE event, if any
-    warnings: list[str]              # e.g. "history_starts_without_create"
+type Timeline struct {
+	Intervals []Interval
+	CreatedAt *time.Time // ts of first CREATE (nil if history starts mid-life)
+	DeletedAt *time.Time // ts of the DELETE event, if any
+	Warnings  []string   // e.g. "history_starts_without_create"
+}
 
-def build_timeline(events: Sequence[Event]) -> Timeline:
-    # 1. sort by (timestamp, received_at, event_id)  — received_at passed alongside
-    # 2. fold: track (state, size, project_id); snapshot changes (deep-compare size)
-    #    close the current interval and open a new one at e.timestamp
-    # 3. DELETE closes the last interval at e.timestamp and sets deleted_at
-    #    (state "deleted" produces no interval — deleted resources accrue nothing)
-    # 4. drop zero-length intervals (start == end)
-    # 5. events that change nothing produce no interval boundary
+func Build(events []event.Stored) Timeline {
+	// 1. sort by (timestamp, received_at, event_id)
+	// 2. fold: track (state, size, project_id); on billable changes (deep-compare size)
+	//    close the current interval and open a new one at e.Timestamp
+	// 3. DELETE closes the last interval at e.Timestamp and sets DeletedAt
+	//    (state "deleted" produces no interval — deleted resources accrue nothing)
+	// 4. drop zero-length intervals (start == end)
+	// 5. events that change nothing produce no interval boundary
+}
 ```
 
-`money.py`: `DECIMAL_CTX` (prec 28, `ROUND_HALF_UP`), `round_money(d) -> Decimal` (quantize
-`0.01`), `minutes(seconds: int) -> Decimal` (quantize `0.0001`), custom JSON encoder preserving
-2 dp for money.
+`money`: `Round2(d)` (quantize `0.01`, half-up), `Minutes(seconds int64)`
+(`Decimal(seconds)/60`, quantize `0.0001`), `Div(a, b)` (`DivRound`, 28 digits), custom JSON
+marshaller preserving 2 dp for money (conventions §6).
 
-`testing/` — conformance kit (used by every provider, extended in Phase 4):
-`assert_valid_event(dict)`, `assert_deterministic_ids(fn)`, fixture events builder.
+`testkit` — conformance kit (used by every provider, extended in Phase 4):
+`AssertValidEvent(t, raw)`, `AssertDeterministicIDs(t, fn)`, fixture events builder.
 
 **Tests (unit)**
 
 - Timeline: single create; create→delete; create→resize→delete; equal-timestamp ties broken by
   `received_at` then `event_id`; no-op event does not split; zero-length interval dropped;
   history starting without CREATE yields warning; DELETE without prior events.
-- `categorize()` table test incl. `sync.create`, `volume.transfer.accept.end` → UPDATE.
-- Money: `round_money(Decimal("2.025")) == Decimal("2.03")` (half-up), encoder output `"2.03"`.
+- `Categorize()` table test incl. `sync.create`, `volume.transfer.accept.end` → UPDATE.
+- Money: `Round2(dec("2.025")) == dec("2.03")` (half-up), marshaller output `2.03`.
 
 ---
 
 ### WP 1.3 – Reporting API skeleton + database schema
 
-**Create** `services/reporting-api/`: FastAPI app factory (`main.py`), `config.py`
-(pydantic-settings, prefix `TALLY_REPORTING_`), `db.py` (async engine/session), `models.py`,
-Alembic setup + **migration 0001** with the full schema:
+**Create** `cmd/tally-reporting` (server main) and `internal/reporting/`: `config` (env
+parsing, prefix `TALLY_REPORTING_`), `store` (pgx pool, transaction helpers), `httpapi`
+(chi router wiring, middleware); goose setup + **migration 0001**
+(`migrations/reporting/0001_init.sql`) with the full schema:
 
 ```sql
 -- Append-only source of truth (TimescaleDB hypertable, compressed)
@@ -307,7 +324,7 @@ CREATE INDEX idx_sync_runs_cloud ON sync_runs (cloud, started_at DESC);
 ```
 
 Also: `GET /healthz`, `GET /readyz` (readiness = DB reachable; liveness = unhealthy-for >
-`TALLY_REPORTING_UNHEALTHY_THRESHOLD_S`, default 600), RFC 9457 exception handlers, structlog
+`TALLY_REPORTING_UNHEALTHY_THRESHOLD_S`, default 600), RFC 9457 error middleware, slog
 setup, request-ID middleware.
 
 **Config** (`.env.example`): `TALLY_REPORTING_DB_URL`, `TALLY_REPORTING_HTTP_PORT=8080`,
@@ -321,11 +338,12 @@ compression policy verified in an integration test (`SELECT * FROM timescaledb_i
 
 ### WP 1.4 – AuthN/AuthZ + audit log
 
-**Create** `auth.py`, `audit.py`, admin CLI (`tally-reporting-admin`, Typer).
+**Create** `internal/reporting/auth`, `internal/reporting/audit`, admin CLI
+(`cmd/tally-reporting-admin`, cobra).
 
 - Token formats: ingest `tly_i_<hex32>`, api `tly_a_<hex32>` (random 32 bytes hex). Lookup by
   `sha256(token)`; constant-time compare not required (hash lookup), but tokens never logged.
-- FastAPI dependencies:
+- Auth middlewares (chi), exposed as request-context helpers:
   - `IngestAuth` → returns `(credential_id, platform, cloud)`; 401 if missing/unknown/revoked.
   - `QueryAuth(required_role)` → `admin` ⊇ `read_all` ⊇ `project`; role `project` restricts
     query endpoints to its `project_ids` (filter injected into queries; forbidden filters → 403).
@@ -338,7 +356,7 @@ compression policy verified in an integration test (`SELECT * FROM timescaledb_i
 - CLI: `create-ingest-credential --platform --cloud --description`,
   `create-api-token --role [--project-id ...]`, `revoke-...` — prints the token exactly once.
 - **RBAC on query endpoints** maps `project_id` strings: a `project`-role token holds registry
-  UUIDs; the dependency resolves them to `(cloud, external_id)` pairs and filters event/resource
+  UUIDs; the middleware resolves them to `(cloud, external_id)` pairs and filters event/resource
   queries on those `project_id` values.
 - OIDC extension point (implement interface, leave provider off): `TALLY_REPORTING_OIDC_JWKS_URL`
   — when set, `Bearer` JWTs are accepted, `role`/`projects` claims mapped like api_tokens.
@@ -350,7 +368,7 @@ only its projects (integration); audit rows written.
 
 ### WP 1.5 – Resource type registry
 
-**Create** `routers/resource_types.py` + service module.
+**Create** resource-type handlers in `internal/reporting/httpapi` + registry service module.
 
 ```
 PUT /api/v1/resource-types/{platform}/{resource_type}    (role: admin)
@@ -391,7 +409,7 @@ WP 1.6 tests.
 
 ### WP 1.6 – Event ingestion
 
-**Create** `routers/events.py` + `ingestion.py` service module.
+**Create** event ingestion handlers in `internal/reporting/httpapi` + `internal/reporting/ingest`.
 
 ```
 POST /api/v1/events        (auth: ingest credential)
@@ -405,7 +423,7 @@ POST /api/v1/events        (auth: ingest credential)
 
 Per-item pipeline (order matters):
 
-1. **Pydantic validation** (`tally_core.schemas.Event`, incl. payload-envelope rules)
+1. **Schema validation** (`core/event` `Validate()`, incl. payload-envelope rules)
    → fail: `rejected` with `reason="schema: …"` **and** row in `rejected_events`.
 2. **Scope check**: `event.platform == cred.platform and event.cloud == cred.cloud`
    → fail: `rejected` with `reason="scope"`, audit-log entry, **no** dead-letter row (D5).
@@ -422,8 +440,8 @@ Per-item pipeline (order matters):
    treat 200 as "safe to delete from buffer" (rejected items are dead-lettered server-side and
    must not be retried).
 
-Internal API for reconciliation: `ingest_events(session, events, source="reconciliation")` —
-same pipeline minus auth/scope, same dedup + projection.
+Internal API for reconciliation: `ingest.Ingest(ctx, tx, events, ingest.SourceReconciliation)`
+— same pipeline minus auth/scope, same dedup + projection.
 
 **Tests (integration, testcontainers)**
 
@@ -439,7 +457,7 @@ same pipeline minus auth/scope, same dedup + projection.
 
 ### WP 1.7 – Projection (`current_resources`)
 
-**Create** `projection.py`.
+**Create** `internal/reporting/projection`.
 
 Concurrency: before touching a resource's projection row, take a transaction-scoped advisory
 lock **on the reporting DB** — the same lock the Phase-3 engine takes:
@@ -451,38 +469,48 @@ SELECT pg_advisory_xact_lock(
 
 Algorithm (per resource key, with its batch of just-inserted events):
 
-```python
-async def apply(session, key, new_events):          # new_events sorted (ts, received_at, event_id)
-    await advisory_xact_lock(session, key)
-    row = await load_projection_row(session, key)   # SELECT ... FOR UPDATE
-    oldest = new_events[0]
-    if row is None or oldest.timestamp >= row.last_event_at:
-        for e in new_events:
-            row = apply_incremental(row, e)         # cheap path
-        await upsert(session, row)
-    else:                                           # out-of-order / late event
-        await replay(session, key)                  # rebuild from full history
-        metrics.projection_replays.labels(cloud=key.cloud).inc()
+```go
+func Apply(ctx context.Context, tx pgx.Tx, key ResourceKey, newEvents []event.Stored) error {
+	// newEvents sorted (ts, received_at, event_id)
+	advisoryXactLock(ctx, tx, key)
+	row := loadProjectionRow(ctx, tx, key) // SELECT ... FOR UPDATE
+	oldest := newEvents[0]
+	if row == nil || !oldest.Timestamp.Before(row.LastEventAt) {
+		for _, e := range newEvents {
+			row = applyIncremental(row, e) // cheap path
+		}
+		upsert(ctx, tx, row)
+	} else { // out-of-order / late event
+		replay(ctx, tx, key) // rebuild from full history
+		metrics.ProjectionReplays.WithLabelValues(key.Cloud).Inc()
+	}
+}
 
-def apply_incremental(row, e):
-    cat = categorize(e.event_type)
-    if cat == "CREATE":
-        row.created_at = e.timestamp; row.deleted_at = None
-        row.state = e.payload.state; row.size = e.payload.size
-    elif cat == "DELETE":
-        row.deleted_at = e.timestamp; row.state = "deleted"
-    else:  # UPDATE
-        if e.payload.state is not None: row.state = e.payload.state
-        if e.payload.size  is not None: row.size  = e.payload.size
-    row.project_id = e.project_id
-    row.platform = e.platform
-    row.last_event_type, row.last_event_at, row.last_payload = e.event_type, e.timestamp, e.payload
-    return row
+func applyIncremental(row *Row, e event.Stored) *Row {
+	switch event.Categorize(e.EventType) {
+	case event.CategoryCreate:
+		row.CreatedAt, row.DeletedAt = &e.Timestamp, nil
+		row.State, row.Size = *e.Payload.State, e.Payload.Size
+	case event.CategoryDelete:
+		row.DeletedAt, row.State = &e.Timestamp, "deleted"
+	default: // UPDATE
+		if e.Payload.State != nil {
+			row.State = *e.Payload.State
+		}
+		if e.Payload.Size != nil {
+			row.Size = e.Payload.Size
+		}
+	}
+	row.ProjectID, row.Platform = e.ProjectID, e.Platform
+	row.LastEventType, row.LastEventAt, row.LastPayload = e.EventType, e.Timestamp, e.Payload
+	return row
+}
 
-async def replay(session, key):
-    events = await load_all_events(session, key)    # full history, ordered
-    tl = build_timeline(events)                     # tally_core.timeline
-    # final snapshot = last interval (or 'deleted' state); upsert row from it
+func replay(ctx context.Context, tx pgx.Tx, key ResourceKey) error {
+	events := loadAllEvents(ctx, tx, key) // full history, ordered
+	tl := timeline.Build(events)          // internal/core/timeline
+	// final snapshot = last interval (or 'deleted' state); upsert row from it
+}
 ```
 
 Rules:
@@ -507,7 +535,7 @@ Rules:
 
 ### WP 1.8 – Query endpoints
 
-**Create** `routers/events.py` (GET), `routers/resources.py`.
+**Create** query handlers in `internal/reporting/httpapi` (events GET, resources).
 
 ```
 GET /api/v1/events?cloud=&platform=&project_id=&resource_type=&event_type=&source=&from=&to=&limit=&cursor=
@@ -520,7 +548,7 @@ GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle
     → { "resource": {...projection row...},
         "events":   [...ordered history...],
         "intervals": [ {"from": "...", "to": "...|null", "state": "...",
-                        "size": {...}, "project_id": "..."} ],   // build_timeline() output
+                        "size": {...}, "project_id": "..."} ],   // timeline.Build() output
         "warnings": [] }
 
 GET /api/v1/resources?cloud=&platform=&project_id=&resource_type=&state=&status=active|deleted|all&limit=&cursor=
@@ -539,7 +567,8 @@ intervals for the resize example, RBAC filtering.
 
 ### WP 1.9 – Project Registry
 
-**Create** `routers/projects.py` + service module.
+**Create** project-registry handlers in `internal/reporting/httpapi` +
+`internal/reporting/registry` service module.
 
 ```
 POST   /api/v1/projects                        (role: admin)
@@ -572,7 +601,7 @@ Semantics:
   422 (cycle). This keeps attribution a forest per the concept's no-double-billing rules.
 
 **Event-driven registration hook** (used by Gardener in Phase 4, spec'd now): ingestion exposes
-a post-ingest hook interface `on_event(event)`; Phase 1 registers only a no-op default.
+a post-ingest hook interface `OnEvent(ctx, event)`; Phase 1 registers only a no-op default.
 
 **Tests**: CRUD; active-uniqueness (409); close & recreate; temporal `at` queries (relation
 closed in March invisible for `at` in April but visible for `at` in March); traversal with
@@ -582,7 +611,8 @@ depth/cycles; attributing-cycle rejection.
 
 ### WP 1.10 – Reconciliation framework (provider-agnostic)
 
-**Create** `reconciliation/framework.py`, `routers/internal.py`.
+**Create** `internal/reporting/reconciliation` (framework) + internal sync handlers in
+`internal/reporting/httpapi`.
 
 Cloud configuration (`TALLY_REPORTING_CLOUDS_CONFIG`, YAML):
 
@@ -592,29 +622,30 @@ clouds:
     platform: openstack
     adapter: openstack
     adapter_config:
-      os_cloud: os-prod-eu1        # entry name in openstacksdk clouds.yaml
+      os_cloud: os-prod-eu1        # entry name in clouds.yaml (resolved via gophercloud/utils)
       include_octavia: false
 ```
 
-Adapter protocol:
+Adapter interface:
 
-```python
-@dataclass(frozen=True)
-class ObservedResource:
-    resource_type: str
-    resource_id: str
-    project_id: str
-    state: str                       # normalized tally state
-    size: dict[str, Any]
-    created_at: datetime | None      # real creation time if the API exposes it
-    deleted_at: datetime | None      # set only for resources reported as deleted
+```go
+type ObservedResource struct {
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	State        string         // normalized tally state
+	Size         map[string]any
+	CreatedAt    *time.Time     // real creation time if the API exposes it
+	DeletedAt    *time.Time     // set only for resources reported as deleted
+}
 
-class ReconciliationAdapter(Protocol):
-    platform: str
-    def list_resources(self, cfg: dict, since: datetime | None
-                       ) -> AsyncIterator[ObservedResource]:
-        """Yield all live resources; MAY additionally yield recently deleted
-        resources (deleted_at set) when the platform exposes them."""
+type Adapter interface {
+	Platform() string
+	// ListResources streams all live resources; MAY additionally yield recently
+	// deleted resources (DeletedAt set) when the platform exposes them.
+	ListResources(ctx context.Context, cfg map[string]any, since *time.Time,
+	) iter.Seq2[ObservedResource, error]
+}
 ```
 
 Sync orchestration:
@@ -625,34 +656,42 @@ POST /internal/sync/{cloud}      (InternalAuth; triggered by CronJob every 10 mi
   → 409 if a sync for this cloud is already running (advisory lock on 'sync:'+cloud)
 ```
 
-Diff algorithm:
+Diff algorithm (Go-flavored pseudocode):
 
-```python
-async def sync(cloud_cfg) -> SyncStats:
-    run = insert_sync_run(cloud)
-    observed = {(r.resource_type, r.resource_id): r
-                async for r in adapter.list_resources(cfg, since=last_success(cloud))}
-    db = load_projection_rows(cloud)                    # incl. state='deleted'
-    synthetic: list[Event] = []
-    for key, obs in observed.items():
-        if obs.deleted_at:                               # platform reports real deletion
-            if db.get(key) and db[key].state != "deleted":
-                synthetic.append(ev("sync.delete", ts=obs.deleted_at, state="deleted"))
-            continue
-        row = db.get(key)
-        if row is None or row.state == "deleted":        # missed create (or resurrection)
-            synthetic.append(ev("sync.create", ts=obs.created_at or now(),
-                                state=obs.state, size=obs.size))
-        elif (row.state, row.size, row.project_id) != (obs.state, obs.size, obs.project_id):
-            synthetic.append(ev("sync.update", ts=now(), state=obs.state, size=obs.size))
-    for key, row in db.items():                          # in DB, not observed → missed delete
-        if row.state != "deleted" and key not in observed_live_keys:
-            synthetic.append(ev("sync.delete", ts=now(), state="deleted"))
-    ingest_events(session, synthetic, source="reconciliation")   # normal pipeline: dedup + projection
-    complete_sync_run(run, stats)
+```go
+func sync(ctx context.Context, cloudCfg CloudConfig) (SyncStats, error) {
+	run := insertSyncRun(cloud)
+	observed := collect(adapter.ListResources(ctx, cfg, lastSuccess(cloud)))
+	//        → map[(resource_type, resource_id)]ObservedResource
+	db := loadProjectionRows(cloud) // incl. state='deleted'
+	var synthetic []event.Event
+	for key, obs := range observed {
+		if obs.DeletedAt != nil { // platform reports real deletion
+			if row, ok := db[key]; ok && row.State != "deleted" {
+				synthetic = append(synthetic, ev("sync.delete", obs.DeletedAt, "deleted", nil))
+			}
+			continue
+		}
+		row, ok := db[key]
+		switch {
+		case !ok || row.State == "deleted": // missed create (or resurrection)
+			synthetic = append(synthetic, ev("sync.create",
+				coalesce(obs.CreatedAt, now()), obs.State, obs.Size))
+		case changed(row, obs): // state, size, or project_id differ
+			synthetic = append(synthetic, ev("sync.update", now(), obs.State, obs.Size))
+		}
+	}
+	for key, row := range db { // in DB, not observed → missed delete
+		if row.State != "deleted" && !observedLive[key] {
+			synthetic = append(synthetic, ev("sync.delete", now(), "deleted", nil))
+		}
+	}
+	ingest.Ingest(ctx, tx, synthetic, ingest.SourceReconciliation) // normal pipeline: dedup + projection
+	completeSyncRun(run, stats)
+}
 ```
 
-- `event_id` = `tally_core.ids.synthetic_event_id(run.id, cloud, rtype, rid, kind)` —
+- `event_id` = `ids.SyntheticEventID(run.ID, cloud, rtype, rid, kind)` —
   deterministic per run; re-POSTing the run's batch never duplicates.
 - Timestamps: use real platform timestamps (`created_at`/`deleted_at`) when available,
   otherwise poll time — the concept's accepted limitation; both cases must be covered by tests.
@@ -669,7 +708,7 @@ deletes; determinism (same run re-applied → 0 new events); concurrent sync →
 
 ### WP 1.11 – Service metrics (`/metrics`)
 
-**Create** `metrics.py`; instrument WP 1.6/1.7/1.10 code paths.
+**Create** `internal/reporting/metrics`; instrument WP 1.6/1.7/1.10 code paths.
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -691,32 +730,38 @@ deletes; determinism (same run re-applied → 0 new events); concurrent sync →
 
 ### WP 1.12 – `openstack-event-collector` (new service)
 
-**Create** `providers/openstack/event-collector/` → package `tally_openstack_collector`
-(`main.py`, `config.py`, `mapping.py`, `buffer.py`, `sender.py`, Dockerfile).
+**Create** `cmd/tally-openstack-collector` + `internal/providers/openstack`
+(`osloamqp.go`, `mapping.go`, `outbox.go`, `sender.go`); image via the root Dockerfile.
 
 Architecture: **consume → map → buffer (SQLite) → ack**, with an independent sender loop —
 at-least-once end-to-end:
 
 ```
-oslo.messaging bus ──▶ NotificationListener ──▶ map to Tally event ──▶ INSERT into outbox ──▶ ack
-                                                     (unmapped types: ack + skip metric)
+RabbitMQ (oslo notifications) ──▶ AMQP consumer ──▶ map to Tally event ──▶ INSERT into outbox ──▶ ack
+                                                    (unmapped types: ack + skip metric)
 outbox (SQLite, WAL) ──▶ sender loop: batch ≤500 ──▶ POST /api/v1/events ──▶ on 200: DELETE batch
-                                                     on error: exponential backoff 1s→300s + jitter
+                                                    on error: exponential backoff 1s→300s + jitter
 ```
 
-- **Consumer**: `oslo.messaging` `get_notification_listener`, transport
-  `TALLY_OSC_TRANSPORT_URL` (RabbitMQ), topics `TALLY_OSC_TOPICS` (default `notifications`),
-  pool `tally-collector` (so Ceilometer keeps receiving its own copies). Ack only after the
-  outbox insert committed; on mapping crash → requeue.
-- **Outbox** (`buffer.py`): SQLite at `TALLY_OSC_BUFFER_PATH` (PVC/volume), WAL mode:
+- **Consumer** (`osloamqp.go`, `rabbitmq/amqp091-go`): oslo.messaging notifications are plain
+  AMQP messages — no Python library required. The collector declares its **own durable queue**
+  `tally-notifications` and binds it to the notification topic(s) (`TALLY_OSC_TOPICS`, default
+  `notifications.info`) on each configured service exchange (`TALLY_OSC_EXCHANGES`, default
+  `nova,neutron,cinder,glance`). An own queue replicates oslo's listener-pool semantics —
+  Ceilometer keeps receiving its own copies untouched. The message body is the oslo envelope
+  `{"oslo.version": "2.0", "oslo.message": "<json string>"}`; the inner document carries
+  `message_id`, `event_type`, `timestamp`, `payload`. Manual acks with bounded prefetch
+  (QoS): ack only after the outbox insert committed; on mapping crash → nack + requeue.
+- **Outbox** (`outbox.go`): SQLite (modernc.org/sqlite) at `TALLY_OSC_BUFFER_PATH`
+  (PVC/volume), WAL mode:
   `outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, event_json TEXT NOT NULL, created_at TEXT NOT NULL)`.
   Backpressure: if outbox exceeds `TALLY_OSC_BUFFER_MAX_EVENTS` (default 1,000,000) → stop
   consuming (events wait on the bus), never drop.
-- **Sender**: batches in id order; a 200 (regardless of per-item rejects — those are
-  dead-lettered server-side) deletes the batch; 4xx/5xx/network keeps it. `event_id` =
+- **Sender** (`sender.go`): batches in id order; a 200 (regardless of per-item rejects — those
+  are dead-lettered server-side) deletes the batch; 4xx/5xx/network keeps it. `event_id` =
   oslo `message_id` ⇒ redelivery is safe.
 
-**Mapping table** (`mapping.py` — data-driven dict, one entry per oslo `event_type`; unmapped
+**Mapping table** (`mapping.go` — data-driven table, one entry per oslo `event_type`; unmapped
 types are counted and skipped). `resource_id` ← `payload.instance_id` / `volume_id` / `id`;
 `project_id` ← `payload.tenant_id` / `project_id`; `timestamp` ← notification timestamp.
 
@@ -742,14 +787,16 @@ types are counted and skipped). `resource_id` ← `payload.instance_id` / `volum
 vm_state → tally state map: `active→active`, `stopped→shutoff`, `shelved_offloaded→shelved`,
 `paused→paused`, `suspended→suspended`, `error→error`.
 
-> ⚠️ Exact oslo notification names/payloads vary by OpenStack release. The mapping table is
-> **data**, not code — verifying it against the target deployment (e.g. via a notification dump)
-> is an explicit task in the acceptance criteria. Nova must run with `notify_on_state_change =
-> vm_state` and `notification_format = unversioned` (or the collector handles versioned
-> payloads — pick per deployment and document).
+> ⚠️ Exact oslo notification names/payloads vary by OpenStack release, and exchange/topic
+> names depend on deployment configuration (`control_exchange`, `notification_topics`). The
+> mapping table is **data**, not code — verifying it (and the exchange/queue bindings) against
+> the target deployment via a notification dump is an explicit task in the acceptance criteria.
+> Nova must run with `notify_on_state_change = vm_state` and `notification_format =
+> unversioned` (or the collector handles versioned payloads — pick per deployment and
+> document).
 
-**Config**: `TALLY_OSC_TRANSPORT_URL`, `TALLY_OSC_TOPICS`, `TALLY_OSC_CLOUD`,
-`TALLY_OSC_REPORTING_URL`, `TALLY_OSC_TOKEN`, `TALLY_OSC_BUFFER_PATH`,
+**Config**: `TALLY_OSC_AMQP_URL` (RabbitMQ), `TALLY_OSC_EXCHANGES`, `TALLY_OSC_TOPICS`,
+`TALLY_OSC_CLOUD`, `TALLY_OSC_REPORTING_URL`, `TALLY_OSC_TOKEN`, `TALLY_OSC_BUFFER_PATH`,
 `TALLY_OSC_BATCH_MAX=500`, `TALLY_OSC_FLUSH_INTERVAL_S=5`, `TALLY_OSC_BUFFER_MAX_EVENTS`.
 
 **Observability**: `/healthz` (consumer connected + outbox writable), `/metrics`:
@@ -760,8 +807,10 @@ vm_state → tally state map: `active→active`, `stopped→shutoff`, `shelved_o
 **Tests**
 
 - Unit: every mapping-table entry with a captured sample notification → exact Tally event
-  (golden JSON fixtures under `tests/golden/notifications/`); conformance kit
-  (`tally_core.testing`) passes for all produced events.
+  (golden JSON fixtures under `testdata/golden/notifications/`); conformance kit
+  (`internal/core/testkit`) passes for all produced events.
+- Integration (RabbitMQ testcontainer): publish captured oslo envelopes → collector consumes,
+  parses the envelope, maps, and buffers them (validates the hand-rolled AMQP layer).
 - Integration: fake Reporting API — kill it, produce events, restart it → all events delivered
   exactly once by `event_id`; collector restart mid-buffer loses nothing (outbox survives).
 
@@ -769,8 +818,9 @@ vm_state → tally state map: `active→active`, `stopped→shutoff`, `shelved_o
 
 ### WP 1.13 – OpenStack reconciliation adapter
 
-**Create** `reconciliation/adapters/openstack.py` (dependency: `openstacksdk`; connects via the
-`os_cloud` entry from `adapter_config`).
+**Create** `internal/reporting/reconciliation/adapters/openstack.go` (dependency:
+**gophercloud v2**; connects via the `os_cloud` entry from `adapter_config`, resolved through
+`gophercloud/utils` clouds.yaml support).
 
 Listings → `ObservedResource` (all with normalized state + size per WP 1.12 conventions):
 
@@ -788,8 +838,8 @@ Listings → `ObservedResource` (all with normalized state + size per WP 1.12 co
 - Pagination handled for all listings; project scoping: `project_id` from the resource's
   `tenant_id`/`project_id` field.
 
-**Tests**: unit tests against recorded API fixtures (respx/vcr-style JSON), one test per diff
-scenario wired through the WP 1.10 framework with this adapter mocked at the HTTP layer.
+**Tests**: unit tests against recorded API fixtures (JSON served via `httptest`), one test per
+diff scenario wired through the WP 1.10 framework with this adapter mocked at the HTTP layer.
 
 ---
 
@@ -866,14 +916,14 @@ scrape_configs:
 
 ### WP 1.15 – Vertical slice (throwaway prototype, golden-numbers gate)
 
-**Create** `services/engine/prototypes/vertical_slice.py` (explicitly throwaway — Phase 3
-replaces it; only `tally_core.timeline` carries over).
+**Create** `cmd/tally-vertical-slice` (explicitly throwaway — Phase 3 replaces it; only
+`internal/core/timeline` carries over).
 
-CLI: `python vertical_slice.py --cloud os-prod-eu1 --project proj-456 --month 2026-03
+CLI: `go run ./cmd/tally-vertical-slice --cloud os-prod-eu1 --project proj-456 --month 2026-03
 --reporting-url ... --pricing pricing/prototype.yaml`
 
 Steps: fetch instance events via `GET /api/v1/resources?...` + per-resource event queries →
-`build_timeline()` → clip intervals to the month → usage records (`minutes` from integer
+`timeline.Build()` → clip intervals to the month → usage records (`minutes` from integer
 seconds) → rate with a minimal hardcoded pricing config (the concept's §3.4 OpenStack instance
 prices) → print JSON, assert invariants (coverage, no gaps/overlaps).
 

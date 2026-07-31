@@ -67,8 +67,9 @@ other; attribution set unaffected by `managed_by`/`member_of` (Phase-3 golden re
 
 ### WP 5.2 – `pricing_adjustments` validation (Reporting API)
 
-**Create** `adjustments_schema.json` in `tally_core` (shared with the engine); enforce it in
-`POST/PATCH /api/v1/projects/{id}/relations` whenever `metadata.pricing_adjustments` is present:
+**Create** `adjustments_schema.json` in `internal/core` (embedded via `embed.FS`, shared with
+the engine); enforce it in `POST/PATCH /api/v1/projects/{id}/relations` whenever
+`metadata.pricing_adjustments` is present:
 
 ```json
 { "type": "array", "minItems": 1,
@@ -98,7 +99,7 @@ preserves the old relation row.
 
 ### WP 5.3 – Rating engine extension: resolve & apply adjustments
 
-**Create** `services/engine/src/tally_engine/adjustments.py`; extend WP 3.7 statements.
+**Create** `internal/engine/adjustments`; extend WP 3.7 statements.
 Engine migration adds:
 
 ```sql
@@ -119,31 +120,34 @@ CREATE INDEX idx_adjustments_run ON adjustment_records (run_id, beneficiary);
 -- + the WP 3.8 immutability trigger on this table
 ```
 
-Resolution & application per project statement (after WP 3.7 produced `base` line items):
+Resolution & application per project statement (after WP 3.7 produced `base` line items;
+language-neutral pseudocode — all arithmetic via `internal/core/money` decimals):
 
-```python
-def apply_adjustments(statement, relations_at_period, cfg) -> Statement:
-    adjs = collect(statement.project, relations_at_period,
-                   types=cfg.adjustment_relation_types,           # ['managed_by','member_of']
-                   depth=cfg.adjustment_depth)                    # BFS, dedupe by relation id
-    adjs.sort(key=lambda a: (ORDER[a.type], a.relation_id))       # D3 + D4
+```
+applyAdjustments(statement, relationsAtPeriod, cfg) -> Statement:
+    adjs = collect(statement.project, relationsAtPeriod,
+                   types = cfg.adjustmentRelationTypes,           // ['managed_by','member_of']
+                   depth = cfg.adjustmentDepth)                   // BFS, dedupe by relation id
+    sort adjs by (ORDER[adj.type], adj.relationID)                // D3 + D4
 
-    def scoped_base(scope) -> Decimal:                            # D5, over rated amounts
-        return sum(r.amount for r in statement.rated if matches(scope, r.platform, r.resource_type))
+    scopedBase(scope) -> Decimal:                                 // D5, over rated amounts
+        Σ r.amount for r in statement.rated
+          where matches(scope, r.platform, r.resourceType)
 
-    surcharged: dict[scope-partition] — start from scoped bases
-    for a in adjs if a.type == "surcharge":
-        amount = round2(scoped_base(a.scope) * a.rate)            # positive
+    // running net per scope partition — starts from the scoped bases
+    for a in adjs where a.type == "surcharge":
+        amount = Round2(scopedBase(a.scope) × a.rate)             // positive
         emit(a, amount); add to running net
-    for a in adjs if a.type in ("discount", "project_discount"):  # multiplicative on running net of its scope
-        amount = round2(-running_net(a.scope) * a.rate)
+    for a in adjs where a.type in ("discount", "project_discount"):
+        // multiplicative on the running net of its scope
+        amount = Round2(−runningNet(a.scope) × a.rate)
         emit(a, amount); add
-    net = base_total + Σ emitted amounts
-    for a in adjs if a.type == "kickback":
-        amount = round2(running_net(a.scope) * a.rate)            # separate item, net unchanged
-        emit(a, amount, beneficiary=a.relation_target)
-    statement.document |= {"base_cost": base_total, "adjustments": [...],
-                           "net_cost": net, "kickback_total": Σ kickbacks}
+    net = baseTotal + Σ emitted amounts
+    for a in adjs where a.type == "kickback":
+        amount = Round2(runningNet(a.scope) × a.rate)             // separate item, net unchanged
+        emit(a, amount, beneficiary = a.relationTarget)
+    statement.document += { base_cost: baseTotal, adjustments: [...],
+                            net_cost: net, kickback_total: Σ kickbacks }
 ```
 
 - Statement JSON extends the concept's output example exactly (`base_cost_eur`,
