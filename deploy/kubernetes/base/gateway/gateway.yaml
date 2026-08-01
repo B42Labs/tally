@@ -1,0 +1,45 @@
+# One Gateway carries every ingress path into the stack: HTTP redirects to
+# HTTPS, HTTPS serves every service under a wildcard certificate, and a TCP
+# listener carries Postgres so psql and goose need no port-forward.
+#
+# Dev and prod share this file. Overlays change the hostnames the routes match,
+# the issuer that signs the certificate, and (in dev) the proxy Service type.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: tally
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tally
+spec:
+  gatewayClassName: tally
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: tally-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: postgres
+      protocol: TCP
+      port: 5432
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+        namespaces:
+          from: Same

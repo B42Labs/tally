@@ -1,0 +1,91 @@
+# The Reporting API's database. It is reachable from outside the cluster through
+# the Gateway's TCP listener, which is what lets `make migrate` and psql run
+# against it without a port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  labels:
+    app.kubernetes.io/name: timescaledb
+spec:
+  selector:
+    app.kubernetes.io/name: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  labels:
+    app.kubernetes.io/name: timescaledb
+spec:
+  serviceName: timescaledb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: timescaledb
+    spec:
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:latest-pg16
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: tally_reporting
+            - name: POSTGRES_USER
+              value: tally
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tally-db
+                  key: password
+            # The volume root holds lost+found, which Postgres refuses to
+            # initialize into, so the cluster lives one level down.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+---
+# TCP routing is by listener port, so the hostname a client uses is cosmetic:
+# anything reaching :5432 on the Gateway lands here.
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: timescaledb
+spec:
+  parentRefs:
+    - name: tally
+      sectionName: postgres
+  rules:
+    - backendRefs:
+        - name: timescaledb
+          port: 5432

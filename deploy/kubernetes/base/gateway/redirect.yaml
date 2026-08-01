@@ -1,0 +1,17 @@
+# Everything arriving on the http listener is redirected to https, whatever the
+# hostname. This route carries no hostnames on purpose: it is the only route
+# attached to that listener, so it matches all of them.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-to-https
+spec:
+  parentRefs:
+    - name: tally
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

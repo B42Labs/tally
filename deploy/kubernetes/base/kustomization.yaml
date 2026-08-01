@@ -1,0 +1,12 @@
+# The deployment surface dev and prod share. One directory per component;
+# overlays change hostnames, the certificate issuer, and environment-specific
+# infrastructure, never the shape of what is deployed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - gateway
+  - timescaledb
+  - victoriametrics
+  - otel-collector
+  - reporting-api

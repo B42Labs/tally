@@ -1,0 +1,7 @@
+# VictoriaMetrics scrape configuration.
+#
+# Scrape targets arrive with the OpenStack metrics pipeline, which also attaches
+# the mandatory platform and cloud labels to every third-party exporter. Until
+# then this file exists so the ConfigMap, the mount, and the -promscrape.config
+# flag are wired and exercised.
+scrape_configs: []

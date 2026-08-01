@@ -1,0 +1,16 @@
+# The wildcard certificate the https listener terminates with.
+#
+# Every overlay MUST patch two fields: dnsNames, to the domain it serves, and
+# issuerRef.name, to the issuer that signs there. The values below are
+# placeholders and are never served by any environment.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tally-wildcard
+spec:
+  secretName: tally-wildcard-tls
+  dnsNames:
+    - "*.tally.example.com"
+  issuerRef:
+    kind: ClusterIssuer
+    name: tally-ca
