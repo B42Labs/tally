@@ -1,0 +1,25 @@
+# OpenTelemetry Collector configuration.
+#
+# The collector is the universal middleware of the metrics pipeline: OTLP in,
+# Prometheus remote write into VictoriaMetrics out. The OpenStack pipeline adds
+# the receivers, processors, and per-cloud labelling it needs; this file is the
+# minimum that boots and accepts OTLP over both transports.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://victoriametrics:8428/api/v1/write
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheusremotewrite]

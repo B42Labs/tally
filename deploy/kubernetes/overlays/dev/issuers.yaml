@@ -1,0 +1,39 @@
+# The dev certificate authority.
+#
+# Applied by `make up` with plain kubectl rather than through the overlay: the
+# CA Certificate must live in cert-manager's own namespace, and the overlay's
+# namespace transformer would move it into tally, where cert-manager would never
+# find the key it signs with.
+#
+# `make ca` prints the resulting CA certificate for `curl --cacert`.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: tally-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tally-dev-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: tally-dev-ca
+  secretName: tally-dev-ca
+  duration: 87600h # 10 years: a dev CA that expires mid-sprint helps nobody
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    kind: ClusterIssuer
+    name: tally-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: tally-dev-ca
+spec:
+  ca:
+    secretName: tally-dev-ca

@@ -1,0 +1,32 @@
+# Dev cluster for Tally.
+#
+# All traffic enters through the Gateway, so the node publishes exactly three
+# ports and nothing uses a per-service NodePort or a port-forward. The node
+# ports below are pinned to match the EnvoyProxy patch in the dev overlay
+# (deploy/kubernetes/overlays/dev/envoyproxy.yaml); change one and you must
+# change the other.
+#
+# The node image is held one Kubernetes minor behind kind's default on purpose:
+# Envoy Gateway v1.8 supports Kubernetes v1.32 to v1.35.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tally
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    extraPortMappings:
+      # http: redirects to https
+      - containerPort: 30080
+        hostPort: 80
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # https: every service's real URL
+      - containerPort: 30443
+        hostPort: 443
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # postgres: psql and goose reach TimescaleDB through the Gateway
+      - containerPort: 30432
+        hostPort: 5432
+        listenAddress: "127.0.0.1"
+        protocol: TCP

@@ -1,0 +1,99 @@
+# The kind dev environment.
+#
+# Every service gets a real HTTPS URL under *.tally.127-0-0-1.nip.io. nip.io
+# resolves that wildcard to 127.0.0.1, so no /etc/hosts edit is needed, and the
+# self-signed CA in issuers.yaml signs the certificate the Gateway serves.
+#
+# issuers.yaml is deliberately not listed here; see the comment in that file.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tally
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - envoyproxy.yaml
+
+# Dev credentials, in the clear on purpose: this database is reachable only
+# through a Gateway bound to 127.0.0.1 on the developer's own machine.
+secretGenerator:
+  - name: tally-db
+    literals:
+      - password=tally-dev-password
+      - db-url=postgres://tally:tally-dev-password@timescaledb:5432/tally_reporting?sslmode=disable
+
+patches:
+  # Route every service to its nip.io hostname.
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: reporting-api
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: api.tally.127-0-0-1.nip.io
+
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: victoriametrics
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: vm.tally.127-0-0-1.nip.io
+
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: otel-collector-http
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: otlp.tally.127-0-0-1.nip.io
+
+  - target:
+      group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      name: otel-collector-grpc
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: otlp-grpc.tally.127-0-0-1.nip.io
+
+  # Serve that domain, signed by the dev CA.
+  - target:
+      group: cert-manager.io
+      kind: Certificate
+      name: tally-wildcard
+    patch: |
+      - op: replace
+        path: /spec/dnsNames/0
+        value: "*.tally.127-0-0-1.nip.io"
+      - op: replace
+        path: /spec/issuerRef/name
+        value: tally-dev-ca
+
+  # Point the Gateway at the proxy config that pins the node ports.
+  - target:
+      group: gateway.networking.k8s.io
+      kind: Gateway
+      name: tally
+    patch: |
+      - op: add
+        path: /spec/infrastructure
+        value:
+          parametersRef:
+            group: gateway.envoyproxy.io
+            kind: EnvoyProxy
+            name: tally-proxy-config
+
+  # The image is built locally and side-loaded with `kind load`, so pulling it
+  # would only ever fail.
+  - target:
+      kind: Deployment
+      name: reporting-api
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

@@ -1,0 +1,27 @@
+# Pins the Envoy proxy Service to the node ports deploy/kind/kind.yaml publishes.
+# Without this, Envoy Gateway allocates node ports at random and the host port
+# mappings point at nothing.
+#
+# There is no per-port nodePort field on envoyService, so the ports go through a
+# strategic merge patch. Its merge key is the service port number.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: tally-proxy-config
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: NodePort
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - port: 80
+                  nodePort: 30080
+                - port: 443
+                  nodePort: 30443
+                - port: 5432
+                  nodePort: 30432
