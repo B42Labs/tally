@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Integration tests added by later work packages use testcontainers, which
+      # needs Docker. The GitHub-hosted runner provides it; kind is never used in CI.
+      - name: lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
