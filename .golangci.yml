@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: 'decimal\.NewFromFloat'
+          msg: >-
+            Money and usage quantities never come from floats (roadmap/00-conventions.md
+            section 6). Construct decimals from strings or integers.
+        - pattern: '\.InexactFloat64'
+          msg: >-
+            Money and usage quantities never leave decimal form (roadmap/00-conventions.md
+            section 6). Use the internal/core/money helpers instead.
+
+formatters:
+  enable:
+    - gofumpt

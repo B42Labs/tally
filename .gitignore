@@ -1,0 +1,24 @@
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Tilt
+.tiltbuild/
+tilt_modules/
+
+# Local environment overrides (.env.example files are tracked)
+.env
+!.env.example
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
