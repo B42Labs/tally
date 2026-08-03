@@ -14,10 +14,8 @@ ENVOY_GATEWAY_VERSION ?= v1.8.3
 CERT_MANAGER_VERSION ?= v1.21.1
 GOLANGCI_LINT_VERSION ?= v2.12.2
 
-# Code generation and migration tools. They run from the module cache at these
-# versions; nothing has to be installed on the host. The configs they read
-# arrive with the Reporting API skeleton.
-GOOSE_VERSION ?= v3.27.3
+# Code generators. They run from the module cache at these versions; nothing has
+# to be installed on the host.
 OAPI_CODEGEN_VERSION ?= v2.8.0
 SQLC_VERSION ?= v1.31.1
 
@@ -75,14 +73,19 @@ up:
 	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/timescaledb --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/victoriametrics --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/otel-collector --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/reporting-api --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) wait gateway/tally --for=condition=Programmed --timeout=300s
+	@# The API stays unready until the database carries its schema, and it never
+	@# migrates on its own, so the chain has to be applied before the rollout can
+	@# finish. It runs through the Gateway, which is what the wait above is for.
+	@echo '==> applying the migration chain'
+	$(MAKE) migrate
+	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/reporting-api --timeout=300s
 	@echo
 	@echo 'Stack is up:'
-	@echo '  https://api.tally.127-0-0-1.nip.io:8443   Reporting API'
-	@echo '  https://vm.tally.127-0-0-1.nip.io:8443    VictoriaMetrics'
-	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443  OTLP/HTTP'
-	@echo '  db.tally.127-0-0-1.nip.io:5432            TimescaleDB'
+	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1  Reporting API'
+	@echo '  https://vm.tally.127-0-0-1.nip.io:8443          VictoriaMetrics'
+	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443        OTLP/HTTP'
+	@echo '  db.tally.127-0-0-1.nip.io:5432                  TimescaleDB'
 	@echo
 	@echo 'Trust the dev CA with: make -s ca > tally-ca.crt'
 
@@ -121,27 +124,12 @@ lint:
 fmt:
 	golangci-lint fmt
 
-## migrate: apply the goose migration chains
-#
-# goose runs from the module cache at a pinned version rather than from a go.mod
-# tool directive: its CLI drags in drivers for ClickHouse, MSSQL, YDB, and half a
-# dozen other databases Tally will never speak, and none of them belong in this
-# module's dependency graph.
+## migrate: apply the reporting migration chain through the admin CLI
 migrate:
-	@if compgen -G 'migrations/reporting/*.sql' >/dev/null; then \
-		echo '==> migrating the reporting database'; \
-		go run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION) \
-			-dir migrations/reporting postgres '$(TALLY_DEV_DB_URL)' up; \
-	else \
-		echo 'nothing to migrate yet'; \
-	fi
+	TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin migrate
 
 ## generate: run the code generators
 generate:
-	@if [[ -f api/reporting/oapi-codegen.yaml || -f sqlc.yaml ]]; then \
-		echo '==> generating'; \
-		test ! -f api/reporting/oapi-codegen.yaml || go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION) -config api/reporting/oapi-codegen.yaml api/reporting/openapi.yaml; \
-		test ! -f sqlc.yaml || go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate; \
-	else \
-		echo 'nothing to generate yet'; \
-	fi
+	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION) \
+		-config api/reporting/oapi-codegen.yaml api/reporting/openapi.yaml
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
