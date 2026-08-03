@@ -1,0 +1,20 @@
+# sqlc reads the goose migration chain as the schema and compiles the static
+# queries in internal/reporting/store/queries.sql against it. `make generate`
+# runs it; the generated package is committed so that a plain `go build` needs
+# no code generator.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations/reporting
+    queries: internal/reporting/store/queries.sql
+    gen:
+      go:
+        package: sqlcgen
+        out: internal/reporting/store/sqlcgen
+        sql_package: pgx/v5
+        # uuid columns become google/uuid values rather than pgtype wrappers, so
+        # callers pass the type the rest of the service uses. The override also
+        # covers UUID[]: api_tokens.project_ids comes out as []uuid.UUID.
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID

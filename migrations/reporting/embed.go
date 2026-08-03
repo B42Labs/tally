@@ -11,3 +11,11 @@ import "embed"
 //
 //go:embed *.sql
 var FS embed.FS
+
+// Version is the highest version this package embeds, and so the schema a
+// binary built from this tree expects. Readiness compares it against what the
+// database carries, which is what keeps a pod from serving traffic against a
+// schema its code is newer than.
+//
+// Adding a migration means raising this; a test fails otherwise.
+const Version int64 = 1
