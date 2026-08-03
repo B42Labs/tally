@@ -22,6 +22,9 @@ secretGenerator:
     literals:
       - password=tally-dev-password
       - db-url=postgres://tally:tally-dev-password@timescaledb:5432/tally_reporting?sslmode=disable
+  - name: tally-internal-token
+    literals:
+      - token=tally-dev-internal-token
 
 patches:
   # Route every service to its nip.io hostname.

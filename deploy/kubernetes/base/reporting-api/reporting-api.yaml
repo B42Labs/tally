@@ -44,28 +44,39 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            - name: TALLY_HTTP_PORT
+            - name: TALLY_REPORTING_HTTP_PORT
               value: "8080"
             # Secrets follow the *_FILE convention so they arrive as a mounted
             # file rather than an environment value.
-            - name: TALLY_DB_URL_FILE
+            - name: TALLY_REPORTING_DB_URL_FILE
               value: /run/secrets/tally/db-url
+            - name: TALLY_REPORTING_INTERNAL_TOKEN_FILE
+              value: /run/secrets/tally-internal/token
           volumeMounts:
             - name: db-credentials
               mountPath: /run/secrets/tally
               readOnly: true
+            - name: internal-token
+              mountPath: /run/secrets/tally-internal
+              readOnly: true
+          # Both probes check the database, and the handler gives that check two
+          # seconds. The kubelet's own default is one, so without a longer
+          # timeout here a slow database would fail every probe on the deadline
+          # the handler is still working within.
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+            timeoutSeconds: 3
       volumes:
         - name: db-credentials
           secret:
@@ -73,6 +84,12 @@ spec:
             items:
               - key: db-url
                 path: db-url
+        - name: internal-token
+          secret:
+            secretName: tally-internal-token
+            items:
+              - key: token
+                path: token
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -85,6 +102,15 @@ spec:
   hostnames:
     - api.tally.example.com
   rules:
-    - backendRefs:
+    # Only the API surface is published. The probes stay on the pod's own port,
+    # where the kubelet reaches them: they are unauthenticated, they do real
+    # database work, and routing them here would let anyone on the internet
+    # occupy the connection pool the service serves requests from. The internal
+    # routes are for in-cluster callers and are not published either.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1
+      backendRefs:
         - name: reporting-api
           port: 80
