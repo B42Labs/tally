@@ -1,0 +1,9 @@
+# oapi-codegen configuration for api/reporting/openapi.yaml. The Makefile's
+# `generate` target dispatches on this file's existence and runs the generator
+# at a pinned version; the output is committed.
+package: httpapi
+output: internal/reporting/httpapi/openapi.gen.go
+generate:
+  chi-server: true
+  models: true
+  embedded-spec: true
