@@ -16,20 +16,21 @@ docker_build(
 k8s_yaml(kustomize('deploy/kubernetes/overlays/dev'))
 
 # Every service is reachable through the Gateway, so no port-forward is
-# configured: the links below are the real URLs.
+# configured: the links below are the real URLs. They carry :8443 because kind
+# publishes https there rather than on 443 — see deploy/kind/kind.yaml.
 k8s_resource(
     'reporting-api',
     labels=['tally'],
-    links=[link('https://api.tally.127-0-0-1.nip.io/healthz', 'health')],
+    links=[link('https://api.tally.127-0-0-1.nip.io:8443/healthz', 'health')],
 )
 k8s_resource('timescaledb', labels=['infrastructure'])
 k8s_resource(
     'victoriametrics',
     labels=['infrastructure'],
-    links=[link('https://vm.tally.127-0-0-1.nip.io', 'UI')],
+    links=[link('https://vm.tally.127-0-0-1.nip.io:8443', 'UI')],
 )
 k8s_resource(
     'otel-collector',
     labels=['infrastructure'],
-    links=[link('https://otlp.tally.127-0-0-1.nip.io', 'OTLP/HTTP')],
+    links=[link('https://otlp.tally.127-0-0-1.nip.io:8443', 'OTLP/HTTP')],
 )

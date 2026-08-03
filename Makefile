@@ -1,7 +1,9 @@
 # Tally development entry points.
 #
 # `make up` gives you a complete stack on kind, reachable over real HTTPS URLs
-# under *.tally.127-0-0-1.nip.io. `make dev` adds the rebuild-on-change loop.
+# under *.tally.127-0-0-1.nip.io:8443. `make dev` adds the rebuild-on-change
+# loop. The port suffix is there because kind publishes https on 8443 rather
+# than 443; deploy/kind/kind.yaml explains why.
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -77,10 +79,10 @@ up:
 	$(KUBECTL) -n $(NAMESPACE) wait gateway/tally --for=condition=Programmed --timeout=300s
 	@echo
 	@echo 'Stack is up:'
-	@echo '  https://api.tally.127-0-0-1.nip.io   Reporting API'
-	@echo '  https://vm.tally.127-0-0-1.nip.io    VictoriaMetrics'
-	@echo '  https://otlp.tally.127-0-0-1.nip.io  OTLP/HTTP'
-	@echo '  db.tally.127-0-0-1.nip.io:5432       TimescaleDB'
+	@echo '  https://api.tally.127-0-0-1.nip.io:8443   Reporting API'
+	@echo '  https://vm.tally.127-0-0-1.nip.io:8443    VictoriaMetrics'
+	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443  OTLP/HTTP'
+	@echo '  db.tally.127-0-0-1.nip.io:5432            TimescaleDB'
 	@echo
 	@echo 'Trust the dev CA with: make -s ca > tally-ca.crt'
 
