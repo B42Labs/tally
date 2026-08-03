@@ -82,11 +82,13 @@ Add a `grafana` component to the kustomize base: Deployment (image `grafana/graf
 provisioning tree and dashboard JSON mounted from ConfigMaps (`configMapGenerator` — editing
 a dashboard file re-rolls the pod), admin password from a Secret, Service, and an
 `HTTPRoute` on the existing Gateway — dev hostname `grafana.tally.127-0-0-1.nip.io`,
-`GF_SERVER_ROOT_URL` derived from the route hostname. The dev overlay enables anonymous
+`GF_SERVER_ROOT_URL` derived from the route hostname. In dev that root URL has to carry the
+`:8443` host port (`https://grafana.tally.127-0-0-1.nip.io:8443`), or every absolute link and
+redirect Grafana emits points at a closed port. The dev overlay enables anonymous
 viewer access. No new host ports and no cluster changes — the route is live as soon as it
 is applied. The same base deploys unchanged to a real cluster via the prod overlay.
 
-**Acceptance criteria**: `make up` → `https://grafana.tally.127-0-0-1.nip.io` shows all
+**Acceptance criteria**: `make up` → `https://grafana.tally.127-0-0-1.nip.io:8443` shows all
 four dashboards with data from the dev cluster.
 
 ---

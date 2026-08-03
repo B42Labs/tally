@@ -74,6 +74,18 @@ patches:
         path: /spec/issuerRef/name
         value: tally-dev-ca
 
+  # The browser follows the redirect on the host side, where https is published
+  # on 8443 rather than 443 (deploy/kind/kind.yaml), so the Location header has
+  # to carry that port. Without it the redirect points at a closed port.
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: http-to-https
+    patch: |
+      - op: add
+        path: /spec/rules/0/filters/0/requestRedirect/port
+        value: 8443
+
   # Point the Gateway at the proxy config that pins the node ports.
   - target:
       group: gateway.networking.k8s.io

@@ -105,7 +105,7 @@ tally/
 ├── pricing/                       # versioned pricing model YAML files (Phase 3)
 ├── deploy/
 │   ├── kind/
-│   │   └── kind.yaml              # kind cluster config: pinned node image; ports 80/443/5432 → Gateway
+│   │   └── kind.yaml              # kind cluster config: pinned node image; host ports 8081/8443/5432 → Gateway
 │   └── kubernetes/
 │       ├── base/                  # kustomize base — one directory per component
 │       │   ├── kustomization.yaml

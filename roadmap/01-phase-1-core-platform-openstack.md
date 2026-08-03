@@ -69,15 +69,21 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
   for local trust), `test`, `lint` (golangci-lint), `fmt` (gofumpt), `migrate` (goose up,
   both chains), `generate` (oapi-codegen, sqlc); add-on versions are pinned in the Makefile
 - `deploy/kind/kind.yaml` — cluster name `tally`, pinned `kindest/node` image, and exactly
-  three `extraPortMappings`: `80`, `443`, `5432`, wired to the Envoy proxy Service (fixed
-  NodePorts, pinned via an `EnvoyProxy` config in the dev overlay). **All** traffic enters
-  through the Gateway — no per-service host ports.
+  three `extraPortMappings`, wired to the Envoy proxy Service (fixed NodePorts, pinned via
+  an `EnvoyProxy` config in the dev overlay). **All** traffic enters through the Gateway —
+  no per-service host ports. The host side binds `8081` (http), `8443` (https), and `5432`
+  (postgres): Docker Desktop needs the `com.docker.vmnetd` helper to publish a privileged
+  port and does not have it on every Mac, and rootless Docker and Podman cannot publish one
+  at all. Only the host binding moves — node ports, Envoy Service ports, and Gateway
+  listeners keep the standard numbers, so prod is unaffected.
 - `deploy/kubernetes/base/gateway/` — `GatewayClass` `tally` (Envoy Gateway controller) and
   one `Gateway` `tally` with listeners `http` (:80, `RequestRedirect` → https), `https`
   (:443, wildcard certificate from a cert-manager `Certificate`), `postgres` (:5432, TCP;
   Gateway API experimental channel for `TCPRoute`). Dev hostname scheme
   `*.tally.127-0-0-1.nip.io` — nip.io resolves it to `127.0.0.1`, so dev has real URLs
-  without `/etc/hosts` edits.
+  without `/etc/hosts` edits, carrying the `:8443` suffix the host binding implies. The
+  redirect filter takes no port in the base (prod redirects to 443); the dev overlay patches
+  `port: 8443` into it so the `Location` header points at a port that is actually open.
 - `deploy/kubernetes/base/` (kustomize base) with components:
   - `timescaledb/` — StatefulSet, image `timescale/timescaledb:latest-pg16`, DB
     `tally_reporting`, PVC, readiness probe `pg_isready`, Service, `TCPRoute` on the
@@ -99,9 +105,9 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
     readiness; Service, `HTTPRoute` → dev: `api.tally.127-0-0-1.nip.io`
 - `deploy/kubernetes/overlays/dev/` — namespace `tally`, nip.io hostname patches on all
   routes, self-signed CA `ClusterIssuer` (cert-manager), `EnvoyProxy` config pinning the
-  proxy Service NodePorts to match `kind.yaml`, dev-only Secret values, `replicas: 1`
-  everywhere; the prod overlay later swaps hostnames and issuer — Gateway and routes stay
-  identical
+  proxy Service NodePorts to match `kind.yaml`, the `port: 8443` patch on the redirect
+  route, dev-only Secret values, `replicas: 1` everywhere; the prod overlay later swaps
+  hostnames and issuer — Gateway and routes stay identical
 - `Tiltfile` — `docker_build` per service image (root `Dockerfile`, `ARG CMD`),
   `k8s_yaml(kustomize('deploy/kubernetes/overlays/dev'))`, resource grouping with the
   nip.io URLs attached as resource links (no port-forwards needed — the Gateway serves
@@ -115,8 +121,9 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
 - `make up` creates the kind cluster, installs Envoy Gateway + cert-manager, and deploys
   the dev overlay; `kubectl get pods -n tally` shows all pods `Ready` (TimescaleDB,
   VictoriaMetrics, OTel Collector, Reporting API); the `Gateway` reports `Programmed`.
-- `https://vm.tally.127-0-0-1.nip.io` serves the VictoriaMetrics UI (`curl --cacert
-  <(make -s ca)` verifies cleanly; plain `http://` redirects to `https://`).
+- `https://vm.tally.127-0-0-1.nip.io:8443` serves the VictoriaMetrics UI (`curl --cacert
+  <(make -s ca)` verifies cleanly; `http://vm.tally.127-0-0-1.nip.io:8081` redirects to
+  the `:8443` URL).
 - `psql "host=db.tally.127-0-0-1.nip.io port=5432 ..."` reaches TimescaleDB through the
   Gateway's TCP listener (prerequisite for `make migrate`).
 - `tilt up` turns green for every resource; changing Go code rebuilds and redeploys the
@@ -372,7 +379,7 @@ setup, request-ID middleware.
 
 **Acceptance criteria**: `make migrate` creates the schema on the dev cluster (reaching
 TimescaleDB through the Gateway's `postgres` listener at `db.tally.127-0-0-1.nip.io:5432`);
-`GET https://api.tally.127-0-0-1.nip.io/healthz` returns 200 through the Gateway; hypertable +
+`GET https://api.tally.127-0-0-1.nip.io:8443/healthz` returns 200 through the Gateway; hypertable +
 compression policy verified in an integration test (`SELECT * FROM timescaledb_information.hypertables`).
 
 ---
@@ -953,8 +960,8 @@ scrape_configs:
    decision in `docs/openstack-metrics.md`.
 
 **Acceptance criteria**: on the dev cluster, a metric pushed to
-`https://otlp.tally.127-0-0-1.nip.io` (OTLP/HTTP through the Gateway) appears in
-VictoriaMetrics (`https://vm.tally.127-0-0-1.nip.io/api/v1/query`); scrape configs load
+`https://otlp.tally.127-0-0-1.nip.io:8443` (OTLP/HTTP through the Gateway) appears in
+VictoriaMetrics (`https://vm.tally.127-0-0-1.nip.io:8443/api/v1/query`); scrape configs load
 without error; evaluation doc committed.
 
 ---
