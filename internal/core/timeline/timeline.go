@@ -53,7 +53,7 @@ func Build(events []event.Stored) Timeline {
 	}
 
 	ordered := slices.Clone(events)
-	slices.SortStableFunc(ordered, compare)
+	slices.SortStableFunc(ordered, Compare)
 
 	var (
 		tl     Timeline
@@ -128,7 +128,10 @@ func appendClosed(intervals []Interval, open Interval, end time.Time) []Interval
 	return append(intervals, open)
 }
 
-func compare(a, b event.Stored) int {
+// Compare orders two events by (timestamp, received_at, event_id), the total
+// order Build folds a history in. It is exported so that every consumer folding
+// a history sorts it the same way this package does.
+func Compare(a, b event.Stored) int {
 	if c := a.Timestamp.Compare(b.Timestamp); c != 0 {
 		return c
 	}
