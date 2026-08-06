@@ -105,6 +105,40 @@ func (q *Queries) GetAPITokenForUpdate(ctx context.Context, id uuid.UUID) (ApiTo
 	return i, err
 }
 
+const getCurrentResourceForUpdate = `-- name: GetCurrentResourceForUpdate :one
+SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
+       created_at, deleted_at, last_event_type, last_event_at, last_payload
+FROM current_resources
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+FOR UPDATE
+`
+
+type GetCurrentResourceForUpdateParams struct {
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+}
+
+func (q *Queries) GetCurrentResourceForUpdate(ctx context.Context, arg GetCurrentResourceForUpdateParams) (CurrentResource, error) {
+	row := q.db.QueryRow(ctx, getCurrentResourceForUpdate, arg.Cloud, arg.ResourceType, arg.ResourceID)
+	var i CurrentResource
+	err := row.Scan(
+		&i.Cloud,
+		&i.Platform,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.ProjectID,
+		&i.State,
+		&i.Size,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.LastEventType,
+		&i.LastEventAt,
+		&i.LastPayload,
+	)
+	return i, err
+}
+
 const getIngestCredentialByTokenHash = `-- name: GetIngestCredentialByTokenHash :one
 SELECT id, platform, cloud, token_hash, description, created_at, revoked_at
 FROM ingest_credentials
@@ -180,6 +214,29 @@ func (q *Queries) GetProjectRefsByIDs(ctx context.Context, dollar_1 []uuid.UUID)
 	return items, nil
 }
 
+const getResourceType = `-- name: GetResourceType :one
+SELECT platform, resource_type, size_schema, updated_at
+FROM resource_types
+WHERE platform = $1 AND resource_type = $2
+`
+
+type GetResourceTypeParams struct {
+	Platform     string
+	ResourceType string
+}
+
+func (q *Queries) GetResourceType(ctx context.Context, arg GetResourceTypeParams) (ResourceType, error) {
+	row := q.db.QueryRow(ctx, getResourceType, arg.Platform, arg.ResourceType)
+	var i ResourceType
+	err := row.Scan(
+		&i.Platform,
+		&i.ResourceType,
+		&i.SizeSchema,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertAuditLog = `-- name: InsertAuditLog :exec
 INSERT INTO audit_log (actor, action, object_type, object_id, details)
 VALUES ($1, $2, $3, $4, $5)
@@ -204,6 +261,191 @@ func (q *Queries) InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) 
 	return err
 }
 
+const insertEvent = `-- name: InsertEvent :one
+INSERT INTO events (event_id, timestamp, event_type, platform, cloud,
+                    resource_type, resource_id, project_id, source, payload)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (event_id, timestamp) DO NOTHING
+RETURNING received_at
+`
+
+type InsertEventParams struct {
+	EventID      string
+	Timestamp    pgtype.Timestamptz
+	EventType    string
+	Platform     string
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	Source       string
+	Payload      []byte
+}
+
+func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, insertEvent,
+		arg.EventID,
+		arg.Timestamp,
+		arg.EventType,
+		arg.Platform,
+		arg.Cloud,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.ProjectID,
+		arg.Source,
+		arg.Payload,
+	)
+	var received_at pgtype.Timestamptz
+	err := row.Scan(&received_at)
+	return received_at, err
+}
+
+const insertRejectedEvent = `-- name: InsertRejectedEvent :exec
+INSERT INTO rejected_events (reason, raw)
+VALUES ($1, $2)
+`
+
+type InsertRejectedEventParams struct {
+	Reason string
+	Raw    []byte
+}
+
+func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEventParams) error {
+	_, err := q.db.Exec(ctx, insertRejectedEvent, arg.Reason, arg.Raw)
+	return err
+}
+
+const listEventsForResource = `-- name: ListEventsForResource :many
+SELECT event_id, timestamp, received_at, event_type, platform, cloud,
+       resource_type, resource_id, project_id, source, payload
+FROM events
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+ORDER BY timestamp, received_at, event_id
+`
+
+type ListEventsForResourceParams struct {
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+}
+
+func (q *Queries) ListEventsForResource(ctx context.Context, arg ListEventsForResourceParams) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listEventsForResource, arg.Cloud, arg.ResourceType, arg.ResourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Event
+	for rows.Next() {
+		var i Event
+		if err := rows.Scan(
+			&i.EventID,
+			&i.Timestamp,
+			&i.ReceivedAt,
+			&i.EventType,
+			&i.Platform,
+			&i.Cloud,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.Source,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResourceKeys = `-- name: ListResourceKeys :many
+SELECT DISTINCT cloud, resource_type, resource_id
+FROM events
+WHERE ($1::text IS NULL OR cloud = $1)
+  AND ($2::text IS NULL OR resource_type = $2)
+ORDER BY cloud, resource_type, resource_id
+`
+
+type ListResourceKeysParams struct {
+	Cloud        pgtype.Text
+	ResourceType pgtype.Text
+}
+
+type ListResourceKeysRow struct {
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+}
+
+func (q *Queries) ListResourceKeys(ctx context.Context, arg ListResourceKeysParams) ([]ListResourceKeysRow, error) {
+	rows, err := q.db.Query(ctx, listResourceKeys, arg.Cloud, arg.ResourceType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListResourceKeysRow
+	for rows.Next() {
+		var i ListResourceKeysRow
+		if err := rows.Scan(&i.Cloud, &i.ResourceType, &i.ResourceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResourceTypes = `-- name: ListResourceTypes :many
+SELECT platform, resource_type, size_schema, updated_at
+FROM resource_types
+ORDER BY platform, resource_type
+`
+
+func (q *Queries) ListResourceTypes(ctx context.Context) ([]ResourceType, error) {
+	rows, err := q.db.Query(ctx, listResourceTypes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ResourceType
+	for rows.Next() {
+		var i ResourceType
+		if err := rows.Scan(
+			&i.Platform,
+			&i.ResourceType,
+			&i.SizeSchema,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockResource = `-- name: LockResource :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text || ':' || $3::text, 0))
+`
+
+type LockResourceParams struct {
+	Column1 string
+	Column2 string
+	Column3 string
+}
+
+func (q *Queries) LockResource(ctx context.Context, arg LockResourceParams) error {
+	_, err := q.db.Exec(ctx, lockResource, arg.Column1, arg.Column2, arg.Column3)
+	return err
+}
+
 const revokeAPIToken = `-- name: RevokeAPIToken :exec
 UPDATE api_tokens
 SET revoked_at = now()
@@ -224,4 +466,81 @@ WHERE id = $1 AND revoked_at IS NULL
 func (q *Queries) RevokeIngestCredential(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, revokeIngestCredential, id)
 	return err
+}
+
+const upsertCurrentResource = `-- name: UpsertCurrentResource :exec
+INSERT INTO current_resources (cloud, platform, resource_type, resource_id,
+                               project_id, state, size, created_at, deleted_at,
+                               last_event_type, last_event_at, last_payload)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (cloud, resource_type, resource_id) DO UPDATE
+SET platform = EXCLUDED.platform,
+    project_id = EXCLUDED.project_id,
+    state = EXCLUDED.state,
+    size = EXCLUDED.size,
+    created_at = EXCLUDED.created_at,
+    deleted_at = EXCLUDED.deleted_at,
+    last_event_type = EXCLUDED.last_event_type,
+    last_event_at = EXCLUDED.last_event_at,
+    last_payload = EXCLUDED.last_payload
+`
+
+type UpsertCurrentResourceParams struct {
+	Cloud         string
+	Platform      string
+	ResourceType  string
+	ResourceID    string
+	ProjectID     string
+	State         string
+	Size          []byte
+	CreatedAt     pgtype.Timestamptz
+	DeletedAt     pgtype.Timestamptz
+	LastEventType string
+	LastEventAt   pgtype.Timestamptz
+	LastPayload   []byte
+}
+
+func (q *Queries) UpsertCurrentResource(ctx context.Context, arg UpsertCurrentResourceParams) error {
+	_, err := q.db.Exec(ctx, upsertCurrentResource,
+		arg.Cloud,
+		arg.Platform,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.ProjectID,
+		arg.State,
+		arg.Size,
+		arg.CreatedAt,
+		arg.DeletedAt,
+		arg.LastEventType,
+		arg.LastEventAt,
+		arg.LastPayload,
+	)
+	return err
+}
+
+const upsertResourceType = `-- name: UpsertResourceType :one
+INSERT INTO resource_types (platform, resource_type, size_schema)
+VALUES ($1, $2, $3)
+ON CONFLICT (platform, resource_type) DO UPDATE
+SET size_schema = EXCLUDED.size_schema,
+    updated_at = now()
+RETURNING platform, resource_type, size_schema, updated_at
+`
+
+type UpsertResourceTypeParams struct {
+	Platform     string
+	ResourceType string
+	SizeSchema   []byte
+}
+
+func (q *Queries) UpsertResourceType(ctx context.Context, arg UpsertResourceTypeParams) (ResourceType, error) {
+	row := q.db.QueryRow(ctx, upsertResourceType, arg.Platform, arg.ResourceType, arg.SizeSchema)
+	var i ResourceType
+	err := row.Scan(
+		&i.Platform,
+		&i.ResourceType,
+		&i.SizeSchema,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
