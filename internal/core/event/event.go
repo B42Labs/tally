@@ -47,6 +47,11 @@ const (
 // usable idempotency key.
 const eventIDMaxLen = 256
 
+// identifierMaxLen bounds the fields that identify a resource. They are indexed
+// columns, and a value past the btree limit fails the insert rather than the
+// event, which would take down whatever batch the event travelled in.
+const identifierMaxLen = 512
+
 var eventTypePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)+$`)
 
 // PayloadEnvelope is the normalized payload every event carries. Collectors map
@@ -179,8 +184,12 @@ func (e *Event) Validate() error {
 		{"resource_id", e.ResourceID},
 		{"project_id", e.ProjectID},
 	} {
-		if field.value == "" {
+		switch n := len(field.value); {
+		case n == 0:
 			errs = append(errs, fmt.Errorf("%s: must not be empty", field.name))
+		case n > identifierMaxLen:
+			errs = append(errs, fmt.Errorf("%s: must be at most %d characters, got %d",
+				field.name, identifierMaxLen, n))
 		}
 	}
 
