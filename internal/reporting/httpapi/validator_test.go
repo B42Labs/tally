@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -115,8 +116,9 @@ func TestValidatorRejectsABrokenParameter(t *testing.T) {
 	})
 }
 
-// securedSpec declares an operation behind the contract's bearer scheme. No
-// shipped operation does yet, so the seam is exercised against this one.
+// securedSpec declares one operation behind a scheme the dispatch enforces and
+// one behind a scheme this API has no middleware for. The shipped contract
+// carries only the first kind, so the second is exercised against this fixture.
 const securedSpec = `
 openapi: 3.0.3
 info:
@@ -127,23 +129,39 @@ paths:
     get:
       operationId: listWidgets
       security:
-        - bearerAuth: []
+        - apiToken: []
       responses:
         "200":
           description: The widgets.
+  /gadgets:
+    get:
+      operationId: listGadgets
+      security:
+        - apiKeyAuth: []
+      responses:
+        "200":
+          description: The gadgets.
 components:
   securitySchemes:
-    bearerAuth:
+    apiToken:
       type: http
       scheme: bearer
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
 `
 
-// TestValidatorRefusesAnUnenforcedSecurityScheme pins the seam shut. The
-// middlewares that check credentials are not mounted yet, so an operation that
-// declares a security scheme has to be refused rather than served: the failure
-// mode this guards against is a route going live unauthenticated because
-// someone added it to the contract before the guard existed.
-func TestValidatorRefusesAnUnenforcedSecurityScheme(t *testing.T) {
+// TestValidatorLeavesTheBearerSchemesToTheDispatch pins both halves of the
+// authentication seam.
+//
+// The contract's bearer schemes pass this layer whatever the request carries,
+// because the credential behind them is checked by the dispatch middleware that
+// runs once chi has matched a route, and only there is the guard a route needs
+// known. A scheme no middleware covers is refused here instead, which is what
+// keeps someone from putting a route online by declaring a security scheme the
+// dispatch knows nothing about.
+func TestValidatorLeavesTheBearerSchemesToTheDispatch(t *testing.T) {
 	spec, err := loadSpec(func() (*openapi3.T, error) {
 		return openapi3.NewLoader().LoadFromData([]byte(securedSpec))
 	})
@@ -161,20 +179,50 @@ func TestValidatorRefusesAnUnenforcedSecurityScheme(t *testing.T) {
 		"without a credential": httptest.NewRequest(http.MethodGet, "/widgets", nil),
 		"with one":             requestWithBearer(t, "/widgets", "any-token"),
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run("passes the bearer scheme on "+name, func(t *testing.T) {
 			served = false
 
 			rec := serve(handler, req)
 
-			assertProblem(t, rec, http.StatusUnauthorized, problem.TypeUnauthorized)
-			if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
-				t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+			if got := rec.Code; got != http.StatusOK {
+				t.Errorf("status = %d, want %d (body %q)", got, http.StatusOK, rec.Body)
 			}
-			if served {
-				t.Error("the handler ran, want the secured operation refused")
+			if !served {
+				t.Error("the handler did not run, want the request left to the next layer")
 			}
 		})
 	}
+
+	t.Run("refuses a scheme nothing enforces", func(t *testing.T) {
+		served = false
+
+		rec := serve(handler, httptest.NewRequest(http.MethodGet, "/gadgets", nil))
+
+		assertProblem(t, rec, http.StatusUnauthorized, problem.TypeUnauthorized)
+		if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+			t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+		}
+		if served {
+			t.Error("the handler ran, want the operation refused")
+		}
+	})
+}
+
+// TestRouterCapsTheRequestBody pins the ceiling an anonymous caller is bounded
+// by. The contract validator reads and decodes a body before the dispatch
+// middleware checks any credential, so a body past the cap has to be refused
+// here: the batch limit in the ingest handler sits behind both and would only
+// fire once this process had already paid for the whole document.
+func TestRouterCapsTheRequestBody(t *testing.T) {
+	handler := newTestRouter(t)
+
+	oversized := bytes.Repeat([]byte("a"), maxRequestBody+1)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(oversized))
+	r.Header.Set("Content-Type", "application/json")
+
+	rec := serve(handler, r)
+
+	assertProblem(t, rec, http.StatusRequestEntityTooLarge, problem.TypePayloadTooLarge)
 }
 
 // TestValidationFailuresNameTheOffendingValue proves the two halves of the

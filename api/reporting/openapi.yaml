@@ -17,8 +17,9 @@ info:
   version: 0.1.0
   description: >-
     Event ingestion, resource inventory, and usage reporting for Tally.
-    This document currently covers the health endpoints; the resource,
-    event, and reporting endpoints arrive with their work packages.
+    This document covers the health probes, event ingestion, the resource-type
+    registry, and the projection rebuild; the query and reporting endpoints
+    arrive with their work packages.
 
 paths:
   /healthz:
@@ -67,6 +68,186 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
         "503":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/events:
+    post:
+      operationId: ingestEvents
+      summary: Ingest events
+      description: >-
+        Stores a batch of canonical events. The body is either one event or an
+        array of at most 1000 of them.
+
+        The answer is 200 whenever the request itself was authorized and
+        readable, whatever the individual items did: an item this API refuses is
+        kept server-side with the reason it was refused and reported in
+        `rejected`. A collector may therefore drop the whole batch from its
+        buffer once the call returns, and must not retry a rejected item.
+      security:
+        - ingestToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/EventInput"
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/EventInput"
+      responses:
+        "200":
+          description: The batch was processed. The body says what happened to it.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResult"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "413":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/resource-types:
+    get:
+      operationId: listResourceTypes
+      summary: List the registered resource types
+      description: >-
+        Returns every registered (platform, resource_type) pair together with
+        the size schema its events are checked against.
+      security:
+        - apiToken: []
+      responses:
+        "200":
+          description: The registered resource types.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceTypeList"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/resource-types/{platform}/{resource_type}:
+    parameters:
+      - name: platform
+        in: path
+        required: true
+        description: The platform the resource type belongs to, openstack for example.
+        schema:
+          type: string
+      - name: resource_type
+        in: path
+        required: true
+        description: The resource type within that platform, instance for example.
+        schema:
+          type: string
+    get:
+      operationId: getResourceType
+      summary: Read one registered resource type
+      security:
+        - apiToken: []
+      responses:
+        "200":
+          description: The registered resource type.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceType"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+    put:
+      operationId: putResourceType
+      summary: Register a resource type
+      description: >-
+        Registers the size schema of one (platform, resource_type) pair, or
+        replaces the schema already registered for it. The document is compiled
+        before it is stored, so a schema that does not compile is refused and
+        nothing changes.
+      security:
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterResourceType"
+      responses:
+        "200":
+          description: The resource type as it is now registered.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceType"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "413":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  # This route is not part of the public API: the other Tally components call it
+  # with the shared internal token. It is described here because the request
+  # validator refuses a path the contract does not carry, so leaving it out
+  # would take the route offline rather than hide it.
+  /internal/projection/rebuild:
+    post:
+      operationId: rebuildProjection
+      summary: Rebuild the projection
+      description: >-
+        Replays the event history of every resource the filter selects into the
+        projection and answers once it is done. It is the operational guarantee
+        behind the derived rows: whatever a projection row holds, the history it
+        comes from can produce it again.
+      security:
+        - internalToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebuildRequest"
+      responses:
+        "200":
+          description: The rebuild finished.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebuildResult"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "413":
+          $ref: "#/components/responses/Problem"
+        "500":
           $ref: "#/components/responses/Problem"
 
 components:
@@ -133,11 +314,192 @@ components:
                 type: string
                 description: What is wrong with the value at that location.
 
+    # This schema constrains nothing, and that is load-bearing rather than
+    # sloppy. It is what the request validator applies to a whole batch, so a
+    # typed member here would answer 500 well-formed events with one 400 because
+    # the 501st spells its timestamp wrong. WP 1.6 requires the opposite: the one
+    # bad item is kept as a dead letter and its siblings are stored. The rules
+    # that decide which item is bad therefore live in (*event.Event).Validate(),
+    # which runs per item.
+    #
+    # The batch limit is enforced the same way, by the handler, which answers
+    # 413. A maxItems keyword here would answer 400 instead.
+    EventInput:
+      type: object
+      additionalProperties: true
+      description: >-
+        One canonical event. The members below are described rather than
+        constrained; the normative schema is roadmap/00-conventions.md
+        section 4.
+      properties:
+        event_id:
+          description: >-
+            Globally unique idempotency key of 1 to 256 characters. An event id
+            resubmitted with the same timestamp counts as a duplicate.
+        timestamp:
+          description: When the event happened, ISO 8601 with a timezone.
+        event_type:
+          description: >-
+            What happened, written resource.action with an optional phase, for
+            example compute.instance.create.end.
+        platform:
+          description: The platform the resource lives on, openstack for example.
+        cloud:
+          description: The installation the resource lives in, os-prod-eu1 for example.
+        resource_type:
+          description: The kind of resource, instance or volume for example.
+        resource_id:
+          description: The resource this event is about.
+        project_id:
+          description: The project owning the resource at or after this event.
+        source:
+          description: >-
+            Where the event came from. The stored event always reports the
+            pipeline that ingested it, so a collector cannot mark its events as
+            reconciliation output. The member may be left out; a value outside
+            `collector` and `reconciliation` refuses the item.
+        payload:
+          description: >-
+            The normalized payload envelope: the state at or after the event,
+            the full replacement size when it changed, and optional raw provider
+            data.
+
+    IngestResult:
+      type: object
+      description: What one ingest call did with the batch it was given.
+      required: [accepted, duplicates, rejected]
+      properties:
+        accepted:
+          type: integer
+          description: How many events the call stored.
+        duplicates:
+          type: integer
+          description: How many items the database already held.
+        rejected:
+          type: array
+          description: The items the call refused, one entry each.
+          items:
+            $ref: "#/components/schemas/RejectedEvent"
+
+    RejectedEvent:
+      type: object
+      description: One refused item and the reason it was refused.
+      required: [index, event_id, reason]
+      properties:
+        index:
+          type: integer
+          description: The item's position in the submitted batch, counted from zero.
+        event_id:
+          type: string
+          description: >-
+            The event id the item carried. It is the empty string for an item
+            that carried none, which is why the index is what identifies the
+            item.
+        reason:
+          type: string
+          description: >-
+            Why the item was refused, for example
+            "size_schema: 'vcpus' is a required property".
+
+    ResourceType:
+      type: object
+      description: >-
+        One registered resource type and the size schema the sizes reported for
+        it are validated against.
+      required: [platform, resource_type, size_schema, updated_at]
+      properties:
+        platform:
+          type: string
+          description: The platform the resource type belongs to.
+        resource_type:
+          type: string
+          description: The resource type within that platform.
+        size_schema:
+          type: object
+          description: The registered JSON Schema draft 2020-12 document.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the schema was last written.
+
+    ResourceTypeList:
+      type: object
+      description: The registered resource types.
+      # next_cursor is required although it is null today: the server always
+      # sends the member, and saying so is what makes the generated model carry
+      # it rather than drop it when it is unset.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: The resource types, ordered by platform and resource type.
+          items:
+            $ref: "#/components/schemas/ResourceType"
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Where the next page starts. It is always null today: the registry
+            holds one row per resource type, so every registration fits into one
+            answer. Cursor pagination arrives with the query endpoints.
+
+    RegisterResourceType:
+      type: object
+      description: The size schema to register for a resource type.
+      required: [size_schema]
+      properties:
+        size_schema:
+          type: object
+          description: >-
+            A JSON Schema draft 2020-12 document. It is compiled before it is
+            stored, so the document a registration accepts is exactly the one
+            ingestion can apply later.
+
+    RebuildRequest:
+      type: object
+      description: >-
+        Which resources to replay. A member left out filters nothing, so an
+        empty object rebuilds every resource the events table knows.
+      properties:
+        cloud:
+          type: string
+          description: Replay only the resources of this cloud.
+        resource_type:
+          type: string
+          description: Replay only the resources of this type.
+
+    RebuildResult:
+      type: object
+      description: What one rebuild replayed.
+      required: [rebuilt]
+      properties:
+        rebuilt:
+          type: integer
+          description: How many resources were replayed.
+
   securitySchemes:
     # Referenced per operation by the authenticated endpoints. The health probes
-    # below are unauthenticated, so there is no document-wide `security`.
-    bearerAuth:
+    # are unauthenticated, so there is no document-wide `security`. The three
+    # schemes are all bearer tokens on the wire and nothing else: they are drawn
+    # from three separate stores, and a token issued for one is refused by the
+    # operations of the other two.
+    ingestToken:
       type: http
       scheme: bearer
       description: >-
-        Service token passed as `Authorization: Bearer <token>`.
+        An ingest credential, issued per (platform, cloud) and passed as
+        `Authorization: Bearer <token>`. It may report events for that pair
+        alone.
+    apiToken:
+      type: http
+      scheme: bearer
+      description: >-
+        An API token passed as `Authorization: Bearer <token>`. Each operation
+        names the role it needs; a token below it is answered 403.
+    internalToken:
+      type: http
+      scheme: bearer
+      description: >-
+        The shared secret the other Tally components call the internal routes
+        with, passed as `Authorization: Bearer <token>`. It is not issued to
+        public callers.

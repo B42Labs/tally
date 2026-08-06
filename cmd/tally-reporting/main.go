@@ -26,7 +26,10 @@ import (
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/config"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
+	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store"
+	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
 
 const (
@@ -87,10 +90,22 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 
+	queries := sqlcgen.New(db.Pool())
+	// The pipeline owns the registry, which caches compiled size schemas for the
+	// life of the process. Nothing else validates a size against a stored schema
+	// today.
+	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema)
+
 	router, err := httpapi.NewRouter(httpapi.Options{
 		Logger:             logger,
 		DB:                 db,
 		UnhealthyThreshold: time.Duration(cfg.UnhealthyThresholdSeconds) * time.Second,
+		Queries:            queries,
+		Store:              db,
+		AuthMode:           auth.Mode(cfg.AuthMode),
+		InternalToken:      cfg.InternalToken,
+		Authenticator:      auth.NewStaticTokenAuthenticator(queries),
+		Pipeline:           pipeline,
 	})
 	if err != nil {
 		return fmt.Errorf("building the router: %w", err)

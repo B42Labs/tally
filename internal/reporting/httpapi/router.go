@@ -17,6 +17,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -28,7 +29,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 
+	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
+	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/store"
+	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
 
 // Options configures the router.
@@ -44,6 +49,23 @@ type Options struct {
 	// Now is the clock the liveness threshold is measured on. It defaults to
 	// time.Now and exists so tests can control the threshold.
 	Now func() time.Time
+	// Queries is the sqlc handle the read endpoints and the ingest guard work
+	// through. It is bound to the pool, so the writes that need a transaction
+	// build their own handle instead.
+	Queries *sqlcgen.Queries
+	// Store is the database the handlers that write run their transactions on.
+	Store *store.Store
+	// AuthMode says whether the authentication middlewares check a credential
+	// at all.
+	AuthMode auth.Mode
+	// InternalToken is the shared secret the /internal routes are guarded with.
+	InternalToken string
+	// Authenticator resolves the bearer token of a query request into the
+	// principal it stands for.
+	Authenticator auth.Authenticator
+	// Pipeline ingests the batches POST /api/v1/events submits. The
+	// resource-type registry and the strict-mode flag travel inside it.
+	Pipeline *ingest.Pipeline
 }
 
 // NewRouter assembles the API: the middleware stack, the request validator, and
@@ -81,33 +103,73 @@ func NewRouter(opts Options) (http.Handler, error) {
 			"Method not allowed", "this path does not accept this method")
 	})
 
-	// Order matters: the id has to exist before anything logs, and the recoverer
-	// has to sit outside the validator and the handlers it protects.
+	// Order matters: the id has to exist before anything logs, the recoverer has
+	// to sit outside the validator and the handlers it protects, and the body cap
+	// has to sit outside the validator, which is the first thing that reads a
+	// body.
 	r.Use(newRequestID(logger))
 	r.Use(requestLogging)
 	r.Use(recoverer)
+	r.Use(limitRequestBody)
 	r.Use(newValidator(spec))
 
 	srv := &server{
-		db:     opts.DB,
-		health: newHealthTracker(now, opts.UnhealthyThreshold),
+		db:       opts.DB,
+		health:   newHealthTracker(now, opts.UnhealthyThreshold),
+		store:    opts.Store,
+		queries:  opts.Queries,
+		pipeline: opts.Pipeline,
 	}
-	return HandlerWithOptions(srv, ChiServerOptions{BaseRouter: r}), nil
+	// The dispatch middleware is handed to the generated wrapper rather than to
+	// chi, because it needs the route chi matched to know which guard applies.
+	return HandlerWithOptions(srv, ChiServerOptions{
+		BaseRouter:  r,
+		Middlewares: []MiddlewareFunc{newAuthDispatch(opts)},
+	}), nil
+}
+
+// maxRequestBody is how much of a request body this service will hold. The cap
+// is what an unauthenticated caller is bounded by: the validator reads and
+// decodes the whole body before the dispatch middleware checks any credential,
+// so without it a body is only bounded by how much a client can send inside the
+// read timeout.
+const maxRequestBody = 8 << 20
+
+// limitRequestBody caps every request body before anything reads one. A body
+// past the cap fails the read it is in, which the validator's error handler
+// answers 413.
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// enforcedSchemes are the security schemes of the contract that a middleware
+// behind this one actually checks a credential for. They mirror the dispatch
+// table in newAuthDispatch: one store per scheme.
+var enforcedSchemes = map[string]bool{
+	"ingestToken":   true,
+	"apiToken":      true,
+	"internalToken": true,
 }
 
 // newValidator builds the middleware that checks every request against the
 // contract.
 //
-// Its authentication function fails closed. The contract describes only the
-// unauthenticated health probes today, and the middlewares that guard the
-// authenticated routes arrive with those routes (see internal/reporting/auth).
-// Until they are mounted here, an operation that declares a security scheme is
-// refused rather than served: adding one to the contract must not put a route
-// online that nothing checks a credential for.
+// Its authentication function lets the contract's bearer schemes through: the
+// credential itself is checked further in, by the dispatch middleware that runs
+// once chi has matched a route (see newAuthDispatch), which is where the guard
+// and the role a route needs are known. Every other scheme name is refused, so
+// declaring one in the contract takes the route offline rather than serving it
+// with nothing checking its credential.
 func newValidator(spec *openapi3.T) func(http.Handler) http.Handler {
 	return nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
 		Options: openapi3filter.Options{
-			AuthenticationFunc: func(context.Context, *openapi3filter.AuthenticationInput) error {
+			AuthenticationFunc: func(_ context.Context, input *openapi3filter.AuthenticationInput) error {
+				if enforcedSchemes[input.SecuritySchemeName] {
+					return nil
+				}
 				return errUnenforcedSecurity
 			},
 		},
@@ -132,15 +194,19 @@ func newValidator(spec *openapi3.T) func(http.Handler) http.Handler {
 }
 
 // errUnenforcedSecurity is what the validator answers an operation that
-// declares a security scheme with, as long as no middleware enforces one.
-var errUnenforcedSecurity = errors.New("the security schemes of this contract are not enforced yet")
+// declares a security scheme this API has no middleware for.
+var errUnenforcedSecurity = errors.New("this security scheme of the contract is not enforced")
 
 // validationDetail is the sentence a rejected request is answered with. It says
 // what happened without echoing the submitted values back, which the field
 // errors carry instead.
 func validationDetail(err error) string {
-	if errors.Is(err, errUnenforcedSecurity) {
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.Is(err, errUnenforcedSecurity):
 		return "this endpoint requires a credential this build does not check"
+	case errors.As(err, &tooLarge):
+		return fmt.Sprintf("a request body carries at most %d bytes", maxRequestBody)
 	}
 	return "the request does not match the API contract"
 }
@@ -196,7 +262,13 @@ func reason(err *openapi3filter.RequestError) string {
 // unmatched route as 404, so a request that hits a known path with the wrong
 // method is only recognizable from the error.
 func validationProblem(err error, suggested int) (status int, typ, title string) {
+	var tooLarge *http.MaxBytesError
 	switch {
+	case errors.As(err, &tooLarge):
+		// The body cap fires inside the validator's own read, which is what
+		// makes an oversized body a rejected request rather than a batch this
+		// service already paid for.
+		return http.StatusRequestEntityTooLarge, problem.TypePayloadTooLarge, "Payload too large"
 	case errors.Is(err, routers.ErrMethodNotAllowed):
 		return http.StatusMethodNotAllowed, problem.TypeMethodNotAllowed, "Method not allowed"
 	case suggested == http.StatusUnauthorized:

@@ -7,15 +7,64 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
+	"github.com/oapi-codegen/runtime"
 )
+
+// EventInput One canonical event. The members below are described rather than constrained; the normative schema is roadmap/00-conventions.md section 4.
+type EventInput struct {
+	// Cloud The installation the resource lives in, os-prod-eu1 for example.
+	Cloud interface{} `json:"cloud,omitempty"`
+
+	// EventId Globally unique idempotency key of 1 to 256 characters. An event id resubmitted with the same timestamp counts as a duplicate.
+	EventId interface{} `json:"event_id,omitempty"`
+
+	// EventType What happened, written resource.action with an optional phase, for example compute.instance.create.end.
+	EventType interface{} `json:"event_type,omitempty"`
+
+	// Payload The normalized payload envelope: the state at or after the event, the full replacement size when it changed, and optional raw provider data.
+	Payload interface{} `json:"payload,omitempty"`
+
+	// Platform The platform the resource lives on, openstack for example.
+	Platform interface{} `json:"platform,omitempty"`
+
+	// ProjectId The project owning the resource at or after this event.
+	ProjectId interface{} `json:"project_id,omitempty"`
+
+	// ResourceId The resource this event is about.
+	ResourceId interface{} `json:"resource_id,omitempty"`
+
+	// ResourceType The kind of resource, instance or volume for example.
+	ResourceType interface{} `json:"resource_type,omitempty"`
+
+	// Source Where the event came from. The stored event always reports the pipeline that ingested it, so a collector cannot mark its events as reconciliation output. The member may be left out; a value outside `collector` and `reconciliation` refuses the item.
+	Source interface{} `json:"source,omitempty"`
+
+	// Timestamp When the event happened, ISO 8601 with a timezone.
+	Timestamp            interface{}            `json:"timestamp,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// IngestResult What one ingest call did with the batch it was given.
+type IngestResult struct {
+	// Accepted How many events the call stored.
+	Accepted int `json:"accepted"`
+
+	// Duplicates How many items the database already held.
+	Duplicates int `json:"duplicates"`
+
+	// Rejected The items the call refused, one entry each.
+	Rejected []RejectedEvent `json:"rejected"`
+}
 
 // Problem RFC 9457 problem detail. Every error response in this API uses this shape, served as application/problem+json.
 type Problem struct {
@@ -47,11 +96,345 @@ type Problem struct {
 	Type string `json:"type"`
 }
 
+// RebuildRequest Which resources to replay. A member left out filters nothing, so an empty object rebuilds every resource the events table knows.
+type RebuildRequest struct {
+	// Cloud Replay only the resources of this cloud.
+	Cloud *string `json:"cloud,omitempty"`
+
+	// ResourceType Replay only the resources of this type.
+	ResourceType *string `json:"resource_type,omitempty"`
+}
+
+// RebuildResult What one rebuild replayed.
+type RebuildResult struct {
+	// Rebuilt How many resources were replayed.
+	Rebuilt int `json:"rebuilt"`
+}
+
+// RegisterResourceType The size schema to register for a resource type.
+type RegisterResourceType struct {
+	// SizeSchema A JSON Schema draft 2020-12 document. It is compiled before it is stored, so the document a registration accepts is exactly the one ingestion can apply later.
+	SizeSchema map[string]interface{} `json:"size_schema"`
+}
+
+// RejectedEvent One refused item and the reason it was refused.
+type RejectedEvent struct {
+	// EventId The event id the item carried. It is the empty string for an item that carried none, which is why the index is what identifies the item.
+	EventId string `json:"event_id"`
+
+	// Index The item's position in the submitted batch, counted from zero.
+	Index int `json:"index"`
+
+	// Reason Why the item was refused, for example "size_schema: 'vcpus' is a required property".
+	Reason string `json:"reason"`
+}
+
+// ResourceType One registered resource type and the size schema the sizes reported for it are validated against.
+type ResourceType struct {
+	// Platform The platform the resource type belongs to.
+	Platform string `json:"platform"`
+
+	// ResourceType The resource type within that platform.
+	ResourceType string `json:"resource_type"`
+
+	// SizeSchema The registered JSON Schema draft 2020-12 document.
+	SizeSchema map[string]interface{} `json:"size_schema"`
+
+	// UpdatedAt When the schema was last written.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ResourceTypeList The registered resource types.
+type ResourceTypeList struct {
+	// Items The resource types, ordered by platform and resource type.
+	Items []ResourceType `json:"items"`
+
+	// NextCursor Where the next page starts. It is always null today: the registry holds one row per resource type, so every registration fits into one answer. Cursor pagination arrives with the query endpoints.
+	NextCursor *string `json:"next_cursor"`
+}
+
+// IngestEventsJSONBody defines parameters for IngestEvents.
+type IngestEventsJSONBody struct {
+	union json.RawMessage
+}
+
+// IngestEventsJSONBody1 defines parameters for IngestEvents.
+type IngestEventsJSONBody1 = []EventInput
+
+// IngestEventsJSONRequestBody defines body for IngestEvents for application/json ContentType.
+type IngestEventsJSONRequestBody IngestEventsJSONBody
+
+// PutResourceTypeJSONRequestBody defines body for PutResourceType for application/json ContentType.
+type PutResourceTypeJSONRequestBody = RegisterResourceType
+
+// RebuildProjectionJSONRequestBody defines body for RebuildProjection for application/json ContentType.
+type RebuildProjectionJSONRequestBody = RebuildRequest
+
+// Getter for additional properties for EventInput. Returns the specified
+// element and whether it was found
+func (a EventInput) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for EventInput
+func (a *EventInput) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for EventInput to handle AdditionalProperties
+func (a *EventInput) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["cloud"]; found {
+		err = json.Unmarshal(raw, &a.Cloud)
+		if err != nil {
+			return fmt.Errorf("error reading 'cloud': %w", err)
+		}
+		delete(object, "cloud")
+	}
+
+	if raw, found := object["event_id"]; found {
+		err = json.Unmarshal(raw, &a.EventId)
+		if err != nil {
+			return fmt.Errorf("error reading 'event_id': %w", err)
+		}
+		delete(object, "event_id")
+	}
+
+	if raw, found := object["event_type"]; found {
+		err = json.Unmarshal(raw, &a.EventType)
+		if err != nil {
+			return fmt.Errorf("error reading 'event_type': %w", err)
+		}
+		delete(object, "event_type")
+	}
+
+	if raw, found := object["payload"]; found {
+		err = json.Unmarshal(raw, &a.Payload)
+		if err != nil {
+			return fmt.Errorf("error reading 'payload': %w", err)
+		}
+		delete(object, "payload")
+	}
+
+	if raw, found := object["platform"]; found {
+		err = json.Unmarshal(raw, &a.Platform)
+		if err != nil {
+			return fmt.Errorf("error reading 'platform': %w", err)
+		}
+		delete(object, "platform")
+	}
+
+	if raw, found := object["project_id"]; found {
+		err = json.Unmarshal(raw, &a.ProjectId)
+		if err != nil {
+			return fmt.Errorf("error reading 'project_id': %w", err)
+		}
+		delete(object, "project_id")
+	}
+
+	if raw, found := object["resource_id"]; found {
+		err = json.Unmarshal(raw, &a.ResourceId)
+		if err != nil {
+			return fmt.Errorf("error reading 'resource_id': %w", err)
+		}
+		delete(object, "resource_id")
+	}
+
+	if raw, found := object["resource_type"]; found {
+		err = json.Unmarshal(raw, &a.ResourceType)
+		if err != nil {
+			return fmt.Errorf("error reading 'resource_type': %w", err)
+		}
+		delete(object, "resource_type")
+	}
+
+	if raw, found := object["source"]; found {
+		err = json.Unmarshal(raw, &a.Source)
+		if err != nil {
+			return fmt.Errorf("error reading 'source': %w", err)
+		}
+		delete(object, "source")
+	}
+
+	if raw, found := object["timestamp"]; found {
+		err = json.Unmarshal(raw, &a.Timestamp)
+		if err != nil {
+			return fmt.Errorf("error reading 'timestamp': %w", err)
+		}
+		delete(object, "timestamp")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for EventInput to handle AdditionalProperties
+func (a EventInput) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["cloud"], err = json.Marshal(a.Cloud)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'cloud': %w", err)
+	}
+
+	object["event_id"], err = json.Marshal(a.EventId)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'event_id': %w", err)
+	}
+
+	object["event_type"], err = json.Marshal(a.EventType)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'event_type': %w", err)
+	}
+
+	object["payload"], err = json.Marshal(a.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'payload': %w", err)
+	}
+
+	object["platform"], err = json.Marshal(a.Platform)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'platform': %w", err)
+	}
+
+	object["project_id"], err = json.Marshal(a.ProjectId)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'project_id': %w", err)
+	}
+
+	object["resource_id"], err = json.Marshal(a.ResourceId)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'resource_id': %w", err)
+	}
+
+	object["resource_type"], err = json.Marshal(a.ResourceType)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'resource_type': %w", err)
+	}
+
+	object["source"], err = json.Marshal(a.Source)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'source': %w", err)
+	}
+
+	object["timestamp"], err = json.Marshal(a.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'timestamp': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// AsEventInput returns the union data inside the IngestEventsJSONBody as a EventInput
+func (t IngestEventsJSONBody) AsEventInput() (EventInput, error) {
+	var body EventInput
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEventInput overwrites any union data inside the IngestEventsJSONBody as the provided EventInput
+func (t *IngestEventsJSONBody) FromEventInput(v EventInput) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEventInput performs a merge with any union data inside the IngestEventsJSONBody, using the provided EventInput
+func (t *IngestEventsJSONBody) MergeEventInput(v EventInput) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsIngestEventsJSONBody1 returns the union data inside the IngestEventsJSONBody as a IngestEventsJSONBody1
+func (t IngestEventsJSONBody) AsIngestEventsJSONBody1() (IngestEventsJSONBody1, error) {
+	var body IngestEventsJSONBody1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromIngestEventsJSONBody1 overwrites any union data inside the IngestEventsJSONBody as the provided IngestEventsJSONBody1
+func (t *IngestEventsJSONBody) FromIngestEventsJSONBody1(v IngestEventsJSONBody1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeIngestEventsJSONBody1 performs a merge with any union data inside the IngestEventsJSONBody, using the provided IngestEventsJSONBody1
+func (t *IngestEventsJSONBody) MergeIngestEventsJSONBody1(v IngestEventsJSONBody1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t IngestEventsJSONBody) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *IngestEventsJSONBody) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// IngestEvents Ingest events
+	// (POST /api/v1/events)
+	IngestEvents(w http.ResponseWriter, r *http.Request)
+	// ListResourceTypes List the registered resource types
+	// (GET /api/v1/resource-types)
+	ListResourceTypes(w http.ResponseWriter, r *http.Request)
+	// GetResourceType Read one registered resource type
+	// (GET /api/v1/resource-types/{platform}/{resource_type})
+	GetResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string)
+	// PutResourceType Register a resource type
+	// (PUT /api/v1/resource-types/{platform}/{resource_type})
+	PutResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string)
 	// Healthz Liveness probe
 	// (GET /healthz)
 	Healthz(w http.ResponseWriter, r *http.Request)
+	// RebuildProjection Rebuild the projection
+	// (POST /internal/projection/rebuild)
+	RebuildProjection(w http.ResponseWriter, r *http.Request)
 	// Readyz Readiness probe
 	// (GET /readyz)
 	Readyz(w http.ResponseWriter, r *http.Request)
@@ -61,9 +444,39 @@ type ServerInterface interface {
 
 type Unimplemented struct{}
 
+// IngestEvents Ingest events
+// (POST /api/v1/events)
+func (_ Unimplemented) IngestEvents(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListResourceTypes List the registered resource types
+// (GET /api/v1/resource-types)
+func (_ Unimplemented) ListResourceTypes(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetResourceType Read one registered resource type
+// (GET /api/v1/resource-types/{platform}/{resource_type})
+func (_ Unimplemented) GetResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// PutResourceType Register a resource type
+// (PUT /api/v1/resource-types/{platform}/{resource_type})
+func (_ Unimplemented) PutResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // Healthz Liveness probe
 // (GET /healthz)
 func (_ Unimplemented) Healthz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RebuildProjection Rebuild the projection
+// (POST /internal/projection/rebuild)
+func (_ Unimplemented) RebuildProjection(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -82,11 +495,123 @@ type ServerInterfaceWrapper struct {
 
 type MiddlewareFunc func(http.Handler) http.Handler
 
+// IngestEvents operation middleware
+func (siw *ServerInterfaceWrapper) IngestEvents(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.IngestEvents(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResourceTypes operation middleware
+func (siw *ServerInterfaceWrapper) ListResourceTypes(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResourceTypes(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetResourceType operation middleware
+func (siw *ServerInterfaceWrapper) GetResourceType(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "platform" -------------
+	var platform string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "platform", chi.URLParam(r, "platform"), &platform, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "platform", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_type" -------------
+	var resourceType string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_type", chi.URLParam(r, "resource_type"), &resourceType, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetResourceType(w, r, platform, resourceType)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutResourceType operation middleware
+func (siw *ServerInterfaceWrapper) PutResourceType(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "platform" -------------
+	var platform string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "platform", chi.URLParam(r, "platform"), &platform, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "platform", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_type" -------------
+	var resourceType string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_type", chi.URLParam(r, "resource_type"), &resourceType, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutResourceType(w, r, platform, resourceType)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Healthz operation middleware
 func (siw *ServerInterfaceWrapper) Healthz(w http.ResponseWriter, r *http.Request) {
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.Healthz(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RebuildProjection operation middleware
+func (siw *ServerInterfaceWrapper) RebuildProjection(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RebuildProjection(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -229,6 +754,21 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/readyz", wrapper.Readyz)
 	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/events", wrapper.IngestEvents)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/resource-types", wrapper.ListResourceTypes)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/resource-types/{platform}/{resource_type}", wrapper.GetResourceType)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/resource-types/{platform}/{resource_type}", wrapper.PutResourceType)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/internal/projection/rebuild", wrapper.RebuildProjection)
+	})
 
 	return r
 }
@@ -238,26 +778,65 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"1Fbfbxs3DP5XiNve5tje0mKY+9R1HRpgD0Ga/QC2YWUk3p0aWVIpnt1rkf99oHS248TbUGDAsLezxeNH",
-	"ft8n8j42Jq5TDBQkN6uPTU9oicvjFb0bKMvFd/rDUjbskrgYmlXzIjKTR/0FzkJsQXqXgesbc7juCTLx",
-	"hhjQxiQZpCeIgQDBoPfEkCnYDBgsdBSIUSiXgCg98dZlegZOAFMiZD0B2hCP4GMH3mlcW3JOkDPIEd4N",
-	"UVzo9D0XACEPKUWWXQy4DNseBcRRLUi2ESR2pJDzZtZk09MatV0ZEzWrJgu70DV3d3ezhimnGDIVbi45",
-	"3nha66OJQSiIPmJK3plCyyLViC/eZmXs473cnzO1zar5bHFgflFP82KXtyAec3596BZadJ5s5fkm2hEy",
-	"jhn6uNUu7kn4y9kk4llV8RT0FL44yH1X0KeSHnR7XNPV9y/gmydPv4apW7Ak6PwcXhaxiDky7IhTUYpN",
-	"nl9ewJCLBi5D7jHRrNrFAmb4Kxa1t8QxEauAtRhFe1zWq2GN4YwJLd54AnqfPIbq1pzIuNYZkFjhozED",
-	"MwVDmv+B7rOmtJAfQ1wSn7WOvJ1aztqBwLanUKy1I8RlQNigd7biq3IDFywntC6Zj5vy0TyG+yFWQna2",
-	"j21LwarZN+gHmgHNu3mxwpwpx4EN/eHsyY7WuXuc/2e9F3o/OIYOtk76AlOSg14ZPfdTESfSlvvxbnBM",
-	"tln9WnqoSL/vQ+PNWzKiFUx/IDOO+jsLynCCY3X3q+vrS6gBYKKle7OmukqLofe4Tp6a1ZPlcp/eBaGO",
-	"uAA60dOH+V/3Oh36Y7PkYb1GHndE73TUpEdQzU/HopI9RXb94yHwj1cXwNRSsR04S0FcO6qafw85cFgJ",
-	"ej+uii1XB1/9oyLldMfEnvLH6qgcZAZ2Mr7WAVA9eUPIxM8H6U+wSLxxhkDiLQVImHO9xm80PLL7UApc",
-	"wbclB/w2LJfnpgSXR3qzn7xaR0U6tNOLpDoNXWjjY/SXGwo67jvK+s8MdvYHF/Qo8jgrW2bI2OkA1Y2g",
-	"TLeR4Vq51CnqMthohrXmquNA/AgmbojrpugJvfRAwaboguRn0/KpWDNdTkEq0AFiHw3I7Da0v1eOYRv5",
-	"FhKaW+woz/fKrJpSE1ztkzy/vGhmjRZSG17Ov5wv1VoxUcDkmlVzPl/Oz3U4ovRFrkUt94M+dyQn5nZJ",
-	"r+uw7L6d7Qxlncdx8BZuiRLwEIIL3Rwu6s7RRexHwFaml/Ikfo8ZbogCDKFij4VgH0NXIrFORRND67qB",
-	"yYL0TLmP3pbVXeYLgjCG7FQFi4I3mAniIFW4LKglhyi9ltQUBriY68Lq0J96frCpv1ouH2xpofeySB7d",
-	"g718uGfx9sR9OrmQd/3rmPduQ//W/p01T2vdp97Y93f4XND480+I12teB50uF7ehoNLr5KFyuNB5OH6a",
-	"gXZcGAx1m6ucbevMPftse+epRO8FdhmGwISm1/k70xDTg+Dt9JGWolUT6EDmKHXg6kXS/yZX1I++x5a4",
-	"qk38V44oHOqHxjEb/0eLKJPuyCN3d38GAAD//w==",
+	"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",
+	"YHes8XvM52RJPUjot7f/DwAA//8=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,
