@@ -35,6 +35,7 @@ const (
 	envInternalToken      = "TALLY_REPORTING_INTERNAL_TOKEN"
 	envUnhealthyThreshold = "TALLY_REPORTING_UNHEALTHY_THRESHOLD_S"
 	envOIDCJWKSURL        = "TALLY_REPORTING_OIDC_JWKS_URL"
+	envRequireSizeSchema  = "TALLY_INGEST_REQUIRE_SIZE_SCHEMA"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -51,6 +52,7 @@ var EnvNames = []string{
 	envInternalToken + fileSuffix,
 	envUnhealthyThreshold,
 	envOIDCJWKSURL,
+	envRequireSizeSchema,
 }
 
 // The accepted values of TALLY_REPORTING_AUTH_MODE.
@@ -99,6 +101,13 @@ type Config struct {
 	// for accepting Bearer JWTs, and nothing implements it yet, so a set value
 	// refuses startup instead of being ignored.
 	OIDCJWKSURL string `env:"TALLY_REPORTING_OIDC_JWKS_URL"`
+	// RequireSizeSchema is ingest's strict mode: when true, an event whose
+	// payload carries a size for a (platform, resource_type) pair with no
+	// registered schema is rejected; the default accepts it unvalidated, so a
+	// registry that lags behind a new resource type does not stop collection.
+	// The variable has no REPORTING infix because roadmap section WP 1.3 names
+	// it TALLY_INGEST_REQUIRE_SIZE_SCHEMA.
+	RequireSizeSchema bool `env:"TALLY_INGEST_REQUIRE_SIZE_SCHEMA" envDefault:"false"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the

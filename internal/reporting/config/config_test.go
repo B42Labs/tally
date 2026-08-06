@@ -70,6 +70,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.OIDCJWKSURL != "" {
 		t.Errorf("OIDCJWKSURL = %q, want empty", cfg.OIDCJWKSURL)
 	}
+	if cfg.RequireSizeSchema {
+		t.Error("RequireSizeSchema = true, want false")
+	}
 	if err := cfg.ValidateServer(); err != nil {
 		t.Errorf("ValidateServer() error = %v, want nil", err)
 	}
@@ -83,6 +86,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_REPORTING_AUTH_MODE":             "disabled",
 		"TALLY_REPORTING_UNHEALTHY_THRESHOLD_S": "30",
 		"TALLY_REPORTING_DB_MAX_CONNS":          "4",
+		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":      "true",
 	})
 
 	cfg, err := config.Load()
@@ -92,6 +96,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 
 	if cfg.DBMaxConns != 4 {
 		t.Errorf("DBMaxConns = %d, want 4", cfg.DBMaxConns)
+	}
+	if !cfg.RequireSizeSchema {
+		t.Error("RequireSizeSchema = false, want true")
 	}
 
 	if cfg.LogLevel != "DEBUG" {
@@ -112,6 +119,21 @@ func TestLoadRejectsUnparsablePort(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_REPORTING_HTTP_PORT": "http",
 		"TALLY_REPORTING_DB_URL":    "postgres://tally@localhost/tally",
+	})
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsUnparsableRequireSizeSchema(t *testing.T) {
+	setEnv(t, map[string]string{
+		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA": "banana",
+		"TALLY_REPORTING_DB_URL":           "postgres://tally@localhost/tally",
 	})
 
 	_, err := config.Load()
