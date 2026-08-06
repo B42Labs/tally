@@ -1,0 +1,72 @@
+package httpapi
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
+)
+
+// TestAuthDispatch pins the seam the generated routes are mounted behind: which
+// guard a request meets is decided by the pattern chi matched, and a pattern the
+// table does not name is refused rather than served.
+func TestAuthDispatch(t *testing.T) {
+	t.Run("refuses a route no rule covers and never reaches its handler", func(t *testing.T) {
+		// An operation that reached the contract without an entry in the dispatch
+		// table looks like this: chi matches it, and nothing says who may call it.
+		ran := false
+		handler := dispatchOn(t, http.MethodGet, "/widgets", &ran)
+
+		rec := serve(handler, httptest.NewRequest(http.MethodGet, "/widgets", nil))
+
+		assertProblem(t, rec, http.StatusInternalServerError, problem.TypeInternal)
+		if ran {
+			t.Error("the wrapped handler ran for a route no rule covers")
+		}
+	})
+
+	t.Run("serves the probes without demanding a credential", func(t *testing.T) {
+		for _, pattern := range []string{"/healthz", "/readyz"} {
+			t.Run(pattern, func(t *testing.T) {
+				ran := false
+				handler := dispatchOn(t, http.MethodGet, pattern, &ran)
+
+				rec := serve(handler, httptest.NewRequest(http.MethodGet, pattern, nil))
+
+				if got := rec.Code; got != http.StatusNoContent {
+					t.Errorf("status = %d, want %d (body %q)", got, http.StatusNoContent, rec.Body)
+				}
+				if !ran {
+					t.Error("the probe handler did not run, want it served without a credential")
+				}
+			})
+		}
+	})
+}
+
+// dispatchOn mounts the dispatch middleware on one chi route the way the
+// generated wrapper does, inside the route rather than in front of the router,
+// so that the matched pattern is what the rule is looked up by. The wrapped
+// handler sets ran and answers 204, which tells a served request from a refused
+// one.
+//
+// The request-id middleware is in front of it because the refusal path logs
+// against the request logger, which keeps that line out of the test output.
+func dispatchOn(t *testing.T, method, pattern string, ran *bool) http.Handler {
+	t.Helper()
+
+	guarded := newAuthDispatch(Options{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		*ran = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := chi.NewRouter()
+	r.Use(newRequestID(slog.New(slog.NewJSONHandler(io.Discard, nil))))
+	r.Method(method, pattern, guarded)
+	return r
+}
