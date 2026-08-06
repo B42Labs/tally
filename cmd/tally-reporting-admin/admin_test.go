@@ -16,6 +16,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/config"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
+	reportingmigrations "github.com/b42labs/tally/migrations/reporting"
 )
 
 // The shape of the two token kinds as they reach stdout.
@@ -224,8 +225,10 @@ func TestAdminCLI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("migrate error = %v, want nil (stderr %q)", err, stderr)
 			}
-			if want := "applied migration 1"; !strings.Contains(stdout, want) {
-				t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+			for _, version := range chainVersions() {
+				if want := fmt.Sprintf("applied migration %d", version); !strings.Contains(stdout, want) {
+					t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+				}
 			}
 
 			stdout, stderr, err = runCLI(t, "migrate")
@@ -244,7 +247,7 @@ func TestAdminCLI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("migrate-status error = %v, want nil (stderr %q)", err, stderr)
 			}
-			if want := "migration 1 pending\n"; stdout != want {
+			if want := migrationStatusOutput("pending"); stdout != want {
 				t.Errorf("stdout = %q, want %q", stdout, want)
 			}
 
@@ -256,7 +259,7 @@ func TestAdminCLI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("migrate-status error = %v, want nil (stderr %q)", err, stderr)
 			}
-			if want := "migration 1 applied\n"; stdout != want {
+			if want := migrationStatusOutput("applied"); stdout != want {
 				t.Errorf("stdout after migrating = %q, want %q", stdout, want)
 			}
 		})
@@ -281,15 +284,17 @@ func TestAdminCLI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("migrate-down-to error = %v, want nil (stderr %q)", err, stderr)
 			}
-			if want := "rolled back migration 1"; !strings.Contains(stdout, want) {
-				t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+			for _, version := range chainVersions() {
+				if want := fmt.Sprintf("rolled back migration %d", version); !strings.Contains(stdout, want) {
+					t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+				}
 			}
 
 			stdout, stderr, err = runCLI(t, "migrate-status")
 			if err != nil {
 				t.Fatalf("migrate-status error = %v, want nil (stderr %q)", err, stderr)
 			}
-			if want := "migration 1 pending\n"; stdout != want {
+			if want := migrationStatusOutput("pending"); stdout != want {
 				t.Errorf("stdout after the rollback = %q, want %q", stdout, want)
 			}
 		})
@@ -404,6 +409,28 @@ func revoke(t *testing.T, command string, id uuid.UUID) {
 	if _, stderr, err := runCLI(t, command, id.String()); err != nil {
 		t.Fatalf("%s error = %v, want nil (stderr %q)", command, err, stderr)
 	}
+}
+
+// chainVersions is every version of the embedded migration chain, oldest
+// first. The chain is numbered sequentially from 1, so its highest version
+// names the whole of it; a gap in the numbering fails the tests below.
+func chainVersions() []int64 {
+	versions := make([]int64, 0, reportingmigrations.Version)
+	for version := int64(1); version <= reportingmigrations.Version; version++ {
+		versions = append(versions, version)
+	}
+	return versions
+}
+
+// migrationStatusOutput is what migrate-status prints for a chain whose
+// migrations are all in the given state. The command reports every migration,
+// so the whole chain has to be spelled out to compare stdout exactly.
+func migrationStatusOutput(state string) string {
+	var out strings.Builder
+	for _, version := range chainVersions() {
+		fmt.Fprintf(&out, "migration %d %s\n", version, state)
+	}
+	return out.String()
 }
 
 // onlyLine returns the single line out holds. A token has to stand alone on
