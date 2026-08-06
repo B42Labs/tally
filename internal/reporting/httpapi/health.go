@@ -61,13 +61,6 @@ func (t *healthTracker) unhealthyFor() time.Duration {
 	return t.now().Sub(t.start) - time.Duration(t.lastSuccess.Load())
 }
 
-// server answers the health probes. It is the generated ServerInterface, which
-// grows an implementation per operation as the contract does.
-type server struct {
-	db     DB
-	health *healthTracker
-}
-
 // Healthz answers the liveness probe. It fails only once the database has been
 // unreachable for longer than the configured threshold, because restarting the
 // pod does not bring a database back: a shorter fuse would turn a database

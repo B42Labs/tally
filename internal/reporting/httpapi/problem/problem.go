@@ -27,6 +27,9 @@ const (
 	TypeNotFound = "urn:tally:error:not_found"
 	// TypeMethodNotAllowed marks a known path addressed with the wrong method.
 	TypeMethodNotAllowed = "urn:tally:error:method_not_allowed"
+	// TypePayloadTooLarge marks a request that carries more than the endpoint
+	// takes at once, such as an event batch above the item limit.
+	TypePayloadTooLarge = "urn:tally:error:payload_too_large"
 	// TypeInternal marks a failure the caller cannot do anything about.
 	TypeInternal = "urn:tally:error:internal"
 	// TypeUnavailable marks a dependency the service needs and cannot reach.

@@ -3,16 +3,16 @@
 // principal, and hands that principal to the handlers through the request
 // context.
 //
-// Three middlewares guard the three classes of route once httpapi mounts them:
-// Ingest for the ingest endpoints, Query for the read endpoints, and Internal
-// for /internal/*. All three answer a missing, malformed, unknown, or revoked
-// credential with a 401 problem document, and a lookup that fails for any other
-// reason with a 500: a database outage must not read as a bad credential.
+// Three middlewares guard the three classes of route: Ingest for the ingest
+// endpoints, Query for the read endpoints, and Internal for /internal/*. All
+// three answer a missing, malformed, unknown, or revoked credential with a 401
+// problem document, and a lookup that fails for any other reason with a 500: a
+// database outage must not read as a bad credential.
 //
-// None of them is mounted yet. The contract describes only the unauthenticated
-// health probes, and the routes these guard arrive with their work packages;
-// until then the request validator refuses any operation that declares a
-// security scheme, so no route is served with its credential unchecked.
+// httpapi picks one of them per route, after chi has matched the route, so the
+// matched pattern decides which guard a request meets and which role it needs.
+// A route the pattern table does not name is refused there rather than served,
+// which keeps a new operation from going online with its credential unchecked.
 //
 // The Authenticator interface is where an OIDC provider slots in later. Today
 // the only implementation is the static lookup against the api_tokens table.
