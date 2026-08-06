@@ -393,6 +393,103 @@ func TestIngestEventsSurvivesADatabaseOutage(t *testing.T) {
 	}
 }
 
+// TestIngestEventsWithAuthenticationDisabled drives the mode a development
+// setup runs in. Nothing checks a credential, so no principal reaches the
+// handler, and what the handler does without one is what this pins: the batch
+// is recorded as the service's own work and no cloud is out of scope.
+func TestIngestEventsWithAuthenticationDisabled(t *testing.T) {
+	db := storetest.NewDB(t)
+	a := newAPIInMode(t, db.Store, auth.ModeDisabled)
+
+	// One credential exists, for a cloud neither item names. Without a principal
+	// there is no scope to check an item against, so both are stored anyway.
+	seedIngestCredential(t, a.queries, fixturePlatform, "os-http-disabled-elsewhere")
+	first := fixture{cloud: "os-http-disabled-a", resourceType: "volume", id: "vol-disabled-a"}
+	second := fixture{cloud: "os-http-disabled-b", resourceType: "volume", id: "vol-disabled-b"}
+	body := batch(t,
+		item(t, first.event("vol-disabled-a-create", "volume.create", createTime,
+			payloadOf("available", volumeSize(10)))),
+		item(t, second.event("vol-disabled-b-create", "volume.create", createTime,
+			payloadOf("available", volumeSize(20)))),
+	)
+
+	// No Authorization header at all, which is what every request looks like
+	// while authentication is disabled.
+	got := ingestResultOf(t, a.call(t, http.MethodPost, "/api/v1/events", "", body))
+
+	if want := (IngestResult{Accepted: 2, Rejected: []RejectedEvent{}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("result = %+v, want %+v", got, want)
+	}
+	for _, cloud := range []string{first.cloud, second.cloud} {
+		if stored := storedEvents(t, a, cloud); stored != 1 {
+			t.Errorf("stored events of %s = %d, want the item to have been stored", cloud, stored)
+		}
+	}
+	if rows := auditRows(t, a, "internal", "events.scope_violation"); len(rows) != 0 {
+		t.Errorf("scope violation audit rows = %v, want none for a batch without a scope", rows)
+	}
+
+	// The actor is the literal the log carries for what the service does on its
+	// own, which is the whole record a request without a credential leaves.
+	rows := auditRows(t, a, "internal", "events.ingest")
+	if len(rows) != 1 {
+		t.Fatalf("ingest audit rows of the service itself = %v, want exactly one", rows)
+	}
+	want := map[string]any{"accepted": float64(2), "duplicates": float64(0), "rejected": float64(0)}
+	if !reflect.DeepEqual(rows[0].details, want) {
+		t.Errorf("audit details = %v, want %v", rows[0].details, want)
+	}
+}
+
+// TestIngestEventsReportsAFailedBatch drives the handler's own failure path.
+// With authentication disabled nothing reads the database before the batch
+// does, so a database that is gone stops the request inside the transaction
+// carrying the batch and the audit row, rather than at the credential lookup in
+// front of it.
+func TestIngestEventsReportsAFailedBatch(t *testing.T) {
+	db := storetest.NewDB(t)
+	a := newAPIInMode(t, db.Store, auth.ModeDisabled)
+
+	res := fixture{cloud: "os-http-disabled-outage", resourceType: "volume", id: "vol-disabled-outage"}
+	body := batch(t,
+		item(t, res.event("vol-disabled-outage-create", "volume.create", createTime,
+			payloadOf("available", volumeSize(10)))),
+		item(t, res.event("vol-disabled-outage-resize", "volume.resize", updateTime,
+			payloadOf("available", volumeSize(20)))),
+	)
+
+	// How long the database gets to shut down cleanly.
+	stopTimeout := 10 * time.Second
+	if err := db.Container.Stop(t.Context(), &stopTimeout); err != nil {
+		t.Fatalf("stopping the database container: %v", err)
+	}
+
+	rec := a.call(t, http.MethodPost, "/api/v1/events", "", body)
+
+	assertProblem(t, rec, http.StatusInternalServerError, problem.TypeInternal)
+	// The detail is what tells the two internal problems of this route apart:
+	// the batch failed, rather than a credential that could not be checked.
+	if got, want := problemDetail(t, rec), "the batch could not be stored"; got != want {
+		t.Errorf("detail = %q, want %q", got, want)
+	}
+
+	if err := db.Container.Start(t.Context()); err != nil {
+		t.Fatalf("starting the database container again: %v", err)
+	}
+	// The container comes back on a different host port, so everything bound to
+	// the old one is rebuilt from the endpoint it has now.
+	back := newAPIInMode(t, reopen(t, db), auth.ModeDisabled)
+	waitForReady(t, back.handler, time.Minute)
+
+	// The failed call is everything this database ever saw, so every table the
+	// batch would have written is still empty.
+	for table, rows := range tableCounts(t, back) {
+		if rows != 0 {
+			t.Errorf("%s holds %d rows, want a failed batch to have written none", table, rows)
+		}
+	}
+}
+
 // api is the router one test drives, together with the database behind it.
 type api struct {
 	store   *store.Store
@@ -401,10 +498,19 @@ type api struct {
 }
 
 // newAPI builds the full router over s with authentication enforced, which is
-// what the route tests need: every request has to carry the credential its
-// route demands. The pipeline is the lax one, so an unregistered resource type
-// is accepted rather than refused.
+// what most route tests need: every request has to carry the credential its
+// route demands.
 func newAPI(t *testing.T, s *store.Store) api {
+	t.Helper()
+
+	return newAPIInMode(t, s, auth.ModeEnforced)
+}
+
+// newAPIInMode builds the full router over s in the given authentication mode.
+// The credential seams are wired either way, so the mode is the only thing that
+// decides whether a request needs one. The pipeline is the lax one, so an
+// unregistered resource type is accepted rather than refused.
+func newAPIInMode(t *testing.T, s *store.Store, mode auth.Mode) api {
 	t.Helper()
 
 	q := sqlcgen.New(s.Pool())
@@ -414,7 +520,7 @@ func newAPI(t *testing.T, s *store.Store) api {
 		UnhealthyThreshold: time.Minute,
 		Queries:            q,
 		Store:              s,
-		AuthMode:           auth.ModeEnforced,
+		AuthMode:           mode,
 		InternalToken:      internalToken,
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           ingest.New(registry.New(), false),
