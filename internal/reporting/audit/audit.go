@@ -26,12 +26,18 @@ import (
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
 
+// ActorInternal is the Actor of a change the system made on its own, with no
+// credential behind it. It is spelled once here because every package that
+// writes such a row has to spell it the same way: two spellings would split the
+// log into two actor identities with nothing failing.
+const ActorInternal = "internal"
+
 // Entry is one audit record: who acted, what they did, and which object they
 // did it to.
 type Entry struct {
 	// Actor is who caused the change: a credential or token id, the name of an
-	// operator tool such as admin-cli, or "internal" for what the system does
-	// on its own.
+	// operator tool such as admin-cli, or ActorInternal for what the system
+	// does on its own.
 	Actor string
 	// Action is what happened, written <object>.<verb>, for example
 	// ingest_credentials.create.
