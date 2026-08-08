@@ -112,6 +112,37 @@ func TestAuthDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("puts the relation operations behind a credential", func(t *testing.T) {
+		// The five operations sit on three patterns, and the two of them that
+		// carry a second path parameter are keyed on the pattern rather than on
+		// a path. What says the table names all of them is every one meeting a
+		// guard rather than being refused as a route no rule covers. Which role
+		// each demands is the integration test's business.
+		const (
+			project  = "/api/v1/projects/0f2a1c3e-5d70-4c31-8f6b-9b1d2b7e4d0a"
+			relation = project + "/relations/6c4b2a10-9e83-4d55-a2f1-7c0e5b3a9d64"
+		)
+		for _, tc := range []struct{ method, pattern, path string }{
+			{method: http.MethodGet, pattern: projectRelationsRoute, path: project + "/relations"},
+			{method: http.MethodPost, pattern: projectRelationsRoute, path: project + "/relations"},
+			{method: http.MethodGet, pattern: projectRelatedRoute, path: project + "/related"},
+			{method: http.MethodPatch, pattern: projectRelationRoute, path: relation},
+			{method: http.MethodDelete, pattern: projectRelationRoute, path: relation},
+		} {
+			t.Run(tc.method+" "+tc.pattern, func(t *testing.T) {
+				ran := false
+				handler := dispatchOn(t, tc.method, tc.pattern, &ran)
+
+				rec := serve(handler, httptest.NewRequest(tc.method, tc.path, nil))
+
+				assertChallenged(t, rec)
+				if ran {
+					t.Error("the handler ran for a request carrying no credential")
+				}
+			})
+		}
+	})
+
 	t.Run("puts the resource reads behind a credential", func(t *testing.T) {
 		// The two per-resource routes are keyed on the pattern rather than on a
 		// path, so what says the table names them is a request whose path
