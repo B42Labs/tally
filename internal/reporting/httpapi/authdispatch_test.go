@@ -63,6 +63,22 @@ func TestAuthDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("puts the dead-letter list behind a credential", func(t *testing.T) {
+		// The route is the admin-only one of the query class. What the table is
+		// keyed with is the pattern, so a request carrying no credential meets the
+		// guard rather than being refused as a route no rule covers; which role it
+		// demands is the integration test's business.
+		ran := false
+		handler := dispatchOn(t, http.MethodGet, "/api/v1/rejected-events", &ran)
+
+		rec := serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/rejected-events", nil))
+
+		assertChallenged(t, rec)
+		if ran {
+			t.Error("the dead-letter handler ran for a request carrying no credential")
+		}
+	})
+
 	t.Run("puts the resource reads behind a credential", func(t *testing.T) {
 		// The two per-resource routes are keyed on the pattern rather than on a
 		// path, so what says the table names them is a request whose path
