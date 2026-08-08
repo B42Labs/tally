@@ -101,12 +101,48 @@ SET platform = EXCLUDED.platform,
     last_event_at = EXCLUDED.last_event_at,
     last_payload = EXCLUDED.last_payload;
 
+-- The history of one resource. Two callers read it: the projection replay, which
+-- folds every event there is under no scope and no bound, and the two
+-- per-resource routes of the API, which pass both. A NULL page size is every
+-- row, which is what the replay folds.
 -- name: ListEventsForResource :many
 SELECT event_id, timestamp, received_at, event_type, platform, cloud,
        resource_type, resource_id, project_id, source, payload
 FROM events
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
-ORDER BY timestamp, received_at, event_id;
+  -- The same pair filter the event list runs, per event rather than per
+  -- resource: a transfer moves the resource to its new project, and the events
+  -- it carried before the transfer stay the old project's alone.
+  AND (sqlc.narg('scope_clouds')::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                         unnest(sqlc.narg('scope_projects')::text[])))
+ORDER BY timestamp, received_at, event_id
+LIMIT sqlc.narg('page_size');
+
+-- How long the history above is under the same scope, counted no further than
+-- probe_limit. The unpaginated per-resource routes ask this before they read
+-- anything, because the bound they enforce is a memory bound and the read above
+-- materializes every row it returns before the caller sees the first one:
+-- deciding the refusal off the rows themselves would cost exactly the payloads
+-- the refusal exists to avoid.
+--
+-- The answer saturates at probe_limit, and a caller reads it as "at least this
+-- many" rather than as the length of the history. A plain count(*) cannot stop
+-- early: it would answer the bounded question of whether the history is too long
+-- by walking every event the resource has, on exactly the request the bound
+-- exists to keep cheap, and this table has no ceiling on how many that is. The
+-- inner LIMIT is what stops the walk at the only rows the decision needs.
+-- name: CountEventsForResource :one
+SELECT count(*)
+FROM (
+    SELECT 1
+    FROM events
+    WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+      AND (sqlc.narg('scope_clouds')::text[] IS NULL
+           OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                             unnest(sqlc.narg('scope_projects')::text[])))
+    LIMIT sqlc.arg('probe_limit')
+) probe;
 
 -- name: ListResourceKeys :many
 SELECT DISTINCT cloud, resource_type, resource_id
@@ -141,3 +177,37 @@ WHERE (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
                                    sqlc.narg('cursor_event_id')::text))
 ORDER BY timestamp, event_id
 LIMIT sqlc.arg('page_size');
+
+-- name: ListCurrentResources :many
+SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
+       created_at, deleted_at, last_event_type, last_event_at, last_payload
+FROM current_resources
+WHERE (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
+  AND (sqlc.narg('platform')::text IS NULL OR platform = sqlc.narg('platform'))
+  AND (sqlc.narg('project_id')::text IS NULL OR project_id = sqlc.narg('project_id'))
+  AND (sqlc.narg('resource_type')::text IS NULL OR resource_type = sqlc.narg('resource_type'))
+  AND (sqlc.narg('state')::text IS NULL OR state = sqlc.narg('state'))
+  -- The status filter of the API, as the one boolean the two halves of the
+  -- fleet differ in: true serves the deleted rows, false the ones that live,
+  -- and NULL both.
+  AND (sqlc.narg('deleted')::boolean IS NULL OR (state = 'deleted') = sqlc.narg('deleted'))
+  AND (sqlc.narg('scope_clouds')::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                         unnest(sqlc.narg('scope_projects')::text[])))
+  -- Every bound is cast: inside a row comparison sqlc reads the type of the
+  -- later placeholders off the first one, which is why the events cursor above
+  -- casts both of its bounds too.
+  AND (sqlc.narg('cursor_cloud')::text IS NULL
+       OR (cloud, resource_type, resource_id) > (sqlc.narg('cursor_cloud')::text,
+                                                 sqlc.narg('cursor_resource_type')::text,
+                                                 sqlc.narg('cursor_resource_id')::text))
+ORDER BY cloud, resource_type, resource_id
+LIMIT sqlc.arg('page_size');
+
+-- The read path of one projection row. It is GetCurrentResourceForUpdate
+-- without the row lock: a read must not make a writer wait on it.
+-- name: GetCurrentResource :one
+SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
+       created_at, deleted_at, last_event_type, last_event_at, last_payload
+FROM current_resources
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3;

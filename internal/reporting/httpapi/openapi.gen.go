@@ -39,6 +39,27 @@ func (e ListEventsParamsSource) Valid() bool {
 	}
 }
 
+// Defines values for ListResourcesParamsStatus.
+const (
+	Active  ListResourcesParamsStatus = "active"
+	All     ListResourcesParamsStatus = "all"
+	Deleted ListResourcesParamsStatus = "deleted"
+)
+
+// Valid indicates whether the value is a known member of the ListResourcesParamsStatus enum.
+func (e ListResourcesParamsStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case All:
+		return true
+	case Deleted:
+		return true
+	default:
+		return false
+	}
+}
+
 // EventInput One canonical event. The members below are described rather than constrained; the normative schema is roadmap/00-conventions.md section 4.
 type EventInput struct {
 	// Cloud The installation the resource lives in, os-prod-eu1 for example.
@@ -92,6 +113,41 @@ type IngestResult struct {
 
 	// Rejected The items the call refused, one entry each.
 	Rejected []RejectedEvent `json:"rejected"`
+}
+
+// Lifecycle One resource, its event history, and the billable intervals that history folds into. `resource` is always there: a resource this API holds no projection row for is answered 404 rather than with an empty lifecycle.
+//
+// The two halves are derived from two different event sets. `events` and `intervals` carry the history this token may read, while `resource` is the projection row, folded from every event the resource has under no scope. On a resource that changed projects the row therefore reports a `created_at` from before the reader owned it, and the first interval starts at the transfer.
+type Lifecycle struct {
+	// Events The full history the fold ran on, ordered by `(timestamp, received_at, event_id)`.
+	Events []StoredEvent `json:"events"`
+
+	// Intervals The billable intervals the history implies, oldest first. Two billable changes at the same instant leave no interval between them, so a resource created and deleted at one instant has none at all.
+	Intervals []LifecycleInterval `json:"intervals"`
+
+	// Resource One resource as the projection holds it: what its event history says it is right now.
+	Resource Resource `json:"resource"`
+
+	// Warnings What the fold could not trust, one entry each. A history whose first event is not a create carries history_starts_without_create.
+	Warnings []string `json:"warnings"`
+}
+
+// LifecycleInterval One half-open span `[from, to)` over which nothing billable about a resource changed.
+type LifecycleInterval struct {
+	// From When the interval starts, the inclusive bound.
+	From time.Time `json:"from"`
+
+	// ProjectId The project owning the resource over the interval.
+	ProjectId string `json:"project_id"`
+
+	// Size The size the resource had over the interval.
+	Size map[string]interface{} `json:"size"`
+
+	// State The state the resource was in over the interval.
+	State string `json:"state"`
+
+	// To When the interval ends, the exclusive bound. It is null while the interval is open, which the last interval of a living resource is.
+	To *time.Time `json:"to"`
 }
 
 // Problem RFC 9457 problem detail. Every error response in this API uses this shape, served as application/problem+json.
@@ -155,6 +211,54 @@ type RejectedEvent struct {
 
 	// Reason Why the item was refused, for example "size_schema: 'vcpus' is a required property".
 	Reason string `json:"reason"`
+}
+
+// Resource One resource as the projection holds it: what its event history says it is right now.
+type Resource struct {
+	// Cloud The installation the resource lives in.
+	Cloud string `json:"cloud"`
+
+	// CreatedAt When the resource was created, as the projection folded it from the resource's whole history. It is null for a history that never showed a create. The projection is not scoped to the reading token, so on a resource that changed projects this is the create of the project it came from and predates the reader's ownership: what a project is billed for is the lifecycle's `intervals`, never `created_at` paired with `deleted_at`.
+	CreatedAt *time.Time `json:"created_at"`
+
+	// DeletedAt When the resource was deleted, null while it lives.
+	DeletedAt *time.Time `json:"deleted_at"`
+
+	// LastEventAt When that event happened.
+	LastEventAt time.Time `json:"last_event_at"`
+
+	// LastEventType The type of the newest event folded into this row.
+	LastEventType string `json:"last_event_type"`
+
+	// LastPayload The payload envelope of that event, member for member as it was stored, and null for a row that holds none.
+	LastPayload *map[string]interface{} `json:"last_payload"`
+
+	// Platform The platform the resource lives on.
+	Platform string `json:"platform"`
+
+	// ProjectId The project owning the resource now.
+	ProjectId string `json:"project_id"`
+
+	// ResourceId The resource itself, as its cloud names it.
+	ResourceId string `json:"resource_id"`
+
+	// ResourceType The kind of resource.
+	ResourceType string `json:"resource_type"`
+
+	// Size The size the resource has now, member for member as its events reported it. It is the empty object for a history that reported no size.
+	Size map[string]interface{} `json:"size"`
+
+	// State The state the resource is in now. A deleted resource carries deleted, which the server sets itself rather than reading it off the delete event.
+	State string `json:"state"`
+}
+
+// ResourceList One page of current resources.
+type ResourceList struct {
+	// Items The resources of this page, ordered by cloud, resource type, and resource id.
+	Items []Resource `json:"items"`
+
+	// NextCursor Where the next page starts, passed back as `cursor`. It is null on the last page.
+	NextCursor *string `json:"next_cursor"`
 }
 
 // ResourceType One registered resource type and the size schema the sizes reported for it are validated against.
@@ -260,6 +364,36 @@ type IngestEventsJSONBody struct {
 
 // IngestEventsJSONBody1 defines parameters for IngestEvents.
 type IngestEventsJSONBody1 = []EventInput
+
+// ListResourcesParams defines parameters for ListResources.
+type ListResourcesParams struct {
+	// Cloud Serve only the resources of this cloud.
+	Cloud *string `form:"cloud,omitempty" json:"cloud,omitempty"`
+
+	// Platform Serve only the resources of this platform.
+	Platform *string `form:"platform,omitempty" json:"platform,omitempty"`
+
+	// ProjectId Serve only the resources of this project, named the way its cloud names it. A token asking for a project outside its scope is answered 403.
+	ProjectId *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// ResourceType Serve only the resources of this type.
+	ResourceType *string `form:"resource_type,omitempty" json:"resource_type,omitempty"`
+
+	// State Serve only the resources whose current state is exactly this, shutoff for example.
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+
+	// Status Which part of the fleet to serve. `active` serves the rows whose state is not deleted, `deleted` serves those alone, and `all` serves both. `state` and `status` are independent filters, so a contradictory pair such as `state=active&status=deleted` yields the empty page.
+	Status *ListResourcesParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Limit How many resources one page carries at most.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor The `next_cursor` of the page before this one. It is opaque: a client passes it back as it received it and reads nothing out of it.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// ListResourcesParamsStatus defines parameters for ListResources.
+type ListResourcesParamsStatus string
 
 // IngestEventsJSONRequestBody defines body for IngestEvents for application/json ContentType.
 type IngestEventsJSONRequestBody IngestEventsJSONBody
@@ -532,6 +666,15 @@ type ServerInterface interface {
 	// PutResourceType Register a resource type
 	// (PUT /api/v1/resource-types/{platform}/{resource_type})
 	PutResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string)
+	// ListResources List the current resources
+	// (GET /api/v1/resources)
+	ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams)
+	// ListResourceEvents Read the event history of one resource
+	// (GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/events)
+	ListResourceEvents(w http.ResponseWriter, r *http.Request, cloud string, resourceType string, resourceId string)
+	// GetResourceLifecycle Read the folded lifecycle of one resource
+	// (GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle)
+	GetResourceLifecycle(w http.ResponseWriter, r *http.Request, cloud string, resourceType string, resourceId string)
 	// Healthz Liveness probe
 	// (GET /healthz)
 	Healthz(w http.ResponseWriter, r *http.Request)
@@ -574,6 +717,24 @@ func (_ Unimplemented) GetResourceType(w http.ResponseWriter, r *http.Request, p
 // PutResourceType Register a resource type
 // (PUT /api/v1/resource-types/{platform}/{resource_type})
 func (_ Unimplemented) PutResourceType(w http.ResponseWriter, r *http.Request, platform string, resourceType string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListResources List the current resources
+// (GET /api/v1/resources)
+func (_ Unimplemented) ListResources(w http.ResponseWriter, r *http.Request, params ListResourcesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListResourceEvents Read the event history of one resource
+// (GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/events)
+func (_ Unimplemented) ListResourceEvents(w http.ResponseWriter, r *http.Request, cloud string, resourceType string, resourceId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetResourceLifecycle Read the folded lifecycle of one resource
+// (GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle)
+func (_ Unimplemented) GetResourceLifecycle(w http.ResponseWriter, r *http.Request, cloud string, resourceType string, resourceId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -852,6 +1013,218 @@ func (siw *ServerInterfaceWrapper) PutResourceType(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// ListResources operation middleware
+func (siw *ServerInterfaceWrapper) ListResources(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListResourcesParams
+
+	// ------------- Optional query parameter "cloud" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cloud", r.URL.Query(), &params.Cloud, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cloud"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cloud", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "platform" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "platform", r.URL.Query(), &params.Platform, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "platform"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "platform", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "project_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "project_id", r.URL.Query(), &params.ProjectId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "project_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "resource_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "resource_type", r.URL.Query(), &params.ResourceType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "resource_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResources(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResourceEvents operation middleware
+func (siw *ServerInterfaceWrapper) ListResourceEvents(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "cloud" -------------
+	var cloud string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "cloud", chi.URLParam(r, "cloud"), &cloud, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cloud", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_type" -------------
+	var resourceType string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_type", chi.URLParam(r, "resource_type"), &resourceType, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_id" -------------
+	var resourceId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_id", chi.URLParam(r, "resource_id"), &resourceId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResourceEvents(w, r, cloud, resourceType, resourceId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetResourceLifecycle operation middleware
+func (siw *ServerInterfaceWrapper) GetResourceLifecycle(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "cloud" -------------
+	var cloud string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "cloud", chi.URLParam(r, "cloud"), &cloud, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cloud", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_type" -------------
+	var resourceType string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_type", chi.URLParam(r, "resource_type"), &resourceType, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "resource_id" -------------
+	var resourceId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "resource_id", chi.URLParam(r, "resource_id"), &resourceId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetResourceLifecycle(w, r, cloud, resourceType, resourceId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Healthz operation middleware
 func (siw *ServerInterfaceWrapper) Healthz(w http.ResponseWriter, r *http.Request) {
 
@@ -1020,6 +1393,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/events", wrapper.IngestEvents)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/resources", wrapper.ListResources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/resources/{cloud}/{resource_type}/{resource_id}/events", wrapper.ListResourceEvents)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle", wrapper.GetResourceLifecycle)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/resource-types", wrapper.ListResourceTypes)
 	})
 	r.Group(func(r chi.Router) {
@@ -1040,82 +1422,117 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

@@ -129,6 +129,9 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key) error {
 		return err
 	}
 
+	// No scope and no page size: the projection row is derived from every event
+	// stored for the key, whoever owned the resource when each of them arrived
+	// and however many there are.
 	rows, err := q.ListEventsForResource(ctx, sqlcgen.ListEventsForResourceParams{
 		Cloud:        key.Cloud,
 		ResourceType: key.ResourceType,
@@ -143,7 +146,7 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key) error {
 
 	history := make([]event.Stored, len(rows))
 	for i, row := range rows {
-		stored, err := decode(row)
+		stored, err := Decode(row)
 		if err != nil {
 			return err
 		}
@@ -377,10 +380,13 @@ func upsert(ctx context.Context, q *sqlcgen.Queries, key Key, s snapshot) error 
 	return nil
 }
 
-// decode turns one events row into the stored event the fold works on. A row
+// Decode turns one events row into the stored event the fold works on. A row
 // whose payload column is NULL carries the empty envelope, which reports neither
 // a state nor a size.
-func decode(row sqlcgen.Event) (event.Stored, error) {
+//
+// It is exported so that every consumer folding a history reads the rows into
+// the fold's input the same way this package does.
+func Decode(row sqlcgen.Event) (event.Stored, error) {
 	stored := event.Stored{
 		Event: event.Event{
 			EventID:      row.EventID,
