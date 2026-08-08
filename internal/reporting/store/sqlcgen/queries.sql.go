@@ -12,6 +12,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countEventsForResource = `-- name: CountEventsForResource :one
+SELECT count(*)
+FROM (
+    SELECT 1
+    FROM events
+    WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+      AND ($4::text[] IS NULL
+           OR (cloud, project_id) IN (SELECT unnest($4::text[]),
+                                             unnest($5::text[])))
+    LIMIT $6
+) probe
+`
+
+type CountEventsForResourceParams struct {
+	Cloud         string
+	ResourceType  string
+	ResourceID    string
+	ScopeClouds   []string
+	ScopeProjects []string
+	ProbeLimit    int32
+}
+
+// How long the history above is under the same scope, counted no further than
+// probe_limit. The unpaginated per-resource routes ask this before they read
+// anything, because the bound they enforce is a memory bound and the read above
+// materializes every row it returns before the caller sees the first one:
+// deciding the refusal off the rows themselves would cost exactly the payloads
+// the refusal exists to avoid.
+//
+// The answer saturates at probe_limit, and a caller reads it as "at least this
+// many" rather than as the length of the history. A plain count(*) cannot stop
+// early: it would answer the bounded question of whether the history is too long
+// by walking every event the resource has, on exactly the request the bound
+// exists to keep cheap, and this table has no ceiling on how many that is. The
+// inner LIMIT is what stops the walk at the only rows the decision needs.
+func (q *Queries) CountEventsForResource(ctx context.Context, arg CountEventsForResourceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countEventsForResource,
+		arg.Cloud,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.ProbeLimit,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAPIToken = `-- name: CreateAPIToken :one
 INSERT INTO api_tokens (token_hash, role, project_ids, description)
 VALUES ($1, $2, $3, $4)
@@ -101,6 +150,41 @@ func (q *Queries) GetAPITokenForUpdate(ctx context.Context, id uuid.UUID) (ApiTo
 		&i.Description,
 		&i.CreatedAt,
 		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getCurrentResource = `-- name: GetCurrentResource :one
+SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
+       created_at, deleted_at, last_event_type, last_event_at, last_payload
+FROM current_resources
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+`
+
+type GetCurrentResourceParams struct {
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+}
+
+// The read path of one projection row. It is GetCurrentResourceForUpdate
+// without the row lock: a read must not make a writer wait on it.
+func (q *Queries) GetCurrentResource(ctx context.Context, arg GetCurrentResourceParams) (CurrentResource, error) {
+	row := q.db.QueryRow(ctx, getCurrentResource, arg.Cloud, arg.ResourceType, arg.ResourceID)
+	var i CurrentResource
+	err := row.Scan(
+		&i.Cloud,
+		&i.Platform,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.ProjectID,
+		&i.State,
+		&i.Size,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.LastEventType,
+		&i.LastEventAt,
+		&i.LastPayload,
 	)
 	return i, err
 }
@@ -315,6 +399,94 @@ func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEve
 	return err
 }
 
+const listCurrentResources = `-- name: ListCurrentResources :many
+SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
+       created_at, deleted_at, last_event_type, last_event_at, last_payload
+FROM current_resources
+WHERE ($1::text IS NULL OR cloud = $1)
+  AND ($2::text IS NULL OR platform = $2)
+  AND ($3::text IS NULL OR project_id = $3)
+  AND ($4::text IS NULL OR resource_type = $4)
+  AND ($5::text IS NULL OR state = $5)
+  -- The status filter of the API, as the one boolean the two halves of the
+  -- fleet differ in: true serves the deleted rows, false the ones that live,
+  -- and NULL both.
+  AND ($6::boolean IS NULL OR (state = 'deleted') = $6)
+  AND ($7::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest($7::text[]),
+                                         unnest($8::text[])))
+  -- Every bound is cast: inside a row comparison sqlc reads the type of the
+  -- later placeholders off the first one, which is why the events cursor above
+  -- casts both of its bounds too.
+  AND ($9::text IS NULL
+       OR (cloud, resource_type, resource_id) > ($9::text,
+                                                 $10::text,
+                                                 $11::text))
+ORDER BY cloud, resource_type, resource_id
+LIMIT $12
+`
+
+type ListCurrentResourcesParams struct {
+	Cloud              pgtype.Text
+	Platform           pgtype.Text
+	ProjectID          pgtype.Text
+	ResourceType       pgtype.Text
+	State              pgtype.Text
+	Deleted            pgtype.Bool
+	ScopeClouds        []string
+	ScopeProjects      []string
+	CursorCloud        pgtype.Text
+	CursorResourceType pgtype.Text
+	CursorResourceID   pgtype.Text
+	PageSize           int32
+}
+
+func (q *Queries) ListCurrentResources(ctx context.Context, arg ListCurrentResourcesParams) ([]CurrentResource, error) {
+	rows, err := q.db.Query(ctx, listCurrentResources,
+		arg.Cloud,
+		arg.Platform,
+		arg.ProjectID,
+		arg.ResourceType,
+		arg.State,
+		arg.Deleted,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.CursorCloud,
+		arg.CursorResourceType,
+		arg.CursorResourceID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CurrentResource
+	for rows.Next() {
+		var i CurrentResource
+		if err := rows.Scan(
+			&i.Cloud,
+			&i.Platform,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.State,
+			&i.Size,
+			&i.CreatedAt,
+			&i.DeletedAt,
+			&i.LastEventType,
+			&i.LastEventAt,
+			&i.LastPayload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEvents = `-- name: ListEvents :many
 SELECT event_id, timestamp, received_at, event_type, platform, cloud,
        resource_type, resource_id, project_id, source, payload
@@ -407,17 +579,38 @@ SELECT event_id, timestamp, received_at, event_type, platform, cloud,
        resource_type, resource_id, project_id, source, payload
 FROM events
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+  -- The same pair filter the event list runs, per event rather than per
+  -- resource: a transfer moves the resource to its new project, and the events
+  -- it carried before the transfer stay the old project's alone.
+  AND ($4::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest($4::text[]),
+                                         unnest($5::text[])))
 ORDER BY timestamp, received_at, event_id
+LIMIT $6
 `
 
 type ListEventsForResourceParams struct {
-	Cloud        string
-	ResourceType string
-	ResourceID   string
+	Cloud         string
+	ResourceType  string
+	ResourceID    string
+	ScopeClouds   []string
+	ScopeProjects []string
+	PageSize      pgtype.Int4
 }
 
+// The history of one resource. Two callers read it: the projection replay, which
+// folds every event there is under no scope and no bound, and the two
+// per-resource routes of the API, which pass both. A NULL page size is every
+// row, which is what the replay folds.
 func (q *Queries) ListEventsForResource(ctx context.Context, arg ListEventsForResourceParams) ([]Event, error) {
-	rows, err := q.db.Query(ctx, listEventsForResource, arg.Cloud, arg.ResourceType, arg.ResourceID)
+	rows, err := q.db.Query(ctx, listEventsForResource,
+		arg.Cloud,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.PageSize,
+	)
 	if err != nil {
 		return nil, err
 	}

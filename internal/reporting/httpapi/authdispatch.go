@@ -14,6 +14,11 @@ import (
 // be the pattern the generated wiring registers, letter for letter.
 const resourceTypeRoute = "/api/v1/resource-types/{platform}/{resource_type}"
 
+// resourceRoute is the chi pattern the per-resource reads are mounted under. The
+// two operations append their own segment to it, and it has to be the pattern
+// the generated wiring registers, letter for letter.
+const resourceRoute = "/api/v1/resources/{cloud}/{resource_type}/{resource_id}"
+
 // newAuthDispatch builds the middleware that puts each route behind the guard
 // its class needs.
 //
@@ -34,6 +39,10 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 
 		http.MethodGet + " /api/v1/events":  auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodPost + " /api/v1/events": auth.Ingest(opts.Queries, opts.AuthMode, Logger),
+
+		http.MethodGet + " /api/v1/resources":               auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
+		http.MethodGet + " " + resourceRoute + "/events":    auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
+		http.MethodGet + " " + resourceRoute + "/lifecycle": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 
 		http.MethodGet + " /api/v1/resource-types": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodGet + " " + resourceTypeRoute:   auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),

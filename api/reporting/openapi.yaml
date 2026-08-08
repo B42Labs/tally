@@ -89,9 +89,9 @@ paths:
         This list is event-scoped rather than resource-scoped. A project token
         reads every event whose `project_id` names one of its projects,
         including the events a resource carried before it was transferred
-        away. The per-resource reads decide on the project the projection row
-        names today, so they stop serving the resource to the old project once
-        the transfer is stored.
+        away. The per-resource reads scope every event the same way, so a
+        transfer moves the resource to its new project without handing that
+        project the history the resource carried under the old one.
       security:
         - apiToken: []
       parameters:
@@ -219,6 +219,238 @@ paths:
         "401":
           $ref: "#/components/responses/Problem"
         "413":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/resources:
+    get:
+      operationId: listResources
+      summary: List the current resources
+      description: >-
+        Returns the projection rows, one per resource, narrowed by whichever
+        filters the request carries. The order is
+        `(cloud, resource_type, resource_id)` ascending.
+
+        One call answers one page. `items` carries the rows, and `next_cursor`
+        is what the next call passes as `cursor`; a null `next_cursor` is the
+        end of the walk. The cursor holds a position and nothing else, so
+        presenting it together with other filters is well defined: the filters
+        of that call apply from that position onwards.
+
+        A deleted resource keeps its row, with `state` deleted and `deleted_at`
+        set. Rows are never removed, so a resource that is gone stays readable
+        here and through its history.
+
+        A project token reads the rows whose (cloud, project_id) pair one of
+        its projects names. The pair is what decides, so a project id another
+        cloud uses for something else stays out of the answer.
+      security:
+        - apiToken: []
+      parameters:
+        - name: cloud
+          in: query
+          description: Serve only the resources of this cloud.
+          schema:
+            type: string
+        - name: platform
+          in: query
+          description: Serve only the resources of this platform.
+          schema:
+            type: string
+        - name: project_id
+          in: query
+          description: >-
+            Serve only the resources of this project, named the way its cloud
+            names it. A token asking for a project outside its scope is
+            answered 403.
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          description: Serve only the resources of this type.
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: >-
+            Serve only the resources whose current state is exactly this,
+            shutoff for example.
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: >-
+            Which part of the fleet to serve. `active` serves the rows whose
+            state is not deleted, `deleted` serves those alone, and `all`
+            serves both. `state` and `status` are independent filters, so a
+            contradictory pair such as `state=active&status=deleted` yields the
+            empty page.
+          schema:
+            type: string
+            enum: [active, deleted, all]
+            default: active
+        - name: limit
+          in: query
+          description: How many resources one page carries at most.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: cursor
+          in: query
+          description: >-
+            The `next_cursor` of the page before this one. It is opaque: a
+            client passes it back as it received it and reads nothing out of
+            it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of current resources.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/resources/{cloud}/{resource_type}/{resource_id}/events:
+    parameters:
+      - name: cloud
+        in: path
+        required: true
+        description: The installation the resource lives in, os-prod-eu1 for example.
+        schema:
+          type: string
+      - name: resource_type
+        in: path
+        required: true
+        description: The kind of resource, instance or volume for example.
+        schema:
+          type: string
+      - name: resource_id
+        in: path
+        required: true
+        description: The resource itself, as its cloud names it.
+        schema:
+          type: string
+    get:
+      operationId: listResourceEvents
+      summary: Read the event history of one resource
+      description: >-
+        Returns the history of one resource, ordered by
+        `(timestamp, received_at, event_id)`. The answer is never paginated:
+        one call carries every event the request may see, and `next_cursor` is
+        always null. A resource with more than 10000 stored events is answered
+        422 (`urn:tally:error:history_too_long`) rather than a truncated
+        history; `GET /api/v1/events` pages such a history.
+
+        The read is gated on the project the resource's projection row names
+        today. A project token whose scope does not hold that
+        (cloud, project_id) pair is answered the 404 an unknown resource gets,
+        so a resource outside the scope cannot be told from one that does not
+        exist. Every served event is scoped the same way, so a project reads
+        the part of the history its own projects carried and no more: after a
+        transfer the old project stops reading the resource here, and the new
+        one reads the events stored since the transfer rather than the whole
+        history. `GET /api/v1/events` is where the old project keeps reading
+        the events it carried.
+      security:
+        - apiToken: []
+      responses:
+        "200":
+          description: >-
+            The ordered history of the resource, with `next_cursor` null.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle:
+    parameters:
+      - name: cloud
+        in: path
+        required: true
+        description: The installation the resource lives in, os-prod-eu1 for example.
+        schema:
+          type: string
+      - name: resource_type
+        in: path
+        required: true
+        description: The kind of resource, instance or volume for example.
+        schema:
+          type: string
+      - name: resource_id
+        in: path
+        required: true
+        description: The resource itself, as its cloud names it.
+        schema:
+          type: string
+    get:
+      operationId: getResourceLifecycle
+      summary: Read the folded lifecycle of one resource
+      description: >-
+        Returns the resource's history folded into the half-open billable
+        intervals of roadmap/00-conventions.md section 5, next to the
+        projection row and the events the fold ran on. It is the fold the
+        projection replay runs, so the intervals here are the ones every
+        derived row comes from.
+
+        `warnings` names what the fold could not trust, a history that starts
+        without a create for example.
+
+        The read is gated and scoped the way the per-resource history is: a
+        resource this API holds no projection row for and a resource outside
+        the token's scope are answered the same 404, the events a project token
+        folds are its own projects' events, and a resource with more than 10000
+        stored events is answered 422
+        (`urn:tally:error:history_too_long`). Folding a scoped history is what
+        keeps the intervals a project reads the spans it is billed for: a
+        transferred resource is folded from the transfer onwards, which
+        `warnings` reports as a history that starts without a create.
+
+        The embedded `resource` is the projection row and is not scoped, so its
+        `created_at` can predate the reader's ownership while the intervals
+        start at the transfer. Bill from `intervals`.
+      security:
+        - apiToken: []
+      responses:
+        "200":
+          description: The resource, its history, and the intervals it folds into.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lifecycle"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "422":
           $ref: "#/components/responses/Problem"
         "500":
           $ref: "#/components/responses/Problem"
@@ -579,6 +811,162 @@ components:
           description: >-
             Where the next page starts, passed back as `cursor`. It is null on
             the last page.
+
+    Resource:
+      type: object
+      description: >-
+        One resource as the projection holds it: what its event history says it
+        is right now.
+      required: [cloud, platform, resource_type, resource_id, project_id, state,
+                 size, created_at, deleted_at, last_event_type, last_event_at,
+                 last_payload]
+      properties:
+        cloud:
+          type: string
+          description: The installation the resource lives in.
+        platform:
+          type: string
+          description: The platform the resource lives on.
+        resource_type:
+          type: string
+          description: The kind of resource.
+        resource_id:
+          type: string
+          description: The resource itself, as its cloud names it.
+        project_id:
+          type: string
+          description: The project owning the resource now.
+        state:
+          type: string
+          description: >-
+            The state the resource is in now. A deleted resource carries
+            deleted, which the server sets itself rather than reading it off the
+            delete event.
+        size:
+          type: object
+          description: >-
+            The size the resource has now, member for member as its events
+            reported it. It is the empty object for a history that reported no
+            size.
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the resource was created, as the projection folded it from the
+            resource's whole history. It is null for a history that never showed
+            a create. The projection is not scoped to the reading token, so on a
+            resource that changed projects this is the create of the project it
+            came from and predates the reader's ownership: what a project is
+            billed for is the lifecycle's `intervals`, never `created_at` paired
+            with `deleted_at`.
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the resource was deleted, null while it lives.
+        last_event_type:
+          type: string
+          description: The type of the newest event folded into this row.
+        last_event_at:
+          type: string
+          format: date-time
+          description: When that event happened.
+        last_payload:
+          type: object
+          nullable: true
+          description: >-
+            The payload envelope of that event, member for member as it was
+            stored, and null for a row that holds none.
+
+    ResourceList:
+      type: object
+      description: One page of current resources.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: >-
+            The resources of this page, ordered by cloud, resource type, and
+            resource id.
+          items:
+            $ref: "#/components/schemas/Resource"
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Where the next page starts, passed back as `cursor`. It is null on
+            the last page.
+
+    LifecycleInterval:
+      type: object
+      description: >-
+        One half-open span `[from, to)` over which nothing billable about a
+        resource changed.
+      required: [from, to, state, size, project_id]
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: When the interval starts, the inclusive bound.
+        to:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the interval ends, the exclusive bound. It is null while the
+            interval is open, which the last interval of a living resource is.
+        state:
+          type: string
+          description: The state the resource was in over the interval.
+        size:
+          type: object
+          description: The size the resource had over the interval.
+        project_id:
+          type: string
+          description: The project owning the resource over the interval.
+
+    Lifecycle:
+      type: object
+      description: >-
+        One resource, its event history, and the billable intervals that
+        history folds into. `resource` is always there: a resource this API
+        holds no projection row for is answered 404 rather than with an empty
+        lifecycle.
+
+
+        The two halves are derived from two different event sets. `events` and
+        `intervals` carry the history this token may read, while `resource` is
+        the projection row, folded from every event the resource has under no
+        scope. On a resource that changed projects the row therefore reports a
+        `created_at` from before the reader owned it, and the first interval
+        starts at the transfer.
+      required: [resource, events, intervals, warnings]
+      properties:
+        resource:
+          $ref: "#/components/schemas/Resource"
+        events:
+          type: array
+          description: >-
+            The full history the fold ran on, ordered by
+            `(timestamp, received_at, event_id)`.
+          items:
+            $ref: "#/components/schemas/StoredEvent"
+        intervals:
+          type: array
+          description: >-
+            The billable intervals the history implies, oldest first. Two
+            billable changes at the same instant leave no interval between them,
+            so a resource created and deleted at one instant has none at all.
+          items:
+            $ref: "#/components/schemas/LifecycleInterval"
+        warnings:
+          type: array
+          description: >-
+            What the fold could not trust, one entry each. A history whose first
+            event is not a create carries history_starts_without_create.
+          items:
+            type: string
 
     ResourceType:
       type: object

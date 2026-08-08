@@ -2,45 +2,27 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
-
-// defaultPageSize is how long a page is when the request names no limit. The
-// contract declares the same number, and bounds the parameter, so a limit that
-// reaches this handler is either absent or between 1 and 1000.
-const defaultPageSize = 100
 
 // eventCursorKeys is how many parts the sort key of this list has: the timestamp
 // and the event id, in the order ORDER BY names them.
 const eventCursorKeys = 2
 
-// badCursorDetail answers every cursor this API cannot use. Which part of it was
-// wrong goes to the log rather than to the client: a cursor is opaque, so a
-// caller has nothing to fix inside one and can only walk the list again.
-const badCursorDetail = "the cursor is not one this API issued"
-
-// errNoPrincipal is what a query route reports when the request context carries
-// no principal. Every route the dispatch table puts behind the query guard has
-// one, in enforced mode from the token and in disabled mode synthetically, so
-// finding none is this service disagreeing with itself.
-var errNoPrincipal = errors.New("the request context carries no query principal")
+// eventsDetail answers every failure of this route a caller can do nothing
+// about.
+const eventsDetail = "the events could not be read"
 
 // ListEvents answers one page of the stored events, narrowed by the filters the
-// request carries.
-//
-// The page is read one row longer than it is served, and that extra row is what
-// decides whether a cursor is sent: it tells "the page is full" from "there is
-// more" without a second query counting the rest.
+// request carries. The page is read one row longer than it is served, which is
+// what trimPage turns into the cursor decision.
 //
 // The list is event-scoped. A project token reads every event whose project_id
 // names one of its projects, which includes the events a resource carried before
@@ -49,17 +31,8 @@ var errNoPrincipal = errors.New("the request context carries no query principal"
 func (s *server) ListEvents(w http.ResponseWriter, r *http.Request, params ListEventsParams) {
 	ctx := r.Context()
 
-	principal, ok := auth.QueryFromContext(ctx)
+	scope, ok := s.queryScope(w, r)
 	if !ok {
-		writeInternal(ctx, w, "serving a query route without a principal", errNoPrincipal,
-			"the request could not be served")
-		return
-	}
-
-	scope, err := auth.ResolveProjectScope(ctx, s.queries, principal)
-	if err != nil {
-		writeInternal(ctx, w, "resolving the project scope", err,
-			"the request could not be served")
 		return
 	}
 	// A filtered scope holding no project reaches no event at all, so the empty
@@ -80,18 +53,14 @@ func (s *server) ListEvents(w http.ResponseWriter, r *http.Request, params ListE
 	var cursorAt pgtype.Timestamptz
 	var cursorEventID pgtype.Text
 	if params.Cursor != nil {
+		var err error
 		if cursorAt, cursorEventID, err = eventCursor(*params.Cursor); err != nil {
-			Logger(ctx).Warn("refusing a cursor", "error", err)
-			problem.Write(w, http.StatusBadRequest, problem.TypeValidation,
-				"Validation failed", badCursorDetail)
+			refuseCursor(ctx, w, err)
 			return
 		}
 	}
 
-	limit := defaultPageSize
-	if params.Limit != nil {
-		limit = *params.Limit
-	}
+	limit := pageLimit(params.Limit)
 	clouds, projects := scopeFilter(scope)
 
 	// A from later than to yields nothing, which is what the half-open window
@@ -113,19 +82,15 @@ func (s *server) ListEvents(w http.ResponseWriter, r *http.Request, params ListE
 		PageSize:      int32(limit) + 1,
 	})
 	if err != nil {
-		writeInternal(ctx, w, "listing events", err, "the events could not be read")
+		writeInternal(ctx, w, "listing events", err, eventsDetail)
 		return
 	}
 
-	more := len(rows) > limit
-	if more {
-		rows = rows[:limit]
-	}
+	rows, more := trimPage(rows, limit)
 	items := make([]StoredEvent, len(rows))
 	for i, row := range rows {
 		if items[i], err = storedEventOf(row); err != nil {
-			writeInternal(ctx, w, "decoding a stored payload", err,
-				"the events could not be read")
+			writeInternal(ctx, w, "decoding a stored payload", err, eventsDetail)
 			return
 		}
 	}
@@ -159,53 +124,6 @@ func eventCursor(cursor string) (pgtype.Timestamptz, pgtype.Text, error) {
 			fmt.Errorf("the timestamp of the cursor is not RFC 3339: %w", err)
 	}
 	return pgtype.Timestamptz{Time: at, Valid: true}, pgtype.Text{String: keys[1], Valid: true}, nil
-}
-
-// scopeFilter zips the projects a filtered principal reads into the two parallel
-// arrays the query pairs positionally, so that clouds[i] belongs to
-// projects[i]. Pairing them is what keeps a project id one cloud uses from
-// matching the rows another cloud stores under the same id.
-//
-// An unfiltered principal yields two nil slices, which pgx sends as NULL and the
-// query reads as no scope filter at all.
-func scopeFilter(scope auth.Scope) (clouds, projects []string) {
-	if scope.Unfiltered {
-		return nil, nil
-	}
-	clouds = make([]string, len(scope.Refs))
-	projects = make([]string, len(scope.Refs))
-	for i, ref := range scope.Refs {
-		clouds[i] = ref.Cloud
-		projects[i] = ref.ExternalID
-	}
-	return clouds, projects
-}
-
-// reachesProject reports whether a filtered scope holds the project a request
-// asked for by name. The cloud is left out of the comparison: the pair filter of
-// the query narrows the answer to the cloud the token holds the project in
-// anyway, so a matching external id is enough to let the request through.
-func reachesProject(scope auth.Scope, externalID string) bool {
-	return slices.ContainsFunc(scope.Refs, func(ref auth.ProjectRef) bool {
-		return ref.ExternalID == externalID
-	})
-}
-
-// filterText maps one optional string filter onto its query parameter. A filter
-// the request left out becomes NULL, which the query reads as every value.
-func filterText(value *string) pgtype.Text {
-	if value == nil {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: *value, Valid: true}
-}
-
-// filterInstant maps one bound of the time window onto its query parameter.
-func filterInstant(value *time.Time) pgtype.Timestamptz {
-	if value == nil {
-		return pgtype.Timestamptz{}
-	}
-	return pgtype.Timestamptz{Time: *value, Valid: true}
 }
 
 // storedEventOf renders one events row as the answer the contract promises. The
