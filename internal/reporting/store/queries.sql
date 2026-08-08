@@ -204,6 +204,17 @@ WHERE (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
 ORDER BY cloud, resource_type, resource_id
 LIMIT sqlc.arg('page_size');
 
+-- name: ListRejectedEvents :many
+SELECT id, received_at, reason, raw
+FROM rejected_events
+WHERE (sqlc.narg('from_ts')::timestamptz IS NULL OR received_at >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR received_at < sqlc.narg('to_ts'))
+  -- Both bounds are cast, for the reason the events cursor above names.
+  AND (sqlc.narg('cursor_ts')::timestamptz IS NULL
+       OR (received_at, id) > (sqlc.narg('cursor_ts')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY received_at, id
+LIMIT sqlc.arg('page_size');
+
 -- The read path of one projection row. It is GetCurrentResourceForUpdate
 -- without the row lock: a read must not make a writer wait on it.
 -- name: GetCurrentResource :one

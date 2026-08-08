@@ -17,9 +17,9 @@ info:
   version: 0.1.0
   description: >-
     Event ingestion, resource inventory, and usage reporting for Tally.
-    This document covers the health probes, event ingestion, the resource-type
-    registry, and the projection rebuild; the query and reporting endpoints
-    arrive with their work packages.
+    This document covers the health probes, event ingestion, the queries over
+    events, resources, and lifecycles, the resource-type registry, dead-letter
+    review, and the projection rebuild.
 
 paths:
   /healthz:
@@ -154,14 +154,7 @@ paths:
             minimum: 1
             maximum: 1000
             default: 100
-        - name: cursor
-          in: query
-          description: >-
-            The `next_cursor` of the page before this one. It is opaque: a
-            client passes it back as it received it and reads nothing out of
-            it.
-          schema:
-            type: string
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: One page of stored events.
@@ -298,14 +291,7 @@ paths:
             minimum: 1
             maximum: 1000
             default: 100
-        - name: cursor
-          in: query
-          description: >-
-            The `next_cursor` of the page before this one. It is opaque: a
-            client passes it back as it received it and reads nothing out of
-            it.
-          schema:
-            type: string
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: One page of current resources.
@@ -551,6 +537,74 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
 
+  /api/v1/rejected-events:
+    get:
+      operationId: listRejectedEvents
+      summary: List the dead-lettered events
+      description: >-
+        Returns every ingest item this API refused server-side, with the reason
+        it was refused and the raw body as it was submitted. The order is
+        `(received_at, id)` ascending. `from` and `to` select the half-open
+        window `[from, to)` on `received_at`, which is when the item was refused
+        rather than when its event claims to have happened: an item received at
+        exactly `from` is served, one received at exactly `to` is not.
+
+        One call answers one page. `items` carries the items, and `next_cursor`
+        is what the next call passes as `cursor`; a null `next_cursor` is the
+        end of the walk. The cursor holds a position and nothing else, so
+        presenting it together with other filters is well defined: the filters
+        of that call apply from that position onwards.
+
+        The operation is admin-only: callers below the admin role are answered
+        403. No project scope applies, because the raw JSON of a refused item
+        carries no reliable project attribution.
+      security:
+        - apiToken: []
+      parameters:
+        - name: from
+          in: query
+          description: >-
+            Serve only the items refused at or after this instant, the inclusive
+            bound of the window.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: >-
+            Serve only the items refused before this instant, the exclusive
+            bound of the window.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: How many items one page carries at most.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of dead-lettered events.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetterList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
   # This route is not part of the public API: the other Tally components call it
   # with the shared internal token. It is described here because the request
   # validator refuses a path the contract does not carry, so leaving it out
@@ -612,6 +666,20 @@ components:
         sends and generates one otherwise; it appears on every log line of the
         request, so quoting it in a support request is what ties the two
         together.
+      schema:
+        type: string
+
+  parameters:
+    # The three paginated lists declare this parameter verbatim, so it lives
+    # here once: the wording a caller reads about the cursor's opacity is the
+    # same on every list, and it stays that way.
+    Cursor:
+      name: cursor
+      in: query
+      description: >-
+        The `next_cursor` of the page before this one. It is opaque: a
+        client passes it back as it received it and reads nothing out of
+        it.
       schema:
         type: string
 
@@ -1008,7 +1076,8 @@ components:
           description: >-
             Where the next page starts. It is always null today: the registry
             holds one row per resource type, so every registration fits into one
-            answer. Cursor pagination arrives with the query endpoints.
+            answer. The registry list stays a single page, while the query lists
+            page with cursors.
 
     RegisterResourceType:
       type: object
@@ -1021,6 +1090,54 @@ components:
             A JSON Schema draft 2020-12 document. It is compiled before it is
             stored, so the document a registration accepts is exactly the one
             ingestion can apply later.
+
+    # The name avoids RejectedEvent above, which is the ingest response's item
+    # and a different shape: that one names the position in the submitted batch,
+    # this one the dead-letter row ingestion kept.
+    DeadLetteredEvent:
+      type: object
+      description: >-
+        One ingest item this API refused, as the dead-letter table holds it.
+      required: [id, received_at, reason, raw]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: >-
+            The dead-letter row. A refused item has no event id this API can
+            trust, so the row's own id is what names it.
+        received_at:
+          type: string
+          format: date-time
+          description: When this API refused the item.
+        reason:
+          type: string
+          description: >-
+            Why ingestion refused the item, a schema violation for example,
+            prefixed the way the ingest response reports it.
+        raw:
+          description: >-
+            The item as it was submitted, with NUL characters scrubbed at
+            ingest. Nothing is constrained here: what a collector sent need not
+            be a JSON object, and this member carries whatever it was.
+
+    DeadLetterList:
+      type: object
+      description: One page of dead-lettered events.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: >-
+            The refused items of this page, ordered by received_at and id.
+          items:
+            $ref: "#/components/schemas/DeadLetteredEvent"
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Where the next page starts, passed back as `cursor`. It is null on
+            the last page.
 
     RebuildRequest:
       type: object
