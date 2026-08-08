@@ -79,6 +79,39 @@ func TestAuthDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("puts the registry operations behind a credential", func(t *testing.T) {
+		// The four operations sit on two patterns, two methods each, so what says
+		// the table keyed the methods apart is every one of them meeting a guard
+		// rather than being refused as a route no rule covers. Which role each
+		// demands is the integration test's business.
+		for _, tc := range []struct{ method, pattern, path string }{
+			{method: http.MethodGet, pattern: "/api/v1/projects", path: "/api/v1/projects"},
+			{method: http.MethodPost, pattern: "/api/v1/projects", path: "/api/v1/projects"},
+			{
+				method:  http.MethodGet,
+				pattern: projectRoute,
+				path:    "/api/v1/projects/0f2a1c3e-5d70-4c31-8f6b-9b1d2b7e4d0a",
+			},
+			{
+				method:  http.MethodPatch,
+				pattern: projectRoute,
+				path:    "/api/v1/projects/0f2a1c3e-5d70-4c31-8f6b-9b1d2b7e4d0a",
+			},
+		} {
+			t.Run(tc.method+" "+tc.pattern, func(t *testing.T) {
+				ran := false
+				handler := dispatchOn(t, tc.method, tc.pattern, &ran)
+
+				rec := serve(handler, httptest.NewRequest(tc.method, tc.path, nil))
+
+				assertChallenged(t, rec)
+				if ran {
+					t.Error("the handler ran for a request carrying no credential")
+				}
+			})
+		}
+	})
+
 	t.Run("puts the resource reads behind a credential", func(t *testing.T) {
 		// The two per-resource routes are keyed on the pattern rather than on a
 		// path, so what says the table names them is a request whose path
