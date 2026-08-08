@@ -47,6 +47,21 @@ func TestAuthDispatch(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("puts the events list behind a credential of its own", func(t *testing.T) {
+		// The list shares its pattern with the ingest endpoint, so what says the
+		// table keyed the two methods apart is a GET meeting a guard rather than
+		// being refused as a route no rule covers.
+		ran := false
+		handler := dispatchOn(t, http.MethodGet, "/api/v1/events", &ran)
+
+		rec := serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/events", nil))
+
+		assertChallenged(t, rec)
+		if ran {
+			t.Error("the list handler ran for a request carrying no credential")
+		}
+	})
 }
 
 // dispatchOn mounts the dispatch middleware on one chi route the way the
