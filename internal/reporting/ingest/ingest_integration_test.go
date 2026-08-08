@@ -1,6 +1,7 @@
 package ingest_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -405,6 +406,176 @@ func TestIngest(t *testing.T) {
 		}
 		assertOutcome(t, out, ingest.Outcome{})
 	})
+}
+
+// TestIngestCallsTheHookOncePerStoredEvent holds the hook to the events it is
+// promised: the ones the batch stored, in the order they were inserted in.
+// Neither a duplicate nor a refused item is one of them.
+func TestIngestCallsTheHookOncePerStoredEvent(t *testing.T) {
+	db := storetest.NewDB(t)
+	res := resource{cloud: "os-ingest-hook", resourceType: "volume", id: "vol-hook"}
+
+	// The event the batch below repeats is stored by a pipeline without a hook,
+	// so the recorder only ever sees that batch.
+	create := res.event("vol-hook-create", "volume.create", createTime,
+		payloadOf("available", volumeSize(10)))
+	assertOutcome(t, batch(t, db, ingest.New(registry.New(), false, nil),
+		[]json.RawMessage{item(t, create)}, event.SourceCollector, nil),
+		ingest.Outcome{Accepted: 1})
+
+	// The two fresh events are submitted in the reverse of the order their ids
+	// sort in, so what the hook sees is the order the pipeline inserted them in
+	// rather than the order they were submitted in.
+	hook := &recordingHook{}
+	items := []json.RawMessage{
+		item(t, res.event("vol-hook-resize", "volume.resize", updateTime,
+			payloadOf("available", volumeSize(20)))),
+		item(t, res.event("vol-hook-pause", "volume.update", deleteTime,
+			payloadOf("paused", nil))),
+		item(t, create),
+		item(t, res.event("vol-hook-refused", "volume-update", updateTime,
+			payloadOf("available", nil))),
+	}
+
+	out := batch(t, db, ingest.New(registry.New(), false, hook), items,
+		event.SourceCollector, nil)
+
+	if out.Accepted != 2 || out.Duplicates != 1 || len(out.Rejected) != 1 {
+		t.Fatalf("Ingest() = %+v, want 2 accepted, 1 duplicate and 1 refused item", out)
+	}
+	want := []string{"vol-hook-pause", "vol-hook-resize"}
+	if got := hook.seenIDs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("hook saw %v, want the stored events in insertion order, %v", got, want)
+	}
+	for _, e := range hook.seen {
+		if e.ReceivedAt.IsZero() {
+			t.Errorf("hook saw %s without a received_at, want the one the insert assigned",
+				e.EventID)
+		}
+		if e.Source != event.SourceCollector {
+			t.Errorf("hook saw %s as %q, want the source the caller named, %q",
+				e.EventID, e.Source, event.SourceCollector)
+		}
+	}
+}
+
+// TestIngestTakesTheBatchWithoutAHook covers the Phase 1 default: a pipeline
+// built with no hook takes the same batch, and calls nothing over it.
+func TestIngestTakesTheBatchWithoutAHook(t *testing.T) {
+	db := storetest.NewDB(t)
+	res := resource{cloud: "os-ingest-hookless", resourceType: "volume", id: "vol-hookless"}
+	pipeline := ingest.New(registry.New(), false, nil)
+
+	create := item(t, res.event("vol-hookless-create", "volume.create", createTime,
+		payloadOf("available", volumeSize(10))))
+	assertOutcome(t, batch(t, db, pipeline, []json.RawMessage{create}, event.SourceCollector, nil),
+		ingest.Outcome{Accepted: 1})
+
+	items := []json.RawMessage{
+		item(t, res.event("vol-hookless-resize", "volume.resize", updateTime,
+			payloadOf("available", volumeSize(20)))),
+		create,
+		item(t, res.event("vol-hookless-refused", "volume-update", updateTime,
+			payloadOf("available", nil))),
+	}
+
+	out := batch(t, db, pipeline, items, event.SourceCollector, nil)
+
+	if out.Accepted != 1 || out.Duplicates != 1 || len(out.Rejected) != 1 {
+		t.Fatalf("Ingest() = %+v, want 1 accepted, 1 duplicate and 1 refused item", out)
+	}
+	if got := storedEvents(t, db, res.cloud); got != 2 {
+		t.Errorf("events rows = %d, want the 2 the two batches stored", got)
+	}
+}
+
+// TestIngestFailsTheBatchWhenTheHookErrs holds the hook to the transaction it
+// runs in: what it refuses takes the whole batch down, the events stored before
+// it and the dead letter a refused item left included.
+func TestIngestFailsTheBatchWhenTheHookErrs(t *testing.T) {
+	db := storetest.NewDB(t)
+	res := resource{cloud: "os-ingest-hook-error", resourceType: "volume", id: "vol-hook-error"}
+	// The hook takes the first event and refuses the one after it, so the batch
+	// fails once it has already stored rows.
+	hook := &failingHook{succeed: 1}
+	pipeline := ingest.New(registry.New(), false, hook)
+
+	items := []json.RawMessage{
+		item(t, res.event("vol-hook-error-create", "volume.create", createTime,
+			payloadOf("available", volumeSize(10)))),
+		item(t, res.event("vol-hook-error-resize", "volume.resize", updateTime,
+			payloadOf("available", volumeSize(20)))),
+		item(t, res.event("vol-hook-error-pause", "volume.update", deleteTime,
+			payloadOf("paused", nil))),
+		item(t, res.event("vol-hook-error-refused", "volume-update", updateTime,
+			payloadOf("available", nil))),
+	}
+
+	err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
+		_, err := pipeline.Ingest(t.Context(), tx, items, event.SourceCollector, nil)
+		return err
+	})
+
+	if err == nil {
+		t.Fatal("Ingest() error = nil, want the error the hook refused the batch with")
+	}
+	// The events are inserted sorted by id, so the second one the hook sees, and
+	// the one it refuses, is the pause.
+	if want := "running the post-ingest hook for event vol-hook-error-pause"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Ingest() error = %v, want it naming the hook and the event, %q", err, want)
+	}
+	if !errors.Is(err, errHookRefused) {
+		t.Errorf("Ingest() error = %v, want it wrapping %v", err, errHookRefused)
+	}
+	if hook.calls != 2 {
+		t.Errorf("hook was called %d times, want it to stop at the event it refused, 2", hook.calls)
+	}
+	if got := storedEvents(t, db, res.cloud); got != 0 {
+		t.Errorf("events rows = %d, want the batch rolled back, 0", got)
+	}
+	if got := deadLetters(t, db, res.cloud); got != 0 {
+		t.Errorf("dead-letter rows = %d, want the batch rolled back, 0", got)
+	}
+}
+
+// recordingHook keeps every event it was called with, in the order the calls
+// came in.
+type recordingHook struct {
+	seen []event.Stored
+}
+
+func (h *recordingHook) OnEvent(_ context.Context, e event.Stored) error {
+	h.seen = append(h.seen, e)
+	return nil
+}
+
+// seenIDs is the ids of the events the hook was called with.
+func (h *recordingHook) seenIDs() []string {
+	ids := make([]string, 0, len(h.seen))
+	for _, e := range h.seen {
+		ids = append(ids, e.EventID)
+	}
+	return ids
+}
+
+// errHookRefused is what the failing hook takes a batch down with. The
+// assertions match on it rather than on its message, which is what the wrapping
+// the pipeline does has to keep intact.
+var errHookRefused = errors.New("the hook refused the event")
+
+// failingHook takes succeed events and refuses the one after them, which is a
+// hook failing in the middle of a batch rather than on its first event.
+type failingHook struct {
+	succeed int
+	calls   int
+}
+
+func (h *failingHook) OnEvent(_ context.Context, _ event.Stored) error {
+	h.calls++
+	if h.calls > h.succeed {
+		return errHookRefused
+	}
+	return nil
 }
 
 // resource is the fixture a subtest works on: one resource of one cloud, which
