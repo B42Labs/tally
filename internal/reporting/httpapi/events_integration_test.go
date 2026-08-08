@@ -509,21 +509,24 @@ func newAPI(t *testing.T, s *store.Store) api {
 // newAPIInMode builds the full router over s in the given authentication mode.
 // The credential seams are wired either way, so the mode is the only thing that
 // decides whether a request needs one. The pipeline is the lax one, so an
-// unregistered resource type is accepted rather than refused.
+// unregistered resource type is accepted rather than refused, and the
+// attributing relation types are the ones the configuration defaults to, so the
+// cycle guard of a relation creation is on.
 func newAPIInMode(t *testing.T, s *store.Store, mode auth.Mode) api {
 	t.Helper()
 
 	q := sqlcgen.New(s.Pool())
 	handler, err := NewRouter(Options{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		DB:                 s,
-		UnhealthyThreshold: time.Minute,
-		Queries:            q,
-		Store:              s,
-		AuthMode:           mode,
-		InternalToken:      internalToken,
-		Authenticator:      auth.NewStaticTokenAuthenticator(q),
-		Pipeline:           ingest.New(registry.New(), false, nil),
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DB:                       s,
+		UnhealthyThreshold:       time.Minute,
+		Queries:                  q,
+		Store:                    s,
+		AuthMode:                 mode,
+		InternalToken:            internalToken,
+		Authenticator:            auth.NewStaticTokenAuthenticator(q),
+		Pipeline:                 ingest.New(registry.New(), false, nil),
+		AttributingRelationTypes: []string{attributingType},
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)
