@@ -12,6 +12,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const closeProjectRelation = `-- name: CloseProjectRelation :execrows
+UPDATE project_relations
+SET valid_to = now()
+WHERE id = $1 AND source_id = $2 AND valid_to IS NULL
+`
+
+type CloseProjectRelationParams struct {
+	ID       uuid.UUID
+	SourceID uuid.UUID
+}
+
+// A relation is closed rather than deleted, so that a read at an earlier
+// instant still finds it. The row count tells the close apart from the relation
+// that was closed already, which no longer matches.
+func (q *Queries) CloseProjectRelation(ctx context.Context, arg CloseProjectRelationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, closeProjectRelation, arg.ID, arg.SourceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countEventsForResource = `-- name: CountEventsForResource :one
 SELECT count(*)
 FROM (
@@ -266,6 +288,27 @@ func (q *Queries) GetIngestCredentialForUpdate(ctx context.Context, id uuid.UUID
 	return i, err
 }
 
+const getProject = `-- name: GetProject :one
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE id = $1
+`
+
+func (q *Queries) GetProject(ctx context.Context, id uuid.UUID) (Project, error) {
+	row := q.db.QueryRow(ctx, getProject, id)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Platform,
+		&i.Cloud,
+		&i.ExternalID,
+		&i.Name,
+		&i.Metadata,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getProjectRefsByIDs = `-- name: GetProjectRefsByIDs :many
 SELECT id, cloud, external_id
 FROM projects
@@ -288,6 +331,74 @@ func (q *Queries) GetProjectRefsByIDs(ctx context.Context, dollar_1 []uuid.UUID)
 	for rows.Next() {
 		var i GetProjectRefsByIDsRow
 		if err := rows.Scan(&i.ID, &i.Cloud, &i.ExternalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getProjectRelation = `-- name: GetProjectRelation :one
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE id = $1 AND source_id = $2
+`
+
+type GetProjectRelationParams struct {
+	ID       uuid.UUID
+	SourceID uuid.UUID
+}
+
+// The source project is part of every single-relation key: a relation is
+// addressed under the project it leaves, and an id that belongs to another
+// project reads as absent rather than as someone else's row.
+func (q *Queries) GetProjectRelation(ctx context.Context, arg GetProjectRelationParams) (ProjectRelation, error) {
+	row := q.db.QueryRow(ctx, getProjectRelation, arg.ID, arg.SourceID)
+	var i ProjectRelation
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.TargetID,
+		&i.RelationType,
+		&i.Metadata,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getProjectsByIDs = `-- name: GetProjectsByIDs :many
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE id = ANY($1::uuid[])
+`
+
+// The batch form of the read above, for the callers that resolve a whole set of
+// ids at once. GetProjectRefsByIDs is the same read narrowed to the two columns
+// an event needs.
+func (q *Queries) GetProjectsByIDs(ctx context.Context, dollar_1 []uuid.UUID) ([]Project, error) {
+	rows, err := q.db.Query(ctx, getProjectsByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Project
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.Platform,
+			&i.Cloud,
+			&i.ExternalID,
+			&i.Name,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -384,6 +495,81 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (pgtyp
 	return received_at, err
 }
 
+const insertProject = `-- name: InsertProject :one
+INSERT INTO projects (platform, cloud, external_id, name, metadata)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, platform, cloud, external_id, name, metadata, created_at
+`
+
+type InsertProjectParams struct {
+	Platform   string
+	Cloud      string
+	ExternalID string
+	Name       pgtype.Text
+	Metadata   []byte
+}
+
+func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (Project, error) {
+	row := q.db.QueryRow(ctx, insertProject,
+		arg.Platform,
+		arg.Cloud,
+		arg.ExternalID,
+		arg.Name,
+		arg.Metadata,
+	)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Platform,
+		&i.Cloud,
+		&i.ExternalID,
+		&i.Name,
+		&i.Metadata,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const insertProjectRelation = `-- name: InsertProjectRelation :one
+INSERT INTO project_relations (source_id, target_id, relation_type, metadata,
+                               valid_from)
+VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()))
+RETURNING id, source_id, target_id, relation_type, metadata, valid_from,
+          valid_to, created_at
+`
+
+type InsertProjectRelationParams struct {
+	SourceID     uuid.UUID
+	TargetID     uuid.UUID
+	RelationType string
+	Metadata     []byte
+	ValidFrom    pgtype.Timestamptz
+}
+
+// A NULL valid_from means the relation starts when it is written, which is what
+// a request that names no start asks for.
+func (q *Queries) InsertProjectRelation(ctx context.Context, arg InsertProjectRelationParams) (ProjectRelation, error) {
+	row := q.db.QueryRow(ctx, insertProjectRelation,
+		arg.SourceID,
+		arg.TargetID,
+		arg.RelationType,
+		arg.Metadata,
+		arg.ValidFrom,
+	)
+	var i ProjectRelation
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.TargetID,
+		&i.RelationType,
+		&i.Metadata,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertRejectedEvent = `-- name: InsertRejectedEvent :exec
 INSERT INTO rejected_events (reason, raw)
 VALUES ($1, $2)
@@ -397,6 +583,53 @@ type InsertRejectedEventParams struct {
 func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEventParams) error {
 	_, err := q.db.Exec(ctx, insertRejectedEvent, arg.Reason, arg.Raw)
 	return err
+}
+
+const listActiveAttributingRelations = `-- name: ListActiveAttributingRelations :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE source_id = ANY($1::uuid[])
+  AND valid_to IS NULL
+  AND relation_type = ANY($2::text[])
+ORDER BY source_id, created_at, id
+`
+
+type ListActiveAttributingRelationsParams struct {
+	SourceIds     []uuid.UUID
+	RelationTypes []string
+}
+
+// The walk the cycle check runs, which asks about the graph as it is rather
+// than as it stood at some instant: only the open relations of the attributing
+// types can carry cost, so only they can close a cycle that matters.
+func (q *Queries) ListActiveAttributingRelations(ctx context.Context, arg ListActiveAttributingRelationsParams) ([]ProjectRelation, error) {
+	rows, err := q.db.Query(ctx, listActiveAttributingRelations, arg.SourceIds, arg.RelationTypes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectRelation
+	for rows.Next() {
+		var i ProjectRelation
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.TargetID,
+			&i.RelationType,
+			&i.Metadata,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listCurrentResources = `-- name: ListCurrentResources :many
@@ -641,6 +874,125 @@ func (q *Queries) ListEventsForResource(ctx context.Context, arg ListEventsForRe
 	return items, nil
 }
 
+const listProjectRelations = `-- name: ListProjectRelations :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE (($1::boolean AND source_id = $2)
+       OR ($3::boolean AND target_id = $2))
+  AND valid_from <= $4
+  AND (valid_to IS NULL OR valid_to > $4)
+  AND ($5::text IS NULL
+       OR relation_type = $5)
+ORDER BY created_at, id
+`
+
+type ListProjectRelationsParams struct {
+	Outgoing     bool
+	ProjectID    uuid.UUID
+	Incoming     bool
+	At           pgtype.Timestamptz
+	RelationType pgtype.Text
+}
+
+// The relations of one project as they stood at one instant. The two direction
+// flags are what the direction filter of the API comes down to: a relation
+// counts when it leaves the project and outgoing is set, or reaches it and
+// incoming is.
+func (q *Queries) ListProjectRelations(ctx context.Context, arg ListProjectRelationsParams) ([]ProjectRelation, error) {
+	rows, err := q.db.Query(ctx, listProjectRelations,
+		arg.Outgoing,
+		arg.ProjectID,
+		arg.Incoming,
+		arg.At,
+		arg.RelationType,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectRelation
+	for rows.Next() {
+		var i ProjectRelation
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.TargetID,
+			&i.RelationType,
+			&i.Metadata,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjects = `-- name: ListProjects :many
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE ($1::text IS NULL OR platform = $1)
+  AND ($2::text IS NULL OR cloud = $2)
+  AND ($3::text IS NULL
+       OR external_id = $3)
+  -- Both bounds are cast, for the reason the events cursor above names.
+  AND ($4::text IS NULL
+       OR (cloud, external_id) > ($4::text,
+                                  $5::text))
+ORDER BY cloud, external_id
+LIMIT $6
+`
+
+type ListProjectsParams struct {
+	Platform         pgtype.Text
+	Cloud            pgtype.Text
+	ExternalID       pgtype.Text
+	CursorCloud      pgtype.Text
+	CursorExternalID pgtype.Text
+	PageSize         int32
+}
+
+func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]Project, error) {
+	rows, err := q.db.Query(ctx, listProjects,
+		arg.Platform,
+		arg.Cloud,
+		arg.ExternalID,
+		arg.CursorCloud,
+		arg.CursorExternalID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Project
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.Platform,
+			&i.Cloud,
+			&i.ExternalID,
+			&i.Name,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRejectedEvents = `-- name: ListRejectedEvents :many
 SELECT id, received_at, reason, raw
 FROM rejected_events
@@ -681,6 +1033,55 @@ func (q *Queries) ListRejectedEvents(ctx context.Context, arg ListRejectedEvents
 			&i.ReceivedAt,
 			&i.Reason,
 			&i.Raw,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRelationsValidAt = `-- name: ListRelationsValidAt :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE source_id = ANY($1::uuid[])
+  AND valid_from <= $2
+  AND (valid_to IS NULL OR valid_to > $2)
+  AND ($3::text IS NULL
+       OR relation_type = $3)
+ORDER BY source_id, created_at, id
+`
+
+type ListRelationsValidAtParams struct {
+	SourceIds    []uuid.UUID
+	At           pgtype.Timestamptz
+	RelationType pgtype.Text
+}
+
+// The relations of a whole set of projects at one instant, for the callers that
+// walk the graph rather than serve one project's list.
+func (q *Queries) ListRelationsValidAt(ctx context.Context, arg ListRelationsValidAtParams) ([]ProjectRelation, error) {
+	rows, err := q.db.Query(ctx, listRelationsValidAt, arg.SourceIds, arg.At, arg.RelationType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectRelation
+	for rows.Next() {
+		var i ProjectRelation
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.TargetID,
+			&i.RelationType,
+			&i.Metadata,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -762,6 +1163,17 @@ func (q *Queries) ListResourceTypes(ctx context.Context) ([]ResourceType, error)
 	return items, nil
 }
 
+const lockAttributingRelations = `-- name: LockAttributingRelations :exec
+SELECT pg_advisory_xact_lock(hashtextextended('project_relations:attributing', 0))
+`
+
+// Serializes the creation of attributing relations, so that two racing inserts
+// cannot each pass the cycle walk and leave a cycle behind.
+func (q *Queries) LockAttributingRelations(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockAttributingRelations)
+	return err
+}
+
 const lockResource = `-- name: LockResource :exec
 SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text || ':' || $3::text, 0))
 `
@@ -797,6 +1209,74 @@ WHERE id = $1 AND revoked_at IS NULL
 func (q *Queries) RevokeIngestCredential(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, revokeIngestCredential, id)
 	return err
+}
+
+const updateProject = `-- name: UpdateProject :one
+UPDATE projects
+SET name = COALESCE($2, name),
+    metadata = COALESCE($3, metadata)
+WHERE id = $1
+RETURNING id, platform, cloud, external_id, name, metadata, created_at
+`
+
+type UpdateProjectParams struct {
+	ID       uuid.UUID
+	Name     pgtype.Text
+	Metadata []byte
+}
+
+// A NULL parameter leaves the column as it stands, so a request that carries
+// one field updates that field alone.
+func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (Project, error) {
+	row := q.db.QueryRow(ctx, updateProject, arg.ID, arg.Name, arg.Metadata)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Platform,
+		&i.Cloud,
+		&i.ExternalID,
+		&i.Name,
+		&i.Metadata,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const updateProjectRelation = `-- name: UpdateProjectRelation :one
+UPDATE project_relations
+SET metadata = COALESCE($3, metadata),
+    valid_to = COALESCE($4, valid_to)
+WHERE id = $1 AND source_id = $2
+RETURNING id, source_id, target_id, relation_type, metadata, valid_from,
+          valid_to, created_at
+`
+
+type UpdateProjectRelationParams struct {
+	ID       uuid.UUID
+	SourceID uuid.UUID
+	Metadata []byte
+	ValidTo  pgtype.Timestamptz
+}
+
+func (q *Queries) UpdateProjectRelation(ctx context.Context, arg UpdateProjectRelationParams) (ProjectRelation, error) {
+	row := q.db.QueryRow(ctx, updateProjectRelation,
+		arg.ID,
+		arg.SourceID,
+		arg.Metadata,
+		arg.ValidTo,
+	)
+	var i ProjectRelation
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.TargetID,
+		&i.RelationType,
+		&i.Metadata,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const upsertCurrentResource = `-- name: UpsertCurrentResource :exec

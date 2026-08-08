@@ -222,3 +222,124 @@ SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
        created_at, deleted_at, last_event_type, last_event_at, last_payload
 FROM current_resources
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3;
+
+-- name: InsertProject :one
+INSERT INTO projects (platform, cloud, external_id, name, metadata)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, platform, cloud, external_id, name, metadata, created_at;
+
+-- name: GetProject :one
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE id = $1;
+
+-- The batch form of the read above, for the callers that resolve a whole set of
+-- ids at once. GetProjectRefsByIDs is the same read narrowed to the two columns
+-- an event needs.
+-- name: GetProjectsByIDs :many
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE id = ANY($1::uuid[]);
+
+-- name: ListProjects :many
+SELECT id, platform, cloud, external_id, name, metadata, created_at
+FROM projects
+WHERE (sqlc.narg('platform')::text IS NULL OR platform = sqlc.narg('platform'))
+  AND (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
+  AND (sqlc.narg('external_id')::text IS NULL
+       OR external_id = sqlc.narg('external_id'))
+  -- Both bounds are cast, for the reason the events cursor above names.
+  AND (sqlc.narg('cursor_cloud')::text IS NULL
+       OR (cloud, external_id) > (sqlc.narg('cursor_cloud')::text,
+                                  sqlc.narg('cursor_external_id')::text))
+ORDER BY cloud, external_id
+LIMIT sqlc.arg('page_size');
+
+-- A NULL parameter leaves the column as it stands, so a request that carries
+-- one field updates that field alone.
+-- name: UpdateProject :one
+UPDATE projects
+SET name = COALESCE(sqlc.narg('name'), name),
+    metadata = COALESCE(sqlc.narg('metadata'), metadata)
+WHERE id = $1
+RETURNING id, platform, cloud, external_id, name, metadata, created_at;
+
+-- A NULL valid_from means the relation starts when it is written, which is what
+-- a request that names no start asks for.
+-- name: InsertProjectRelation :one
+INSERT INTO project_relations (source_id, target_id, relation_type, metadata,
+                               valid_from)
+VALUES ($1, $2, $3, $4, COALESCE(sqlc.narg('valid_from')::timestamptz, now()))
+RETURNING id, source_id, target_id, relation_type, metadata, valid_from,
+          valid_to, created_at;
+
+-- The source project is part of every single-relation key: a relation is
+-- addressed under the project it leaves, and an id that belongs to another
+-- project reads as absent rather than as someone else's row.
+-- name: GetProjectRelation :one
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE id = $1 AND source_id = $2;
+
+-- The relations of one project as they stood at one instant. The two direction
+-- flags are what the direction filter of the API comes down to: a relation
+-- counts when it leaves the project and outgoing is set, or reaches it and
+-- incoming is.
+-- name: ListProjectRelations :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE ((sqlc.arg('outgoing')::boolean AND source_id = sqlc.arg('project_id'))
+       OR (sqlc.arg('incoming')::boolean AND target_id = sqlc.arg('project_id')))
+  AND valid_from <= sqlc.arg('at')
+  AND (valid_to IS NULL OR valid_to > sqlc.arg('at'))
+  AND (sqlc.narg('relation_type')::text IS NULL
+       OR relation_type = sqlc.narg('relation_type'))
+ORDER BY created_at, id;
+
+-- name: UpdateProjectRelation :one
+UPDATE project_relations
+SET metadata = COALESCE(sqlc.narg('metadata'), metadata),
+    valid_to = COALESCE(sqlc.narg('valid_to'), valid_to)
+WHERE id = $1 AND source_id = $2
+RETURNING id, source_id, target_id, relation_type, metadata, valid_from,
+          valid_to, created_at;
+
+-- A relation is closed rather than deleted, so that a read at an earlier
+-- instant still finds it. The row count tells the close apart from the relation
+-- that was closed already, which no longer matches.
+-- name: CloseProjectRelation :execrows
+UPDATE project_relations
+SET valid_to = now()
+WHERE id = $1 AND source_id = $2 AND valid_to IS NULL;
+
+-- The relations of a whole set of projects at one instant, for the callers that
+-- walk the graph rather than serve one project's list.
+-- name: ListRelationsValidAt :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE source_id = ANY(sqlc.arg('source_ids')::uuid[])
+  AND valid_from <= sqlc.arg('at')
+  AND (valid_to IS NULL OR valid_to > sqlc.arg('at'))
+  AND (sqlc.narg('relation_type')::text IS NULL
+       OR relation_type = sqlc.narg('relation_type'))
+ORDER BY source_id, created_at, id;
+
+-- The walk the cycle check runs, which asks about the graph as it is rather
+-- than as it stood at some instant: only the open relations of the attributing
+-- types can carry cost, so only they can close a cycle that matters.
+-- name: ListActiveAttributingRelations :many
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
+       created_at
+FROM project_relations
+WHERE source_id = ANY(sqlc.arg('source_ids')::uuid[])
+  AND valid_to IS NULL
+  AND relation_type = ANY(sqlc.arg('relation_types')::text[])
+ORDER BY source_id, created_at, id;
+
+-- Serializes the creation of attributing relations, so that two racing inserts
+-- cannot each pass the cycle walk and leave a cycle behind.
+-- name: LockAttributingRelations :exec
+SELECT pg_advisory_xact_lock(hashtextextended('project_relations:attributing', 0));
