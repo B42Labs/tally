@@ -716,6 +716,287 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
 
+  /api/v1/projects/{id}/relations:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The project the relations are addressed under.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    post:
+      operationId: createProjectRelation
+      summary: Relate one project to another
+      description: >-
+        Creates one relation leaving the project the path names. A relation is
+        valid at `t` iff `valid_from <= t AND (valid_to IS NULL OR valid_to >
+        t)`, and `valid_from` defaults to the instant the relation is written.
+
+        One triple of source, target and `relation_type` carries a single open
+        relation at a time. A triple that is already active is answered 409;
+        the same triple after a close is created again.
+
+        A source project this registry does not hold is answered 404. A target
+        it does not hold, and a target that is the source itself, are answered
+        422.
+
+        A relation of one of the configured attributing types keeps
+        attribution a forest. Its creation walks the active attributing
+        relations out of `target_id` first, and a relation that reaches the
+        source again is answered 422
+        (`urn:tally:error:relation_cycle`) without being written. A type
+        outside that list is created without the walk.
+      security:
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRelation"
+      responses:
+        "201":
+          description: The relation as it is now stored.
+          headers:
+            Location:
+              description: The URL of the created relation.
+              schema:
+                type: string
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relation"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+    get:
+      operationId: listProjectRelations
+      summary: List the relations of one project
+      description: >-
+        Returns the relations of the project that are valid at `at`, ordered by
+        `(created_at, id)`. A relation is valid at `t` iff `valid_from <= t AND
+        (valid_to IS NULL OR valid_to > t)`, so the answer is the point-in-time
+        view of the neighborhood and history is read by passing a past `at`.
+
+        The answer is never paginated. A project this registry does not hold is
+        answered 404, which is what tells an empty neighborhood from an unknown
+        project.
+      security:
+        - apiToken: []
+      parameters:
+        - name: direction
+          in: query
+          description: >-
+            Which relations to serve: `outgoing` the ones leaving the project,
+            `incoming` the ones reaching it, `both` either.
+          schema:
+            type: string
+            enum: [outgoing, incoming, both]
+            default: both
+        - name: relation_type
+          in: query
+          description: Serve only the relations of this type.
+          schema:
+            type: string
+        - name: at
+          in: query
+          description: >-
+            The instant the answer describes. It defaults to now.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: The relations valid at that instant.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelationList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/projects/{id}/relations/{relation_id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The project the relation leaves.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+      - name: relation_id
+        in: path
+        required: true
+        description: The relation itself, as this API names it.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    patch:
+      operationId: updateProjectRelation
+      summary: Update one relation
+      description: >-
+        Changes the metadata or the end of one relation. A member the request
+        leaves out stays as it is, and `metadata` is replaced wholesale rather
+        than merged.
+
+        `valid_to` has to be after `valid_from`, which is 422 otherwise. It is
+        also where a closed relation gets its close instant corrected; the
+        member is not nullable, so reopening a closed relation is not
+        supported.
+
+        A relation the path does not name, and a relation that does not leave
+        the project of the path, are both answered 404.
+      security:
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRelation"
+      responses:
+        "200":
+          description: The relation as it now stands.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relation"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+    delete:
+      operationId: deleteProjectRelation
+      summary: Close one relation
+      description: >-
+        Closes the relation by setting `valid_to` to now. The row is never
+        deleted, so a read at an earlier `at` still finds the relation.
+
+        A relation that is already closed is answered 204 as well, and the
+        stored `valid_to` does not move: the close instant a relation was given
+        is the one it keeps. A relation this API does not hold, and one that
+        does not leave the project of the path, are answered 404.
+      security:
+        - apiToken: []
+      responses:
+        "204":
+          description: The relation is closed.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/projects/{id}/related:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The project the traversal starts from.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    get:
+      operationId: listRelatedProjects
+      summary: List the projects one project reaches
+      description: >-
+        Walks the outgoing relations that are valid at `at`, up to `depth`
+        relations out, and returns every project the walk reaches. A relation
+        is valid at `t` iff `valid_from <= t AND (valid_to IS NULL OR valid_to
+        > t)`, so the answer is the point-in-time view of the graph and history
+        is read by passing a past `at`.
+
+        The walk is breadth-first and visits a project once, which terminates a
+        cycle and keeps the project of the path out of the answer. The items
+        come in the order they were visited, and `path` names the relations the
+        walk took to reach each of them.
+
+        The answer is never paginated. A project this registry does not hold is
+        answered 404.
+      security:
+        - apiToken: []
+      parameters:
+        - name: depth
+          in: query
+          description: How many relations out the walk goes.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 1
+        - name: relation_type
+          in: query
+          description: Walk only the relations of this type.
+          schema:
+            type: string
+        - name: at
+          in: query
+          description: >-
+            The instant the answer describes. It defaults to now.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: The projects the walk reached.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelatedProjectList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
   /api/v1/rejected-events:
     get:
       operationId: listRejectedEvents
@@ -1385,6 +1666,154 @@ components:
             The metadata the project carries from now on. It replaces the
             stored object wholesale rather than being merged into it, so a
             request carrying it carries every member the project keeps.
+
+    Relation:
+      type: object
+      description: >-
+        One relation between two projects. It is valid at `t` iff
+        `valid_from <= t AND (valid_to IS NULL OR valid_to > t)`, and it is
+        closed rather than deleted, so a read at an earlier instant still finds
+        it.
+      required:
+        [id, source_id, target_id, relation_type, metadata, valid_from,
+         valid_to, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The relation, as this API names it.
+        source_id:
+          type: string
+          format: uuid
+          description: The project the relation leaves.
+        target_id:
+          type: string
+          format: uuid
+          description: The project the relation reaches.
+        relation_type:
+          type: string
+          description: >-
+            What the relation means, infrastructure_tenant for example.
+        metadata:
+          type: object
+          description: >-
+            Whatever else was stored about the relation. It is the empty object
+            for a relation created without any.
+        valid_from:
+          type: string
+          format: date-time
+          description: When the relation starts being valid, the inclusive bound.
+        valid_to:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the relation stops being valid, the exclusive bound. It is
+            null while the relation is open.
+        created_at:
+          type: string
+          format: date-time
+          description: When the relation was written.
+
+    RelationList:
+      type: object
+      description: The relations of one project at one instant.
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: >-
+            The relations valid at that instant, ordered by created_at and id.
+          items:
+            $ref: "#/components/schemas/Relation"
+
+    CreateRelation:
+      type: object
+      description: >-
+        The relation to create. It leaves the project the path names, so only
+        the other end is given here.
+      required: [target_id, relation_type]
+      properties:
+        target_id:
+          type: string
+          format: uuid
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          description: >-
+            The project the relation reaches. It has to be registered, and it
+            cannot be the project the relation leaves.
+        relation_type:
+          type: string
+          minLength: 1
+          description: >-
+            What the relation means, infrastructure_tenant for example.
+        metadata:
+          type: object
+          description: >-
+            Whatever else is worth keeping about the relation. A creation that
+            leaves it out stores the empty object.
+        valid_from:
+          type: string
+          format: date-time
+          description: >-
+            When the relation starts being valid. It defaults to the instant
+            the relation is written.
+
+    UpdateRelation:
+      type: object
+      description: >-
+        What to change about a relation. A member the request leaves out stays
+        as it is, so at least one of them has to be present.
+      minProperties: 1
+      properties:
+        metadata:
+          type: object
+          description: >-
+            The metadata the relation carries from now on. It replaces the
+            stored object wholesale rather than being merged into it, so a
+            request carrying it carries every member the relation keeps.
+        valid_to:
+          type: string
+          format: date-time
+          description: >-
+            When the relation stops being valid. It has to be after
+            `valid_from`. The member is not nullable: an open relation is
+            closed here and a closed one gets its close instant corrected,
+            while reopening a closed relation is not supported.
+
+    RelatedProject:
+      type: object
+      description: One project a traversal reached.
+      required: [project, relation_type, depth, path]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        relation_type:
+          type: string
+          description: The type of the relation the walk arrived on.
+        depth:
+          type: integer
+          description: >-
+            How many relations lie between the project the walk started from
+            and this one.
+        path:
+          type: array
+          description: >-
+            The relation ids from the start to this project in walk order, so
+            it holds `depth` of them.
+          items:
+            type: string
+            format: uuid
+
+    RelatedProjectList:
+      type: object
+      description: The projects one traversal reached.
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: The projects the walk reached, in the order it visited them.
+          items:
+            $ref: "#/components/schemas/RelatedProject"
 
     # The name avoids RejectedEvent above, which is the ingest response's item
     # and a different shape: that one names the position in the submitted batch,
