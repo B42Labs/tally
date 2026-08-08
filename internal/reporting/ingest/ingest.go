@@ -86,11 +86,23 @@ type Outcome struct {
 	Rejected   []Rejected
 }
 
+// Hook runs once per newly stored event, after the batch was folded into the
+// projection and inside the ingest transaction. An error it returns fails the
+// whole batch, so what a hook writes lands together with the events it saw or
+// not at all.
+//
+// A hook sees reconciliation-sourced events as well as collected ones, so a
+// hook that is only about what a collector reported filters on e.Source.
+type Hook interface {
+	OnEvent(ctx context.Context, e event.Stored) error
+}
+
 // Pipeline ingests batches. Its zero value is not usable; New builds one. It is
 // safe for concurrent use.
 type Pipeline struct {
 	registry          *registry.Registry
 	requireSizeSchema bool
+	hook              Hook
 }
 
 // New returns a Pipeline that validates sizes through reg. requireSizeSchema is
@@ -98,8 +110,11 @@ type Pipeline struct {
 // unvalidated, so onboarding a resource type is not blocked on registering its
 // schema first, and true refuses it, which is what a production deployment runs
 // (decision D9).
-func New(reg *registry.Registry, requireSizeSchema bool) *Pipeline {
-	return &Pipeline{registry: reg, requireSizeSchema: requireSizeSchema}
+//
+// hook is called over the events a batch stores. A nil hook calls nothing,
+// which is what Phase 1 ingests with.
+func New(reg *registry.Registry, requireSizeSchema bool, hook Hook) *Pipeline {
+	return &Pipeline{registry: reg, requireSizeSchema: requireSizeSchema, hook: hook}
 }
 
 // Ingest runs the per-item pipeline over items, stores what survives it, and
@@ -141,6 +156,10 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 	slices.SortFunc(screened, compareEvent)
 
 	grouped := map[projection.Key][]event.Stored{}
+	// What the hook is called over: the events this batch stored, in the order
+	// they were inserted in. A duplicate is not one of them, and neither is a
+	// refused item.
+	var newlyStored []event.Stored
 	for _, e := range screened {
 		stored, inserted, err := insert(ctx, q, e)
 		if err != nil {
@@ -151,6 +170,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 			continue
 		}
 		out.Accepted++
+		newlyStored = append(newlyStored, stored)
 
 		key := projection.Key{Cloud: e.Cloud, ResourceType: e.ResourceType, ResourceID: e.ResourceID}
 		grouped[key] = append(grouped[key], stored)
@@ -159,6 +179,14 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 	for _, key := range slices.SortedFunc(maps.Keys(grouped), projection.CompareKey) {
 		if err := projection.Apply(ctx, tx, key, grouped[key]); err != nil {
 			return Outcome{}, fmt.Errorf("folding the batch into the projection: %w", err)
+		}
+	}
+
+	if p.hook != nil {
+		for _, e := range newlyStored {
+			if err := p.hook.OnEvent(ctx, e); err != nil {
+				return Outcome{}, fmt.Errorf("running the post-ingest hook for event %s: %w", e.EventID, err)
+			}
 		}
 	}
 	return out, nil

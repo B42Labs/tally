@@ -523,7 +523,7 @@ func newAPIInMode(t *testing.T, s *store.Store, mode auth.Mode) api {
 		AuthMode:           mode,
 		InternalToken:      internalToken,
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
-		Pipeline:           ingest.New(registry.New(), false),
+		Pipeline:           ingest.New(registry.New(), false, nil),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)
