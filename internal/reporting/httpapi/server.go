@@ -24,6 +24,9 @@ type server struct {
 	queries *sqlcgen.Queries
 	// pipeline is what a submitted event batch is put through.
 	pipeline *ingest.Pipeline
+	// attributingTypes are the relation types the cycle guard walks. An empty
+	// list disables the guard.
+	attributingTypes []string
 }
 
 // writeJSON sends one successful response body under the 200 almost every

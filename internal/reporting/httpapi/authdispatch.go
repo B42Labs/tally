@@ -24,6 +24,15 @@ const resourceRoute = "/api/v1/resources/{cloud}/{resource_type}/{resource_id}"
 // be the pattern the generated wiring registers, letter for letter.
 const projectRoute = "/api/v1/projects/{id}"
 
+// The chi patterns the relation operations of one project are mounted under.
+// They are built from projectRoute because they hang off it, and each of them
+// has to be the pattern the generated wiring registers, letter for letter.
+const (
+	projectRelationsRoute = projectRoute + "/relations"
+	projectRelationRoute  = projectRelationsRoute + "/{relation_id}"
+	projectRelatedRoute   = projectRoute + "/related"
+)
+
 // newAuthDispatch builds the middleware that puts each route behind the guard
 // its class needs.
 //
@@ -56,6 +65,14 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodGet + " " + projectRoute:   auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
 		http.MethodPost + " /api/v1/projects": auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
 		http.MethodPatch + " " + projectRoute: auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+
+		// The relations of a project are the same structure seen from one row of
+		// it, so they are guarded the way the registry itself is.
+		http.MethodGet + " " + projectRelationsRoute:   auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
+		http.MethodGet + " " + projectRelatedRoute:     auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
+		http.MethodPost + " " + projectRelationsRoute:  auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+		http.MethodPatch + " " + projectRelationRoute:  auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+		http.MethodDelete + " " + projectRelationRoute: auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
 
 		// The dead-letter list is admin-only like the two writes above and the
 		// registration below: a refused item carries whatever a collector sent,

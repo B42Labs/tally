@@ -97,15 +97,16 @@ func run(ctx context.Context) error {
 	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil)
 
 	router, err := httpapi.NewRouter(httpapi.Options{
-		Logger:             logger,
-		DB:                 db,
-		UnhealthyThreshold: time.Duration(cfg.UnhealthyThresholdSeconds) * time.Second,
-		Queries:            queries,
-		Store:              db,
-		AuthMode:           auth.Mode(cfg.AuthMode),
-		InternalToken:      cfg.InternalToken,
-		Authenticator:      auth.NewStaticTokenAuthenticator(queries),
-		Pipeline:           pipeline,
+		Logger:                   logger,
+		DB:                       db,
+		UnhealthyThreshold:       time.Duration(cfg.UnhealthyThresholdSeconds) * time.Second,
+		Queries:                  queries,
+		Store:                    db,
+		AuthMode:                 auth.Mode(cfg.AuthMode),
+		InternalToken:            cfg.InternalToken,
+		Authenticator:            auth.NewStaticTokenAuthenticator(queries),
+		Pipeline:                 pipeline,
+		AttributingRelationTypes: cfg.AttributingRelationTypes,
 	})
 	if err != nil {
 		return fmt.Errorf("building the router: %w", err)

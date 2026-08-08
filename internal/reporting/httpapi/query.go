@@ -133,7 +133,8 @@ func filterText(value *string) pgtype.Text {
 	return pgtype.Text{String: *value, Valid: true}
 }
 
-// filterInstant maps one bound of a time window onto its query parameter.
+// filterInstant maps one optional instant onto its query parameter, whether it
+// bounds a time window or writes a column.
 func filterInstant(value *time.Time) pgtype.Timestamptz {
 	if value == nil {
 		return pgtype.Timestamptz{}

@@ -66,6 +66,11 @@ type Options struct {
 	// Pipeline ingests the batches POST /api/v1/events submits. The
 	// resource-type registry and the strict-mode flag travel inside it.
 	Pipeline *ingest.Pipeline
+	// AttributingRelationTypes are the relation types that attribute cost,
+	// which is what the cycle guard of a relation creation walks. It comes from
+	// TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES, and an empty list disables
+	// the guard.
+	AttributingRelationTypes []string
 }
 
 // NewRouter assembles the API: the middleware stack, the request validator, and
@@ -114,11 +119,12 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Use(newValidator(spec))
 
 	srv := &server{
-		db:       opts.DB,
-		health:   newHealthTracker(now, opts.UnhealthyThreshold),
-		store:    opts.Store,
-		queries:  opts.Queries,
-		pipeline: opts.Pipeline,
+		db:               opts.DB,
+		health:           newHealthTracker(now, opts.UnhealthyThreshold),
+		store:            opts.Store,
+		queries:          opts.Queries,
+		pipeline:         opts.Pipeline,
+		attributingTypes: opts.AttributingRelationTypes,
 	}
 	// The dispatch middleware is handed to the generated wrapper rather than to
 	// chi, because it needs the route chi matched to know which guard applies.
