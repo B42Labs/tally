@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
@@ -36,6 +37,7 @@ const (
 	envUnhealthyThreshold = "TALLY_REPORTING_UNHEALTHY_THRESHOLD_S"
 	envOIDCJWKSURL        = "TALLY_REPORTING_OIDC_JWKS_URL"
 	envRequireSizeSchema  = "TALLY_INGEST_REQUIRE_SIZE_SCHEMA"
+	envAttributingTypes   = "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -53,6 +55,7 @@ var EnvNames = []string{
 	envUnhealthyThreshold,
 	envOIDCJWKSURL,
 	envRequireSizeSchema,
+	envAttributingTypes,
 }
 
 // The accepted values of TALLY_REPORTING_AUTH_MODE.
@@ -108,6 +111,10 @@ type Config struct {
 	// The variable has no REPORTING infix because roadmap section WP 1.3 names
 	// it TALLY_INGEST_REQUIRE_SIZE_SCHEMA.
 	RequireSizeSchema bool `env:"TALLY_INGEST_REQUIRE_SIZE_SCHEMA" envDefault:"false"`
+	// AttributingRelationTypes are the relation types the cycle guard walks when
+	// a relation is created; an empty list disables the guard. Setting the
+	// variable to the empty string yields that empty list.
+	AttributingRelationTypes []string `env:"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES" envDefault:"infrastructure_tenant"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
@@ -141,6 +148,18 @@ func Load() (Config, error) {
 	}
 	if cfg.DBMaxConns <= 0 {
 		return Config{}, fmt.Errorf("%s: %d must be positive", envDBMaxConns, cfg.DBMaxConns)
+	}
+	// env applies the default to a variable set to the empty string, the same as
+	// to an unset one, so the raw value is what tells the two apart. Only the
+	// explicit empty value disables the cycle guard; anything else that parses
+	// into an empty entry is a stray comma, which would otherwise silently mean
+	// a relation type no relation has.
+	raw, isSet := os.LookupEnv(envAttributingTypes)
+	if isSet && raw == "" {
+		cfg.AttributingRelationTypes = []string{}
+	}
+	if slices.Contains(cfg.AttributingRelationTypes, "") {
+		return Config{}, fmt.Errorf("%s: %q must not contain an empty relation type", envAttributingTypes, raw)
 	}
 
 	return cfg, nil
