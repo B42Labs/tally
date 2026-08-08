@@ -34,7 +34,7 @@ const historySteps = 5
 // the order or the batches they arrived in.
 func TestIngestConverges(t *testing.T) {
 	db := storetest.NewDB(t)
-	pipeline := ingest.New(registry.New(), false)
+	pipeline := ingest.New(registry.New(), false, nil)
 
 	t.Run("folds every arrival order of one history into the same row", func(t *testing.T) {
 		const (

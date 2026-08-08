@@ -37,8 +37,8 @@ var (
 // one, so each of them works on a cloud and resource ids of its own.
 func TestIngest(t *testing.T) {
 	db := storetest.NewDB(t)
-	lax := ingest.New(registry.New(), false)
-	strict := ingest.New(registry.New(), true)
+	lax := ingest.New(registry.New(), false, nil)
+	strict := ingest.New(registry.New(), true, nil)
 
 	t.Run("stores the source the caller names, not the one the item claims", func(t *testing.T) {
 		res := resource{cloud: "os-ingest-source", resourceType: "volume", id: "vol-source"}

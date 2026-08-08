@@ -94,7 +94,7 @@ func run(ctx context.Context) error {
 	// The pipeline owns the registry, which caches compiled size schemas for the
 	// life of the process. Nothing else validates a size against a stored schema
 	// today.
-	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema)
+	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil)
 
 	router, err := httpapi.NewRouter(httpapi.Options{
 		Logger:             logger,
