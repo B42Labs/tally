@@ -26,14 +26,21 @@ type server struct {
 	pipeline *ingest.Pipeline
 }
 
-// writeJSON sends one successful response body. Every success this API has is a
-// 200 carrying JSON, so the status is not a parameter.
+// writeJSON sends one successful response body under the 200 almost every
+// success of this API carries.
 //
 // The documents passed here are the generated response types, so encoding fails
 // only when the connection does, and the status line is already gone by then.
 func writeJSON(w http.ResponseWriter, document any) {
+	writeJSONStatus(w, http.StatusOK, document)
+}
+
+// writeJSONStatus is writeJSON for the successes that answer another status,
+// the 201 of a registration for example. A caller that has already set response
+// headers keeps them: nothing is written before the status line here.
+func writeJSONStatus(w http.ResponseWriter, status int, document any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(document)
 }
 

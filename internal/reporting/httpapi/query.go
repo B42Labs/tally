@@ -123,8 +123,9 @@ func reachesPair(scope auth.Scope, cloud, projectID string) bool {
 	})
 }
 
-// filterText maps one optional string filter onto its query parameter. A filter
-// the request left out becomes NULL, which the query reads as every value.
+// filterText maps one optional string onto its query parameter, whether the
+// request left it out of a filter or out of a written body. Absent becomes
+// NULL, which a read takes as every value and a write stores as such.
 func filterText(value *string) pgtype.Text {
 	if value == nil {
 		return pgtype.Text{}

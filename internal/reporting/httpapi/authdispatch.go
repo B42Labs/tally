@@ -19,6 +19,11 @@ const resourceTypeRoute = "/api/v1/resource-types/{platform}/{resource_type}"
 // the generated wiring registers, letter for letter.
 const resourceRoute = "/api/v1/resources/{cloud}/{resource_type}/{resource_id}"
 
+// projectRoute is the chi pattern the two per-project operations share. It is
+// named once because the dispatch table keys two methods on it, and it has to
+// be the pattern the generated wiring registers, letter for letter.
+const projectRoute = "/api/v1/projects/{id}"
+
 // newAuthDispatch builds the middleware that puts each route behind the guard
 // its class needs.
 //
@@ -44,7 +49,15 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodGet + " " + resourceRoute + "/events":    auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodGet + " " + resourceRoute + "/lifecycle": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 
-		// The dead-letter list is the second admin-only route, next to the
+		// The project registry is the organizational structure a project scope is
+		// built out of, so no project-scoped view of it exists: reading it takes
+		// read_all, and changing it is an operator's job.
+		http.MethodGet + " /api/v1/projects":  auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
+		http.MethodGet + " " + projectRoute:   auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
+		http.MethodPost + " /api/v1/projects": auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+		http.MethodPatch + " " + projectRoute: auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+
+		// The dead-letter list is admin-only like the two writes above and the
 		// registration below: a refused item carries whatever a collector sent,
 		// which no project scope narrows.
 		http.MethodGet + " /api/v1/rejected-events": auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
