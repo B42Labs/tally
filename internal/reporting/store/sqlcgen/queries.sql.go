@@ -315,6 +315,93 @@ func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEve
 	return err
 }
 
+const listEvents = `-- name: ListEvents :many
+SELECT event_id, timestamp, received_at, event_type, platform, cloud,
+       resource_type, resource_id, project_id, source, payload
+FROM events
+WHERE ($1::text IS NULL OR cloud = $1)
+  AND ($2::text IS NULL OR platform = $2)
+  AND ($3::text IS NULL OR project_id = $3)
+  AND ($4::text IS NULL OR resource_type = $4)
+  AND ($5::text IS NULL OR event_type = $5)
+  AND ($6::text IS NULL OR source = $6)
+  AND ($7::timestamptz IS NULL OR timestamp >= $7)
+  AND ($8::timestamptz IS NULL OR timestamp < $8)
+  AND ($9::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest($9::text[]),
+                                         unnest($10::text[])))
+  -- Both bounds are cast: inside a row comparison sqlc reads the type of the
+  -- second placeholder off the first one, which would make the event id a
+  -- timestamp in the generated parameters.
+  AND ($11::timestamptz IS NULL
+       OR (timestamp, event_id) > ($11::timestamptz,
+                                   $12::text))
+ORDER BY timestamp, event_id
+LIMIT $13
+`
+
+type ListEventsParams struct {
+	Cloud         pgtype.Text
+	Platform      pgtype.Text
+	ProjectID     pgtype.Text
+	ResourceType  pgtype.Text
+	EventType     pgtype.Text
+	Source        pgtype.Text
+	FromTs        pgtype.Timestamptz
+	ToTs          pgtype.Timestamptz
+	ScopeClouds   []string
+	ScopeProjects []string
+	CursorTs      pgtype.Timestamptz
+	CursorEventID pgtype.Text
+	PageSize      int32
+}
+
+func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listEvents,
+		arg.Cloud,
+		arg.Platform,
+		arg.ProjectID,
+		arg.ResourceType,
+		arg.EventType,
+		arg.Source,
+		arg.FromTs,
+		arg.ToTs,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.CursorTs,
+		arg.CursorEventID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Event
+	for rows.Next() {
+		var i Event
+		if err := rows.Scan(
+			&i.EventID,
+			&i.Timestamp,
+			&i.ReceivedAt,
+			&i.EventType,
+			&i.Platform,
+			&i.Cloud,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.Source,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEventsForResource = `-- name: ListEventsForResource :many
 SELECT event_id, timestamp, received_at, event_type, platform, cloud,
        resource_type, resource_id, project_id, source, payload

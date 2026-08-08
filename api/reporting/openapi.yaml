@@ -71,6 +71,115 @@ paths:
           $ref: "#/components/responses/Problem"
 
   /api/v1/events:
+    get:
+      operationId: listEvents
+      summary: List stored events
+      description: >-
+        Returns every stored event, narrowed by whichever filters the request
+        carries. The order is `(timestamp, event_id)` ascending. `from` and `to`
+        select the half-open window `[from, to)` on the event timestamp: an
+        event at exactly `from` is served, one at exactly `to` is not.
+
+        One call answers one page. `items` carries the events, and
+        `next_cursor` is what the next call passes as `cursor`; a null
+        `next_cursor` is the end of the walk. The cursor holds a position and
+        nothing else, so presenting it together with other filters is well
+        defined: the filters of that call apply from that position onwards.
+
+        This list is event-scoped rather than resource-scoped. A project token
+        reads every event whose `project_id` names one of its projects,
+        including the events a resource carried before it was transferred
+        away. The per-resource reads decide on the project the projection row
+        names today, so they stop serving the resource to the old project once
+        the transfer is stored.
+      security:
+        - apiToken: []
+      parameters:
+        - name: cloud
+          in: query
+          description: Serve only the events of this cloud.
+          schema:
+            type: string
+        - name: platform
+          in: query
+          description: Serve only the events of this platform.
+          schema:
+            type: string
+        - name: project_id
+          in: query
+          description: >-
+            Serve only the events of this project, named the way its cloud
+            names it. A token asking for a project outside its scope is
+            answered 403.
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          description: Serve only the events about resources of this type.
+          schema:
+            type: string
+        - name: event_type
+          in: query
+          description: >-
+            Serve only the events of this type, volume.create for example.
+          schema:
+            type: string
+        - name: source
+          in: query
+          description: Serve only the events the named pipeline produced.
+          schema:
+            type: string
+            enum: [collector, reconciliation]
+        - name: from
+          in: query
+          description: >-
+            Serve only the events at or after this instant, the inclusive bound
+            of the window.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: >-
+            Serve only the events before this instant, the exclusive bound of
+            the window.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: How many events one page carries at most.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: cursor
+          in: query
+          description: >-
+            The `next_cursor` of the page before this one. It is opaque: a
+            client passes it back as it received it and reads nothing out of
+            it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of stored events.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
     post:
       operationId: ingestEvents
       summary: Ingest events
@@ -400,6 +509,76 @@ components:
           description: >-
             Why the item was refused, for example
             "size_schema: 'vcpus' is a required property".
+
+    StoredEvent:
+      type: object
+      description: >-
+        One event as the events table holds it: what was submitted, plus the
+        instant this API stored it.
+      required: [event_id, timestamp, event_type, platform, cloud, resource_type,
+                 resource_id, project_id, source, payload, received_at]
+      properties:
+        event_id:
+          type: string
+          description: The idempotency key the event was submitted under.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the event happened.
+        event_type:
+          type: string
+          description: >-
+            What happened, written resource.action with an optional phase, for
+            example compute.instance.create.end.
+        platform:
+          type: string
+          description: The platform the resource lives on.
+        cloud:
+          type: string
+          description: The installation the resource lives in.
+        resource_type:
+          type: string
+          description: The kind of resource the event is about.
+        resource_id:
+          type: string
+          description: The resource the event is about.
+        project_id:
+          type: string
+          description: The project owning the resource at or after this event.
+        source:
+          type: string
+          description: >-
+            Which pipeline produced the event, collector or reconciliation. It
+            is what the server recorded rather than what the submitter claimed.
+        payload:
+          type: object
+          nullable: true
+          description: >-
+            The normalized payload envelope, member for member as it was
+            stored. It is null for an event stored without one, which a delete
+            event may be. The members are not constrained here: an envelope
+            keeps the fields a provider sent beyond the ones this API names.
+        received_at:
+          type: string
+          format: date-time
+          description: When this API stored the event.
+
+    EventList:
+      type: object
+      description: One page of stored events.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: The events of this page, ordered by timestamp and event id.
+          items:
+            $ref: "#/components/schemas/StoredEvent"
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Where the next page starts, passed back as `cursor`. It is null on
+            the last page.
 
     ResourceType:
       type: object
