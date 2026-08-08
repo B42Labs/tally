@@ -641,6 +641,57 @@ func (q *Queries) ListEventsForResource(ctx context.Context, arg ListEventsForRe
 	return items, nil
 }
 
+const listRejectedEvents = `-- name: ListRejectedEvents :many
+SELECT id, received_at, reason, raw
+FROM rejected_events
+WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+  AND ($2::timestamptz IS NULL OR received_at < $2)
+  -- Both bounds are cast, for the reason the events cursor above names.
+  AND ($3::timestamptz IS NULL
+       OR (received_at, id) > ($3::timestamptz, $4::uuid))
+ORDER BY received_at, id
+LIMIT $5
+`
+
+type ListRejectedEventsParams struct {
+	FromTs   pgtype.Timestamptz
+	ToTs     pgtype.Timestamptz
+	CursorTs pgtype.Timestamptz
+	CursorID pgtype.UUID
+	PageSize int32
+}
+
+func (q *Queries) ListRejectedEvents(ctx context.Context, arg ListRejectedEventsParams) ([]RejectedEvent, error) {
+	rows, err := q.db.Query(ctx, listRejectedEvents,
+		arg.FromTs,
+		arg.ToTs,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RejectedEvent
+	for rows.Next() {
+		var i RejectedEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReceivedAt,
+			&i.Reason,
+			&i.Raw,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listResourceKeys = `-- name: ListResourceKeys :many
 SELECT DISTINCT cloud, resource_type, resource_id
 FROM events

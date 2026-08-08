@@ -176,6 +176,40 @@ func TestMigrate(t *testing.T) {
 		assertSeededResourceTypes(t, db.Store)
 	})
 
+	t.Run("a rollback repeats after one that dropped without recording", func(t *testing.T) {
+		// The index migrations run outside a transaction in both directions, so a
+		// rollback that dies after dropping the index and before goose deletes the
+		// version row leaves the index gone with the migration still recorded as
+		// applied: migrating up is then a no-op and the index never comes back.
+		// Running the rollback again is the operator's repair, and it only works
+		// if the drops tolerate the index they already dropped.
+		interrupted := db.NewSiblingDB(t, "migrate_interrupted")
+		if _, err := store.Migrate(t.Context(), interrupted); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), interrupted, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+		for _, index := range []string{"idx_events_cloud_project", "idx_rejected_events_received"} {
+			if _, err := s.Pool().Exec(t.Context(), "DROP INDEX "+index); err != nil {
+				t.Fatalf("dropping %s the way an interrupted rollback leaves it: %v", index, err)
+			}
+		}
+
+		rolledBack, err := store.MigrateDownTo(t.Context(), interrupted, 0)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(0) error = %v, want nil", err)
+		}
+		// Newest first, the order a rollback has to run in.
+		want := slices.Clone(chainVersions)
+		slices.Reverse(want)
+		if !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(0) = %v, want %v", rolledBack, want)
+		}
+	})
+
 	t.Run("rolling back the seed empties the registry", func(t *testing.T) {
 		rolledBack, err := store.MigrateDownTo(t.Context(), db.URL, 1)
 		if err != nil {
