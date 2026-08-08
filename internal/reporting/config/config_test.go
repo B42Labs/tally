@@ -13,10 +13,11 @@ import (
 	"github.com/b42labs/tally/internal/reporting/config"
 )
 
-// setEnv applies vars and blanks every other variable the package reads, so a
+// setEnv applies vars and removes every other variable the package reads, so a
 // test never inherits a value from the developer's shell. t.Setenv restores the
-// previous environment when the test ends, and a variable set to the empty
-// string falls back to its default exactly as an unset one does.
+// previous environment when the test ends; removing a variable afterwards keeps
+// that restoration intact, and it lets a test set a variable to the empty
+// string to mean the empty value rather than the default.
 func setEnv(t *testing.T, vars map[string]string) {
 	t.Helper()
 
@@ -26,7 +27,14 @@ func setEnv(t *testing.T, vars map[string]string) {
 		}
 	}
 	for _, name := range config.EnvNames {
-		t.Setenv(name, vars[name])
+		value, set := vars[name]
+		t.Setenv(name, value)
+		if set {
+			continue
+		}
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("Unsetenv(%s): %v", name, err)
+		}
 	}
 }
 
@@ -73,6 +81,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.RequireSizeSchema {
 		t.Error("RequireSizeSchema = true, want false")
 	}
+	if want := []string{"infrastructure_tenant"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
+		t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
+	}
 	if err := cfg.ValidateServer(); err != nil {
 		t.Errorf("ValidateServer() error = %v, want nil", err)
 	}
@@ -80,13 +91,14 @@ func TestLoadAppliesDefaults(t *testing.T) {
 
 func TestLoadReadsExplicitValues(t *testing.T) {
 	setEnv(t, map[string]string{
-		"TALLY_LOG_LEVEL":                       "DEBUG",
-		"TALLY_REPORTING_HTTP_PORT":             "9090",
-		"TALLY_REPORTING_DB_URL":                "postgres://tally@db/tally",
-		"TALLY_REPORTING_AUTH_MODE":             "disabled",
-		"TALLY_REPORTING_UNHEALTHY_THRESHOLD_S": "30",
-		"TALLY_REPORTING_DB_MAX_CONNS":          "4",
-		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":      "true",
+		"TALLY_LOG_LEVEL":                            "DEBUG",
+		"TALLY_REPORTING_HTTP_PORT":                  "9090",
+		"TALLY_REPORTING_DB_URL":                     "postgres://tally@db/tally",
+		"TALLY_REPORTING_AUTH_MODE":                  "disabled",
+		"TALLY_REPORTING_UNHEALTHY_THRESHOLD_S":      "30",
+		"TALLY_REPORTING_DB_MAX_CONNS":               "4",
+		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":           "true",
+		"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,same_owner",
 	})
 
 	cfg, err := config.Load()
@@ -99,6 +111,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if !cfg.RequireSizeSchema {
 		t.Error("RequireSizeSchema = false, want true")
+	}
+	if want := []string{"infrastructure_tenant", "same_owner"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
+		t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
 	}
 
 	if cfg.LogLevel != "DEBUG" {
@@ -229,9 +244,41 @@ func TestLoadRejectsNonPositiveBounds(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAttributingRelationTypes(t *testing.T) {
+	t.Run("an explicitly empty value disables the cycle guard", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_REPORTING_DB_URL":                     "postgres://tally@localhost/tally",
+			"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if len(cfg.AttributingRelationTypes) != 0 {
+			t.Errorf("AttributingRelationTypes = %q, want the empty list", cfg.AttributingRelationTypes)
+		}
+	})
+
+	t.Run("a stray comma is rejected", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_REPORTING_DB_URL":                     "postgres://tally@localhost/tally",
+			"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,,same_owner",
+		})
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES") {
+			t.Errorf("Load() error = %q, want it to name TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES", err)
+		}
+	})
+}
+
 // TestEnvNamesCoversEveryField keeps the exported list and the struct tags from
 // drifting apart. A variable missing from EnvNames is one the tests stop
-// blanking, which makes them depend on the shell they run in.
+// removing, which makes them depend on the shell they run in.
 func TestEnvNamesCoversEveryField(t *testing.T) {
 	fields := reflect.TypeFor[config.Config]()
 	tagged := make(map[string]bool, fields.NumField())
