@@ -25,6 +25,11 @@ var chainVersions = func() []int64 {
 	return versions
 }()
 
+// afterInit is every version the chain adds on top of the schema 0001 creates,
+// oldest first. It is derived rather than spelled out so that adding a migration
+// does not need the rollback tests below rewritten.
+var afterInit = chainVersions[1:]
+
 // wantTables is every table migration 0001 creates, sorted.
 var wantTables = []string{
 	"api_tokens",
@@ -176,7 +181,10 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MigrateDownTo(1) error = %v, want nil", err)
 		}
-		if want := []int64{2}; !slices.Equal(rolledBack, want) {
+		// Newest first, which is the order a rollback undoes the chain in.
+		want := slices.Clone(afterInit)
+		slices.Reverse(want)
+		if !slices.Equal(rolledBack, want) {
 			t.Errorf("MigrateDownTo(1) = %v, want %v", rolledBack, want)
 		}
 		var remaining int
@@ -222,8 +230,8 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Migrate() error = %v, want nil", err)
 		}
-		if want := []int64{2}; !slices.Equal(applied, want) {
-			t.Errorf("Migrate() = %v, want %v", applied, want)
+		if !slices.Equal(applied, afterInit) {
+			t.Errorf("Migrate() = %v, want %v", applied, afterInit)
 		}
 
 		var stored []byte

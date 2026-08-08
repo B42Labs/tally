@@ -117,3 +117,27 @@ ORDER BY cloud, resource_type, resource_id;
 
 -- name: LockResource :exec
 SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text || ':' || $3::text, 0));
+
+-- name: ListEvents :many
+SELECT event_id, timestamp, received_at, event_type, platform, cloud,
+       resource_type, resource_id, project_id, source, payload
+FROM events
+WHERE (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
+  AND (sqlc.narg('platform')::text IS NULL OR platform = sqlc.narg('platform'))
+  AND (sqlc.narg('project_id')::text IS NULL OR project_id = sqlc.narg('project_id'))
+  AND (sqlc.narg('resource_type')::text IS NULL OR resource_type = sqlc.narg('resource_type'))
+  AND (sqlc.narg('event_type')::text IS NULL OR event_type = sqlc.narg('event_type'))
+  AND (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR timestamp >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR timestamp < sqlc.narg('to_ts'))
+  AND (sqlc.narg('scope_clouds')::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                         unnest(sqlc.narg('scope_projects')::text[])))
+  -- Both bounds are cast: inside a row comparison sqlc reads the type of the
+  -- second placeholder off the first one, which would make the event id a
+  -- timestamp in the generated parameters.
+  AND (sqlc.narg('cursor_ts')::timestamptz IS NULL
+       OR (timestamp, event_id) > (sqlc.narg('cursor_ts')::timestamptz,
+                                   sqlc.narg('cursor_event_id')::text))
+ORDER BY timestamp, event_id
+LIMIT sqlc.arg('page_size');

@@ -32,6 +32,7 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodGet + " /healthz": nil,
 		http.MethodGet + " /readyz":  nil,
 
+		http.MethodGet + " /api/v1/events":  auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodPost + " /api/v1/events": auth.Ingest(opts.Queries, opts.AuthMode, Logger),
 
 		http.MethodGet + " /api/v1/resource-types": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
