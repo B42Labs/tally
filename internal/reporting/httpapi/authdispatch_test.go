@@ -62,6 +62,35 @@ func TestAuthDispatch(t *testing.T) {
 			t.Error("the list handler ran for a request carrying no credential")
 		}
 	})
+
+	t.Run("puts the resource reads behind a credential", func(t *testing.T) {
+		// The two per-resource routes are keyed on the pattern rather than on a
+		// path, so what says the table names them is a request whose path
+		// parameters carry values no rule could match.
+		for _, tc := range []struct{ pattern, path string }{
+			{pattern: "/api/v1/resources", path: "/api/v1/resources"},
+			{
+				pattern: resourceRoute + "/events",
+				path:    "/api/v1/resources/os-prod-eu1/instance/i-1/events",
+			},
+			{
+				pattern: resourceRoute + "/lifecycle",
+				path:    "/api/v1/resources/os-prod-eu1/instance/i-1/lifecycle",
+			},
+		} {
+			t.Run(tc.pattern, func(t *testing.T) {
+				ran := false
+				handler := dispatchOn(t, http.MethodGet, tc.pattern, &ran)
+
+				rec := serve(handler, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+				assertChallenged(t, rec)
+				if ran {
+					t.Error("the handler ran for a request carrying no credential")
+				}
+			})
+		}
+	})
 }
 
 // dispatchOn mounts the dispatch middleware on one chi route the way the
