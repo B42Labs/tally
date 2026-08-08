@@ -18,8 +18,8 @@ info:
   description: >-
     Event ingestion, resource inventory, and usage reporting for Tally.
     This document covers the health probes, event ingestion, the queries over
-    events, resources, and lifecycles, the resource-type registry, dead-letter
-    review, and the projection rebuild.
+    events, resources, and lifecycles, the resource-type registry, the project
+    registry, dead-letter review, and the projection rebuild.
 
 paths:
   /healthz:
@@ -537,6 +537,185 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
 
+  /api/v1/projects:
+    post:
+      operationId: createProject
+      summary: Register a project
+      description: >-
+        Registers one project. The registry is keyed by `(cloud, external_id)`:
+        a pair it already holds is answered 409 rather than replaced, so a
+        repeated registration never overwrites what an operator entered before.
+
+        The `id` the answer carries is how the other operations address the
+        project. An external id alone does not, because two clouds may name
+        different projects the same way.
+      security:
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProject"
+      responses:
+        "201":
+          description: The project as it is now registered.
+          headers:
+            Location:
+              description: The URL of the created project.
+              schema:
+                type: string
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+    get:
+      operationId: listProjects
+      summary: List the registered projects
+      description: >-
+        Returns the registered projects, narrowed by whichever filters the
+        request carries. The order is `(cloud, external_id)` ascending.
+
+        One call answers one page. `items` carries the projects, and
+        `next_cursor` is what the next call passes as `cursor`; a null
+        `next_cursor` is the end of the walk. The cursor holds a position and
+        nothing else, so presenting it together with other filters is well
+        defined: the filters of that call apply from that position onwards.
+      security:
+        - apiToken: []
+      parameters:
+        - name: platform
+          in: query
+          description: Serve only the projects of this platform.
+          schema:
+            type: string
+        - name: cloud
+          in: query
+          description: Serve only the projects of this cloud.
+          schema:
+            type: string
+        - name: external_id
+          in: query
+          description: >-
+            Serve only the projects their cloud names this way. It is not a key
+            on its own, so two clouds using the same external id are both
+            served unless `cloud` narrows the answer.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: How many projects one page carries at most.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of registered projects.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/projects/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The project, as this API names it.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    get:
+      operationId: getProject
+      summary: Read one registered project
+      security:
+        - apiToken: []
+      responses:
+        "200":
+          description: The registered project.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+    patch:
+      operationId: updateProject
+      summary: Update one registered project
+      description: >-
+        Changes the name or the metadata of one project. A member the request
+        leaves out stays as it is, and `metadata` is replaced wholesale rather
+        than merged, so a request carrying it carries every member the project
+        keeps.
+
+        Neither the platform nor the `(cloud, external_id)` key is writable
+        here. They are what the registry is keyed by, and a project that moves
+        to another cloud is a different project.
+      security:
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProject"
+      responses:
+        "200":
+          description: The project as it now stands.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
   /api/v1/rejected-events:
     get:
       operationId: listRejectedEvents
@@ -722,6 +901,18 @@ components:
               msg:
                 type: string
                 description: What is wrong with the value at that location.
+
+    # The shape every id in a path is constrained to. It lives here rather than
+    # at each parameter, so that the copies cannot drift apart; what an id names
+    # stays with the parameter, because that differs per route.
+    Uuid:
+      type: string
+      format: uuid
+      # The request validator checks a pattern and ignores an unregistered
+      # format, so the RFC 4122 shape is spelled out here as well. That is
+      # what answers a malformed id with the contract's 400 rather than
+      # letting the generated binding fail behind the validator.
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
     # This schema constrains nothing, and that is load-bearing rather than
     # sloppy. It is what the request validator applies to a whole batch, so a
@@ -1090,6 +1281,110 @@ components:
             A JSON Schema draft 2020-12 document. It is compiled before it is
             stored, so the document a registration accepts is exactly the one
             ingestion can apply later.
+
+    Project:
+      type: object
+      description: >-
+        One registered project. The registry is keyed by
+        `(cloud, external_id)`, and `id` is what the other operations address
+        the project by.
+      required: [id, platform, cloud, external_id, name, metadata, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The project, as this API names it.
+        platform:
+          type: string
+          description: The platform the project lives on, openstack for example.
+        cloud:
+          type: string
+          description: >-
+            The installation the project lives in, os-prod-eu1 for example.
+        external_id:
+          type: string
+          description: >-
+            The project as its cloud names it, which is the id an event carries.
+        name:
+          type: string
+          nullable: true
+          description: >-
+            What the project is called, null for a project registered without a
+            name.
+        metadata:
+          type: object
+          description: >-
+            Whatever else was stored about the project. It is the empty object
+            for a project registered without any.
+        created_at:
+          type: string
+          format: date-time
+          description: When the project was registered.
+
+    ProjectList:
+      type: object
+      description: One page of registered projects.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: The projects of this page, ordered by cloud and external id.
+          items:
+            $ref: "#/components/schemas/Project"
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Where the next page starts, passed back as `cursor`. It is null on
+            the last page.
+
+    CreateProject:
+      type: object
+      description: >-
+        The project to register. Its `(cloud, external_id)` pair has to be one
+        the registry does not hold yet.
+      required: [platform, cloud, external_id]
+      properties:
+        platform:
+          type: string
+          minLength: 1
+          description: The platform the project lives on, openstack for example.
+        cloud:
+          type: string
+          minLength: 1
+          description: >-
+            The installation the project lives in, os-prod-eu1 for example.
+        external_id:
+          type: string
+          minLength: 1
+          description: The project as its cloud names it.
+        name:
+          type: string
+          minLength: 1
+          description: What the project is called.
+        metadata:
+          type: object
+          description: >-
+            Whatever else is worth keeping about the project. A registration
+            that leaves it out stores the empty object.
+
+    UpdateProject:
+      type: object
+      description: >-
+        What to change about a project. A member the request leaves out stays
+        as it is, so at least one of them has to be present.
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: What the project is called from now on.
+        metadata:
+          type: object
+          description: >-
+            The metadata the project carries from now on. It replaces the
+            stored object wholesale rather than being merged into it, so a
+            request carrying it carries every member the project keeps.
 
     # The name avoids RejectedEvent above, which is the ingest response's item
     # and a different shape: that one names the position in the submitted batch,
