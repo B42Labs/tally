@@ -27,12 +27,19 @@ const (
 	TypeNotFound = "urn:tally:error:not_found"
 	// TypeMethodNotAllowed marks a known path addressed with the wrong method.
 	TypeMethodNotAllowed = "urn:tally:error:method_not_allowed"
+	// TypeConflict marks a write that collides with existing state, such as a
+	// project whose (cloud, external_id) is already registered or a relation
+	// triple that is already active.
+	TypeConflict = "urn:tally:error:conflict"
 	// TypePayloadTooLarge marks a request that carries more than the endpoint
 	// takes at once, such as an event batch above the item limit.
 	TypePayloadTooLarge = "urn:tally:error:payload_too_large"
 	// TypeHistoryTooLong marks a resource whose stored history is longer than
 	// the unpaginated per-resource reads answer at once.
 	TypeHistoryTooLong = "urn:tally:error:history_too_long"
+	// TypeRelationCycle marks a relation creation that would close a cycle over
+	// the relation types that attribute cost.
+	TypeRelationCycle = "urn:tally:error:relation_cycle"
 	// TypeInternal marks a failure the caller cannot do anything about.
 	TypeInternal = "urn:tally:error:internal"
 	// TypeUnavailable marks a dependency the service needs and cannot reach.
