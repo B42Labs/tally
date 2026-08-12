@@ -23,10 +23,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/config"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store"
@@ -92,10 +95,16 @@ func run(ctx context.Context) error {
 	defer db.Close()
 
 	queries := sqlcgen.New(db.Pool())
+	// One Prometheus registry for the process. Every component that records gets
+	// the same Metrics value, so what a batch counts and what a sync run counts
+	// land in the instruments one scrape reads.
+	promReg := prometheus.NewRegistry()
+	m := metrics.New(promReg)
+
 	// The pipeline owns the registry, which caches compiled size schemas for the
 	// life of the process. Nothing else validates a size against a stored schema
 	// today.
-	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil, nil)
+	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil, m)
 
 	// The clouds file is read here rather than per sync run, so a broken one
 	// refuses the process instead of failing every request that reaches the sync
@@ -107,7 +116,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading the clouds config: %w", err)
 	}
-	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapters, time.Now, nil)
+	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapters, time.Now, m)
 
 	router, err := httpapi.NewRouter(httpapi.Options{
 		Logger:                   logger,
@@ -121,9 +130,22 @@ func run(ctx context.Context) error {
 		Pipeline:                 pipeline,
 		AttributingRelationTypes: cfg.AttributingRelationTypes,
 		Syncer:                   syncer,
+		Metrics:                  m,
+		MetricsEnabled:           cfg.MetricsEnabled,
 	})
 	if err != nil {
 		return fmt.Errorf("building the router: %w", err)
+	}
+
+	// The gauge reports what the projection holds rather than what passed
+	// through it, so a reader of its own keeps it current. It runs only while
+	// the scrape route is served: with the instrumentation off the route answers
+	// 404, and every refresh would be a query nothing reads. The counters record
+	// either way, because the components hold this Metrics value whatever the
+	// flag says. The context is the process's, so the goroutine ends with it.
+	if cfg.MetricsEnabled {
+		go metrics.NewRefresher(db, m, logger).
+			Run(ctx, time.Duration(cfg.MetricsRefreshSeconds)*time.Second)
 	}
 
 	server := &http.Server{
