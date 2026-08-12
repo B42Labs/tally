@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -75,6 +76,53 @@ func TestRunShutsDownWhenTheContextIsCancelled(t *testing.T) {
 	}
 }
 
+// TestRunServesTheScrapeRoute holds the assembled process to what the metrics
+// switch decides: the registry every component records into is served under
+// /metrics while the switch is on, and the route is gone while it is off. The
+// database is unreachable in both cases, which the exposition does not depend
+// on.
+func TestRunServesTheScrapeRoute(t *testing.T) {
+	for name, tc := range map[string]struct {
+		enabled string
+		want    int
+	}{
+		"on by default":     {enabled: "", want: http.StatusOK},
+		"off by the switch": {enabled: "false", want: http.StatusNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			port := freePort(t)
+			env := serverEnv(port)
+			env["TALLY_METRICS_ENABLED"] = tc.enabled
+			setEnv(t, env)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- run(ctx) }()
+			waitForHealthz(t, port, done)
+
+			body, status := get(t, fmt.Sprintf("http://127.0.0.1:%d/metrics", port))
+
+			if status != tc.want {
+				t.Errorf("GET /metrics = %d, want %d (body %q)", status, tc.want, body)
+			}
+			if tc.want == http.StatusOK && !strings.Contains(body, "go_goroutines") {
+				t.Errorf("the body carries no go_goroutines series, want the exposition:\n%s", body)
+			}
+
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("run() error = %v, want nil after a cancelled context", err)
+				}
+			case <-time.After(shutdownTimeout / 2):
+				t.Fatalf("run() did not return within %v of the cancellation", shutdownTimeout/2)
+			}
+		})
+	}
+}
+
 func TestRunRefusesToStart(t *testing.T) {
 	t.Run("when the OIDC JWKS URL names an unimplemented provider", func(t *testing.T) {
 		env := serverEnv(freePort(t))
@@ -142,6 +190,24 @@ func freePort(t *testing.T) int {
 		t.Fatalf("releasing the reserved port: %v", err)
 	}
 	return addr.Port
+}
+
+// get reads one URL off the running server and returns the body and the status
+// it answered with.
+func get(t *testing.T, url string) (string, int) {
+	t.Helper()
+
+	resp, err := (&http.Client{Timeout: startupTimeout}).Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the body of %s: %v", url, err)
+	}
+	return string(body), resp.StatusCode
 }
 
 // waitForHealthz polls the liveness probe until the server answers it. A server
