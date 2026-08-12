@@ -87,6 +87,12 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.CloudsConfigPath != "" {
 		t.Errorf("CloudsConfigPath = %q, want empty", cfg.CloudsConfigPath)
 	}
+	if !cfg.MetricsEnabled {
+		t.Error("MetricsEnabled = false, want true")
+	}
+	if cfg.MetricsRefreshSeconds != 60 {
+		t.Errorf("MetricsRefreshSeconds = %d, want 60", cfg.MetricsRefreshSeconds)
+	}
 	if err := cfg.ValidateServer(); err != nil {
 		t.Errorf("ValidateServer() error = %v, want nil", err)
 	}
@@ -103,6 +109,8 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":           "true",
 		"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,same_owner",
 		"TALLY_REPORTING_CLOUDS_CONFIG":              "/etc/tally/clouds.yaml",
+		"TALLY_METRICS_ENABLED":                      "false",
+		"TALLY_REPORTING_METRICS_REFRESH_S":          "15",
 	})
 
 	cfg, err := config.Load()
@@ -135,6 +143,12 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	if want := "/etc/tally/clouds.yaml"; cfg.CloudsConfigPath != want {
 		t.Errorf("CloudsConfigPath = %q, want %q", cfg.CloudsConfigPath, want)
 	}
+	if cfg.MetricsEnabled {
+		t.Error("MetricsEnabled = true, want false")
+	}
+	if cfg.MetricsRefreshSeconds != 15 {
+		t.Errorf("MetricsRefreshSeconds = %d, want 15", cfg.MetricsRefreshSeconds)
+	}
 }
 
 func TestLoadRejectsUnparsablePort(t *testing.T) {
@@ -156,6 +170,21 @@ func TestLoadRejectsUnparsableRequireSizeSchema(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA": "banana",
 		"TALLY_REPORTING_DB_URL":           "postgres://tally@localhost/tally",
+	})
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsUnparsableMetricsEnabled(t *testing.T) {
+	setEnv(t, map[string]string{
+		"TALLY_METRICS_ENABLED":  "maybe",
+		"TALLY_REPORTING_DB_URL": "postgres://tally@localhost/tally",
 	})
 
 	_, err := config.Load()
@@ -229,6 +258,16 @@ func TestLoadRejectsNonPositiveBounds(t *testing.T) {
 			name:     "a zero pool bound leaves no connection to query with",
 			vars:     map[string]string{"TALLY_REPORTING_DB_MAX_CONNS": "0"},
 			wantText: "TALLY_REPORTING_DB_MAX_CONNS",
+		},
+		{
+			name:     "a zero metrics refresh interval leaves the refresher no interval to wait",
+			vars:     map[string]string{"TALLY_REPORTING_METRICS_REFRESH_S": "0"},
+			wantText: "TALLY_REPORTING_METRICS_REFRESH_S",
+		},
+		{
+			name:     "a negative metrics refresh interval behaves the same way",
+			vars:     map[string]string{"TALLY_REPORTING_METRICS_REFRESH_S": "-5"},
+			wantText: "TALLY_REPORTING_METRICS_REFRESH_S",
 		},
 	}
 

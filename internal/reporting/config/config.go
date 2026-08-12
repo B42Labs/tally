@@ -39,6 +39,8 @@ const (
 	envRequireSizeSchema  = "TALLY_INGEST_REQUIRE_SIZE_SCHEMA"
 	envAttributingTypes   = "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES"
 	envCloudsConfig       = "TALLY_REPORTING_CLOUDS_CONFIG"
+	envMetricsEnabled     = "TALLY_METRICS_ENABLED"
+	envMetricsRefresh     = "TALLY_REPORTING_METRICS_REFRESH_S"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -58,6 +60,8 @@ var EnvNames = []string{
 	envRequireSizeSchema,
 	envAttributingTypes,
 	envCloudsConfig,
+	envMetricsEnabled,
+	envMetricsRefresh,
 }
 
 // The accepted values of TALLY_REPORTING_AUTH_MODE.
@@ -124,6 +128,16 @@ type Config struct {
 	// answers 404. Whether the file exists and parses is checked by
 	// reconciliation.LoadConfig, not here.
 	CloudsConfigPath string `env:"TALLY_REPORTING_CLOUDS_CONFIG"`
+	// MetricsEnabled exposes the instrumentation: false makes GET /metrics answer
+	// 404 and stops the gauge refresher. The instruments still exist and keep
+	// counting either way, so turning the flag back on costs nothing and loses
+	// only the samples of the window it was off. The variable has no REPORTING
+	// infix because roadmap section 8 lists it among the common variables every
+	// service reads.
+	MetricsEnabled bool `env:"TALLY_METRICS_ENABLED" envDefault:"true"`
+	// MetricsRefreshSeconds is the interval on which the tally_current_resources
+	// gauge is re-derived from the projection.
+	MetricsRefreshSeconds int `env:"TALLY_REPORTING_METRICS_REFRESH_S" envDefault:"60"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
@@ -157,6 +171,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DBMaxConns <= 0 {
 		return Config{}, fmt.Errorf("%s: %d must be positive", envDBMaxConns, cfg.DBMaxConns)
+	}
+	if cfg.MetricsRefreshSeconds <= 0 {
+		return Config{}, fmt.Errorf("%s: %d must be positive", envMetricsRefresh, cfg.MetricsRefreshSeconds)
 	}
 	// env applies the default to a variable set to the empty string, the same as
 	// to an unset one, so the raw value is what tells the two apart. Only the
