@@ -207,7 +207,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 	}
 
 	for _, key := range slices.SortedFunc(maps.Keys(grouped), projection.CompareKey) {
-		if err := projection.Apply(ctx, tx, key, grouped[key]); err != nil {
+		if err := projection.Apply(ctx, tx, key, grouped[key], p.metrics); err != nil {
 			return Outcome{}, fmt.Errorf("folding the batch into the projection: %w", err)
 		}
 	}
