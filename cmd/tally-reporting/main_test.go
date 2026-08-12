@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -98,6 +99,14 @@ func TestRunRefusesToStart(t *testing.T) {
 		setEnv(t, env)
 
 		assertRunFails(t, "TALLY_REPORTING_DB_URL")
+	})
+
+	t.Run("when the clouds config cannot be read", func(t *testing.T) {
+		env := serverEnv(freePort(t))
+		env["TALLY_REPORTING_CLOUDS_CONFIG"] = filepath.Join(t.TempDir(), "absent.yaml")
+		setEnv(t, env)
+
+		assertRunFails(t, "loading the clouds config")
 	})
 }
 

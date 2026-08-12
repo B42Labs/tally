@@ -84,6 +84,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if want := []string{"infrastructure_tenant"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
 		t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
 	}
+	if cfg.CloudsConfigPath != "" {
+		t.Errorf("CloudsConfigPath = %q, want empty", cfg.CloudsConfigPath)
+	}
 	if err := cfg.ValidateServer(); err != nil {
 		t.Errorf("ValidateServer() error = %v, want nil", err)
 	}
@@ -99,6 +102,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_REPORTING_DB_MAX_CONNS":               "4",
 		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":           "true",
 		"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,same_owner",
+		"TALLY_REPORTING_CLOUDS_CONFIG":              "/etc/tally/clouds.yaml",
 	})
 
 	cfg, err := config.Load()
@@ -127,6 +131,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if cfg.UnhealthyThresholdSeconds != 30 {
 		t.Errorf("UnhealthyThresholdSeconds = %d, want 30", cfg.UnhealthyThresholdSeconds)
+	}
+	if want := "/etc/tally/clouds.yaml"; cfg.CloudsConfigPath != want {
+		t.Errorf("CloudsConfigPath = %q, want %q", cfg.CloudsConfigPath, want)
 	}
 }
 

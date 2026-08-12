@@ -38,6 +38,7 @@ const (
 	envOIDCJWKSURL        = "TALLY_REPORTING_OIDC_JWKS_URL"
 	envRequireSizeSchema  = "TALLY_INGEST_REQUIRE_SIZE_SCHEMA"
 	envAttributingTypes   = "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES"
+	envCloudsConfig       = "TALLY_REPORTING_CLOUDS_CONFIG"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -56,6 +57,7 @@ var EnvNames = []string{
 	envOIDCJWKSURL,
 	envRequireSizeSchema,
 	envAttributingTypes,
+	envCloudsConfig,
 }
 
 // The accepted values of TALLY_REPORTING_AUTH_MODE.
@@ -115,6 +117,13 @@ type Config struct {
 	// a relation is created; an empty list disables the guard. Setting the
 	// variable to the empty string yields that empty list.
 	AttributingRelationTypes []string `env:"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES" envDefault:"infrastructure_tenant"`
+	// CloudsConfigPath is the path to the deployment's clouds YAML, the file the
+	// reconciliation framework reads at startup to learn which clouds it can
+	// sync. It has no *_FILE companion because the value is a path already, not
+	// a secret. Unset is valid and means no clouds are configured, so every sync
+	// answers 404. Whether the file exists and parses is checked by
+	// reconciliation.LoadConfig, not here.
+	CloudsConfigPath string `env:"TALLY_REPORTING_CLOUDS_CONFIG"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
