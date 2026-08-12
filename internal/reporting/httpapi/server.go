@@ -7,6 +7,7 @@ import (
 
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -31,6 +32,11 @@ type server struct {
 	// syncer runs the reconciliation of one cloud the internal sync route asks
 	// for.
 	syncer *reconciliation.Syncer
+	// metrics holds the instruments the scrape route serves. A nil value is a
+	// build without instrumentation, which that route answers 404.
+	metrics *metrics.Metrics
+	// metricsEnabled is whether the scrape route serves the instruments at all.
+	metricsEnabled bool
 }
 
 // writeJSON sends one successful response body under the 200 almost every

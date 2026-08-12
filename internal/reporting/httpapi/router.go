@@ -32,6 +32,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -77,6 +78,13 @@ type Options struct {
 	// over the empty configuration, which answers every cloud 404, so the
 	// handler behind the route needs no nil check.
 	Syncer *reconciliation.Syncer
+	// Metrics holds the instruments GET /metrics serves. A nil value leaves the
+	// route answering 404, the way a disabled scrape route does.
+	Metrics *metrics.Metrics
+	// MetricsEnabled is whether GET /metrics serves the instruments. It comes
+	// from the deployment's configuration, so an operator can take the scrape
+	// route offline without rebuilding.
+	MetricsEnabled bool
 }
 
 // NewRouter assembles the API: the middleware stack, the request validator, and
@@ -132,6 +140,8 @@ func NewRouter(opts Options) (http.Handler, error) {
 		pipeline:         opts.Pipeline,
 		attributingTypes: opts.AttributingRelationTypes,
 		syncer:           opts.Syncer,
+		metrics:          opts.Metrics,
+		metricsEnabled:   opts.MetricsEnabled,
 	}
 	// The dispatch middleware is handed to the generated wrapper rather than to
 	// chi, because it needs the route chi matched to know which guard applies.
