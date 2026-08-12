@@ -32,6 +32,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
@@ -71,6 +72,11 @@ type Options struct {
 	// TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES, and an empty list disables
 	// the guard.
 	AttributingRelationTypes []string
+	// Syncer is the orchestrator behind POST /internal/sync/{cloud}. It is
+	// required: a deployment that configured no clouds passes a Syncer built
+	// over the empty configuration, which answers every cloud 404, so the
+	// handler behind the route needs no nil check.
+	Syncer *reconciliation.Syncer
 }
 
 // NewRouter assembles the API: the middleware stack, the request validator, and
@@ -125,6 +131,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 		queries:          opts.Queries,
 		pipeline:         opts.Pipeline,
 		attributingTypes: opts.AttributingRelationTypes,
+		syncer:           opts.Syncer,
 	}
 	// The dispatch middleware is handed to the generated wrapper rather than to
 	// chi, because it needs the route chi matched to know which guard applies.
