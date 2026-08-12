@@ -233,10 +233,9 @@ func normalizeReason(reason string) string {
 	return check
 }
 
-// The labels whose values an event decides. event.Validate bounds resource_type
-// to 512 characters and event_type to a pattern with no length limit at all,
-// and checks neither against a set of known values; state is whatever
-// payload.state spelled, which nothing checks beyond its presence.
+// The labels whose values an event decides. event.Validate bounds each of them
+// to 512 characters, which is far past what a series can carry, and checks none
+// of them against a set of known values.
 const (
 	labelResourceType = "resource_type"
 	labelEventType    = "event_type"

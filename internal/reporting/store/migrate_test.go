@@ -3,6 +3,7 @@ package store_test
 import (
 	"encoding/json"
 	"maps"
+	"math/rand/v2"
 	"reflect"
 	"slices"
 	"strings"
@@ -174,6 +175,57 @@ func TestMigrate(t *testing.T) {
 			t.Error("the events table is missing after migrating up again")
 		}
 		assertSeededResourceTypes(t, db.Store)
+	})
+
+	t.Run("the fleet index reaches a row written before the state bound", func(t *testing.T) {
+		// The operator ran the chain up to 0004, whose only index over state was
+		// idx_current_resources_type, and a collector reported a state long enough
+		// to fit next to a short resource_type there. 0005 puts platform and cloud
+		// in front of the same value, so the tuple no longer fits and the build
+		// aborts on that one row, leaving an INVALID index behind and the upgrade
+		// stuck. The lengths below are picked so the row is over the limit of the
+		// new index and well under the limit of the old one, and the values are
+		// incompressible because a btree compresses an attribute before it
+		// measures the tuple: a repeated character fits where a real state of the
+		// same length does not.
+		legacy := db.NewSiblingDB(t, "migrate_long_state")
+		if _, err := store.Migrate(t.Context(), legacy); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if _, err := store.MigrateDownTo(t.Context(), legacy, 4); err != nil {
+			t.Fatalf("MigrateDownTo(4) error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), legacy, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+		if _, err := s.Pool().Exec(t.Context(),
+			`INSERT INTO current_resources
+			   (cloud, platform, resource_type, resource_id, project_id, state,
+			    last_event_type, last_event_at)
+			 VALUES ($1, $2, 'instance', 'r-1', 'p-1', $3,
+			         'compute.instance.create.end', now())`,
+			noise(250), noise(250), noise(2300)); err != nil {
+			t.Fatalf("writing the row the old schema accepted: %v", err)
+		}
+
+		applied, err := store.Migrate(t.Context(), legacy)
+		if err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if want := []int64{5}; !slices.Equal(applied, want) {
+			t.Errorf("Migrate() = %v, want %v", applied, want)
+		}
+
+		var length int
+		if err := s.Pool().QueryRow(t.Context(),
+			`SELECT octet_length(state) FROM current_resources WHERE resource_id = 'r-1'`).Scan(&length); err != nil {
+			t.Fatalf("reading the repaired state: %v", err)
+		}
+		if length > 512 {
+			t.Errorf("state = %d bytes, want the 512 the code bounds it to at most", length)
+		}
 	})
 
 	t.Run("a rollback repeats after one that dropped without recording", func(t *testing.T) {
@@ -356,6 +408,20 @@ func TestMigrateUnreachableDatabase(t *testing.T) {
 	if prefix := "applying the migrations:"; !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("Migrate() error = %q, want it to start with %q", err, prefix)
 	}
+}
+
+// noise is n characters of text pglz gives up on, which is what a column value
+// has to be for its stored length to be the length it was written with. The
+// generator is seeded so that a failure repeats.
+func noise(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+	r := rand.New(rand.NewPCG(1, 2))
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = alphabet[r.IntN(len(alphabet))]
+	}
+	return string(out)
 }
 
 // chainStatus is the status of the whole chain with every migration in the

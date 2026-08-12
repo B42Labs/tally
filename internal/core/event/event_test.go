@@ -88,6 +88,72 @@ func TestValidateEventIDLength(t *testing.T) {
 	}
 }
 
+func TestValidateStateLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   string
+		wantErr bool
+	}{
+		{name: "one character", state: "x"},
+		{name: "512 characters", state: strings.Repeat("x", 512)},
+		{name: "513 characters", state: strings.Repeat("x", 513), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEvent()
+			e.Payload.State = &tc.state
+
+			err := e.Validate()
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatalf("Validate() = nil, want an error for a %d character state", len(tc.state))
+			case tc.wantErr && !strings.Contains(err.Error(), "payload.state"):
+				t.Fatalf("Validate() error does not mention payload.state: %v", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateEventTypeLength(t *testing.T) {
+	// The pattern holds in every case, so only the length rule can refuse them.
+	tests := []struct {
+		name      string
+		eventType string
+		wantErr   bool
+	}{
+		{name: "512 characters", eventType: strings.Repeat("a", 505) + ".create"},
+		{name: "513 characters", eventType: strings.Repeat("a", 506) + ".create", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEvent()
+			e.EventType = tc.eventType
+			// Keep the payload complete so only the type rule can fail.
+			state := "active"
+			e.Payload.State = &state
+			e.Payload.Size = map[string]any{"vcpus": 4}
+
+			err := e.Validate()
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatalf("Validate() = nil, want an error for a %d character event type", len(tc.eventType))
+			case tc.wantErr && !strings.Contains(err.Error(), "event_type"):
+				t.Fatalf("Validate() error does not mention event_type: %v", err)
+			// The reason a refused item is dead-lettered under is this text, and
+			// that column is capped by nothing but the value it quotes.
+			case tc.wantErr && strings.Contains(err.Error(), tc.eventType):
+				t.Fatalf("Validate() error carries the whole event type: %v", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestValidateEventTypePattern(t *testing.T) {
 	tests := []struct {
 		name      string

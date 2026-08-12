@@ -51,6 +51,50 @@ func (q *Queries) CompleteSyncRun(ctx context.Context, arg CompleteSyncRunParams
 	return err
 }
 
+const countCurrentResources = `-- name: CountCurrentResources :many
+SELECT platform, cloud, resource_type, state, COUNT(*) AS resources
+FROM current_resources
+GROUP BY platform, cloud, resource_type, state
+`
+
+type CountCurrentResourcesRow struct {
+	Platform     string
+	Cloud        string
+	ResourceType string
+	State        string
+	Resources    int64
+}
+
+// The fleet the projection holds, grouped the way tally_current_resources is
+// labeled. The gauge is derived from this count rather than from the events as
+// they are folded, so it cannot drift from the rows the API serves. Deleted
+// resources keep their row and are counted under state 'deleted'.
+func (q *Queries) CountCurrentResources(ctx context.Context) ([]CountCurrentResourcesRow, error) {
+	rows, err := q.db.Query(ctx, countCurrentResources)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountCurrentResourcesRow
+	for rows.Next() {
+		var i CountCurrentResourcesRow
+		if err := rows.Scan(
+			&i.Platform,
+			&i.Cloud,
+			&i.ResourceType,
+			&i.State,
+			&i.Resources,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countEventsForResource = `-- name: CountEventsForResource :one
 SELECT count(*)
 FROM (
