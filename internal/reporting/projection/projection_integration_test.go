@@ -10,8 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/projection"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
@@ -178,6 +180,24 @@ func TestApply(t *testing.T) {
 		}
 	})
 
+	t.Run("counts the replay a late event causes and nothing else", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		m := metrics.New(reg)
+		key := projection.Key{Cloud: cloud, ResourceType: "volume", ResourceID: "vol-late-counted"}
+
+		meteredIngest(t, db, key, resourceEvent(key, "vol-late-counted-create", "volume.create",
+			createTime, payloadOf("available", sizeGB(10))), m)
+		meteredIngest(t, db, key, resourceEvent(key, "vol-late-counted-delete", "volume.delete",
+			deleteTime, event.PayloadEnvelope{}), m)
+		// Both events arrived in order, so both folds took the incremental path
+		// and the counter has no sample at all.
+		assertReplays(t, reg, map[string]float64{})
+
+		meteredIngest(t, db, key, resourceEvent(key, "vol-late-counted-resize", "volume.resize",
+			resizeTime, payloadOf("available", sizeGB(20))), m)
+		assertReplays(t, reg, map[string]float64{cloud: 1})
+	})
+
 	t.Run("lets the batch applied last win a timestamp tie", func(t *testing.T) {
 		for _, order := range [][2]string{{"paused", "active"}, {"active", "paused"}} {
 			first, second := order[0], order[1]
@@ -238,13 +258,17 @@ func TestReplay(t *testing.T) {
 	})
 
 	t.Run("writes no row for a key without history", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
 		key := projection.Key{Cloud: cloud, ResourceType: "volume", ResourceID: "vol-without-history"}
 
-		replay(t, db, key)
+		meteredReplay(t, db, key, metrics.New(reg))
 
 		if _, ok := readRow(t, db, key); ok {
 			t.Error("Replay() wrote a projection row, want none for a key without events")
 		}
+		// The counter reports how often the replay path was taken, so this run
+		// counts although it wrote nothing.
+		assertReplays(t, reg, map[string]float64{cloud: 1})
 	})
 
 	t.Run("keeps the size of a resource created and deleted at one instant", func(t *testing.T) {
@@ -312,7 +336,7 @@ func TestRebuild(t *testing.T) {
 	t.Run("rebuilds every key when the filter is empty", func(t *testing.T) {
 		corrupt(t, db)
 
-		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{})
+		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{}, nil)
 		if err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
@@ -325,7 +349,7 @@ func TestRebuild(t *testing.T) {
 	t.Run("rebuilds only the cloud the filter names", func(t *testing.T) {
 		broken := corrupt(t, db)
 
-		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{Cloud: cloud})
+		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{Cloud: cloud}, nil)
 		if err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
@@ -345,7 +369,7 @@ func TestRebuild(t *testing.T) {
 		broken := corrupt(t, db)
 
 		rebuilt, err := projection.Rebuild(t.Context(), db.Store,
-			projection.Filter{ResourceType: "volume"})
+			projection.Filter{ResourceType: "volume"}, nil)
 		if err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
@@ -366,7 +390,7 @@ func TestRebuild(t *testing.T) {
 		broken := corrupt(t, db)
 
 		rebuilt, err := projection.Rebuild(t.Context(), db.Store,
-			projection.Filter{Cloud: cloud, ResourceType: "black_hole"})
+			projection.Filter{Cloud: cloud, ResourceType: "black_hole"}, nil)
 		if err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
@@ -374,6 +398,27 @@ func TestRebuild(t *testing.T) {
 			t.Errorf("Rebuild() = %d, want 0", rebuilt)
 		}
 		assertSnapshots(t, snapshots(t, db), broken)
+	})
+
+	t.Run("counts one replay per key it walks", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		// Every key the run reaches is one replay, under the cloud it belongs to,
+		// so the rows the fleet holds say what the counter has to hold. The
+		// fixtures span two clouds, which is what makes the labels tell them apart.
+		fleet := snapshots(t, db)
+		want := map[string]float64{}
+		for key := range fleet {
+			want[key.Cloud]++
+		}
+
+		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{}, metrics.New(reg))
+		if err != nil {
+			t.Fatalf("Rebuild() error = %v, want nil", err)
+		}
+		if rebuilt != len(fleet) {
+			t.Errorf("Rebuild() = %d, want %d", rebuilt, len(fleet))
+		}
+		assertReplays(t, reg, want)
 	})
 
 	t.Run("replays a fleet that spans more than one transaction", func(t *testing.T) {
@@ -402,7 +447,7 @@ func TestRebuild(t *testing.T) {
 		}
 		corrupt(t, db)
 
-		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{Cloud: batched})
+		rebuilt, err := projection.Rebuild(t.Context(), db.Store, projection.Filter{Cloud: batched}, nil)
 		if err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
@@ -482,13 +527,21 @@ func record(t *testing.T, db storetest.DB, e event.Event) event.Stored {
 }
 
 // ingest records e and folds it into the projection, which is the way one event
-// travels through the pipeline.
+// travels through the pipeline. It records no metrics, which is what a test
+// asserting on rows alone needs.
 func ingest(t *testing.T, db storetest.DB, key projection.Key, e event.Event) {
+	t.Helper()
+
+	meteredIngest(t, db, key, e, nil)
+}
+
+// meteredIngest is ingest with m recording what the fold counts.
+func meteredIngest(t *testing.T, db storetest.DB, key projection.Key, e event.Event, m *metrics.Metrics) {
 	t.Helper()
 
 	stored := record(t, db, e)
 	if err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
-		return projection.Apply(t.Context(), tx, key, []event.Stored{stored})
+		return projection.Apply(t.Context(), tx, key, []event.Stored{stored}, m)
 	}); err != nil {
 		t.Fatalf("Apply() error = %v, want nil", err)
 	}
@@ -498,11 +551,55 @@ func ingest(t *testing.T, db storetest.DB, key projection.Key, e event.Event) {
 func replay(t *testing.T, db storetest.DB, key projection.Key) {
 	t.Helper()
 
+	meteredReplay(t, db, key, nil)
+}
+
+// meteredReplay is replay with m recording what the fold counts.
+func meteredReplay(t *testing.T, db storetest.DB, key projection.Key, m *metrics.Metrics) {
+	t.Helper()
+
 	if err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
-		return projection.Replay(t.Context(), tx, key)
+		return projection.Replay(t.Context(), tx, key, m)
 	}); err != nil {
 		t.Fatalf("Replay() error = %v, want nil", err)
 	}
+}
+
+// assertReplays fails the test unless the registry exports exactly want for
+// tally_projection_replays_total. Comparing the whole map also states which
+// clouds counted nothing.
+func assertReplays(t *testing.T, reg *prometheus.Registry, want map[string]float64) {
+	t.Helper()
+
+	if got := replays(t, reg); !reflect.DeepEqual(got, want) {
+		t.Errorf("tally_projection_replays_total = %v, want %v", got, want)
+	}
+}
+
+// replays is every sample the registry exports for
+// tally_projection_replays_total, keyed by the cloud it counts.
+func replays(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering the registry: %v", err)
+	}
+
+	found := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "tally_projection_replays_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "cloud" {
+					found[label.GetValue()] = metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return found
 }
 
 // corrupt overwrites the state of every projection row, which is the drift a

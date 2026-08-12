@@ -238,7 +238,7 @@ func TestSync(t *testing.T) {
 		// one wrote. A replay that read the resurrection as a deletion would send
 		// the next run around the same drift, under one more event id every time.
 		if _, err := projection.Rebuild(t.Context(), db.Store,
-			projection.Filter{Cloud: cloud}); err != nil {
+			projection.Filter{Cloud: cloud}, nil); err != nil {
 			t.Fatalf("Rebuild() error = %v, want nil", err)
 		}
 		row := rowOf(t, db, cloud, typeShare, "share-back")

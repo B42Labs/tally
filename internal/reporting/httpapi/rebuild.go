@@ -61,7 +61,7 @@ func (s *server) RebuildProjection(w http.ResponseWriter, r *http.Request) {
 	runCtx, cancel := context.WithTimeout(ctx, rebuildBudget)
 	defer cancel()
 
-	rebuilt, err := projection.Rebuild(runCtx, s.store, filter)
+	rebuilt, err := projection.Rebuild(runCtx, s.store, filter, s.metrics)
 	if err != nil {
 		// How far the run got is the only thing that tells a rebuild which did
 		// nothing from one which did most of the fleet, and a run that stops

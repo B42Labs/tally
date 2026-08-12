@@ -39,6 +39,7 @@ import (
 
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/core/timeline"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
@@ -85,7 +86,9 @@ type Filter struct {
 // last_event_at. One that does is a late event, which the incremental fold
 // cannot place, so the call turns into a Replay of the whole history. An empty
 // batch changes nothing.
-func Apply(ctx context.Context, tx pgx.Tx, key Key, newEvents []event.Stored) error {
+//
+// m counts the replay a late event causes. A nil m records nothing.
+func Apply(ctx context.Context, tx pgx.Tx, key Key, newEvents []event.Stored, m *metrics.Metrics) error {
 	if len(newEvents) == 0 {
 		return nil
 	}
@@ -103,7 +106,7 @@ func Apply(ctx context.Context, tx pgx.Tx, key Key, newEvents []event.Stored) er
 	slices.SortStableFunc(ordered, timeline.Compare)
 
 	if found && ordered[0].Timestamp.Before(current.lastEventAt) {
-		return Replay(ctx, tx, key)
+		return Replay(ctx, tx, key, m)
 	}
 
 	for _, e := range ordered {
@@ -123,7 +126,14 @@ func Apply(ctx context.Context, tx pgx.Tx, key Key, newEvents []event.Stored) er
 // The advisory lock is taken here as well. It is reentrant within a transaction,
 // so the Apply path that lands here pays nothing for it, and taking it is what
 // keeps a rebuild from folding a resource another transaction is ingesting.
-func Replay(ctx context.Context, tx pgx.Tx, key Key) error {
+//
+// m counts the replay. A nil m records nothing.
+func Replay(ctx context.Context, tx pgx.Tx, key Key, m *metrics.Metrics) error {
+	// Every replay counts, including one that finds no history and writes no row:
+	// what the counter reports is how often this path was taken, not how many
+	// rows came out of it.
+	m.ProjectionReplayed(key.Cloud)
+
 	q := sqlcgen.New(tx)
 	if err := lock(ctx, q, key); err != nil {
 		return err
@@ -206,7 +216,9 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key) error {
 // The keys are listed outside a transaction and replayed in batches, one
 // transaction each. A run that fails partway returns the keys it got through
 // along with the error, and repeating it costs only the work it redoes.
-func Rebuild(ctx context.Context, s *store.Store, filter Filter) (int, error) {
+//
+// m counts one replay per key the run reaches. A nil m records nothing.
+func Rebuild(ctx context.Context, s *store.Store, filter Filter, m *metrics.Metrics) (int, error) {
 	rows, err := sqlcgen.New(s.Pool()).ListResourceKeys(ctx, sqlcgen.ListResourceKeysParams{
 		Cloud:        text(filter.Cloud),
 		ResourceType: text(filter.ResourceType),
@@ -229,7 +241,7 @@ func Rebuild(ctx context.Context, s *store.Store, filter Filter) (int, error) {
 	for batch := range slices.Chunk(keys, rebuildBatchSize) {
 		if err := s.WithTx(ctx, func(tx pgx.Tx) error {
 			for _, key := range batch {
-				if err := Replay(ctx, tx, key); err != nil {
+				if err := Replay(ctx, tx, key, m); err != nil {
 					return err
 				}
 			}
