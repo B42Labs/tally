@@ -343,3 +343,52 @@ ORDER BY source_id, created_at, id;
 -- cannot each pass the cycle walk and leave a cycle behind.
 -- name: LockAttributingRelations :exec
 SELECT pg_advisory_xact_lock(hashtextextended('project_relations:attributing', 0));
+
+-- The run row is written before the adapter is called, so that a run in flight
+-- can be seen while it works: status defaults to 'running' in the schema, and
+-- the row is left at that value until the run finishes.
+-- name: InsertSyncRun :one
+INSERT INTO sync_runs (cloud)
+VALUES ($1)
+RETURNING id;
+
+-- name: CompleteSyncRun :exec
+UPDATE sync_runs
+SET status = $2, stats = $3, completed_at = now()
+WHERE id = $1;
+
+-- Reads a finished run back, for the tests that compare the stored row against
+-- the response the sync returned.
+-- name: GetSyncRun :one
+SELECT id, cloud, started_at, completed_at, status, stats
+FROM sync_runs
+WHERE id = $1;
+
+-- Where an incremental sync starts. The bound is the previous run's started_at
+-- rather than its completed_at, so that the window overlaps that run and a
+-- change made while it was working cannot fall between the two.
+-- name: GetLastCompletedSyncStartedAt :one
+SELECT started_at
+FROM sync_runs
+WHERE cloud = $1 AND status = 'completed'
+ORDER BY started_at DESC
+LIMIT 1;
+
+-- The stored side of the reconciliation diff, in the six columns the diff
+-- reads. Deleted resources are part of the answer: one the adapter reports
+-- again has come back, and telling that apart from a first sighting needs the
+-- row. last_event_at is what a correction has to be dated past to reach the
+-- row at all: one the fold orders before it replays the history instead.
+-- name: ListCurrentResourcesByCloud :many
+SELECT resource_type, resource_id, project_id, state, size, last_event_at
+FROM current_resources
+WHERE cloud = $1;
+
+-- Keeps two syncs of one cloud from running at once. The lock is held for the
+-- session rather than for the transaction, as LockResource is, because a run
+-- spans several transactions.
+-- name: TrySyncLock :one
+SELECT pg_try_advisory_lock(hashtextextended('sync:' || $1::text, 0));
+
+-- name: UnlockSync :exec
+SELECT pg_advisory_unlock(hashtextextended('sync:' || $1::text, 0));

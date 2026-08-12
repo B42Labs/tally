@@ -34,6 +34,23 @@ func (q *Queries) CloseProjectRelation(ctx context.Context, arg CloseProjectRela
 	return result.RowsAffected(), nil
 }
 
+const completeSyncRun = `-- name: CompleteSyncRun :exec
+UPDATE sync_runs
+SET status = $2, stats = $3, completed_at = now()
+WHERE id = $1
+`
+
+type CompleteSyncRunParams struct {
+	ID     uuid.UUID
+	Status string
+	Stats  []byte
+}
+
+func (q *Queries) CompleteSyncRun(ctx context.Context, arg CompleteSyncRunParams) error {
+	_, err := q.db.Exec(ctx, completeSyncRun, arg.ID, arg.Status, arg.Stats)
+	return err
+}
+
 const countEventsForResource = `-- name: CountEventsForResource :one
 SELECT count(*)
 FROM (
@@ -288,6 +305,24 @@ func (q *Queries) GetIngestCredentialForUpdate(ctx context.Context, id uuid.UUID
 	return i, err
 }
 
+const getLastCompletedSyncStartedAt = `-- name: GetLastCompletedSyncStartedAt :one
+SELECT started_at
+FROM sync_runs
+WHERE cloud = $1 AND status = 'completed'
+ORDER BY started_at DESC
+LIMIT 1
+`
+
+// Where an incremental sync starts. The bound is the previous run's started_at
+// rather than its completed_at, so that the window overlaps that run and a
+// change made while it was working cannot fall between the two.
+func (q *Queries) GetLastCompletedSyncStartedAt(ctx context.Context, cloud string) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getLastCompletedSyncStartedAt, cloud)
+	var started_at pgtype.Timestamptz
+	err := row.Scan(&started_at)
+	return started_at, err
+}
+
 const getProject = `-- name: GetProject :one
 SELECT id, platform, cloud, external_id, name, metadata, created_at
 FROM projects
@@ -428,6 +463,28 @@ func (q *Queries) GetResourceType(ctx context.Context, arg GetResourceTypeParams
 		&i.ResourceType,
 		&i.SizeSchema,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getSyncRun = `-- name: GetSyncRun :one
+SELECT id, cloud, started_at, completed_at, status, stats
+FROM sync_runs
+WHERE id = $1
+`
+
+// Reads a finished run back, for the tests that compare the stored row against
+// the response the sync returned.
+func (q *Queries) GetSyncRun(ctx context.Context, id uuid.UUID) (SyncRun, error) {
+	row := q.db.QueryRow(ctx, getSyncRun, id)
+	var i SyncRun
+	err := row.Scan(
+		&i.ID,
+		&i.Cloud,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Status,
+		&i.Stats,
 	)
 	return i, err
 }
@@ -585,6 +642,22 @@ func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEve
 	return err
 }
 
+const insertSyncRun = `-- name: InsertSyncRun :one
+INSERT INTO sync_runs (cloud)
+VALUES ($1)
+RETURNING id
+`
+
+// The run row is written before the adapter is called, so that a run in flight
+// can be seen while it works: status defaults to 'running' in the schema, and
+// the row is left at that value until the run finishes.
+func (q *Queries) InsertSyncRun(ctx context.Context, cloud string) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, insertSyncRun, cloud)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const listActiveAttributingRelations = `-- name: ListActiveAttributingRelations :many
 SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to,
        created_at
@@ -709,6 +782,53 @@ func (q *Queries) ListCurrentResources(ctx context.Context, arg ListCurrentResou
 			&i.LastEventType,
 			&i.LastEventAt,
 			&i.LastPayload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCurrentResourcesByCloud = `-- name: ListCurrentResourcesByCloud :many
+SELECT resource_type, resource_id, project_id, state, size, last_event_at
+FROM current_resources
+WHERE cloud = $1
+`
+
+type ListCurrentResourcesByCloudRow struct {
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	State        string
+	Size         []byte
+	LastEventAt  pgtype.Timestamptz
+}
+
+// The stored side of the reconciliation diff, in the six columns the diff
+// reads. Deleted resources are part of the answer: one the adapter reports
+// again has come back, and telling that apart from a first sighting needs the
+// row. last_event_at is what a correction has to be dated past to reach the
+// row at all: one the fold orders before it replays the history instead.
+func (q *Queries) ListCurrentResourcesByCloud(ctx context.Context, cloud string) ([]ListCurrentResourcesByCloudRow, error) {
+	rows, err := q.db.Query(ctx, listCurrentResourcesByCloud, cloud)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCurrentResourcesByCloudRow
+	for rows.Next() {
+		var i ListCurrentResourcesByCloudRow
+		if err := rows.Scan(
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.State,
+			&i.Size,
+			&i.LastEventAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1208,6 +1328,29 @@ WHERE id = $1 AND revoked_at IS NULL
 
 func (q *Queries) RevokeIngestCredential(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, revokeIngestCredential, id)
+	return err
+}
+
+const trySyncLock = `-- name: TrySyncLock :one
+SELECT pg_try_advisory_lock(hashtextextended('sync:' || $1::text, 0))
+`
+
+// Keeps two syncs of one cloud from running at once. The lock is held for the
+// session rather than for the transaction, as LockResource is, because a run
+// spans several transactions.
+func (q *Queries) TrySyncLock(ctx context.Context, dollar_1 string) (bool, error) {
+	row := q.db.QueryRow(ctx, trySyncLock, dollar_1)
+	var pg_try_advisory_lock bool
+	err := row.Scan(&pg_try_advisory_lock)
+	return pg_try_advisory_lock, err
+}
+
+const unlockSync = `-- name: UnlockSync :exec
+SELECT pg_advisory_unlock(hashtextextended('sync:' || $1::text, 0))
+`
+
+func (q *Queries) UnlockSync(ctx context.Context, dollar_1 string) error {
+	_, err := q.db.Exec(ctx, unlockSync, dollar_1)
 	return err
 }
 
