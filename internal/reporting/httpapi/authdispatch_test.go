@@ -30,8 +30,8 @@ func TestAuthDispatch(t *testing.T) {
 		}
 	})
 
-	t.Run("serves the probes without demanding a credential", func(t *testing.T) {
-		for _, pattern := range []string{"/healthz", "/readyz"} {
+	t.Run("serves the probes and the scrape route without a credential", func(t *testing.T) {
+		for _, pattern := range []string{"/healthz", "/readyz", "/metrics"} {
 			t.Run(pattern, func(t *testing.T) {
 				ran := false
 				handler := dispatchOn(t, http.MethodGet, pattern, &ran)
@@ -42,7 +42,7 @@ func TestAuthDispatch(t *testing.T) {
 					t.Errorf("status = %d, want %d (body %q)", got, http.StatusNoContent, rec.Body)
 				}
 				if !ran {
-					t.Error("the probe handler did not run, want it served without a credential")
+					t.Error("the handler did not run, want the route served without a credential")
 				}
 			})
 		}

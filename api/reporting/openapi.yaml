@@ -70,6 +70,37 @@ paths:
         "503":
           $ref: "#/components/responses/Problem"
 
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Service metrics
+      description: >-
+        Serves the instruments of this service in the Prometheus exposition
+        format: the nine `tally_` series over the ingest, projection, and
+        reconciliation paths, together with the Go runtime and process
+        collectors.
+
+        The route carries no credential, which is what
+        roadmap/00-conventions.md section 7 asks of every service, and the
+        Gateway publishes `/api/v1` alone, so it stays reachable from inside
+        the cluster only. A deployment whose configuration turns the
+        instrumentation off is answered 404 here.
+      responses:
+        "200":
+          description: The current values of this service's instruments.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: tally_events_ingested_total 0
+        "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
   /api/v1/events:
     get:
       operationId: listEvents
