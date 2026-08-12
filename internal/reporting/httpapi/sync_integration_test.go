@@ -264,7 +264,7 @@ func syncerOver(s *store.Store, cloud string, fake *syncFake) *reconciliation.Sy
 	cfg := reconciliation.Config{Clouds: []reconciliation.CloudConfig{{
 		Cloud: cloud, Platform: fixturePlatform, Adapter: syncAdapterName,
 	}}}
-	return reconciliation.New(s, ingest.New(registry.New(), false, nil), cfg,
+	return reconciliation.New(s, ingest.New(registry.New(), false, nil, nil), cfg,
 		map[string]reconciliation.Adapter{syncAdapterName: fake}, time.Now)
 }
 
@@ -285,7 +285,7 @@ func newSyncAPI(t *testing.T, s *store.Store, syncer *reconciliation.Syncer) api
 		AuthMode:           auth.ModeEnforced,
 		InternalToken:      internalToken,
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
-		Pipeline:           ingest.New(registry.New(), false, nil),
+		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer:             syncer,
 	})
 	if err != nil {

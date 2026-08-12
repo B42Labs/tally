@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/projection"
 	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
@@ -38,8 +42,8 @@ var (
 // one, so each of them works on a cloud and resource ids of its own.
 func TestIngest(t *testing.T) {
 	db := storetest.NewDB(t)
-	lax := ingest.New(registry.New(), false, nil)
-	strict := ingest.New(registry.New(), true, nil)
+	lax := ingest.New(registry.New(), false, nil, nil)
+	strict := ingest.New(registry.New(), true, nil, nil)
 
 	t.Run("stores the source the caller names, not the one the item claims", func(t *testing.T) {
 		res := resource{cloud: "os-ingest-source", resourceType: "volume", id: "vol-source"}
@@ -419,7 +423,7 @@ func TestIngestCallsTheHookOncePerStoredEvent(t *testing.T) {
 	// so the recorder only ever sees that batch.
 	create := res.event("vol-hook-create", "volume.create", createTime,
 		payloadOf("available", volumeSize(10)))
-	assertOutcome(t, batch(t, db, ingest.New(registry.New(), false, nil),
+	assertOutcome(t, batch(t, db, ingest.New(registry.New(), false, nil, nil),
 		[]json.RawMessage{item(t, create)}, event.SourceCollector, nil),
 		ingest.Outcome{Accepted: 1})
 
@@ -437,7 +441,7 @@ func TestIngestCallsTheHookOncePerStoredEvent(t *testing.T) {
 			payloadOf("available", nil))),
 	}
 
-	out := batch(t, db, ingest.New(registry.New(), false, hook), items,
+	out := batch(t, db, ingest.New(registry.New(), false, hook, nil), items,
 		event.SourceCollector, nil)
 
 	if out.Accepted != 2 || out.Duplicates != 1 || len(out.Rejected) != 1 {
@@ -464,7 +468,7 @@ func TestIngestCallsTheHookOncePerStoredEvent(t *testing.T) {
 func TestIngestTakesTheBatchWithoutAHook(t *testing.T) {
 	db := storetest.NewDB(t)
 	res := resource{cloud: "os-ingest-hookless", resourceType: "volume", id: "vol-hookless"}
-	pipeline := ingest.New(registry.New(), false, nil)
+	pipeline := ingest.New(registry.New(), false, nil, nil)
 
 	create := item(t, res.event("vol-hookless-create", "volume.create", createTime,
 		payloadOf("available", volumeSize(10))))
@@ -498,7 +502,7 @@ func TestIngestFailsTheBatchWhenTheHookErrs(t *testing.T) {
 	// The hook takes the first event and refuses the one after it, so the batch
 	// fails once it has already stored rows.
 	hook := &failingHook{succeed: 1}
-	pipeline := ingest.New(registry.New(), false, hook)
+	pipeline := ingest.New(registry.New(), false, hook, nil)
 
 	items := []json.RawMessage{
 		item(t, res.event("vol-hook-error-create", "volume.create", createTime,
@@ -536,6 +540,192 @@ func TestIngestFailsTheBatchWhenTheHookErrs(t *testing.T) {
 	if got := deadLetters(t, db, res.cloud); got != 0 {
 		t.Errorf("dead-letter rows = %d, want the batch rolled back, 0", got)
 	}
+}
+
+// The series the pipeline records a batch under.
+const (
+	ingestedSeries     = "tally_events_ingested_total"
+	deduplicatedSeries = "tally_events_deduplicated_total"
+	rejectedSeries     = "tally_events_rejected_total"
+	unvalidatedSeries  = "tally_ingest_unvalidated_size_total"
+)
+
+// countedSeries is all four of them, which the assertions over a batch that
+// counted nothing read at once.
+var countedSeries = []string{ingestedSeries, deduplicatedSeries, rejectedSeries, unvalidatedSeries}
+
+// TestIngestCounts holds the pipeline to what it reports about a batch: one
+// count per stored event, per duplicate, per refusal, and per size it took
+// unvalidated, and nothing at all for a batch that never committed.
+func TestIngestCounts(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	t.Run("counts what a mixed batch stored, dropped, and refused", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-count-mixed", resourceType: "volume", id: "vol-count-mixed"}
+		// The event the metered batch repeats is stored by a pipeline that counts
+		// nothing, so the registry below sees that batch alone.
+		create := item(t, res.event("vol-count-create", "volume.create", createTime,
+			payloadOf("available", volumeSize(10))))
+		assertOutcome(t, batch(t, db, ingest.New(registry.New(), false, nil, nil),
+			[]json.RawMessage{create}, event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		// The timestamp is a number rather than an instant, so the item does not
+		// decode and names no cloud the refusal could be counted under.
+		undecodable := json.RawMessage(`{"event_id": "vol-count-undecodable", "timestamp": 42,
+			"event_type": "volume.create", "platform": "openstack", "cloud": "os-ingest-count-mixed",
+			"resource_type": "volume", "resource_id": "vol-count-mixed", "project_id": "project-a",
+			"payload": {"state": "available"}}`)
+		pipeline, reg := metered(t, false, nil)
+
+		out := batch(t, db, pipeline, []json.RawMessage{
+			item(t, res.event("vol-count-resize", "volume.resize", updateTime,
+				payloadOf("available", volumeSize(20)))),
+			create,
+			undecodable,
+			item(t, res.event("vol-count-pause", "volume.update", deleteTime,
+				payloadOf("paused", nil))),
+		}, event.SourceCollector, nil)
+
+		if out.Accepted != 2 || out.Duplicates != 1 || len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() = %+v, want 2 accepted, 1 duplicate and 1 refused item", out)
+		}
+		assertSamples(t, reg, ingestedSeries, map[string]float64{
+			ingestedLabels(res, "volume.resize"): 1,
+			ingestedLabels(res, "volume.update"): 1,
+		})
+		assertSamples(t, reg, deduplicatedSeries, map[string]float64{
+			`cloud="os-ingest-count-mixed"`: 1,
+		})
+		assertSamples(t, reg, rejectedSeries, map[string]float64{
+			`cloud="",reason="schema"`: 1,
+		})
+	})
+
+	t.Run("counts a refusal under the cloud the credential authenticated for", func(t *testing.T) {
+		const credentialCloud = "os-ingest-count-scope"
+		res := resource{cloud: credentialCloud, resourceType: "volume", id: "vol-count-scope"}
+		// What a refused item names is bounded in neither length nor number of
+		// distinct values: the item never passed Validate, so the 512-character
+		// cap on an identifier never applied to it either. Counting it would let
+		// a credential holder mint a series per item on a counter that evicts
+		// nothing. The first item below is refused for naming another cloud, the
+		// second for naming one no column could hold.
+		foreign := resource{
+			cloud:        credentialCloud + "-foreign",
+			resourceType: "volume",
+			id:           "vol-count-scope-foreign",
+		}
+		oversized := resource{
+			cloud:        strings.Repeat("f", 4096),
+			resourceType: "volume",
+			id:           "vol-count-scope-oversized",
+		}
+		pipeline, reg := metered(t, false, nil)
+
+		out := batch(t, db, pipeline, []json.RawMessage{
+			item(t, foreign.event("vol-count-scope-foreign", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+			item(t, oversized.event("vol-count-scope-oversized", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+			item(t, res.event("vol-count-scope-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+		}, event.SourceCollector, &ingest.Scope{Platform: platform, Cloud: credentialCloud})
+
+		if out.Accepted != 1 || len(out.Rejected) != 2 {
+			t.Fatalf("Ingest() = %+v, want both foreign events refused and their sibling stored", out)
+		}
+		assertSamples(t, reg, rejectedSeries, map[string]float64{
+			fmt.Sprintf(`cloud=%q,reason="scope"`, credentialCloud):  1,
+			fmt.Sprintf(`cloud=%q,reason="schema"`, credentialCloud): 1,
+		})
+	})
+
+	t.Run("counts an unregistered size as a refusal in strict mode", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-count-strict", resourceType: "black_hole", id: "bh-count-strict"}
+		pipeline, reg := metered(t, true, nil)
+
+		// Strict mode is what a production deployment runs, and a production
+		// deployment authenticates, so the refusal is counted under the cloud the
+		// credential carries. A caller without one leaves the label empty rather
+		// than taking what the refused item claimed.
+		out := batch(t, db, pipeline, []json.RawMessage{
+			item(t, res.event("bh-count-strict-create", "black_hole.create", createTime,
+				payloadOf("active", map[string]any{"mass_kg": 12}))),
+		}, event.SourceCollector, &ingest.Scope{Platform: platform, Cloud: res.cloud})
+
+		if out.Accepted != 0 || len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() = %+v, want the event refused", out)
+		}
+		assertSamples(t, reg, rejectedSeries, map[string]float64{
+			`cloud="os-ingest-count-strict",reason="size_schema"`: 1,
+		})
+		// A size the strict mode refused was never taken, validated or not.
+		assertSamples(t, reg, unvalidatedSeries, map[string]float64{})
+		assertSamples(t, reg, ingestedSeries, map[string]float64{})
+	})
+
+	t.Run("counts the size it took unvalidated in lax mode", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-count-lax", resourceType: "black_hole", id: "bh-count-lax"}
+		pipeline, reg := metered(t, false, nil)
+
+		// The resource type is registered nowhere, so the create carries a size no
+		// schema validated. The update carries none, which is nothing to validate.
+		out := batch(t, db, pipeline, []json.RawMessage{
+			item(t, res.event("bh-count-lax-create", "black_hole.create", createTime,
+				payloadOf("active", map[string]any{"mass_kg": 12}))),
+			item(t, res.event("bh-count-lax-pause", "black_hole.update", updateTime,
+				payloadOf("paused", nil))),
+		}, event.SourceCollector, nil)
+
+		assertOutcome(t, out, ingest.Outcome{Accepted: 2})
+		assertSamples(t, reg, unvalidatedSeries, map[string]float64{
+			`platform="openstack",resource_type="black_hole"`: 1,
+		})
+		assertSamples(t, reg, ingestedSeries, map[string]float64{
+			ingestedLabels(res, "black_hole.create"): 1,
+			ingestedLabels(res, "black_hole.update"): 1,
+		})
+		assertSamples(t, reg, rejectedSeries, map[string]float64{})
+	})
+
+	t.Run("counts nothing for a batch that failed", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-count-failed", resourceType: "volume", id: "vol-count-failed"}
+		// The hook takes the first event and refuses the one after it, so the
+		// batch fails once it has stored rows and refused an item.
+		pipeline, reg := metered(t, false, &failingHook{succeed: 1})
+		items := []json.RawMessage{
+			item(t, res.event("vol-count-failed-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+			item(t, res.event("vol-count-failed-resize", "volume.resize", updateTime,
+				payloadOf("available", volumeSize(20)))),
+			item(t, res.event("vol-count-failed-refused", "volume-update", updateTime,
+				payloadOf("available", nil))),
+		}
+
+		err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
+			_, err := pipeline.Ingest(t.Context(), tx, items, event.SourceCollector, nil)
+			return err
+		})
+
+		if !errors.Is(err, errHookRefused) {
+			t.Fatalf("Ingest() error = %v, want it wrapping %v", err, errHookRefused)
+		}
+		// The transaction took the rows down with it, and a counter the batch had
+		// already moved would have stayed up.
+		if got := seriesCount(t, reg, countedSeries...); got != 0 {
+			t.Errorf("the registry exports %d ingest series, want none for a rolled back batch", got)
+		}
+	})
+
+	t.Run("counts nothing for an empty batch", func(t *testing.T) {
+		pipeline, reg := metered(t, false, nil)
+
+		assertOutcome(t, batch(t, db, pipeline, nil, event.SourceCollector, nil), ingest.Outcome{})
+
+		if got := seriesCount(t, reg, countedSeries...); got != 0 {
+			t.Errorf("the registry exports %d ingest series, want none for an empty batch", got)
+		}
+	})
 }
 
 // recordingHook keeps every event it was called with, in the order the calls
@@ -832,4 +1022,68 @@ func resourceState(t *testing.T, db storetest.DB, key projection.Key) (string, b
 		t.Fatalf("reading the projection row of %s: %v", key.ResourceID, err)
 	}
 	return state, true
+}
+
+// metered builds a pipeline recording into a registry of its own, so what one
+// subtest counts stays out of every other.
+func metered(t *testing.T, requireSizeSchema bool, hook ingest.Hook) (*ingest.Pipeline, *prometheus.Registry) {
+	t.Helper()
+
+	reg := prometheus.NewRegistry()
+	return ingest.New(registry.New(), requireSizeSchema, hook, metrics.New(reg)), reg
+}
+
+// ingestedLabels is the label set tally_events_ingested_total carries for one
+// event of res that a collector reported.
+func ingestedLabels(res resource, eventType string) string {
+	return fmt.Sprintf("cloud=%q,event_type=%q,platform=%q,resource_type=%q,source=%q",
+		res.cloud, eventType, platform, res.resourceType, event.SourceCollector)
+}
+
+// assertSamples fails the test unless the registry exports exactly want for the
+// named metric. Comparing the whole map also states which series the batch left
+// alone.
+func assertSamples(t *testing.T, reg *prometheus.Registry, name string, want map[string]float64) {
+	t.Helper()
+
+	if got := samples(t, reg, name); !reflect.DeepEqual(got, want) {
+		t.Errorf("%s = %v, want %v", name, got, want)
+	}
+}
+
+// samples is every sample the registry exports for the named metric, keyed by
+// the label set it carries, as the exposition format spells it.
+func samples(t *testing.T, reg *prometheus.Registry, name string) map[string]float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering the registry: %v", err)
+	}
+
+	found := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make([]string, 0, len(metric.GetLabel()))
+			for _, label := range metric.GetLabel() {
+				labels = append(labels, fmt.Sprintf("%s=%q", label.GetName(), label.GetValue()))
+			}
+			found[strings.Join(labels, ",")] = metric.GetCounter().GetValue()
+		}
+	}
+	return found
+}
+
+// seriesCount is how many samples the registry exports for the named metrics.
+func seriesCount(t *testing.T, reg *prometheus.Registry, names ...string) int {
+	t.Helper()
+
+	count, err := testutil.GatherAndCount(reg, names...)
+	if err != nil {
+		t.Fatalf("gathering the registry: %v", err)
+	}
+	return count
 }
