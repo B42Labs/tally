@@ -392,3 +392,12 @@ SELECT pg_try_advisory_lock(hashtextextended('sync:' || $1::text, 0));
 
 -- name: UnlockSync :exec
 SELECT pg_advisory_unlock(hashtextextended('sync:' || $1::text, 0));
+
+-- The fleet the projection holds, grouped the way tally_current_resources is
+-- labeled. The gauge is derived from this count rather than from the events as
+-- they are folded, so it cannot drift from the rows the API serves. Deleted
+-- resources keep their row and are counted under state 'deleted'.
+-- name: CountCurrentResources :many
+SELECT platform, cloud, resource_type, state, COUNT(*) AS resources
+FROM current_resources
+GROUP BY platform, cloud, resource_type, state;

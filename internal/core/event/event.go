@@ -47,10 +47,23 @@ const (
 // usable idempotency key.
 const eventIDMaxLen = 256
 
+// eventTypeMaxLen bounds event_type for the same reason as identifierMaxLen
+// below: idx_events_type indexes it next to timestamp. The pattern alone lets a
+// value of any length through, and one past the btree limit fails the insert
+// rather than the event, which would take down whatever batch it travelled in.
+const eventTypeMaxLen = 512
+
 // identifierMaxLen bounds the fields that identify a resource. They are indexed
 // columns, and a value past the btree limit fails the insert rather than the
 // event, which would take down whatever batch the event travelled in.
 const identifierMaxLen = 512
+
+// stateMaxLen bounds payload.state for the same reason. The projection writes it
+// to current_resources.state, which idx_current_resources_type indexes next to
+// resource_type and idx_current_resources_fleet next to platform, cloud and
+// resource_type. Those three are bounded above, so a state within this bound
+// keeps the widest of the tuples under the btree limit.
+const stateMaxLen = 512
 
 var eventTypePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)+$`)
 
@@ -173,7 +186,15 @@ func (e *Event) Validate() error {
 	if e.Timestamp.IsZero() {
 		errs = append(errs, errors.New("timestamp: must be set"))
 	}
-	if !eventTypePattern.MatchString(e.EventType) {
+	// The length is reported before the pattern rather than alongside it, so that
+	// the quoted value below stays as bounded as the field itself: the reason a
+	// refusal is dead-lettered under is this error's text, and that column has no
+	// cap of its own.
+	switch n := len(e.EventType); {
+	case n > eventTypeMaxLen:
+		errs = append(errs, fmt.Errorf("event_type: must be at most %d characters, got %d",
+			eventTypeMaxLen, n))
+	case !eventTypePattern.MatchString(e.EventType):
 		errs = append(errs, fmt.Errorf("event_type: %q must match %s", e.EventType, eventTypePattern))
 	}
 
@@ -190,6 +211,13 @@ func (e *Event) Validate() error {
 		case n > identifierMaxLen:
 			errs = append(errs, fmt.Errorf("%s: must be at most %d characters, got %d",
 				field.name, identifierMaxLen, n))
+		}
+	}
+
+	if e.Payload.State != nil {
+		if n := len(*e.Payload.State); n > stateMaxLen {
+			errs = append(errs, fmt.Errorf("payload.state: must be at most %d characters, got %d",
+				stateMaxLen, n))
 		}
 	}
 
