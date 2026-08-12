@@ -19,6 +19,7 @@ import (
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/core/ids"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
@@ -113,6 +114,7 @@ type Syncer struct {
 	clouds   map[string]CloudConfig
 	adapters map[string]Adapter
 	now      func() time.Time
+	metrics  *metrics.Metrics
 }
 
 // New builds a Syncer over the clouds cfg names and the adapters that observe
@@ -122,14 +124,18 @@ type Syncer struct {
 // now is where every poll-time timestamp comes from. It is injected rather than
 // read from the clock, so that a test can state which instant a correction the
 // platform gave no timestamp for is dated at.
+//
+// m counts the runs and what they reconciled. A nil m records nothing.
 func New(db *store.Store, pipeline *ingest.Pipeline, cfg Config, adapters map[string]Adapter,
-	now func() time.Time,
+	now func() time.Time, m *metrics.Metrics,
 ) *Syncer {
 	clouds := make(map[string]CloudConfig, len(cfg.Clouds))
 	for _, cloud := range cfg.Clouds {
 		clouds[cloud.Cloud] = cloud
 	}
-	return &Syncer{db: db, pipeline: pipeline, clouds: clouds, adapters: adapters, now: now}
+	return &Syncer{
+		db: db, pipeline: pipeline, clouds: clouds, adapters: adapters, now: now, metrics: m,
+	}
 }
 
 // Sync reconciles one cloud: it asks the adapter what the platform holds, diffs
@@ -187,7 +193,7 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 	// hands the caller the run id and the tally alongside it.
 	abort := func(err error) (Result, error) {
 		recordError(&stats, err.Error())
-		if cerr := s.complete(ctx, id, stats); cerr != nil {
+		if cerr := s.finish(ctx, id, cloud, stats); cerr != nil {
 			err = errors.Join(err, cerr)
 		}
 		return Result{RunID: runID, Stats: stats}, err
@@ -282,7 +288,7 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 	}
 
 	result := Result{RunID: runID, Stats: stats}
-	if err := s.complete(ctx, id, stats); err != nil {
+	if err := s.finish(ctx, id, cloud, stats); err != nil {
 		return result, err
 	}
 	if stats.ErrorCount > 0 {
@@ -292,8 +298,37 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 	return result, nil
 }
 
-// complete writes the run's final row, deriving the status from the errors the
-// run recorded so that the two cannot disagree.
+// finish ends a run: it writes the final row and, once that write landed,
+// counts what the run did. A run counts once, when its final row is written, so
+// a completion the database refused leaves the run in neither the sync_runs
+// table nor the counters. Both paths out of a run go through here, which is
+// what keeps the row and the counters saying the same thing.
+func (s *Syncer) finish(ctx context.Context, id uuid.UUID, cloud string, stats Stats) error {
+	if err := s.complete(ctx, id, stats); err != nil {
+		return err
+	}
+	s.metrics.SyncRunFinished(cloud, runStatus(stats))
+	// One call per action, the zero counts included: a finished run makes all
+	// three series appear, so a run that deleted nothing reports a delete count
+	// of zero rather than no series at all.
+	s.metrics.ResourcesReconciled(cloud, "created", stats.Created)
+	s.metrics.ResourcesReconciled(cloud, "updated", stats.Updated)
+	s.metrics.ResourcesReconciled(cloud, "deleted", stats.Deleted)
+	s.metrics.SyncErrorsRecorded(cloud, stats.ErrorCount)
+	return nil
+}
+
+// runStatus is the status a finished run ends at. The sync_runs row and the
+// status label of the run counter both come from here, so the two cannot drift.
+func runStatus(stats Stats) string {
+	if stats.ErrorCount > 0 {
+		return statusFailed
+	}
+	return statusCompleted
+}
+
+// complete writes the run's final row at the status runStatus derives from the
+// errors the run recorded, so that the two cannot disagree.
 //
 // The write runs on a context detached from the caller's. A run ends because
 // its deadline passed as readily as because it finished, and a completion that
@@ -302,10 +337,6 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 // none: this write has to acquire a connection while the run still holds one,
 // and waiting for it without a bound would hold the run's advisory lock forever.
 func (s *Syncer) complete(ctx context.Context, id uuid.UUID, stats Stats) error {
-	status := statusCompleted
-	if stats.ErrorCount > 0 {
-		status = statusFailed
-	}
 	raw, err := json.Marshal(stats)
 	if err != nil {
 		return fmt.Errorf("marshaling the stats of sync run %s: %w", id, err)
@@ -314,7 +345,7 @@ func (s *Syncer) complete(ctx context.Context, id uuid.UUID, stats Stats) error 
 	done, cancel := context.WithTimeout(context.WithoutCancel(ctx), completionBudget)
 	defer cancel()
 	if err := sqlcgen.New(s.db.Pool()).CompleteSyncRun(done,
-		sqlcgen.CompleteSyncRunParams{ID: id, Status: status, Stats: raw},
+		sqlcgen.CompleteSyncRunParams{ID: id, Status: runStatus(stats), Stats: raw},
 	); err != nil {
 		return fmt.Errorf("completing sync run %s: %w", id, err)
 	}

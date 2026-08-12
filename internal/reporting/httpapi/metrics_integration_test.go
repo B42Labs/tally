@@ -103,7 +103,7 @@ func newMetricsAPI(t *testing.T, s *store.Store, m *metrics.Metrics, enabled boo
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
 		Metrics:        m,
 		MetricsEnabled: enabled,
 	})
