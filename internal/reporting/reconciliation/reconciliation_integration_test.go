@@ -69,7 +69,7 @@ var errManilaDown = errors.New("connection refused")
 // the projection, the run history, and the advisory lock all by cloud.
 func TestSync(t *testing.T) {
 	db := storetest.NewDB(t)
-	pipeline := ingest.New(registry.New(), false, nil)
+	pipeline := ingest.New(registry.New(), false, nil, nil)
 
 	t.Run("creates what the projection does not hold yet", func(t *testing.T) {
 		const cloud = "os-sync-create"
@@ -713,7 +713,7 @@ func TestSync(t *testing.T) {
 			"required": ["slots"],
 			"properties": {"slots": {"type": "integer"}}
 		}`)
-		strict := ingest.New(registry.New(), true, nil)
+		strict := ingest.New(registry.New(), true, nil, nil)
 		// The second quota is what tells a dead-lettered correction from a batch
 		// that was thrown away whole: its siblings have to land.
 		fake := &fakeAdapter{

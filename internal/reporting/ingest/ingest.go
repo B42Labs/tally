@@ -44,6 +44,7 @@ import (
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/reporting/audit"
 	"github.com/b42labs/tally/internal/reporting/auth"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/projection"
 	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -103,6 +104,7 @@ type Pipeline struct {
 	registry          *registry.Registry
 	requireSizeSchema bool
 	hook              Hook
+	metrics           *metrics.Metrics
 }
 
 // New returns a Pipeline that validates sizes through reg. requireSizeSchema is
@@ -113,8 +115,10 @@ type Pipeline struct {
 //
 // hook is called over the events a batch stores. A nil hook calls nothing,
 // which is what Phase 1 ingests with.
-func New(reg *registry.Registry, requireSizeSchema bool, hook Hook) *Pipeline {
-	return &Pipeline{registry: reg, requireSizeSchema: requireSizeSchema, hook: hook}
+//
+// m counts what the batches did. A nil m records nothing.
+func New(reg *registry.Registry, requireSizeSchema bool, hook Hook, m *metrics.Metrics) *Pipeline {
+	return &Pipeline{registry: reg, requireSizeSchema: requireSizeSchema, hook: hook, metrics: m}
 }
 
 // Ingest runs the per-item pipeline over items, stores what survives it, and
@@ -134,15 +138,40 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 	}
 
 	q := sqlcgen.New(tx)
+	// What the counters at the success return are moved by. The batch collects
+	// them as it runs, because the labels of an item are not readable from the
+	// Outcome: a refusal carries no cloud, and a duplicate carries nothing at all.
+	var (
+		refusals         []refusal
+		duplicateClouds  []string
+		unvalidatedSizes []unvalidatedSize
+	)
+	// The cloud a refusal is counted under is the one the caller authenticated
+	// for, never the one the refused item names. A refused item passed no
+	// validation at all, so what it claims is bounded in neither length nor
+	// number of distinct values, and every distinct value would be a child the
+	// counter keeps for the life of the process.
+	refusedCloud := ""
+	if scope != nil {
+		refusedCloud = scope.Cloud
+	}
+
 	screened := make([]event.Event, 0, len(items))
 	for i, raw := range items {
-		e, reason, err := p.screen(ctx, q, raw, scope)
+		e, reason, unvalidated, err := p.screen(ctx, q, raw, scope)
 		if err != nil {
 			return Outcome{}, err
 		}
 		if reason != "" {
 			out.Rejected = append(out.Rejected, Rejected{Index: i, EventID: e.EventID, Reason: reason})
+			refusals = append(refusals, refusal{cloud: refusedCloud, reason: reason})
 			continue
+		}
+		if unvalidated {
+			// Recorded as the item is screened rather than after its insert: an
+			// item the database already holds passed its size through unvalidated
+			// all the same.
+			unvalidatedSizes = append(unvalidatedSizes, unvalidatedSize{platform: e.Platform, resourceType: e.ResourceType})
 		}
 
 		// Where an event came from is the caller's to state: what the body claims
@@ -167,6 +196,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 		}
 		if !inserted {
 			out.Duplicates++
+			duplicateClouds = append(duplicateClouds, e.Cloud)
 			continue
 		}
 		out.Accepted++
@@ -189,79 +219,116 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 			}
 		}
 	}
+
+	// The batch counts here and nowhere else. A counter cannot be rolled back
+	// with the transaction, and every return above is an error the caller rolls
+	// tx back on, so a batch that fails counts nothing at all.
+	for _, e := range newlyStored {
+		p.metrics.EventIngested(e.Platform, e.Cloud, e.ResourceType, e.EventType, string(e.Source))
+	}
+	for _, cloud := range duplicateClouds {
+		p.metrics.EventDeduplicated(cloud)
+	}
+	for _, r := range refusals {
+		p.metrics.EventRejected(r.cloud, r.reason)
+	}
+	for _, u := range unvalidatedSizes {
+		p.metrics.SizeUnvalidated(u.platform, u.resourceType)
+	}
 	return out, nil
 }
 
+// refusal is one refused item as the counters label it: the cloud the caller
+// authenticated for, empty for a caller that reports for every cloud, and the
+// reason the item was refused, in full. Reducing the reason to the check that
+// refused the item is the metrics package's job.
+type refusal struct {
+	cloud  string
+	reason string
+}
+
+// unvalidatedSize is one stored event as the size counter labels it. Only the
+// two labels are kept: holding the whole event would keep a copy of every item
+// of a batch whose types are unregistered, which in the default lax mode is
+// every item a collector sends.
+type unvalidatedSize struct {
+	platform     string
+	resourceType string
+}
+
 // screen runs the checks one item passes before it is stored: decode and
-// validate, scope, size. It returns the event the item carries and the reason
-// it was refused, which is empty for an item that survives.
+// validate, scope, size. It returns the event the item carries, the reason it
+// was refused, which is empty for an item that survives, and whether its size
+// was taken without a schema validating it.
 //
 // Refusing an item is not an error. What the refusal leaves behind, a
 // dead-letter row or an audit row, is written here, and the error return is for
 // what takes the whole batch down.
-func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawMessage, scope *Scope) (event.Event, string, error) {
+func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawMessage, scope *Scope) (event.Event, string, bool, error) {
 	var e event.Event
 	if carriesNUL(raw) {
 		// The item never reaches the decoder: a NUL is refused here rather than
 		// at the database, where it would take the whole batch down instead of
 		// the one item carrying it.
 		e.EventID = probeEventID(raw)
-		return e, reasonNUL, deadLetter(ctx, q, reasonNUL, raw)
+		return e, reasonNUL, false, deadLetter(ctx, q, reasonNUL, raw)
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
 		// Nothing decoded, so the only event id there is to report is whatever the
 		// item spells at the top level.
 		e.EventID = probeEventID(raw)
 		reason := fmt.Sprintf("schema: %s", err)
-		return e, reason, deadLetter(ctx, q, reason, raw)
+		return e, reason, false, deadLetter(ctx, q, reason, raw)
 	}
 	if err := e.Validate(); err != nil {
 		reason := fmt.Sprintf("schema: %s", err)
-		return e, reason, deadLetter(ctx, q, reason, raw)
+		return e, reason, false, deadLetter(ctx, q, reason, raw)
 	}
 
 	if scope != nil && (e.Platform != scope.Platform || e.Cloud != scope.Cloud) {
-		return e, reasonScope, auditScopeViolation(ctx, q, *scope, e)
+		return e, reasonScope, false, auditScopeViolation(ctx, q, *scope, e)
 	}
 
 	// An event without a size reports that the size did not change, so there is
 	// nothing to validate.
 	if e.Payload.Size == nil {
-		return e, "", nil
+		return e, "", false, nil
 	}
-	reason, err := p.checkSize(ctx, q, e)
+	reason, unvalidated, err := p.checkSize(ctx, q, e)
 	if err != nil {
-		return e, "", err
+		return e, "", false, err
 	}
 	if reason == "" {
-		return e, "", nil
+		return e, "", unvalidated, nil
 	}
-	return e, reason, deadLetter(ctx, q, reason, raw)
+	return e, reason, false, deadLetter(ctx, q, reason, raw)
 }
 
 // checkSize validates the event's size object against the schema registered for
 // its (platform, resource_type) and returns the reason to refuse the event,
-// empty when there is none. An unregistered pair is refused in strict mode only.
-func (p *Pipeline) checkSize(ctx context.Context, q *sqlcgen.Queries, e event.Event) (string, error) {
+// empty when there is none, together with whether the size was taken without a
+// schema validating it. An unregistered pair is refused in strict mode and
+// taken unvalidated in lax mode.
+func (p *Pipeline) checkSize(ctx context.Context, q *sqlcgen.Queries, e event.Event) (string, bool, error) {
 	schema, registered, err := p.registry.Validator(ctx, q, e.Platform, e.ResourceType)
 	if err != nil {
-		return "", fmt.Errorf("validating the size of event %s: %w", e.EventID, err)
+		return "", false, fmt.Errorf("validating the size of event %s: %w", e.EventID, err)
 	}
 	if !registered {
 		if !p.requireSizeSchema {
-			return "", nil
+			return "", true, nil
 		}
-		return fmt.Sprintf("size_schema: no schema registered for (%s, %s)", e.Platform, e.ResourceType), nil
+		return fmt.Sprintf("size_schema: no schema registered for (%s, %s)", e.Platform, e.ResourceType), false, nil
 	}
 
 	size, err := instance(e.Payload.Size)
 	if err != nil {
-		return "", fmt.Errorf("reading the size of event %s: %w", e.EventID, err)
+		return "", false, fmt.Errorf("reading the size of event %s: %w", e.EventID, err)
 	}
 	if err := schema.Validate(size); err != nil {
-		return fmt.Sprintf("size_schema: %s", err), nil
+		return fmt.Sprintf("size_schema: %s", err), false, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
 // insert stores e and pairs it with the received_at the database assigned. The

@@ -526,9 +526,9 @@ func newAPIInMode(t *testing.T, s *store.Store, mode auth.Mode) api {
 		AuthMode:                 mode,
 		InternalToken:            internalToken,
 		Authenticator:            auth.NewStaticTokenAuthenticator(q),
-		Pipeline:                 ingest.New(registry.New(), false, nil),
+		Pipeline:                 ingest.New(registry.New(), false, nil, nil),
 		AttributingRelationTypes: []string{attributingType},
-		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil),
+		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil, nil),
 			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now),
 	})
 	if err != nil {

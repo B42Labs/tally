@@ -95,7 +95,7 @@ func run(ctx context.Context) error {
 	// The pipeline owns the registry, which caches compiled size schemas for the
 	// life of the process. Nothing else validates a size against a stored schema
 	// today.
-	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil)
+	pipeline := ingest.New(registry.New(), cfg.RequireSizeSchema, nil, nil)
 
 	// The clouds file is read here rather than per sync run, so a broken one
 	// refuses the process instead of failing every request that reaches the sync
