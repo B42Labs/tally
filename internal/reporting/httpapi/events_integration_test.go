@@ -22,6 +22,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -527,6 +528,8 @@ func newAPIInMode(t *testing.T, s *store.Store, mode auth.Mode) api {
 		Authenticator:            auth.NewStaticTokenAuthenticator(q),
 		Pipeline:                 ingest.New(registry.New(), false, nil),
 		AttributingRelationTypes: []string{attributingType},
+		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)

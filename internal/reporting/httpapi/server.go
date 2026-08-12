@@ -7,6 +7,7 @@ import (
 
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
@@ -27,6 +28,9 @@ type server struct {
 	// attributingTypes are the relation types the cycle guard walks. An empty
 	// list disables the guard.
 	attributingTypes []string
+	// syncer runs the reconciliation of one cloud the internal sync route asks
+	// for.
+	syncer *reconciliation.Syncer
 }
 
 // writeJSON sends one successful response body under the 200 almost every

@@ -84,6 +84,7 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodPut + " " + resourceTypeRoute:   auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
 
 		http.MethodPost + " /internal/projection/rebuild": auth.Internal(opts.InternalToken, opts.AuthMode),
+		http.MethodPost + " /internal/sync/{cloud}":       auth.Internal(opts.InternalToken, opts.AuthMode),
 	}
 
 	return func(next http.Handler) http.Handler {

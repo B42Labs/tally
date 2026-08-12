@@ -1105,6 +1105,54 @@ paths:
         "500":
           $ref: "#/components/responses/Problem"
 
+  # This route is not part of the public API either: whatever drives the sync
+  # schedule calls it with the shared internal token. It is described here for
+  # the same reason the rebuild above is, that the request validator refuses a
+  # path the contract does not carry.
+  /internal/sync/{cloud}:
+    parameters:
+      - name: cloud
+        in: path
+        required: true
+        description: The installation to reconcile, os-prod-eu1 for example.
+        schema:
+          type: string
+    post:
+      operationId: syncCloud
+      summary: Reconcile one cloud
+      description: >-
+        Runs one sync of the cloud. A sync asks the platform's adapter what the
+        cloud currently holds, diffs that observation against the projection,
+        and feeds the difference back as synthetic events through the ordinary
+        ingest path, so a resource a run corrected ends up with the same kind of
+        history as one that was never missed.
+
+        The run is synchronous: the answer carries the stats of the run that
+        just happened rather than a handle to poll. A cloud the configuration
+        does not name is answered 404, and a cloud another run is holding is
+        answered 409, because two syncs of one cloud would diff the same
+        projection rows against two overlapping observations.
+      security:
+        - internalToken: []
+      responses:
+        "200":
+          description: The sync run finished.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResult"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
 components:
   responses:
     # Every error response of this API is this one, so operations reference it
@@ -1301,7 +1349,11 @@ components:
           type: string
           description: >-
             What happened, written resource.action with an optional phase, for
-            example compute.instance.create.end.
+            example compute.instance.create.end. The reconciliation framework
+            writes the second family, `sync.create`, `sync.update`, and
+            `sync.delete`: a correction is about no one service, so it names
+            none. `source` is the member to branch on rather than the prefix —
+            it is `reconciliation` for exactly those events.
         platform:
           type: string
           description: The platform the resource lives on.
@@ -1407,7 +1459,11 @@ components:
           description: When the resource was deleted, null while it lives.
         last_event_type:
           type: string
-          description: The type of the newest event folded into this row.
+          description: >-
+            The type of the newest event folded into this row. It is a
+            `sync.create`, `sync.update`, or `sync.delete` when the newest thing
+            that happened to the resource was a correction by the reconciliation
+            framework rather than a report by a collector.
         last_event_at:
           type: string
           format: date-time
@@ -1884,6 +1940,42 @@ components:
         rebuilt:
           type: integer
           description: How many resources were replayed.
+
+    SyncResult:
+      type: object
+      description: What one sync run did.
+      required: [sync_run_id, stats]
+      properties:
+        sync_run_id:
+          type: string
+          description: >-
+            The id of the `sync_runs` row this run wrote. It is what an operator
+            reads the run back by, and what the synthetic event ids of the run
+            are derived from.
+        stats:
+          $ref: "#/components/schemas/SyncStats"
+
+    # What went wrong is deliberately not a member here. A run that recorded any
+    # error at all is answered 500, so a member for it could only ever be empty
+    # in a document a caller gets to see, and the reasons carry platform detail
+    # that an error response does not hand out. The `sync_runs` row of the run
+    # keeps them, which is what an operator reads them back from.
+    SyncStats:
+      type: object
+      description: The tally of one sync run, which is one that finished clean.
+      required: [created, updated, deleted]
+      properties:
+        created:
+          type: integer
+          description: >-
+            How many resources the run reported to the projection as new, one
+            synthetic event each.
+        updated:
+          type: integer
+          description: How many it corrected the state, size, or owner of.
+        deleted:
+          type: integer
+          description: How many it reported as gone.
 
   securitySchemes:
     # Referenced per operation by the authenticated endpoints. The health probes
