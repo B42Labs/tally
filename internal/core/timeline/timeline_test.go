@@ -288,6 +288,33 @@ func TestBuildLoneDelete(t *testing.T) {
 	}
 }
 
+func TestBuildCreateAfterDeleteStartsASecondLife(t *testing.T) {
+	size := map[string]any{"vcpus": 2}
+
+	got := timeline.Build([]event.Stored{
+		ev("e1", "compute.instance.create.end", t0, withState("active"), withSize(size)),
+		ev("e2", "compute.instance.delete.end", t1),
+		ev("e3", "compute.instance.create.end", t2, withState("active"), withSize(size)),
+	})
+
+	// The resource is back, so the delete it superseded is history rather than
+	// what the timeline reports. A fold that kept it would tell the projection's
+	// replay path that a resource its incremental path holds live is deleted.
+	if got.DeletedAt != nil {
+		t.Errorf("DeletedAt = %v, want nil: the resource came back at %v", got.DeletedAt, t2)
+	}
+	if got.CreatedAt == nil || !got.CreatedAt.Equal(t0) {
+		t.Errorf("CreatedAt = %v, want the first create %v", got.CreatedAt, t0)
+	}
+	if len(got.Intervals) != 2 {
+		t.Fatalf("got %d intervals, want 2: %+v", len(got.Intervals), got.Intervals)
+	}
+	if !got.Intervals[1].Start.Equal(t2) || got.Intervals[1].End != nil {
+		t.Errorf("second interval = %+v, want one open from the second create %v",
+			got.Intervals[1], t2)
+	}
+}
+
 func TestBuildDoesNotMutateInput(t *testing.T) {
 	events := []event.Stored{
 		ev("e2", "compute.instance.delete.end", t1),

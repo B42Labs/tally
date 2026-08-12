@@ -67,9 +67,17 @@ func Build(events []event.Stored) Timeline {
 		if i == 0 && category != event.CategoryCreate {
 			tl.Warnings = append(tl.Warnings, WarningHistoryStartsWithoutCreate)
 		}
-		if category == event.CategoryCreate && tl.CreatedAt == nil {
-			ts := e.Timestamp
-			tl.CreatedAt = &ts
+		// A create that follows a delete is the resource coming back, so the
+		// deletion it superseded stops being what the timeline reports: the fold
+		// takes a resource's fate from its newest lifecycle event, which is how
+		// the projection's incremental fold reads one as well. Both fold one
+		// history into one answer, so neither may be delete-dominant on its own.
+		if category == event.CategoryCreate {
+			if tl.CreatedAt == nil {
+				ts := e.Timestamp
+				tl.CreatedAt = &ts
+			}
+			tl.DeletedAt = nil
 		}
 
 		// A delete closes the running interval and opens nothing: a deleted
