@@ -17,10 +17,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/core/ids"
 	"github.com/b42labs/tally/internal/reporting/ingest"
+	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/projection"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/registry"
@@ -884,7 +887,7 @@ func TestSync(t *testing.T) {
 			Cloud: cloud, Platform: platform, Adapter: "absent",
 		}}}
 		syncer := reconciliation.New(db.Store, pipeline, cfg,
-			map[string]reconciliation.Adapter{}, func() time.Time { return pollTime })
+			map[string]reconciliation.Adapter{}, func() time.Time { return pollTime }, nil)
 
 		res, err := syncer.Sync(t.Context(), cloud)
 
@@ -1070,6 +1073,143 @@ func TestSync(t *testing.T) {
 	})
 }
 
+// The series a finished run lands in.
+const (
+	runsSeries       = "tally_sync_runs_total"
+	reconciledSeries = "tally_sync_resources_reconciled_total"
+	errorsSeries     = "tally_sync_errors_total"
+)
+
+// syncSeries is all three of them, which the assertions over a sync that
+// counted nothing read at once.
+var syncSeries = []string{runsSeries, reconciledSeries, errorsSeries}
+
+// TestSyncCounts holds the framework to what it reports about a run: one count
+// per finished run under the status its row carries, the corrections it
+// committed under their action, the reasons it recorded, and nothing at all for
+// a sync that never wrote a run row.
+func TestSyncCounts(t *testing.T) {
+	db := storetest.NewDB(t)
+	pipeline := ingest.New(registry.New(), false, nil, nil)
+
+	t.Run("counts a finished run and what it reconciled", func(t *testing.T) {
+		const cloud = "os-sync-count-clean"
+		share := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		doomed := seen(typeShare, "share-doomed", projectB, "available", map[string]any{"size_gb": 20})
+		// The fleet is seeded through a syncer that counts nothing, so the
+		// registry below sees the one run that follows.
+		seedFleet(t, db, pipeline, cloud, share, doomed)
+
+		// One resource the projection does not hold, one whose state drifted, and
+		// one the platform no longer lists: a run that moves all three actions.
+		fresh := seen(typeShare, "share-2", projectA, "available", map[string]any{"size_gb": 30})
+		drifted := seen(typeShare, "share-1", projectA, "in-use", map[string]any{"size_gb": 10})
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(fresh, drifted)}
+		syncer, reg := meteredSyncer(t, db, pipeline, cloud, fake)
+
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(1, 1, 1))
+		assertRun(t, db, res, statusCompleted)
+		assertSamples(t, reg, runsSeries, map[string]float64{
+			fmt.Sprintf("cloud=%q,status=%q", cloud, statusCompleted): 1,
+		})
+		assertSamples(t, reg, reconciledSeries, map[string]float64{
+			reconciledLabels(cloud, "created"): float64(res.Stats.Created),
+			reconciledLabels(cloud, "updated"): float64(res.Stats.Updated),
+			reconciledLabels(cloud, "deleted"): float64(res.Stats.Deleted),
+		})
+		// A clean run reports the zero it recorded rather than leaving the series
+		// out, so a rate over it reads no errors instead of no data.
+		assertSamples(t, reg, errorsSeries, map[string]float64{
+			fmt.Sprintf("cloud=%q", cloud): 0,
+		})
+	})
+
+	t.Run("counts a run that did not finish clean as failed", func(t *testing.T) {
+		const cloud = "os-sync-count-failed"
+		share := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		router := seen(typeRouter, "router-1", projectA, "active", nil)
+		seedFleet(t, db, pipeline, cloud, share, router)
+
+		// The shares stay unknown and the routers are enumerated to their end, so
+		// the run reconciles what it saw and reports the type it could not list.
+		fake := &fakeAdapter{types: []string{typeShare, typeRouter}, steps: []step{
+			{err: &reconciliation.EnumerationError{ResourceType: typeShare, Err: errManilaDown}},
+			{resource: seen(typeRouter, "router-2", projectB, "active", nil)},
+		}}
+		syncer, reg := meteredSyncer(t, db, pipeline, cloud, fake)
+
+		res, err := syncer.Sync(t.Context(), cloud)
+
+		if err == nil {
+			t.Fatal("Sync() error = nil, want the run reporting the enumeration failure")
+		}
+		if res.Stats.Created != 1 || res.Stats.Updated != 0 || res.Stats.Deleted != 1 {
+			t.Fatalf("stats = %+v, want the create of router-2 and the delete of router-1", res.Stats)
+		}
+		if res.Stats.ErrorCount == 0 {
+			t.Fatalf("stats = %+v, want the enumeration failure recorded", res.Stats)
+		}
+		// The status the row ends at and the one the counter carries are derived
+		// from the same tally, so a failed run is failed in both records.
+		assertRun(t, db, res, statusFailed)
+		assertSamples(t, reg, runsSeries, map[string]float64{
+			fmt.Sprintf("cloud=%q,status=%q", cloud, statusFailed): 1,
+		})
+		// A run that spoiled part of its work keeps what it did reconcile, and the
+		// action it never took is exported as the zero it is.
+		assertSamples(t, reg, reconciledSeries, map[string]float64{
+			reconciledLabels(cloud, "created"): float64(res.Stats.Created),
+			reconciledLabels(cloud, "updated"): 0,
+			reconciledLabels(cloud, "deleted"): float64(res.Stats.Deleted),
+		})
+		assertSamples(t, reg, errorsSeries, map[string]float64{
+			fmt.Sprintf("cloud=%q", cloud): float64(res.Stats.ErrorCount),
+		})
+	})
+
+	t.Run("counts nothing for a cloud the configuration does not name", func(t *testing.T) {
+		syncer, reg := meteredSyncer(t, db, pipeline, "os-sync-count-configured", &fakeAdapter{})
+
+		_, err := syncer.Sync(t.Context(), "os-sync-count-unconfigured")
+
+		if !errors.Is(err, reconciliation.ErrUnknownCloud) {
+			t.Fatalf("Sync() error = %v, want %v", err, reconciliation.ErrUnknownCloud)
+		}
+		assertNoSyncSamples(t, reg, "a cloud that cannot be synced")
+	})
+
+	t.Run("counts nothing for a sync a run is already holding", func(t *testing.T) {
+		const cloud = "os-sync-count-lock"
+		held := blockingAdapter()
+		holder := newSyncer(t, db, pipeline, cloud, held)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := holder.Sync(context.Background(), cloud); err != nil {
+				t.Errorf("the holding Sync() error = %v, want nil", err)
+			}
+		}()
+		<-held.entered
+
+		refused, reg := meteredSyncer(t, db, pipeline, cloud, &fakeAdapter{types: []string{typeShare}})
+		_, err := refused.Sync(t.Context(), cloud)
+
+		if !errors.Is(err, reconciliation.ErrAlreadyRunning) {
+			t.Errorf("Sync() error = %v, want %v", err, reconciliation.ErrAlreadyRunning)
+		}
+		// The refused sync wrote no run row, and a run counts once, when its row
+		// is written: the run it stepped aside for is the only one there is.
+		assertNoSyncSamples(t, reg, "a sync that stepped aside")
+
+		close(held.released)
+		wg.Wait()
+	})
+}
+
 // step is one entry of a scripted stream: a resource the platform holds, an
 // error it answers with, or a crash in the middle of the listing.
 type step struct {
@@ -1190,7 +1330,23 @@ func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 	}}}
 	return reconciliation.New(db.Store, pipeline, cfg,
 		map[string]reconciliation.Adapter{adapterName: fake},
-		func() time.Time { return pollTime })
+		func() time.Time { return pollTime }, nil)
+}
+
+// meteredSyncer builds a Syncer like newSyncer does, recording into a registry
+// of its own so that what one subtest counts stays out of every other.
+func meteredSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud string,
+	fake *fakeAdapter,
+) (*reconciliation.Syncer, *prometheus.Registry) {
+	t.Helper()
+
+	cfg := reconciliation.Config{Clouds: []reconciliation.CloudConfig{{
+		Cloud: cloud, Platform: platform, Adapter: adapterName,
+	}}}
+	reg := prometheus.NewRegistry()
+	return reconciliation.New(db.Store, pipeline, cfg,
+		map[string]reconciliation.Adapter{adapterName: fake},
+		func() time.Time { return pollTime }, metrics.New(reg)), reg
 }
 
 // seedFleet puts resources into the projection by running one sync over them,
@@ -1272,6 +1428,63 @@ func assertRun(t *testing.T, db storetest.DB, res reconciliation.Result, status 
 	if errs, ok := raw["errors"].([]any); !ok || len(errs) != len(res.Stats.Errors) {
 		t.Errorf("stored errors = %v, want the %d the run recorded, as a list",
 			raw["errors"], len(res.Stats.Errors))
+	}
+}
+
+// reconciledLabels is the label set tally_sync_resources_reconciled_total
+// carries for one action of cloud, as the exposition format spells it.
+func reconciledLabels(cloud, action string) string {
+	return fmt.Sprintf("action=%q,cloud=%q", action, cloud)
+}
+
+// assertSamples fails the test unless the registry exports exactly want for the
+// named metric. Comparing the whole map also states which series the run left
+// alone.
+func assertSamples(t *testing.T, reg *prometheus.Registry, name string, want map[string]float64) {
+	t.Helper()
+
+	if got := samples(t, reg, name); !reflect.DeepEqual(got, want) {
+		t.Errorf("%s = %v, want %v", name, got, want)
+	}
+}
+
+// samples is every sample the registry exports for the named metric, keyed by
+// the label set it carries, as the exposition format spells it.
+func samples(t *testing.T, reg *prometheus.Registry, name string) map[string]float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering the registry: %v", err)
+	}
+
+	found := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make([]string, 0, len(metric.GetLabel()))
+			for _, label := range metric.GetLabel() {
+				labels = append(labels, fmt.Sprintf("%s=%q", label.GetName(), label.GetValue()))
+			}
+			found[strings.Join(labels, ",")] = metric.GetCounter().GetValue()
+		}
+	}
+	return found
+}
+
+// assertNoSyncSamples fails the test unless the registry exports no sync series
+// at all. subject names what left them empty.
+func assertNoSyncSamples(t *testing.T, reg *prometheus.Registry, subject string) {
+	t.Helper()
+
+	count, err := testutil.GatherAndCount(reg, syncSeries...)
+	if err != nil {
+		t.Fatalf("gathering the registry: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("the registry exports %d sync series, want none for %s", count, subject)
 	}
 }
 

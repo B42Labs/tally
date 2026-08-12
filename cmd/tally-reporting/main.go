@@ -107,7 +107,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading the clouds config: %w", err)
 	}
-	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapters, time.Now)
+	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapters, time.Now, nil)
 
 	router, err := httpapi.NewRouter(httpapi.Options{
 		Logger:                   logger,
