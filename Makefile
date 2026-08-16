@@ -24,6 +24,12 @@ NAMESPACE ?= tally
 DEV_OVERLAY := deploy/kubernetes/overlays/dev
 SERVICES := tally-reporting
 
+# The two lists are not the same. SERVICES is what `up` deploys into kind, so it
+# is also what gets loaded into the cluster. IMAGES is everything `images`
+# builds: the collector image is built and publishable, but it runs beside the
+# broker of an OpenStack control plane rather than in the dev cluster.
+IMAGES := $(SERVICES) tally-openstack-collector
+
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
 # switches the current context, but reusing an existing one does not, so an
 # unqualified kubectl would deploy Tally into whatever cluster happened to be
@@ -89,9 +95,9 @@ up:
 	@echo
 	@echo 'Trust the dev CA with: make -s ca > tally-ca.crt'
 
-## images: build one container image per service
+## images: build one container image per binary
 images:
-	@for service in $(SERVICES); do \
+	@for service in $(IMAGES); do \
 		echo "==> building $$service"; \
 		docker build --build-arg "CMD=$$service" -t "$$service:dev" .; \
 	done
