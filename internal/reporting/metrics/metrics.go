@@ -26,12 +26,13 @@ package metrics
 import (
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/b42labs/tally/internal/core/cardinality"
 )
 
 // Metrics holds the instruments of the Reporting API and the registry they are
@@ -44,7 +45,7 @@ type Metrics struct {
 	// limiter bounds the label values that come off an ingested event. The
 	// refresher shares it, so a resource type the counters admitted is the one
 	// the gauge reports too.
-	limiter *limiter
+	limiter *cardinality.Limiter
 
 	eventsIngested      *prometheus.CounterVec
 	eventsDeduplicated  *prometheus.CounterVec
@@ -68,7 +69,7 @@ type Metrics struct {
 func New(reg *prometheus.Registry) *Metrics {
 	m := &Metrics{
 		reg:     reg,
-		limiter: newLimiter(),
+		limiter: cardinality.New(labelValueLimit),
 		eventsIngested: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tally_events_ingested_total",
 			Help: "Events stored by the ingest pipeline.",
@@ -157,8 +158,8 @@ func (m *Metrics) EventIngested(platform, cloud, resourceType, eventType, source
 	m.eventsIngested.WithLabelValues(
 		platform,
 		cloud,
-		m.limiter.bound(labelResourceType, resourceType),
-		m.limiter.bound(labelEventType, eventType),
+		m.limiter.Bound(labelResourceType, resourceType),
+		m.limiter.Bound(labelEventType, eventType),
 		source,
 	).Inc()
 }
@@ -187,7 +188,7 @@ func (m *Metrics) SizeUnvalidated(platform, resourceType string) {
 	if m == nil {
 		return
 	}
-	m.sizeUnvalidated.WithLabelValues(platform, m.limiter.bound(labelResourceType, resourceType)).Inc()
+	m.sizeUnvalidated.WithLabelValues(platform, m.limiter.Bound(labelResourceType, resourceType)).Inc()
 }
 
 // ProjectionReplayed counts one projection row folded again from its history.
@@ -242,56 +243,6 @@ const (
 	labelState        = "state"
 )
 
-// What one such label may put into the series: values longer than
-// labelValueMax, and values past the labelValueLimit-th distinct one, are
-// counted under labelOverflow instead.
-//
-// The limit is per label and admits on a first-seen basis, so a deployment
-// reporting fewer kinds than that sees its real values throughout and a
-// credential filling the limit with noise costs the remaining series their
-// detail rather than the process its memory. labelOverflow is a value an event
-// may legitimately carry as well; the two then share a series, which is the
-// price of not keeping a second, unbounded vocabulary to tell them apart.
-const (
-	labelValueMax   = 128
-	labelValueLimit = 128
-	labelOverflow   = "other"
-)
-
-// limiter is the vocabulary the bounded labels have been recorded under. It is
-// shared by every instrument and safe for concurrent use: the ingest path calls
-// it from whatever goroutine serves the batch.
-type limiter struct {
-	mu       sync.Mutex
-	admitted map[labelValue]struct{}
-	distinct map[string]int
-}
-
-// labelValue is one value of one label, which is what a limiter admits.
-type labelValue struct{ label, value string }
-
-func newLimiter() *limiter {
-	return &limiter{admitted: map[labelValue]struct{}{}, distinct: map[string]int{}}
-}
-
-// bound returns what value may be recorded as under label: value itself while
-// the label has room for it, and labelOverflow once it has not.
-func (l *limiter) bound(label, value string) string {
-	if len(value) > labelValueMax {
-		return labelOverflow
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	admitted := labelValue{label: label, value: value}
-	if _, ok := l.admitted[admitted]; ok {
-		return value
-	}
-	if l.distinct[label] >= labelValueLimit {
-		return labelOverflow
-	}
-	l.admitted[admitted] = struct{}{}
-	l.distinct[label]++
-	return value
-}
+// labelValueLimit is how many distinct values each of those labels may put into
+// the series, on the terms internal/core/cardinality bounds them with.
+const labelValueLimit = 128
