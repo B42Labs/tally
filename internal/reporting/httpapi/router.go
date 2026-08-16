@@ -29,6 +29,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 
+	"github.com/b42labs/tally/internal/core/health"
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
@@ -134,7 +135,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 
 	srv := &server{
 		db:               opts.DB,
-		health:           newHealthTracker(now, opts.UnhealthyThreshold),
+		health:           health.New(now, opts.UnhealthyThreshold),
 		store:            opts.Store,
 		queries:          opts.Queries,
 		pipeline:         opts.Pipeline,

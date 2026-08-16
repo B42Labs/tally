@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/b42labs/tally/internal/core/health"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/ingest"
 	"github.com/b42labs/tally/internal/reporting/metrics"
@@ -18,7 +19,7 @@ import (
 // seam, so an Options that leaves the fields below unset still serves them.
 type server struct {
 	db     DB
-	health *healthTracker
+	health *health.Tracker
 	// store is what the handlers that write run their transactions on: an event
 	// batch and the audit row naming it land together or not at all.
 	store *store.Store
