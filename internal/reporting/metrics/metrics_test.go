@@ -10,6 +10,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/b42labs/tally/internal/core/cardinality"
 )
 
 // tallySeries names every series this package registers. The tests assert over
@@ -150,12 +152,12 @@ func TestBoundedLabels(t *testing.T) {
 		// to a pattern with no length limit at all, so both reach this package
 		// longer than a series name should ever be.
 		m := fresh(t)
-		long := strings.Repeat("a", labelValueMax+1)
+		long := strings.Repeat("a", cardinality.ValueMax+1)
 
 		m.EventIngested("openstack", "prod", long, "compute."+long, "collector")
 
 		if got := testutil.ToFloat64(m.eventsIngested.WithLabelValues(
-			"openstack", "prod", labelOverflow, labelOverflow, "collector",
+			"openstack", "prod", cardinality.Overflow, cardinality.Overflow, "collector",
 		)); got != 1 {
 			t.Errorf("the overflow series counted %v of the long labels, want 1", got)
 		}
@@ -179,7 +181,7 @@ func TestBoundedLabels(t *testing.T) {
 			t.Errorf("tally_ingest_unvalidated_size_total has %d series, want %d",
 				got, labelValueLimit+1)
 		}
-		if got := testutil.ToFloat64(m.sizeUnvalidated.WithLabelValues("openstack", labelOverflow)); got != 100 {
+		if got := testutil.ToFloat64(m.sizeUnvalidated.WithLabelValues("openstack", cardinality.Overflow)); got != 100 {
 			t.Errorf("the overflow series counted %v events, want the 100 past the limit", got)
 		}
 	})
@@ -208,7 +210,7 @@ func TestBoundedLabels(t *testing.T) {
 		m.EventIngested("openstack", "prod", "type-past-the-limit", "compute.instance.delete.end", "collector")
 
 		if got := testutil.ToFloat64(m.eventsIngested.WithLabelValues(
-			"openstack", "prod", labelOverflow, "compute.instance.delete.end", "collector",
+			"openstack", "prod", cardinality.Overflow, "compute.instance.delete.end", "collector",
 		)); got != 1 {
 			t.Error("the event type was folded into the overflow bucket along with the resource type")
 		}

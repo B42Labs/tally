@@ -80,8 +80,8 @@ func (r *Refresher) Refresh(ctx context.Context) error {
 		written[group{
 			row.Platform,
 			row.Cloud,
-			r.m.limiter.bound(labelResourceType, row.ResourceType),
-			r.m.limiter.bound(labelState, row.State),
+			r.m.limiter.Bound(labelResourceType, row.ResourceType),
+			r.m.limiter.Bound(labelState, row.State),
 		}] += row.Resources
 	}
 
