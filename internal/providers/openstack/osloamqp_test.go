@@ -237,6 +237,104 @@ func FuzzParseEnvelope(f *testing.F) {
 // TestParseEnvelopeAcceptsAbsentMembers pins what the decoder tolerates: only
 // the timestamp is required, and every gap besides it is left for the mapping
 // to decide about.
+// TestPreviewRedactsTheRequestContextCredentials covers the encoding the
+// redaction has to match. oslo carries the notification as a JSON string and
+// not as a nested object, so in the raw bytes the inner document's quotes are
+// backslash-escaped and the token reaches the dump as
+// \"_context_auth_token\": \"gAAAAAB…\". A pattern written against bare quotes
+// matches none of that and the body is printed through unchanged.
+//
+// Redaction runs whenever ParseEnvelope refuses a body, and the most common
+// refusal of a well-formed envelope is a timestamp layout the collector does not
+// know — which is exactly when an operator reaches for the dump and attaches its
+// output to a ticket. A Keystone token is valid for hours.
+func TestPreviewRedactsTheRequestContextCredentials(t *testing.T) {
+	const token = "gAAAAABlive-keystone-token"
+
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			// The envelope decodes, only the timestamp does not, so the credentials
+			// travel escaped inside the oslo.message string.
+			name: "an envelope the parser refused for its timestamp",
+			body: wrap(t, `{
+				"event_type": "identity.authenticate",
+				"timestamp": "01.03.2026 12:00",
+				"_context_auth_token": "`+token+`",
+				"_context_password": "hunter2"
+			}`),
+		},
+		{
+			// A body that is no envelope at all is previewed as it arrived, which is
+			// the case the pattern already covered.
+			name: "a body that is no envelope at all",
+			body: []byte(`{"_context_auth_token": "` + token + `", "_context_password": "hunter2"}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseEnvelope(tc.body); err == nil {
+				t.Fatal("ParseEnvelope() error = nil, want the body to reach the preview")
+			}
+
+			got := preview(tc.body)
+
+			if strings.Contains(got, token) {
+				t.Errorf("preview() printed the Keystone token: %s", got)
+			}
+			if strings.Contains(got, "hunter2") {
+				t.Errorf("preview() printed the request context password: %s", got)
+			}
+			if want := strings.Count(got, `"[redacted]"`); want != 2 {
+				t.Errorf("preview() replaced %d credentials, want the token and the password: %s", want, got)
+			}
+		})
+	}
+}
+
+// TestPreviewDescribesABodyItCannotRedact covers the bodies the redaction
+// cannot reach. The pattern is written against JSON quoting, so a
+// msgpack-serialized notification — oslo.messaging offers that serializer — and
+// anything else a publisher on a bound topic sends carry their
+// _context_auth_token past it untouched. Printing those bytes raw would put a
+// live Keystone token in the file an operator attaches to a ticket, which is
+// what the redaction exists to prevent.
+func TestPreviewDescribesABodyItCannotRedact(t *testing.T) {
+	const token = "gAAAAABlive-keystone-token"
+	// A msgpack map: the member names arrive length-prefixed rather than quoted,
+	// so the pattern matches nothing at all.
+	body := []byte("\x82\xb3_context_auth_token\xd9\x1a" + token + "\xaaevent_type")
+
+	if _, err := ParseEnvelope(body); err == nil {
+		t.Fatal("ParseEnvelope() error = nil, want the body to reach the preview")
+	}
+
+	got := preview(body)
+
+	if strings.Contains(got, token) {
+		t.Errorf("preview() printed the Keystone token: %s", got)
+	}
+	// The delivery is still reported: that a body arrived which this collector can
+	// neither read nor redact is what the operator running the dump is looking for.
+	if !strings.Contains(got, "not JSON") {
+		t.Errorf("preview() = %q, want it to report the body it did not print", got)
+	}
+}
+
+// TestPreviewCutsTheBodyAtTheBound keeps the dump's line to the beginning of a
+// message, which is where its shape shows.
+func TestPreviewCutsTheBodyAtTheBound(t *testing.T) {
+	body := wrap(t, `{"timestamp": "01.03.2026 12:00", "filler": "`+
+		strings.Repeat("z", 2*previewMax)+`"}`)
+
+	if got := preview(body); len(got) != previewMax {
+		t.Errorf("preview() returned %d bytes, want it cut at %d", len(got), previewMax)
+	}
+}
+
 func TestParseEnvelopeAcceptsAbsentMembers(t *testing.T) {
 	t.Run("a notification without a payload parses with a nil payload", func(t *testing.T) {
 		got, err := ParseEnvelope(wrap(t, `{
