@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b42labs/tally/internal/core/health"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 )
 
@@ -150,7 +151,7 @@ func TestReadyz(t *testing.T) {
 		// keeps passing because restarting fixes nothing.
 		srv := &server{
 			db:     splitDB{ready: errSchemaTooOld},
-			health: newHealthTracker(time.Now, time.Minute),
+			health: health.New(time.Now, time.Minute),
 		}
 
 		assertUnavailable(t, probe(t, srv.Readyz))
@@ -164,7 +165,7 @@ func TestReadyz(t *testing.T) {
 				deadline, _ = ctx.Deadline()
 				return nil
 			}),
-			health: newHealthTracker(time.Now, time.Minute),
+			health: health.New(time.Now, time.Minute),
 		}
 
 		before := time.Now()
@@ -193,7 +194,7 @@ func newTestServer(t *testing.T, threshold time.Duration) (*fakeClock, *server, 
 	var down error
 	srv := &server{
 		db:     pingerFunc(func(context.Context) error { return down }),
-		health: newHealthTracker(clock.Now, threshold),
+		health: health.New(clock.Now, threshold),
 	}
 	return clock, srv, &down
 }
