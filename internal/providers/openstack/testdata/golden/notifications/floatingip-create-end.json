@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"f193d5cb-48e6-402b-1c30-76d829415575\", \"event_type\": \"floatingip.create.end\", \"publisher_id\": \"network.neutron-01\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-01 11:00:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"floatingip\": {\"id\": \"708192a3-b4c5-40d1-e253-6e7f8091a2b3\", \"tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"floating_ip_address\": \"203.0.113.42\", \"floating_network_id\": \"81a2b3c4-d5e6-41f2-9364-7f8091a2b3c4\", \"fixed_ip_address\": null, \"port_id\": null, \"router_id\": null, \"status\": \"DOWN\", \"description\": \"\"}}}"
+}

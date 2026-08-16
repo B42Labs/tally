@@ -1,0 +1,16 @@
+{
+  "event_id": "35d719af-8c2a-4460-5074-ba1c6d859919",
+  "timestamp": "2026-03-07T09:40:00Z",
+  "event_type": "image.delete",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "image",
+  "resource_id": "8192a3b4-c5d6-41e2-f364-7f8091a2b3c4",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "provider": {
+      "oslo_event_type": "image.delete"
+    }
+  }
+}

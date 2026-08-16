@@ -1,0 +1,20 @@
+{
+  "event_id": "24c608fe-7b19-435e-4f63-a90b5c748808",
+  "timestamp": "2026-03-02T13:15:00Z",
+  "event_type": "image.create",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "image",
+  "resource_id": "92a3b4c5-d6e7-41f2-0475-8091a2b3c4d5",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "active",
+    "size": {
+      "size_gb": 2
+    },
+    "provider": {
+      "oslo_event_type": "image.create"
+    }
+  }
+}

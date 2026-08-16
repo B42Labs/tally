@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"e082c4ba-37d5-491a-0b2f-65c71830d464\", \"event_type\": \"volume.transfer.accept.end\", \"publisher_id\": \"volume.storage-01@ceph\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-05 11:45:00.000000\", \"_context_project_id\": \"b7e1c2d3f405162738495a6b7c8d9e0f\", \"_context_tenant_id\": \"b7e1c2d3f405162738495a6b7c8d9e0f\", \"payload\": {\"volume_id\": \"6f708192-a3b4-4fc0-d142-5d6e7f8091a2\", \"tenant_id\": \"b7e1c2d3f405162738495a6b7c8d9e0f\", \"user_id\": \"1f0e9d8c7b6a5948372615043f2e1d0c\", \"display_name\": \"handover-01\", \"status\": \"available\", \"size\": 50, \"volume_type\": \"standard\", \"host\": \"storage-01@ceph#ceph\", \"created_at\": \"2026-02-28 08:05:00.000000\"}}"
+}
