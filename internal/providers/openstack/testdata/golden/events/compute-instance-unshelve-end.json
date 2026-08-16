@@ -1,0 +1,17 @@
+{
+  "event_id": "7f1b5d43-c06e-42a3-94b8-9e50a1c3d6f7",
+  "timestamp": "2026-03-04T06:30:00Z",
+  "event_type": "compute.instance.unshelve",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "instance",
+  "resource_id": "2b3c4d5e-6f70-4b8c-9d0e-1f2a3b4c5d6e",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "active",
+    "provider": {
+      "oslo_event_type": "compute.instance.unshelve.end"
+    }
+  }
+}

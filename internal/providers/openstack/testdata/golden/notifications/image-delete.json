@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"35d719af-8c2a-4460-5074-ba1c6d859919\", \"event_type\": \"image.delete\", \"publisher_id\": \"image.glance-01\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-07 09:40:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"id\": \"8192a3b4-c5d6-41e2-f364-7f8091a2b3c4\", \"owner\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"name\": \"ubuntu-24.04\", \"status\": \"deleted\", \"size\": 1610612736, \"disk_format\": \"qcow2\", \"container_format\": \"bare\", \"deleted\": true, \"deleted_at\": \"2026-03-07 09:40:00.000000\"}}"
+}

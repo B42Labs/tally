@@ -1,0 +1,21 @@
+{
+  "event_id": "e082c4ba-37d5-491a-0b2f-65c71830d464",
+  "timestamp": "2026-03-05T11:45:00Z",
+  "event_type": "volume.transfer.accept.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "volume",
+  "resource_id": "6f708192-a3b4-4fc0-d142-5d6e7f8091a2",
+  "project_id": "b7e1c2d3f405162738495a6b7c8d9e0f",
+  "source": "collector",
+  "payload": {
+    "state": "available",
+    "size": {
+      "size_gb": 50,
+      "type": "standard"
+    },
+    "provider": {
+      "oslo_event_type": "volume.transfer.accept.end"
+    }
+  }
+}

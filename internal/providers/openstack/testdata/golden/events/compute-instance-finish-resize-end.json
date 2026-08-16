@@ -1,0 +1,23 @@
+{
+  "event_id": "5d9f3b21-ae4c-4081-b2f6-7c3e9a1b4d85",
+  "timestamp": "2026-03-02T09:45:00Z",
+  "event_type": "compute.instance.resize.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "instance",
+  "resource_id": "3c4d5e6f-7081-4c9d-ae1f-2a3b4c5d6e7f",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "active",
+    "size": {
+      "vcpus": 8,
+      "ram_gb": 16,
+      "disk_gb": 160,
+      "flavor": "m1.xlarge"
+    },
+    "provider": {
+      "oslo_event_type": "compute.instance.finish_resize.end"
+    }
+  }
+}

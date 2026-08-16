@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"6e0a4c32-bf5d-4192-83a7-8d4f0b2c5e96\", \"event_type\": \"compute.instance.shelve_offload.end\", \"publisher_id\": \"compute.compute-02\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-03 22:00:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"instance_id\": \"2b3c4d5e-6f70-4b8c-9d0e-1f2a3b4c5d6e\", \"tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"user_id\": \"1f0e9d8c7b6a5948372615043f2e1d0c\", \"display_name\": \"batch-runner\", \"state\": \"shelved_offloaded\", \"state_description\": \"\", \"vcpus\": 1, \"memory_mb\": 512, \"root_gb\": 1, \"ephemeral_gb\": 0, \"instance_type\": \"m1.tiny\", \"host\": \"compute-02\"}}"
+}

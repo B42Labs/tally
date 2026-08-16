@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"9b3d7f65-e280-44c5-b6da-1072c3e5f819\", \"event_type\": \"compute.instance.power_on.end\", \"publisher_id\": \"compute.compute-01\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-05 07:20:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"instance_id\": \"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\", \"tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"user_id\": \"1f0e9d8c7b6a5948372615043f2e1d0c\", \"display_name\": \"web-01\", \"state\": \"active\", \"state_description\": \"\", \"vcpus\": 4, \"memory_mb\": 8192, \"instance_type\": \"m1.large\", \"host\": \"compute-01\"}}"
+}

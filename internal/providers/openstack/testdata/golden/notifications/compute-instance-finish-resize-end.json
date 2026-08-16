@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"5d9f3b21-ae4c-4081-b2f6-7c3e9a1b4d85\", \"event_type\": \"compute.instance.finish_resize.end\", \"publisher_id\": \"compute.compute-03\", \"priority\": \"INFO\", \"timestamp\": \"2026-03-02 09:45:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"instance_id\": \"3c4d5e6f-7081-4c9d-ae1f-2a3b4c5d6e7f\", \"tenant_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"user_id\": \"1f0e9d8c7b6a5948372615043f2e1d0c\", \"display_name\": \"db-01\", \"state\": \"active\", \"state_description\": \"\", \"vcpus\": 8, \"memory_mb\": 16384, \"root_gb\": 160, \"ephemeral_gb\": 0, \"instance_type\": \"m1.xlarge\", \"instance_type_id\": 7, \"host\": \"compute-03\", \"availability_zone\": \"nova\", \"created_at\": \"2026-02-20 07:00:00.000000\", \"launched_at\": \"2026-03-02 09:44:51.000000\"}}"
+}

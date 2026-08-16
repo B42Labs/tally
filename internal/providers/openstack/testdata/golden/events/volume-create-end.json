@@ -1,0 +1,21 @@
+{
+  "event_id": "ac4e8076-f391-45d6-c7eb-2183d4f60920",
+  "timestamp": "2026-03-01T10:30:00Z",
+  "event_type": "volume.create.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "volume",
+  "resource_id": "4d5e6f70-8192-4dae-bf20-3b4c5d6e7f80",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "available",
+    "size": {
+      "size_gb": 100,
+      "type": "ssd"
+    },
+    "provider": {
+      "oslo_event_type": "volume.create.end"
+    }
+  }
+}

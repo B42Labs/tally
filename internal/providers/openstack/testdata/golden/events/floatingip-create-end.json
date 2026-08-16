@@ -1,0 +1,20 @@
+{
+  "event_id": "f193d5cb-48e6-402b-1c30-76d829415575",
+  "timestamp": "2026-03-01T11:00:00Z",
+  "event_type": "floatingip.create.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "floating_ip",
+  "resource_id": "708192a3-b4c5-40d1-e253-6e7f8091a2b3",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "active",
+    "size": {
+      "ip_version": 4
+    },
+    "provider": {
+      "oslo_event_type": "floatingip.create.end"
+    }
+  }
+}

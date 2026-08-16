@@ -1,0 +1,23 @@
+{
+  "event_id": "4c8e2a10-9d3b-4f7c-a1e5-6b2d8f0a3c74",
+  "timestamp": "2026-03-02T08:15:00Z",
+  "event_type": "compute.instance.resize.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "instance",
+  "resource_id": "2b3c4d5e-6f70-4b8c-9d0e-1f2a3b4c5d6e",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "resized",
+    "size": {
+      "vcpus": 1,
+      "ram_gb": 0.5,
+      "disk_gb": 1,
+      "flavor": "m1.tiny"
+    },
+    "provider": {
+      "oslo_event_type": "compute.instance.resize.end"
+    }
+  }
+}

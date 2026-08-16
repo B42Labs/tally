@@ -1,0 +1,17 @@
+{
+  "event_id": "8a2c6e54-d17f-43b4-a5c9-0f61b2d4e708",
+  "timestamp": "2026-03-04T19:05:00Z",
+  "event_type": "compute.instance.power_off",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "instance",
+  "resource_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "shutoff",
+    "provider": {
+      "oslo_event_type": "compute.instance.power_off.end"
+    }
+  }
+}
