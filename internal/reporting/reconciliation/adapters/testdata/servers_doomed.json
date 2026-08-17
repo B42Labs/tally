@@ -1,0 +1,72 @@
+{
+  "servers": [
+    {
+      "id": "3a9e5c07-2b81-4d6f-9a34-5c7e1b0d8f26",
+      "name": "web-04",
+      "status": "ACTIVE",
+      "tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "created": "2026-07-02T13:44:10Z",
+      "updated": "2026-07-02T13:44:28Z",
+      "hostId": "5c1f9a3b7d2e4680a9c3b5d7e1f2a4c6",
+      "OS-EXT-STS:task_state": null,
+      "OS-EXT-STS:vm_state": "active",
+      "OS-EXT-STS:power_state": 1,
+      "OS-EXT-AZ:availability_zone": "nova",
+      "OS-SRV-USG:launched_at": "2026-07-02T13:44:28.000000",
+      "OS-SRV-USG:terminated_at": null,
+      "flavor": {
+        "id": "d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74",
+        "original_name": "m1.small",
+        "vcpus": 1,
+        "ram": 512,
+        "disk": 20,
+        "ephemeral": 10,
+        "swap": 0,
+        "disabled": false,
+        "is_public": true,
+        "extra_specs": {}
+      },
+      "image": {"id": "0b1c2d3e4f50461783940516273849ab"},
+      "addresses": {
+        "private": [{"addr": "192.0.2.41", "version": 4, "OS-EXT-IPS:type": "fixed"}]
+      },
+      "security_groups": [{"name": "default"}],
+      "metadata": {}
+    },
+    {
+      "id": "b6d2f483-7e15-4a90-8c73-0d5b9a1e6c42",
+      "name": "batch-11",
+      "status": "ACTIVE",
+      "tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "created": "2026-06-19T07:05:55Z",
+      "updated": "2026-06-19T07:06:12Z",
+      "hostId": "9d3c1b5a7e2f4806b1c3d5e7f9a2b4c6",
+      "OS-EXT-STS:task_state": null,
+      "OS-EXT-STS:vm_state": "active",
+      "OS-EXT-STS:power_state": 1,
+      "OS-EXT-AZ:availability_zone": "nova",
+      "OS-SRV-USG:launched_at": "2026-06-19T07:06:12.000000",
+      "OS-SRV-USG:terminated_at": null,
+      "flavor": {
+        "id": "3e7c1a95-2d48-4b6f-8017-5a9c3e1d7b02",
+        "original_name": "m1.tiny",
+        "vcpus": 1,
+        "ram": 1024,
+        "disk": 5,
+        "ephemeral": 0,
+        "swap": 0,
+        "disabled": false,
+        "is_public": true,
+        "extra_specs": {}
+      },
+      "image": {"id": "0b1c2d3e4f50461783940516273849ab"},
+      "addresses": {
+        "private": [{"addr": "192.0.2.42", "version": 4, "OS-EXT-IPS:type": "fixed"}]
+      },
+      "security_groups": [{"name": "default"}],
+      "metadata": {}
+    }
+  ]
+}
