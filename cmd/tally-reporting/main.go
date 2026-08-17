@@ -31,6 +31,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/ingest"
 	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
+	"github.com/b42labs/tally/internal/reporting/reconciliation/adapters"
 	"github.com/b42labs/tally/internal/reporting/registry"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -108,15 +109,19 @@ func run(ctx context.Context) error {
 
 	// The clouds file is read here rather than per sync run, so a broken one
 	// refuses the process instead of failing every request that reaches the sync
-	// endpoint. The adapter registry stays empty until the first provider adapter
-	// lands (issue #10), which is why a non-empty file refuses startup today: no
-	// adapter it names is registered, and none exists that could serve it.
-	adapters := map[string]reconciliation.Adapter{}
-	cloudsCfg, err := reconciliation.LoadConfig(cfg.CloudsConfigPath, adapters)
+	// endpoint. The registry carries the OpenStack adapter, and LoadConfig checks
+	// every configured cloud's adapter name and platform against it at startup:
+	// a cloud that names an unregistered adapter, or one that observes a
+	// different platform than the cloud declares, stops the process before it
+	// listens.
+	adapterRegistry := map[string]reconciliation.Adapter{
+		"openstack": adapters.NewOpenStack(time.Now, logger),
+	}
+	cloudsCfg, err := reconciliation.LoadConfig(cfg.CloudsConfigPath, adapterRegistry)
 	if err != nil {
 		return fmt.Errorf("loading the clouds config: %w", err)
 	}
-	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapters, time.Now, m)
+	syncer := reconciliation.New(db, pipeline, cloudsCfg, adapterRegistry, time.Now, m)
 
 	router, err := httpapi.NewRouter(httpapi.Options{
 		Logger:                   logger,
