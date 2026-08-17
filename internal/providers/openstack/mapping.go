@@ -3,39 +3,18 @@ package openstack
 import (
 	"encoding/json"
 	"log/slog"
-	"net/netip"
 
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/core/ids"
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/providers/openstack/osmap"
 )
 
 // platform is the platform name every event this collector produces carries. It
 // is also half of the key the resource type registry validates a size against.
 const platform = "openstack"
-
-// mebibytesPerGibibyte and bytesPerGibibyte are the divisors the reported
-// quantities are converted with. Nova reports memory in MiB and glance reports
-// image sizes in bytes, while the canonical size objects are in GiB.
-var (
-	mebibytesPerGibibyte = decimal.NewFromInt(1024)
-	bytesPerGibibyte     = decimal.NewFromInt(1 << 30)
-)
-
-// vmStates maps a nova vm_state to the state Tally records. A state outside the
-// map passes through unchanged, because a state is an opaque provider string
-// and substituting something known for an unknown one would hide what the cloud
-// actually reported.
-var vmStates = map[string]string{
-	"active":            "active",
-	"stopped":           "shutoff",
-	"shelved_offloaded": "shelved",
-	"paused":            "paused",
-	"suspended":         "suspended",
-	"error":             "error",
-}
 
 // stateRule derives an event's payload state from the notification payload.
 type stateRule func(payload map[string]any) string
@@ -286,13 +265,9 @@ func projectID(n Notification, path []string) string {
 	return n.ContextTenantID
 }
 
-// vmState reads nova's vm_state and normalizes it through vmStates.
+// vmState reads nova's vm_state and normalizes it through osmap.VMState.
 func vmState(payload map[string]any) string {
-	state := stringAt(payload, "state")
-	if normalized, ok := vmStates[state]; ok {
-		return normalized
-	}
-	return state
+	return osmap.VMState(stringAt(payload, "state"))
 }
 
 // fixedState is the rule for a notification whose type already says what the
@@ -325,7 +300,7 @@ func unsizedImage(payload map[string]any) bool {
 func instanceSize(payload map[string]any) map[string]any {
 	size := make(map[string]any, 4)
 	setNumber(size, "vcpus", payload, "vcpus")
-	setQuotient(size, "ram_gb", payload, "memory_mb", mebibytesPerGibibyte)
+	setQuotient(size, "ram_gb", payload, "memory_mb", osmap.MebibytesPerGibibyte)
 	if disk, ok := diskGB(payload); ok {
 		size["disk_gb"] = json.Number(disk.String())
 	}
@@ -369,7 +344,7 @@ func volumeSize(payload map[string]any) map[string]any {
 // imageSize describes an image. Glance reports the size in bytes.
 func imageSize(payload map[string]any) map[string]any {
 	size := make(map[string]any, 1)
-	setQuotient(size, "size_gb", payload, "size", bytesPerGibibyte)
+	setQuotient(size, "size_gb", payload, "size", osmap.BytesPerGibibyte)
 	return size
 }
 
@@ -379,13 +354,10 @@ func imageSize(payload map[string]any) map[string]any {
 // and a skipped event would cost the address its whole billing record.
 func floatingIPSize(payload map[string]any) map[string]any {
 	address := stringAt(payload, "floatingip", "floating_ip_address")
-	version := 4
-	switch parsed, err := netip.ParseAddr(address); {
-	case err != nil:
+	version, err := osmap.IPVersion(address)
+	if err != nil {
 		slog.Default().Debug("floating ip address is unreadable, assuming IPv4",
 			"address", address)
-	case !parsed.Is4():
-		version = 6
 	}
 	return map[string]any{"ip_version": version}
 }

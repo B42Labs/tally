@@ -1,0 +1,62 @@
+{
+  "floatingips": [
+    {
+      "id": "e1a7c3b5-0d92-4f68-8a41-6b2c9d5e7f03",
+      "status": "ACTIVE",
+      "floating_ip_address": "203.0.113.42",
+      "floating_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "fixed_ip_address": "192.0.2.11",
+      "port_id": "4f2a8c60-1d75-4b39-a8e2-3c6b9d1f5a07",
+      "router_id": "a9c5e3b1-7f42-4d08-96b5-2e8c4a1d6f30",
+      "project_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "created_at": "2026-05-11T07:30:00",
+      "updated_at": "2026-07-14T09:14:26",
+      "revision_number": 3,
+      "description": "",
+      "tags": []
+    },
+    {
+      "id": "f28d5a91-6c04-4e73-b1f8-9a2d7c3e5b46",
+      "status": "DOWN",
+      "floating_ip_address": "2001:db8:2a::7",
+      "floating_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "fixed_ip_address": null,
+      "port_id": null,
+      "router_id": null,
+      "project_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "created_at": "2026-05-12T09:00:00",
+      "updated_at": "2026-05-12T09:00:00",
+      "revision_number": 1,
+      "description": "",
+      "tags": []
+    },
+    {
+      "id": "a3b6d8f2-4e01-4c95-87a3-5d1b9c6e2f48",
+      "status": "DOWN",
+      "floating_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "fixed_ip_address": null,
+      "port_id": null,
+      "router_id": null,
+      "tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "description": ""
+    },
+    {
+      "id": "b45c9e17-2a68-4d03-91f7-6c8e0b3a5d92",
+      "status": "ACTIVE",
+      "floating_ip_address": "203.0.113",
+      "floating_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "fixed_ip_address": "192.0.2.24",
+      "port_id": "7c1e5b39-8d24-4a06-bf95-2d3c7a1e6b48",
+      "router_id": "a9c5e3b1-7f42-4d08-96b5-2e8c4a1d6f30",
+      "project_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "created_at": "2026-05-13T18:22:07",
+      "updated_at": "2026-07-20T16:46:11",
+      "revision_number": 2,
+      "description": "",
+      "tags": []
+    }
+  ]
+}

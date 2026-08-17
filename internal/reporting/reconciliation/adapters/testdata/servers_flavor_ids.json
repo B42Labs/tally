@@ -1,0 +1,66 @@
+{
+  "servers": [
+    {
+      "id": "1e5d9b74-3c2a-4f68-b019-7d4c6a2e8f53",
+      "name": "legacy-01",
+      "status": "ACTIVE",
+      "tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "created": "2026-02-03T11:20:15Z",
+      "updated": "2026-08-02T04:11:09Z",
+      "hostId": "5c1f9a3b7d2e4680a9c3b5d7e1f2a4c6",
+      "OS-EXT-STS:task_state": null,
+      "OS-EXT-STS:vm_state": "active",
+      "OS-EXT-STS:power_state": 1,
+      "OS-EXT-AZ:availability_zone": "nova",
+      "OS-SRV-USG:launched_at": "2026-02-03T11:20:31.000000",
+      "OS-SRV-USG:terminated_at": null,
+      "flavor": {
+        "id": "d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74",
+        "links": [
+          {
+            "rel": "bookmark",
+            "href": "https://openstack.invalid/compute/flavors/d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74"
+          }
+        ]
+      },
+      "image": {"id": "0b1c2d3e4f50461783940516273849ab"},
+      "addresses": {
+        "private": [{"addr": "192.0.2.31", "version": 4, "OS-EXT-IPS:type": "fixed"}]
+      },
+      "security_groups": [{"name": "default"}],
+      "metadata": {}
+    },
+    {
+      "id": "6b0e2f81-5a7d-4c39-8e42-1f9b3d5c7a06",
+      "name": "legacy-02",
+      "status": "ACTIVE",
+      "tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "created": "2026-02-04T14:52:40Z",
+      "updated": "2026-08-03T19:38:27Z",
+      "hostId": "9d3c1b5a7e2f4806b1c3d5e7f9a2b4c6",
+      "OS-EXT-STS:task_state": null,
+      "OS-EXT-STS:vm_state": "active",
+      "OS-EXT-STS:power_state": 1,
+      "OS-EXT-AZ:availability_zone": "nova",
+      "OS-SRV-USG:launched_at": "2026-02-04T14:52:58.000000",
+      "OS-SRV-USG:terminated_at": null,
+      "flavor": {
+        "id": "0f7e6d5c-4b3a-4291-8807-6a5b4c3d2e1f",
+        "links": [
+          {
+            "rel": "bookmark",
+            "href": "https://openstack.invalid/compute/flavors/0f7e6d5c-4b3a-4291-8807-6a5b4c3d2e1f"
+          }
+        ]
+      },
+      "image": {"id": "0b1c2d3e4f50461783940516273849ab"},
+      "addresses": {
+        "private": [{"addr": "192.0.2.32", "version": 4, "OS-EXT-IPS:type": "fixed"}]
+      },
+      "security_groups": [{"name": "default"}],
+      "metadata": {}
+    }
+  ]
+}

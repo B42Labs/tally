@@ -1,0 +1,74 @@
+{
+  "loadbalancers": [
+    {
+      "id": "4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23",
+      "name": "web-lb",
+      "description": "",
+      "provisioning_status": "ACTIVE",
+      "operating_status": "ONLINE",
+      "admin_state_up": true,
+      "project_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "vip_address": "203.0.113.42",
+      "vip_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "vip_subnet_id": "c8e4d2b0-6f39-4a71-8d25-9b4c6e8a1f30",
+      "vip_port_id": "4f2a8c60-1d75-4b39-a8e2-3c6b9d1f5a07",
+      "provider": "amphora",
+      "availability_zone": null,
+      "flavor_id": null,
+      "created_at": "2026-04-20T10:00:00",
+      "updated_at": "2026-07-14T09:20:31",
+      "listeners": [
+        {"id": "9e1f3a57-2b48-4c60-8d19-5a7c3e2b6f04"},
+        {"id": "af2c48d1-6b93-4e05-97a2-1d8b5c3f7e60"}
+      ],
+      "pools": [
+        {"id": "b3d5f791-4c26-4a08-8e13-7f9a2c5d6b81"}
+      ],
+      "tags": []
+    },
+    {
+      "id": "5b6c7d8e-9012-4345-b678-9c0d1e2f3a45",
+      "name": "retired-lb",
+      "description": "",
+      "provisioning_status": "DELETED",
+      "operating_status": "OFFLINE",
+      "admin_state_up": true,
+      "project_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "vip_address": "203.0.113.51",
+      "vip_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "vip_subnet_id": "c8e4d2b0-6f39-4a71-8d25-9b4c6e8a1f30",
+      "vip_port_id": "6d0b4f28-3a51-4e97-b26c-8f1d3a5c7e92",
+      "provider": "amphora",
+      "availability_zone": null,
+      "flavor_id": null,
+      "created_at": "2026-01-09T13:45:12",
+      "updated_at": "2026-06-30T07:02:55",
+      "listeners": [],
+      "pools": [],
+      "tags": []
+    },
+    {
+      "id": "6c7d8e90-1234-4567-8901-2d3e4f5a6b78",
+      "name": "staging-lb",
+      "description": "",
+      "provisioning_status": "PENDING_DELETE",
+      "operating_status": "OFFLINE",
+      "admin_state_up": true,
+      "project_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "vip_address": "203.0.113.63",
+      "vip_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "vip_subnet_id": "c8e4d2b0-6f39-4a71-8d25-9b4c6e8a1f30",
+      "vip_port_id": "8f2d6a04-5c73-4b19-9e48-1a6c3b5d7f20",
+      "provider": "amphora",
+      "availability_zone": null,
+      "flavor_id": null,
+      "created_at": "2026-05-28T16:11:39",
+      "updated_at": "2026-08-16T21:58:04",
+      "listeners": [
+        {"id": "c4e6a812-7d35-4f90-8b21-3e5c7a9d1f46"}
+      ],
+      "pools": [],
+      "tags": []
+    }
+  ]
+}
