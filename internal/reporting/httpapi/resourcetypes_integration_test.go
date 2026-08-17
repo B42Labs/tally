@@ -168,7 +168,8 @@ func TestResourceTypesOverHTTP(t *testing.T) {
 			pairs = append(pairs, entry.Platform+":"+entry.ResourceType)
 		}
 		want := []string{
-			"openstack:floating_ip", "openstack:image", "openstack:instance", "openstack:volume",
+			"openstack:floating_ip", "openstack:image", "openstack:instance",
+			"openstack:loadbalancer", "openstack:volume",
 		}
 		if !slices.Equal(pairs, want) {
 			t.Errorf("listed openstack pairs = %v, want the seeded %v", pairs, want)
