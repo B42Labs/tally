@@ -1,0 +1,42 @@
+{
+  "flavors": [
+    {
+      "id": "d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74",
+      "name": "m1.medium",
+      "ram": 4096,
+      "disk": 40,
+      "vcpus": 2,
+      "swap": "",
+      "rxtx_factor": 1.0,
+      "OS-FLV-EXT-DATA:ephemeral": 0,
+      "OS-FLV-DISABLED:disabled": false,
+      "os-flavor-access:is_public": true,
+      "description": null,
+      "links": [
+        {
+          "rel": "self",
+          "href": "https://openstack.invalid/compute/v2.1/flavors/d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74"
+        }
+      ]
+    },
+    {
+      "id": "3e7c1a95-2d48-4b6f-8017-5a9c3e1d7b02",
+      "name": "m1.tiny",
+      "ram": 1024,
+      "disk": 5,
+      "vcpus": 1,
+      "swap": "",
+      "rxtx_factor": 1.0,
+      "OS-FLV-EXT-DATA:ephemeral": 0,
+      "OS-FLV-DISABLED:disabled": false,
+      "os-flavor-access:is_public": true,
+      "description": null,
+      "links": [
+        {
+          "rel": "self",
+          "href": "https://openstack.invalid/compute/v2.1/flavors/3e7c1a95-2d48-4b6f-8017-5a9c3e1d7b02"
+        }
+      ]
+    }
+  ]
+}

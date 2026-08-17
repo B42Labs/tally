@@ -1,0 +1,48 @@
+{
+  "volumes": [
+    {
+      "id": "5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64",
+      "name": "web-01-data",
+      "description": null,
+      "status": "in-use",
+      "size": 100,
+      "volume_type": "ssd",
+      "bootable": "false",
+      "encrypted": false,
+      "multiattach": false,
+      "availability_zone": "nova",
+      "created_at": "2026-06-02T08:15:00.000000",
+      "updated_at": "2026-07-14T09:13:02.000000",
+      "os-vol-tenant-attr:tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "os-vol-host-attr:host": "cinder@ceph#ceph",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "attachments": [
+        {
+          "server_id": "7f3a1c58-9d2b-4e17-8c6a-2b5d0e9f4a31",
+          "volume_id": "5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64",
+          "device": "/dev/vdb"
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50",
+      "name": "scratch",
+      "description": null,
+      "status": "error_deleting",
+      "size": 25,
+      "volume_type": "hdd",
+      "bootable": "false",
+      "encrypted": false,
+      "multiattach": false,
+      "availability_zone": "nova",
+      "created_at": "2026-06-11T21:03:44.000000",
+      "updated_at": "2026-08-05T02:41:18.000000",
+      "os-vol-tenant-attr:tenant_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "os-vol-host-attr:host": "cinder@lvm#lvm",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "attachments": [],
+      "metadata": {}
+    }
+  ]
+}
