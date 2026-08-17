@@ -16,7 +16,9 @@
       "domain": {"id": "default", "name": "Default"}
     },
     "roles": [
-      {"id": "6b0f3d5a2c1e4f8b9d7a0c3e5f2b1a48", "name": "reader"}
+      {"id": "7c1a4e6b3d2f5081ae8b1c4d6e9f0a52", "name": "admin"},
+      {"id": "6b0f3d5a2c1e4f8b9d7a0c3e5f2b1a48", "name": "reader"},
+      {"id": "5a9e2c7b4d6f3081ac1b7d9e2f5a0c36", "name": "cloud-operator"}
     ],
     "catalog": [
       {
