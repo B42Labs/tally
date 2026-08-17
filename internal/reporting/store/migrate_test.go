@@ -45,8 +45,9 @@ var wantTables = []string{
 	"sync_runs",
 }
 
-// wantResourceTypes is the registry migration 0002 seeds: the size schema of
-// every OpenStack type of Phase 1, keyed by "platform/resource_type".
+// wantResourceTypes is the registry the chain seeds: the size schema of every
+// OpenStack type of Phase 1, keyed by "platform/resource_type". Migration 0002
+// carries the first four, 0006 the load balancer.
 var wantResourceTypes = map[string]string{
 	"openstack/instance": `{
 		"type": "object",
@@ -75,6 +76,16 @@ var wantResourceTypes = map[string]string{
 		"required": ["size_gb"],
 		"properties": {"size_gb": {"type": "number", "minimum": 0}},
 		"additionalProperties": true
+	}`,
+	// The seed marker is what the rollback of 0006 names its own row by, so it is
+	// part of the document the migration has to write.
+	"openstack/loadbalancer": `{
+		"type": "object",
+		"required": ["listeners", "pools"],
+		"properties": {"listeners": {"type": "integer", "minimum": 0},
+		               "pools": {"type": "integer", "minimum": 0}},
+		"additionalProperties": true,
+		"x-tally-seed": 6
 	}`,
 }
 
@@ -214,7 +225,9 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Migrate() error = %v, want nil", err)
 		}
-		if want := []int64{5}; !slices.Equal(applied, want) {
+		// Everything the chain carries above the 4 it was rolled down to, derived
+		// so that a later migration does not need this scenario rewritten.
+		if want := chainVersions[4:]; !slices.Equal(applied, want) {
 			t.Errorf("Migrate() = %v, want %v", applied, want)
 		}
 
@@ -290,9 +303,15 @@ func TestMigrate(t *testing.T) {
 
 	t.Run("the seed reaches a database that already registered one of its types", func(t *testing.T) {
 		// The operator ran the previous release, whose chain ended at 1, and
-		// registered a type by hand to unblock collection. The seed has to leave
-		// their row alone rather than fail the whole chain on the duplicate key,
-		// which would keep every pod of the new release unready.
+		// registered two types by hand to unblock collection. The seed has to
+		// leave their rows alone rather than fail the whole chain on the duplicate
+		// key, which would keep every pod of the new release unready.
+		//
+		// openstack/loadbalancer is the pair a production database actually
+		// carries: an operator running Octavia before this chain reached 6 had no
+		// other way to register it. Its conflict is 0006's, one migration removed
+		// from 0002's, and a wrong conflict target in either fails every such
+		// upgrade.
 		occupied := db.NewSiblingDB(t, "migrate_occupied")
 		if _, err := store.Migrate(t.Context(), occupied); err != nil {
 			t.Fatalf("Migrate() error = %v, want nil", err)
@@ -305,11 +324,29 @@ func TestMigrate(t *testing.T) {
 			t.Fatalf("New() error = %v, want nil", err)
 		}
 		defer s.Close()
-		const registered = `{"type": "object", "required": ["vcpus"]}`
-		if _, err := s.Pool().Exec(t.Context(),
-			`INSERT INTO resource_types (platform, resource_type, size_schema)
-			 VALUES ('openstack', 'instance', $1)`, registered); err != nil {
-			t.Fatalf("registering the type by hand: %v", err)
+		byHand := map[string]string{
+			// A document of their own, which is the case a rollback that deletes by
+			// content already protects.
+			"instance": `{"type": "object", "required": ["vcpus"]}`,
+			// The document 0006 seeds, without the marker that migration added to
+			// it. An operator registering the pair before the chain carried it had
+			// nothing else to copy, so byte-identical is the likely case rather
+			// than the edge one, and content alone cannot tell their row from the
+			// chain's.
+			"loadbalancer": `{
+				"type": "object",
+				"required": ["listeners", "pools"],
+				"properties": {"listeners": {"type": "integer", "minimum": 0},
+				               "pools": {"type": "integer", "minimum": 0}},
+				"additionalProperties": true
+			}`,
+		}
+		for resourceType, registered := range byHand {
+			if _, err := s.Pool().Exec(t.Context(),
+				`INSERT INTO resource_types (platform, resource_type, size_schema)
+				 VALUES ('openstack', $1, $2)`, resourceType, registered); err != nil {
+				t.Fatalf("registering %s by hand: %v", resourceType, err)
+			}
 		}
 
 		applied, err := store.Migrate(t.Context(), occupied)
@@ -320,25 +357,97 @@ func TestMigrate(t *testing.T) {
 			t.Errorf("Migrate() = %v, want %v", applied, afterInit)
 		}
 
-		var stored []byte
-		if err := s.Pool().QueryRow(t.Context(),
-			`SELECT size_schema FROM resource_types
-			 WHERE platform = 'openstack' AND resource_type = 'instance'`).Scan(&stored); err != nil {
-			t.Fatalf("reading the registered type: %v", err)
+		assertRegisteredByHand := func(t *testing.T) {
+			t.Helper()
+
+			for resourceType, registered := range byHand {
+				var stored []byte
+				if err := s.Pool().QueryRow(t.Context(),
+					`SELECT size_schema FROM resource_types
+					 WHERE platform = 'openstack' AND resource_type = $1`,
+					resourceType).Scan(&stored); err != nil {
+					t.Fatalf("reading the registered %s: %v", resourceType, err)
+				}
+				if !jsonEqual(t, stored, []byte(registered)) {
+					t.Errorf("size schema of %s = %s, want the operator's %s",
+						resourceType, stored, registered)
+				}
+			}
 		}
-		if !jsonEqual(t, stored, []byte(registered)) {
-			t.Errorf("size schema = %s, want the operator's %s", stored, registered)
-		}
-		for _, resourceType := range []string{"volume", "floating_ip", "image"} {
+		assertRegisteredByHand(t)
+
+		// Every pair the chain seeds is there, the two the operator owns
+		// included, derived so a later migration does not need this scenario
+		// rewritten.
+		for _, name := range slices.Sorted(maps.Keys(wantResourceTypes)) {
+			platform, resourceType, _ := strings.Cut(name, "/")
 			var found int
 			if err := s.Pool().QueryRow(t.Context(),
 				`SELECT count(*) FROM resource_types
-				 WHERE platform = 'openstack' AND resource_type = $1`, resourceType).Scan(&found); err != nil {
-				t.Fatalf("counting the seeded %s: %v", resourceType, err)
+				 WHERE platform = $1 AND resource_type = $2`,
+				platform, resourceType).Scan(&found); err != nil {
+				t.Fatalf("counting the seeded %s: %v", name, err)
 			}
 			if found != 1 {
-				t.Errorf("rows for (openstack, %s) = %d, want the seed", resourceType, found)
+				t.Errorf("rows for (%s, %s) = %d, want one", platform, resourceType, found)
 			}
+		}
+
+		// Rolling the release back is where the seed can still take what it never
+		// wrote. The operator's document is not the chain's to delete, so the
+		// rollback has to leave both rows exactly where the Up found them.
+		if _, err := store.MigrateDownTo(t.Context(), occupied, 5); err != nil {
+			t.Fatalf("MigrateDownTo(5) error = %v, want nil", err)
+		}
+		assertRegisteredByHand(t)
+	})
+
+	t.Run("rolling the seed back leaves a customized document alone", func(t *testing.T) {
+		// size_schema is public and round-trippable: GET answers the stored
+		// document verbatim and PUT stores what arrives verbatim. An operator who
+		// fetches the seeded load balancer schema, tightens it, and registers it
+		// back therefore keeps the seed marker inside a document that is now
+		// theirs. Rolling the release back must leave it where it is — deleting it
+		// would take the customization with it and leave the cloud's load-balancer
+		// ingest with no registered schema at all.
+		customized := db.NewSiblingDB(t, "migrate_customized")
+		if _, err := store.Migrate(t.Context(), customized); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), customized, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		const tightened = `{
+			"type": "object",
+			"required": ["listeners", "pools"],
+			"properties": {"listeners": {"type": "integer", "minimum": 0},
+			               "pools": {"type": "integer", "minimum": 0}},
+			"additionalProperties": false,
+			"x-tally-seed": 6
+		}`
+		if _, err := s.Pool().Exec(t.Context(),
+			`UPDATE resource_types SET size_schema = $1
+			 WHERE platform = 'openstack' AND resource_type = 'loadbalancer'`,
+			tightened); err != nil {
+			t.Fatalf("registering the operator's own load balancer schema: %v", err)
+		}
+
+		if _, err := store.MigrateDownTo(t.Context(), customized, 5); err != nil {
+			t.Fatalf("MigrateDownTo(5) error = %v, want nil", err)
+		}
+
+		var stored []byte
+		if err := s.Pool().QueryRow(t.Context(),
+			`SELECT size_schema FROM resource_types
+			 WHERE platform = 'openstack' AND resource_type = 'loadbalancer'`).Scan(&stored); err != nil {
+			t.Fatalf("reading the customized load balancer schema after the rollback: %v", err)
+		}
+		if !jsonEqual(t, stored, []byte(tightened)) {
+			t.Errorf("size schema of openstack/loadbalancer = %s, want the operator's %s",
+				stored, tightened)
 		}
 	})
 
@@ -434,8 +543,8 @@ func chainStatus(applied bool) []store.MigrationState {
 	return states
 }
 
-// assertSeededResourceTypes checks that the registry holds the seeds of
-// migration 0002 and nothing else.
+// assertSeededResourceTypes checks that the registry holds the seeds of the
+// chain and nothing else.
 func assertSeededResourceTypes(t *testing.T, s *store.Store) {
 	t.Helper()
 
