@@ -36,6 +36,7 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
 	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/loadbalancers"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
+	"github.com/gophercloud/gophercloud/v2/openstack/utils"
 	"github.com/gophercloud/gophercloud/v2/pagination"
 	"github.com/shopspring/decimal"
 
@@ -138,17 +139,28 @@ type service struct {
 	list func(context.Context, *gophercloud.ServiceClient, *observer) bool
 }
 
-// services is what this configuration observes, one entry per resource type.
-// ResourceTypes and ListResources both read it, so the types a run reports
-// cannot drift from the types it attempts.
-func (c openStackConfig) services() []service {
+// services is what cfg observes, one entry per resource type. ResourceTypes and
+// ListResources both read it, so the types a run reports cannot drift from the
+// types it attempts.
+//
+// since bounds the deleted listing of the one type that has one, and nothing
+// else. ResourceTypes names the types alone and passes none.
+func (a *openStack) services(cfg openStackConfig, since *time.Time) []service {
+	// Instances are the one type this cloud will name its deletions for, so the
+	// bound a run carries reaches this listing and no other.
+	instances := func(ctx context.Context, client *gophercloud.ServiceClient,
+		out *observer,
+	) bool {
+		return a.listInstances(ctx, client, out, since)
+	}
+
 	list := []service{
-		{resourceType: "instance", newClient: openstack.NewComputeV2, list: listInstances},
+		{resourceType: "instance", newClient: openstack.NewComputeV2, list: instances},
 		{resourceType: "volume", newClient: openstack.NewBlockStorageV3, list: listVolumes},
 		{resourceType: "floating_ip", newClient: openstack.NewNetworkV2, list: listFloatingIPs},
 		{resourceType: "image", newClient: openstack.NewImageV2, list: listImages},
 	}
-	if c.includeOctavia {
+	if cfg.includeOctavia {
 		list = append(list, service{
 			resourceType: "loadbalancer",
 			newClient:    openstack.NewLoadBalancerV2,
@@ -165,7 +177,7 @@ func (a *openStack) ResourceTypes(cfg map[string]any) ([]string, error) {
 		return nil, err
 	}
 
-	services := parsed.services()
+	services := a.services(parsed, nil)
 	types := make([]string, 0, len(services))
 	for _, svc := range services {
 		types = append(types, svc.resourceType)
@@ -187,6 +199,15 @@ func (a *openStack) ResourceTypes(cfg map[string]any) ([]string, error) {
 // one resource type. It is yielded as an EnumerationError, the remaining types
 // are still enumerated, and the missed-delete pass leaves that one type's rows
 // alone.
+//
+// An account that cannot see every project is a third case, and the loudest of
+// the three: it is refused before a single resource is observed. Nothing
+// downstream can tell a narrowed listing from a complete one, so a run that
+// cannot prove its scope must not observe at all.
+//
+// since bounds the deleted listing alone, never the live one. It is the last
+// completed run of this cloud, so the deleted listing walks exactly the window
+// this sync may have missed.
 func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since *time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
 	return func(yield func(reconciliation.ObservedResource, error) bool) {
@@ -210,7 +231,14 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			return
 		}
 
-		for _, svc := range parsed.services() {
+		if err := probeAdminScope(ctx, provider, endpointOptions); err != nil {
+			yield(reconciliation.ObservedResource{},
+				fmt.Errorf("the clouds.yaml entry %q cannot observe the whole cloud: %w",
+					parsed.osCloud, err))
+			return
+		}
+
+		for _, svc := range a.services(parsed, since) {
 			out := observer{resourceType: svc.resourceType, yield: yield}
 
 			// Building the client is what looks the service up in the catalog, so
@@ -218,7 +246,7 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			// this resource type alone.
 			client, err := svc.newClient(provider, endpointOptions)
 			if err != nil {
-				if !out.fail(fmt.Errorf("building the service client: %w", err)) {
+				if !out.fail(ctx, fmt.Errorf("building the service client: %w", err)) {
 					return
 				}
 				continue
@@ -229,6 +257,46 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			}
 		}
 	}
+}
+
+// probeAdminScope sends the one listing a cloud refuses a lesser account
+// outright, before any of the three that would narrow silently.
+//
+// Only two of the five listings say so themselves: nova and cinder answer an
+// account without the reach with a 403 on all_tenants. Floating IP addresses,
+// images and load balancers carry no such flag — neutron, glance and octavia
+// narrow the listing to the caller's own project and answer 200. That answer is
+// indistinguishable from a complete one, so the missed-delete pass books a
+// delete correction for every projection row of every other project, the
+// endpoint reports a completed run, and no later run with a restored account
+// undoes it: the diff skips a row it already holds as deleted.
+//
+// So the scope is established by asking the cloud, not by reading a name off
+// the token. Only the cloud knows what its policy.yaml resolves
+// context_is_admin to, and a deployment that renamed that role needs no setting
+// here: whatever the role is called, an account that holds it is answered and
+// one that does not is refused. A name in adapter_config could establish
+// neither — it would only say which name to compare against, so a name that
+// happens to be in the token would pass the check while the three silent
+// listings still narrowed, and the run would wipe every other project's rows
+// with nothing to say it had.
+func probeAdminScope(ctx context.Context, provider *gophercloud.ProviderClient,
+	endpoint gophercloud.EndpointOpts,
+) error {
+	client, err := openstack.NewComputeV2(provider, endpoint)
+	if err != nil {
+		return fmt.Errorf("building the compute client its scope is established with: %w", err)
+	}
+	// One server is the whole of the proof: nova refuses the request itself, so
+	// what it would have answered with does not matter. The walk stops at the
+	// first page because the limit alone would not stop it — nova answers a
+	// limited listing with a link to the next one, and AllPages would follow that
+	// through every instance of the cloud, one at a time.
+	return servers.List(client, servers.ListOpts{AllTenants: true, Limit: 1}).EachPage(ctx,
+		func(_ context.Context, page pagination.Page) (bool, error) {
+			_, err := servers.ExtractServers(page)
+			return false, err
+		})
 }
 
 // observer hands one resource type's listing to the stream. It carries the
@@ -254,7 +322,21 @@ func (o *observer) observe(resource reconciliation.ObservedResource) bool {
 // the consequence is the one thing an EnumerationError says: the missed-delete
 // pass leaves this type's rows alone, and the run carries on with the types
 // that finished.
-func (o *observer) fail(err error) bool {
+//
+// A cancelled run is the one failure that is not attributable. It says nothing
+// about this resource type and nothing about the types after it, so the stream
+// ends here with a plain error and no further type is attempted: the framework
+// refuses the partial inventory of a cancelled run anyway
+// (reconciliation/sync.go:432-438), and an EnumerationError per remaining type
+// would only bury the one thing that happened.
+func (o *observer) fail(ctx context.Context, err error) bool {
+	if cause := ctx.Err(); cause != nil {
+		o.hand(reconciliation.ObservedResource{},
+			fmt.Errorf("the run ended while enumerating %s: %w", o.resourceType, cause))
+		// Nothing is yielded after it, whether or not the consumer would read on.
+		o.stopped = true
+		return false
+	}
 	return o.hand(reconciliation.ObservedResource{},
 		&reconciliation.EnumerationError{ResourceType: o.resourceType, Err: err})
 }
@@ -291,23 +373,53 @@ func enumerate[T any](ctx context.Context, out *observer, pager pagination.Pager
 		return true, nil
 	})
 	if err != nil {
-		return out.fail(err)
+		return out.fail(ctx, err)
 	}
 	return !out.stopped
 }
 
-// listInstances observes every project's instances. The flavor cache is built
-// here rather than held by the adapter, which is what bounds it to one run: a
-// flavor the operator edited between two syncs is read again by the next one.
-func listInstances(ctx context.Context, client *gophercloud.ServiceClient, out *observer) bool {
+// embeddedFlavorMicroversion is the compute microversion from which nova reports
+// a server's flavor in full rather than by id, out of the instance's own record
+// rather than out of the catalog. It is what lets an instance on a flavor the
+// operator retired still say what it is made of.
+const embeddedFlavorMicroversion = "2.47"
+
+// listInstances observes every project's instances, and the ones nova destroyed
+// within the window this run is responsible for. The flavor cache is built here
+// rather than held by the adapter, which is what bounds it to one run: a flavor
+// the operator edited between two syncs is read again by the next one.
+func (a *openStack) listInstances(ctx context.Context, client *gophercloud.ServiceClient,
+	out *observer, since *time.Time,
+) bool {
+	// Negotiated rather than demanded: a nova too old for the microversion and an
+	// endpoint that publishes no range at all both answer the listing the way they
+	// always did, and the flavor cache below is what resolves a server that
+	// carries its flavor by id.
+	//
+	// Discovery is an HTTP request, so it fails for reasons that say nothing about
+	// the range nova speaks as well — a proxy answering 503, a reset connection —
+	// and gophercloud reports those as the endpoint publishing no range whenever
+	// the catalog entry carries a version, which is how every deployment
+	// publishes nova. The two cannot be told apart here, so both fall back. The
+	// reason is logged rather than dropped: the fallback is only complete while
+	// the cloud still publishes every flavor its instances run on, and an
+	// instance on a retired one is observed without a size after this.
+	if negotiated, err := utils.RequireMicroversion(ctx, *client, embeddedFlavorMicroversion); err == nil {
+		client = &negotiated
+	} else {
+		a.logger.Warn("reading the flavors from the catalog, because the compute microversion "+
+			"that embeds them could not be negotiated",
+			"microversion", embeddedFlavorMicroversion, "error", truncate(err.Error()))
+	}
+
 	cache := flavorCache{client: client}
-	return enumerate(ctx, out, servers.List(client, servers.ListOpts{AllTenants: true}),
+	live := enumerate(ctx, out, servers.List(client, servers.ListOpts{AllTenants: true}),
 		servers.ExtractServers, func(server servers.Server) bool {
 			// A cloud that would not say what its flavors are still says which
 			// instances exist, so the failure is reported for the type and the
 			// instance is observed without the size nova did not describe.
 			size, err := instanceSize(ctx, &cache, server)
-			if err != nil && !out.fail(err) {
+			if err != nil && !out.fail(ctx, err) {
 				return false
 			}
 			return out.observe(reconciliation.ObservedResource{
@@ -318,6 +430,102 @@ func listInstances(ctx context.Context, client *gophercloud.ServiceClient, out *
 				CreatedAt:  timestamp(server.Created),
 			})
 		})
+	if !live {
+		return false
+	}
+
+	// A run without a bound is the first completed run of this cloud. It has no
+	// window behind it to catch up on, and what the projection holds while the
+	// cloud does not is exactly what the absence pass books.
+	if since == nil {
+		return true
+	}
+	return a.listDeletedInstances(ctx, client, out, *since)
+}
+
+// maxDeletedWindow is how far back a run asks nova for the servers it
+// destroyed. A bound older than this is not worth the pages it costs: the
+// absence pass books those deletes at poll time anyway, while a deleted listing
+// that no longer fits the run's budget is what keeps the bound from ever moving
+// forward again.
+const maxDeletedWindow = 24 * time.Hour
+
+// listDeletedInstances observes the instances nova reports as deleted since the
+// last completed run. It is the only pass that can date a missed delete at the
+// instant the platform performed it: the absence pass books one at poll time,
+// and no later run corrects that, because the diff skips a row it already holds
+// as deleted (reconciliation/sync.go:524-534).
+//
+// A listing that fails here costs the instance type its completeness, even
+// though the live listing succeeded. That is the point of it: the absence pass
+// must not book the same deletes at poll time in this run, and a failed run
+// does not move the bound the next one starts from
+// (reconciliation/sync.go:377-391), so the window is walked again and the real
+// instants still land.
+func (a *openStack) listDeletedInstances(ctx context.Context, client *gophercloud.ServiceClient,
+	out *observer, since time.Time,
+) bool {
+	// A cloud that has not completed a run in a week would otherwise ask nova
+	// for a week of churn, inside the same budget the five live listings share,
+	// and time out before it can complete and move the bound. The window would
+	// then be longer on every following run: a ratchet with no way back, and one
+	// nothing but a hand-written sync_runs row recovers from.
+	//
+	// The floor is the one thing a run asks the cloud for that this machine's
+	// clock decides rather than the database. The deletes it leaves out are
+	// booked by the absence pass at poll time, and a completed run says nothing
+	// about which of its delete corrections carry the platform's own instant, so
+	// the clamp is logged: a host whose clock ran away would otherwise silently
+	// ask nova for a window that has not happened yet and observe nothing.
+	if floor := a.now().Add(-maxDeletedWindow); since.Before(floor) {
+		a.logger.Warn("asking nova only for the newest part of the window this run is "+
+			"responsible for, because the last completed run is older than the window",
+			"bound", since.UTC(), "asking_since", floor.UTC(), "window", maxDeletedWindow)
+		since = floor
+	}
+	opts := deletedServerOpts{ListOpts: servers.ListOpts{
+		AllTenants:   true,
+		ChangesSince: since.UTC().Format(time.RFC3339),
+	}}
+	return enumerate(ctx, out, servers.List(client, opts), servers.ExtractServers,
+		func(server servers.Server) bool {
+			deletedAt := timestamp(server.TerminatedAt)
+			// A nova that reports no terminated_at has nothing this pass could add:
+			// the absence pass books that delete at poll time, and an instant
+			// invented here would be worse than the approximation it replaces.
+			if deletedAt == nil {
+				return true
+			}
+			// A deleted resource is reported by its key alone. What it was, how big
+			// it was and who owned it is what the projection row already holds
+			// (reconciliation/sync.go:468-491).
+			return out.observe(reconciliation.ObservedResource{
+				ResourceID: server.ID,
+				DeletedAt:  deletedAt,
+			})
+		})
+}
+
+// deletedServerOpts asks nova for the servers it destroyed since an instant.
+// servers.ListOpts carries changes-since but has no deleted field at all, so
+// the query is where that half of the request comes from: nova reads
+// deleted=true&changes-since=<RFC3339> as the listing of what it destroyed
+// within the window, and a listing without changes-since would be every
+// instance the cloud ever had.
+type deletedServerOpts struct {
+	servers.ListOpts
+}
+
+// ToServerListQuery renders the listing's query, the embedded options and the
+// deleted flag the compute API has no option for.
+func (o deletedServerOpts) ToServerListQuery() (string, error) {
+	query, err := gophercloud.BuildQueryString(o.ListOpts)
+	if err != nil {
+		return "", err
+	}
+	values := query.Query()
+	values.Set("deleted", "true")
+	return "?" + values.Encode(), nil
 }
 
 // listVolumes observes every project's volumes.
@@ -365,19 +573,57 @@ func listFloatingIPs(ctx context.Context, client *gophercloud.ServiceClient, out
 
 // listImages observes every project's images.
 func listImages(ctx context.Context, client *gophercloud.ServiceClient, out *observer) bool {
+	// Whether this listing has already reported an ownerless image, which is what
+	// keeps the run to one reason for however many of them glance holds.
+	var reported bool
 	return enumerate(ctx, out, images.List(client, nil),
 		images.ExtractImages, func(image images.Image) bool {
-			// An image without an owner is booked to no project, and one whose bits
-			// are not uploaded yet has no size to book (mapping.go:294-297). Neither
-			// is something the collector ever recorded, so observing them would be
-			// drift the sync itself invented.
-			if image.Owner == "" || image.Status != images.ImageStatusActive {
+			// glance holds an image in its listing before its bits are uploaded and
+			// after it was removed, and neither is a resource the collector booked:
+			// an image is registered without a size and reaches the projection with
+			// the upload that follows (mapping.go:178-197, 294-297). A deactivated
+			// image is the opposite case. It still exists, still occupies the store,
+			// and glance publishes no notification that would have taken its row out
+			// of the projection, so skipping it would book a delete for a resource
+			// that is there.
+			if image.Status != images.ImageStatusActive &&
+				image.Status != images.ImageStatusDeactivated {
 				return true
+			}
+			// An image glance names no owner for is one the collector booked to the
+			// project of whoever registered it (mapping.go:252-265). This run cannot
+			// say which that was, so the whole type stays incomplete rather than one
+			// row being deleted for an absence the adapter caused.
+			//
+			// Only the first of them is reported. A glance holding a hundred would
+			// otherwise fill the whole of Stats.Errors with copies of one reason: the
+			// cap is 100 (reconciliation/sync.go:59), images are the fourth of five
+			// listings, and whatever the fifth failed with would never reach the row
+			// an operator reads.
+			//
+			// The listing still walks to its end. Holding the type back stops the
+			// deletes and nothing else — the diff still books a create or an update
+			// for every image this run observed (reconciliation/sync.go:536-589), and
+			// glance orders its listing newest first, so ending here would leave every
+			// image older than the ownerless one unobserved until somebody reaps it by
+			// hand: a create the run missed would never be corrected, and a size or
+			// owner that drifted would never settle.
+			if image.Owner == "" {
+				if reported {
+					return true
+				}
+				reported = true
+				return out.fail(ctx,
+					fmt.Errorf("glance reports the image %s without an owner", image.ID))
 			}
 			return out.observe(reconciliation.ObservedResource{
 				ResourceID: image.ID,
 				ProjectID:  image.Owner,
-				State:      "active",
+				// The state glance reports is not booked: the collector writes
+				// "active" for every image it records and has no notification that
+				// would write another, so reporting a deactivation here would be
+				// drift no collector event could ever settle.
+				State: "active",
 				Size: map[string]any{
 					"size_gb": json.Number(
 						money.Div(decimal.NewFromInt(image.SizeBytes), osmap.BytesPerGibibyte).String()),
@@ -531,6 +777,24 @@ func flavorSize(vcpus, ram, disk, ephemeral int64, name string) map[string]any {
 // as, which is the form the projection stores and compares against.
 func quantity(value int64) json.Number {
 	return json.Number(strconv.FormatInt(value, 10))
+}
+
+// maxLoggedErrorBytes is how much of a platform's error text one log record
+// keeps. It is the bound the run's stats already apply, for the same reason
+// (reconciliation/sync.go:61-66): what a platform answered is rendered into the
+// error verbatim, so nothing but this bounds how long one is, and a log record
+// this adapter writes is written once per sync of every configured cloud
+// forever, with nothing that throttles it.
+const maxLoggedErrorBytes = 4 << 10
+
+// truncate bounds one reason to what an operator works from. The cut can fall
+// inside a character the platform sent, which the log's encoder replaces the way
+// it replaces every other byte that is not UTF-8.
+func truncate(reason string) string {
+	if len(reason) <= maxLoggedErrorBytes {
+		return reason
+	}
+	return reason[:maxLoggedErrorBytes] + "… (truncated)"
 }
 
 // timestamp is a platform-reported instant as an observation carries it: absent
