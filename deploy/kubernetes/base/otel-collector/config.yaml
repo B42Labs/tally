@@ -1,16 +1,50 @@
 # OpenTelemetry Collector configuration.
 #
-# The collector is the universal middleware of the metrics pipeline: OTLP in,
-# Prometheus remote write into VictoriaMetrics out. The OpenStack pipeline adds
-# the receivers, processors, and per-cloud labelling it needs; this file is the
-# minimum that boots and accepts OTLP over both transports.
+# This file is the complete OTLP-to-remote-write pipeline: OTLP arrives over
+# both transports, memory_limiter bounds what the process may hold, the batch
+# processor groups the points, and the prometheusremotewrite exporter writes
+# them to VictoriaMetrics.
+#
+# Both receivers demand HTTP Basic credentials. They are published through the
+# Gateway, and whatever they accept is written to the billing metrics store
+# under the labels its producer chose, so without a credential anything that
+# resolves the OTLP hostname could invent usage series for any cloud, project
+# and resource, and could grow the series count of a store with a fixed volume
+# at will. Basic and not a bearer token because Ceilometer's OTLP publisher
+# takes credentials from the URL's userinfo and cannot set an arbitrary header
+# (docs/openstack-metrics.md). The htpasswd file arrives from a Secret; it
+# takes a bcrypt hash as well as a plain user:password line, and it is read at
+# startup alone, so rotating it rolls the pod.
+extensions:
+  basicauth/otlp:
+    htpasswd:
+      file: /run/secrets/tally-otlp/htpasswd
+
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        auth:
+          authenticator: basicauth/otlp
       http:
         endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: basicauth/otlp
+
+# memory_limiter is first in the pipeline because that is the only position
+# where it can push back: it refuses the data at the receiver rather than after
+# batch has already buffered it. Without it a slow or absent VictoriaMetrics
+# backs prometheusremotewrite up into batch while the receivers keep accepting,
+# the heap grows until the kubelet kills the pod, and every buffered point is
+# lost. The two percentages are of the container's memory limit in
+# otel-collector.yaml, so the sizing lives in one place.
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
 
 exporters:
   prometheusremotewrite:
@@ -18,8 +52,23 @@ exporters:
     tls:
       insecure: true
 
+# The collector serves its own metrics in Prometheus format on 0.0.0.0:8888 for
+# the otel-collector scrape job in the VictoriaMetrics scrape config. The
+# readers form is required here: the collector's default binds its telemetry to
+# localhost, and the deprecated service.telemetry.metrics.address field no
+# longer starts a listener in this collector version (0.157.0).
 service:
+  extensions: [basicauth/otlp]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
   pipelines:
     metrics:
       receivers: [otlp]
+      processors: [memory_limiter, batch]
       exporters: [prometheusremotewrite]

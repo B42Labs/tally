@@ -25,6 +25,12 @@ secretGenerator:
   - name: tally-internal-token
     literals:
       - token=tally-dev-internal-token
+  # The OTLP receivers read this as an htpasswd file. A plain user:password
+  # line is one of the formats it takes; a real deployment puts a bcrypt hash
+  # here instead.
+  - name: tally-otlp-auth
+    literals:
+      - htpasswd=tally:tally-dev-otlp-password
 
 patches:
   # Route every service to its nip.io hostname.
