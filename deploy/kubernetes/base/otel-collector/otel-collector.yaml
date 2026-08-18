@@ -14,6 +14,9 @@ spec:
     - name: otlp-http
       port: 4318
       targetPort: otlp-http
+    - name: metrics
+      port: 8888
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -41,14 +44,37 @@ spec:
               containerPort: 4317
             - name: otlp-http
               containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+          # The limit is what config.yaml's memory_limiter takes its
+          # percentages from: it reads the cgroup limit, so without one here it
+          # has nothing to limit against and the process would grow until the
+          # node evicts pods.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           volumeMounts:
             - name: config
               mountPath: /etc/otel
+              readOnly: true
+            # Secrets follow the same convention as the Reporting API's: they
+            # arrive as a mounted file rather than an environment value.
+            - name: otlp-credentials
+              mountPath: /run/secrets/tally-otlp
               readOnly: true
       volumes:
         - name: config
           configMap:
             name: otel-collector-config
+        - name: otlp-credentials
+          secret:
+            secretName: tally-otlp-auth
+            items:
+              - key: htpasswd
+                path: htpasswd
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -79,3 +105,60 @@ spec:
     - backendRefs:
         - name: otel-collector
           port: 4317
+---
+# Both OTLP hostnames are published on the internet and both answer every
+# request with a bcrypt comparison before they can reject it. The username is
+# not a secret — it is in this tree and in the publisher URL in
+# docs/openstack-metrics.md — so a wrong password costs the collector tens of
+# milliseconds of CPU per request while costing the sender nothing. Against one
+# replica with a 100m CPU request that is an amplifier: a few dozen requests a
+# second from a single host starve the pipeline, and Ceilometer's OTLP
+# publisher has neither a queue nor a retry, so the samples it fails to push in
+# the meantime are gone from the billing store for good.
+#
+# The limit is enforced by the proxy, so a rejected request is answered with 429
+# and never reaches the authenticator. Local means per proxy replica and needs
+# no rate limit service. The bucket has to be per client address, which is what
+# the Distinct selector is for: a rule without clientSelectors is the catch-all
+# form, where every publisher on both hostnames and across every cloud draws
+# from one bucket, and emptying that bucket takes no credential at all. The
+# control written against permanent sample loss would then be the thing causing
+# it, for every publisher at once.
+#
+# 10 a second leaves a publisher three orders of magnitude of headroom —
+# Ceilometer posts once per polling cycle — and holds what one address can make
+# the collector spend on bcrypt to a few tenths of a CPU-second a second. What
+# it does not bound is a flood spread over many addresses: a local limit counts
+# per address per proxy replica, and a total across them takes the Global type
+# and the rate limit service that comes with it.
+#
+# The second rule is the route default, and it covers the sources the IPv4
+# matcher does not select, an IPv6 client being the one to expect. It is not
+# optional: a rule set with no rule without clientSelectors leaves everything
+# that matches no selector unlimited.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: otel-collector-otlp
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: otel-collector-http
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      name: otel-collector-grpc
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        - clientSelectors:
+            - sourceCIDR:
+                value: 0.0.0.0/0
+                type: Distinct
+          limit:
+            requests: 10
+            unit: Second
+        - limit:
+            requests: 10
+            unit: Second
