@@ -14,6 +14,46 @@ spec:
       port: 8428
       targetPort: http
 ---
+# The in-cluster scrape jobs discover their targets through the Kubernetes API
+# (scrape.yaml), which is what these three objects are for. Discovery of the
+# endpointslice role reads endpointslices plus the pod and service objects it
+# takes its labels from, and nothing else. A Role rather than a ClusterRole
+# because the jobs discover in their own namespace alone.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: victoriametrics
+  labels:
+    app.kubernetes.io/name: victoriametrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: victoriametrics-scrape
+  labels:
+    app.kubernetes.io/name: victoriametrics
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: victoriametrics-scrape
+  labels:
+    app.kubernetes.io/name: victoriametrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: victoriametrics-scrape
+subjects:
+  - kind: ServiceAccount
+    name: victoriametrics
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -31,6 +71,7 @@ spec:
       labels:
         app.kubernetes.io/name: victoriametrics
     spec:
+      serviceAccountName: victoriametrics
       containers:
         - name: victoriametrics
           image: victoriametrics/victoria-metrics:v1.148.0
