@@ -1,0 +1,14 @@
+# Prototype pricing for WP 1.15. Phase 3 replaces this file with versioned
+# pricing models in this directory. Prices are strings: they are parsed with
+# decimal.NewFromString, and floats are banned from money paths.
+currency: EUR
+dimensions:
+  - metric: vcpus
+    price_per_unit_hour: "0.02"
+  - metric: ram_gb
+    price_per_unit_hour: "0.005"
+  - metric: disk_gb
+    price_per_unit_hour: "0.001"
+state_modifiers:
+  shelved: "0.0"
+  shutoff: "0.5"
