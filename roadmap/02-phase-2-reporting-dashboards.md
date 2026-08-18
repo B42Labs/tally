@@ -211,6 +211,25 @@ Rules (`groups: [{name: tally, interval: 1m, rules: [...]}]`):
   expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
   for: 5m
   labels: { severity: critical }
+
+# 9. Exporter answering 200 with a service missing. The database exporter opens
+#    one connection pool per service, and a scrape that runs out of connections
+#    on the exporter's database account (docs/openstack-metrics.md) loses whole
+#    services: their collectors emit nothing while the target stays up and the
+#    scrape duration stays normal, so 7 and 8 both stay silent and the gap
+#    surfaces a month later as a short invoice. One series per billed resource
+#    is enough to see it, matched per cloud so one healthy cloud cannot cover
+#    for another. At a 300s scrape interval `for: 15m` wants three short scrapes
+#    in a row, so this reports a cap that is too low, not a single slow scrape.
+- alert: TallyExporterServiceSilent
+  expr: |
+    (up{job="openstack-db-exporter"} == 1) unless on (cloud) openstack_nova_total_vms
+    or (up{job="openstack-db-exporter"} == 1) unless on (cloud) openstack_cinder_volumes
+    or (up{job="openstack-db-exporter"} == 1) unless on (cloud) openstack_neutron_floating_ips
+    or (up{job="openstack-db-exporter"} == 1) unless on (cloud) openstack_glance_images
+    or (up{job="openstack-db-exporter"} == 1) unless on (cloud) openstack_loadbalancer_total_loadbalancers
+  for: 15m
+  labels: { severity: critical }
 ```
 
 Alertmanager: single default receiver (webhook/email placeholder) + route `severity=critical`
@@ -228,6 +247,6 @@ with tighter repeat interval; receiver endpoints are deployment-specific (env-su
 1. Four dashboards provisioned from the repo, rendering on the dev cluster.
 2. All vmalert rules load (`-dryRun` in CI); the collector-silent drill fires and resolves.
 3. Aggregation endpoints documented in OpenAPI and covered by RBAC tests.
-4. Runbook stubs in `docs/runbooks/` for the four critical alerts (`TallyCloudEventsSilent`,
-   `TallySyncStale`, `TallyScrapeTargetDown`, `TallyScrapeJobMissing`) — symptom, impact on
-   billing, first checks.
+4. Runbook stubs in `docs/runbooks/` for the five critical alerts (`TallyCloudEventsSilent`,
+   `TallySyncStale`, `TallyScrapeTargetDown`, `TallyScrapeJobMissing`,
+   `TallyExporterServiceSilent`) — symptom, impact on billing, first checks.

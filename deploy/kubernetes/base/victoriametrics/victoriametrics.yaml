@@ -125,6 +125,25 @@ spec:
   hostnames:
     - vm.tally.example.com
   rules:
-    - backendRefs:
+    # Only the read paths are published. Port 8428 also serves
+    # /api/v1/write and /api/v1/admin/tsdb/delete_series, and VictoriaMetrics
+    # gates neither: it takes a remote write from anyone who reaches it, and
+    # with no -deleteAuthKey set one request to the delete API drops a match of
+    # every series in the 13-month window. Routing the whole port would publish
+    # both to the internet, so the route names the paths a reader needs instead.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/query
+        - path:
+            type: PathPrefix
+            value: /api/v1/query_range
+        - path:
+            type: PathPrefix
+            value: /targets
+        - path:
+            type: PathPrefix
+            value: /vmui
+      backendRefs:
         - name: victoriametrics
           port: 8428
