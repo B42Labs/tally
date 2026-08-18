@@ -31,7 +31,7 @@ k8s_resource('timescaledb', labels=['infrastructure'])
 k8s_resource(
     'victoriametrics',
     labels=['infrastructure'],
-    links=[link('https://vm.tally.127-0-0-1.nip.io:8443', 'UI')],
+    links=[link('https://vm.tally.127-0-0-1.nip.io:8443/vmui/', 'UI')],
 )
 k8s_resource(
     'otel-collector',
