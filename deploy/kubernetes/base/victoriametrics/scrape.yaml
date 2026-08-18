@@ -1,7 +1,80 @@
 # VictoriaMetrics scrape configuration.
 #
-# Scrape targets arrive with the OpenStack metrics pipeline, which also attaches
-# the mandatory platform and cloud labels to every third-party exporter. Until
-# then this file exists so the ConfigMap, the mount, and the -promscrape.config
-# flag are wired and exercised.
-scrape_configs: []
+# The jobs, their intervals, how the in-cluster jobs find their targets, the
+# static labels on the two OpenStack jobs, the placeholder targets, and how a
+# real deployment replaces this file are documented in
+# docs/openstack-metrics.md.
+scrape_configs:
+  # The in-cluster jobs discover endpoints instead of naming a Service address.
+  # A Service address is one ClusterIP that kube-proxy resolves to an arbitrary
+  # backend per connection, so a second replica would leave every scrape landing
+  # on a different pod while every sample carries the same instance label, and
+  # one series would interleave two independent counters. rate() reads each of
+  # those decreases as a counter reset, the targets stay up, nothing is logged,
+  # and the numbers billing reconciles against are quietly wrong. Discovery
+  # gives every pod a target and an instance label of its own.
+  #
+  # own_namespace keeps the discovery inside the namespace the pod runs in,
+  # which is what the Role in victoriametrics.yaml grants.
+  #
+  # instance comes from the pod name rather than the default, which is
+  # __address__ and therefore the pod IP and port. A pod IP is handed back to
+  # the pool on deletion and reused, so the next pod to take it would continue
+  # the series its predecessor wrote — two independent counters in one series,
+  # which is what discovery is here to prevent. A pod name carries a random
+  # suffix and is not reused.
+  #
+  # What discovery cannot express is a job that resolves to nothing. up is a
+  # per-target series, so zero targets produce no up series at all rather than
+  # up == 0: a Deployment scaled to zero, a renamed Service, a renamed port, a
+  # removed RoleBinding, or an unreachable API server all take the job off
+  # /targets instead of turning it red. An alert on these two jobs therefore
+  # pairs up == 0 with absent(up{job="..."})
+  # (roadmap/02-phase-2-reporting-dashboards.md).
+  - job_name: reporting-api
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: reporting-api;http
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  # One scrape of this exporter runs its whole query set against the live
+  # OpenStack service databases. The default 10s timeout gives up long before
+  # those queries finish on a cloud of any size, while the queries themselves
+  # keep running to completion, so a short interval piles a second set on top of
+  # the first until the control plane's database is saturated. The timeout is
+  # what one scrape may cost; the interval leaves it room to finish.
+  - job_name: openstack-db-exporter
+    scrape_interval: 300s
+    scrape_timeout: 60s
+    static_configs:
+      - targets: ["os-db-exporter:9180"]
+        labels: { platform: "openstack", cloud: "os-prod-eu1" }
+  - job_name: ceilometer
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["ceilometer-exporter:9101"]
+        labels: { platform: "openstack", cloud: "os-prod-eu1" }
+  - job_name: otel-collector
+    scrape_interval: 15s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: otel-collector;metrics
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance

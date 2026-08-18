@@ -201,6 +201,16 @@ Rules (`groups: [{name: tally, interval: 1m, rules: [...]}]`):
   expr: up{job=~"reporting-api|openstack-db-exporter|otel-collector"} == 0
   for: 5m
   labels: { severity: critical }
+
+# 8. Scrape job gone entirely. `up` is a per-target series, and `reporting-api`
+#    and `otel-collector` discover their targets (see the scrape config), so a
+#    job that resolves to no targets emits no `up` series at all and rule 7
+#    stays silent. A Deployment scaled to zero, a renamed Service or port, a
+#    removed RoleBinding, or an unreachable API server all land here, not in 7.
+- alert: TallyScrapeJobMissing
+  expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+  for: 5m
+  labels: { severity: critical }
 ```
 
 Alertmanager: single default receiver (webhook/email placeholder) + route `severity=critical`
@@ -218,5 +228,6 @@ with tighter repeat interval; receiver endpoints are deployment-specific (env-su
 1. Four dashboards provisioned from the repo, rendering on the dev cluster.
 2. All vmalert rules load (`-dryRun` in CI); the collector-silent drill fires and resolves.
 3. Aggregation endpoints documented in OpenAPI and covered by RBAC tests.
-4. Runbook stubs in `docs/runbooks/` for the three critical alerts (`TallyCloudEventsSilent`,
-   `TallySyncStale`, `TallyScrapeTargetDown`) — symptom, impact on billing, first checks.
+4. Runbook stubs in `docs/runbooks/` for the four critical alerts (`TallyCloudEventsSilent`,
+   `TallySyncStale`, `TallyScrapeTargetDown`, `TallyScrapeJobMissing`) — symptom, impact on
+   billing, first checks.
