@@ -60,9 +60,9 @@ const identifierMaxLen = 512
 
 // stateMaxLen bounds payload.state for the same reason. The projection writes it
 // to current_resources.state, which idx_current_resources_type indexes next to
-// resource_type and idx_current_resources_fleet next to platform, cloud and
-// resource_type. Those three are bounded above, so a state within this bound
-// keeps the widest of the tuples under the btree limit.
+// resource_type and idx_current_resources_stats next to platform, cloud,
+// resource_type and project_id. Those four are bounded above, so a state within
+// this bound keeps the widest of the tuples under the btree limit.
 const stateMaxLen = 512
 
 var eventTypePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)+$`)
