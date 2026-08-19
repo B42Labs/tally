@@ -38,3 +38,8 @@ k8s_resource(
     labels=['infrastructure'],
     links=[link('https://otlp.tally.127-0-0-1.nip.io:8443', 'OTLP/HTTP')],
 )
+k8s_resource(
+    'grafana',
+    labels=['infrastructure'],
+    links=[link('https://grafana.tally.127-0-0-1.nip.io:8443', 'Grafana')],
+)
