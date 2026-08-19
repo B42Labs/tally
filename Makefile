@@ -79,6 +79,7 @@ up:
 	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/timescaledb --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/victoriametrics --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/otel-collector --timeout=300s
+	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/grafana --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) wait gateway/tally --for=condition=Programmed --timeout=300s
 	@# The API stays unready until the database carries its schema, and it never
 	@# migrates on its own, so the chain has to be applied before the rollout can
@@ -90,6 +91,7 @@ up:
 	@echo 'Stack is up:'
 	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1  Reporting API'
 	@echo '  https://vm.tally.127-0-0-1.nip.io:8443          VictoriaMetrics'
+	@echo '  https://grafana.tally.127-0-0-1.nip.io:8443     Grafana'
 	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443        OTLP/HTTP'
 	@echo '  db.tally.127-0-0-1.nip.io:5432                  TimescaleDB'
 	@echo
