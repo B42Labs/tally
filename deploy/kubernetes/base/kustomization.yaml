@@ -10,3 +10,4 @@ resources:
   - victoriametrics
   - otel-collector
   - reporting-api
+  - grafana

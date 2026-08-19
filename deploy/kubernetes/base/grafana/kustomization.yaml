@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - grafana.yaml
+
+# Generating the ConfigMaps from the files means editing any provisioning or
+# dashboard file re-rolls the pod through the generated name hash, rather than
+# leaving it serving a stale datasource or an old dashboard.
+configMapGenerator:
+  - name: grafana-provisioning-datasources
+    files:
+      - provisioning/datasources/vm.yaml
+  - name: grafana-provisioning-dashboards
+    files:
+      - provisioning/dashboards/tally.yaml
+  - name: grafana-vmauth
+    files:
+      - vmauth/auth.yaml
+  - name: grafana-dashboards
+    files:
+      - dashboards/fleet-overview.json
+      - dashboards/project-drilldown.json
+      - dashboards/ingestion-health.json
+      - dashboards/reconciliation-drift.json

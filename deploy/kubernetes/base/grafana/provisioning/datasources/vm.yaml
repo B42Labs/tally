@@ -1,0 +1,28 @@
+# The datasource every provisioned dashboard queries.
+#
+# The uid is fixed here because every panel target in the dashboard JSON names
+# it. A generated uid would leave each panel pointing at a datasource Grafana
+# does not have.
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    type: prometheus
+    uid: victoriametrics
+    access: proxy
+    # Not http://victoriametrics:8428. Grafana hands whoever can open a
+    # dashboard a tunnel to whatever this URL is: both
+    # /api/datasources/proxy/uid/<uid>/<path> and
+    # /api/datasources/uid/<uid>/resources/<path> forward <path> to it under the
+    # datasources:query permission the viewer role holds, and the second is what
+    # fills the variable dropdowns, so no Gateway rule closes them. The vmauth
+    # container in the Grafana pod (grafana.yaml) is the read-only face of the
+    # store: it carries the Prometheus read paths on to
+    # http://victoriametrics:8428 and refuses everything else, /api/v1/write and
+    # /api/v1/admin/tsdb/delete_series included. It listens on this pod's
+    # loopback alone, so nothing outside the pod reaches it either.
+    url: http://127.0.0.1:8427
+    isDefault: true
+    # The definition lives in this file, so the UI must not offer edits that
+    # the next pod restart discards.
+    editable: false
