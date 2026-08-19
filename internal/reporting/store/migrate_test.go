@@ -275,6 +275,60 @@ func TestMigrate(t *testing.T) {
 		}
 	})
 
+	t.Run("the stats index migration repeats after one that built without recording", func(t *testing.T) {
+		// 0007 swaps one index for another and runs outside a transaction, so
+		// neither direction is atomic: goose records the migration only once both
+		// statements have gone through. A concurrent drop waits for every
+		// transaction that can still see the index, and current_resources is
+		// written from inside the ingest transaction, so a lock_timeout or a lost
+		// connection between the build and the drop is ordinary. What that leaves
+		// is the index built and the version unrecorded, in either direction. The
+		// rerun is the operator's only repair, and it only works if the build
+		// tolerates the index a previous run already left behind.
+		half := db.NewSiblingDB(t, "migrate_half_built")
+		if _, err := store.Migrate(t.Context(), half); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), half, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		// A rollback that built the fleet index back and died before recording it.
+		if _, err := s.Pool().Exec(t.Context(),
+			`CREATE INDEX idx_current_resources_fleet
+			     ON current_resources (platform, cloud, resource_type, state)`); err != nil {
+			t.Fatalf("building the index an interrupted rollback leaves: %v", err)
+		}
+		if _, err := store.MigrateDownTo(t.Context(), half, 6); err != nil {
+			t.Fatalf("MigrateDownTo(6) error = %v, want nil", err)
+		}
+		if !indexExists(t, s, "idx_current_resources_fleet") {
+			t.Error("the fleet index is missing after the rollback")
+		}
+		if indexExists(t, s, "idx_current_resources_stats") {
+			t.Error("the stats index survived the rollback")
+		}
+
+		// An upgrade that built the stats index and died before dropping the one
+		// it makes redundant.
+		if _, err := s.Pool().Exec(t.Context(),
+			`CREATE INDEX idx_current_resources_stats
+			     ON current_resources (platform, cloud, resource_type, state, project_id)`); err != nil {
+			t.Fatalf("building the index an interrupted upgrade leaves: %v", err)
+		}
+		if _, err := store.Migrate(t.Context(), half); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if !indexExists(t, s, "idx_current_resources_stats") {
+			t.Error("the stats index is missing after the repeated upgrade")
+		}
+		if indexExists(t, s, "idx_current_resources_fleet") {
+			t.Error("the fleet index survived the repeated upgrade")
+		}
+	})
+
 	t.Run("rolling back the seed empties the registry", func(t *testing.T) {
 		rolledBack, err := store.MigrateDownTo(t.Context(), db.URL, 1)
 		if err != nil {
@@ -595,6 +649,22 @@ func jsonEqual(t *testing.T, a, b []byte) bool {
 		t.Fatalf("parsing %s: %v", b, err)
 	}
 	return reflect.DeepEqual(parsedA, parsedB)
+}
+
+// indexExists says whether the database s is opened on carries an index of that
+// name, which is what the migration tests read the index swap of 0007 off.
+func indexExists(t *testing.T, s *store.Store, name string) bool {
+	t.Helper()
+
+	var exists bool
+	if err := s.Pool().QueryRow(t.Context(),
+		`SELECT EXISTS (
+		     SELECT 1 FROM pg_indexes
+		     WHERE schemaname = 'public' AND indexname = $1
+		 )`, name).Scan(&exists); err != nil {
+		t.Fatalf("querying pg_indexes: %v", err)
+	}
+	return exists
 }
 
 // eventsTableExists reports whether the hypertable the chain creates first and

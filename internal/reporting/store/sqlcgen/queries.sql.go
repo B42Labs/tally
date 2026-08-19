@@ -95,6 +95,156 @@ func (q *Queries) CountCurrentResources(ctx context.Context) ([]CountCurrentReso
 	return items, nil
 }
 
+const countCurrentResourcesGrouped = `-- name: CountCurrentResourcesGrouped :many
+SELECT cloud, platform, resource_type, state, project_id, count(*) AS resources
+FROM current_resources
+WHERE ($1::boolean IS NULL OR (state = 'deleted') = $1)
+  AND ($2::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest($2::text[]),
+                                         unnest($3::text[])))
+GROUP BY cloud, platform, resource_type, state, project_id
+LIMIT $4
+`
+
+type CountCurrentResourcesGroupedParams struct {
+	Deleted       pgtype.Bool
+	ScopeClouds   []string
+	ScopeProjects []string
+	RowCap        int32
+}
+
+type CountCurrentResourcesGroupedRow struct {
+	Cloud        string
+	Platform     string
+	ResourceType string
+	State        string
+	ProjectID    string
+	Resources    int64
+}
+
+// The projection counted along all five dimensions the resource statistics can
+// group by. The route takes any non-empty combination of them, which is
+// thirty-one groupings and would be thirty-one static queries. A coarser
+// grouping is the sum of these rows over the dimensions it drops, so this one
+// query answers every combination and the handler adds the rows up in Go.
+//
+// The status filter and the scope pair are the ones ListCurrentResources runs,
+// so the counts cover the rows the list serves and nothing else.
+//
+// row_cap bounds what one request materializes. Four of the five dimensions are
+// low-cardinality, but project_id is one value per tenant, so the row set grows
+// with the fleet's tenants rather than with the shapes it shows, and the answer
+// is not paginated.
+func (q *Queries) CountCurrentResourcesGrouped(ctx context.Context, arg CountCurrentResourcesGroupedParams) ([]CountCurrentResourcesGroupedRow, error) {
+	rows, err := q.db.Query(ctx, countCurrentResourcesGrouped,
+		arg.Deleted,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.RowCap,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountCurrentResourcesGroupedRow
+	for rows.Next() {
+		var i CountCurrentResourcesGroupedRow
+		if err := rows.Scan(
+			&i.Cloud,
+			&i.Platform,
+			&i.ResourceType,
+			&i.State,
+			&i.ProjectID,
+			&i.Resources,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countEventBuckets = `-- name: CountEventBuckets :many
+SELECT time_bucket(($1::text)::interval, timestamp)::timestamptz AS bucket,
+       cloud, event_type, source, count(*) AS events
+FROM events
+WHERE timestamp >= $2::timestamptz
+  AND timestamp < $3::timestamptz
+  AND ($4::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest($4::text[]),
+                                         unnest($5::text[])))
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2, 3, 4
+LIMIT $6
+`
+
+type CountEventBucketsParams struct {
+	BucketWidth   string
+	FromTs        pgtype.Timestamptz
+	ToTs          pgtype.Timestamptz
+	ScopeClouds   []string
+	ScopeProjects []string
+	RowCap        int32
+}
+
+type CountEventBucketsRow struct {
+	Bucket    pgtype.Timestamptz
+	Cloud     string
+	EventType string
+	Source    string
+	Events    int64
+}
+
+// The event statistics route, as one row per bucket and group. The window is
+// required and half-open, which is what keeps the read on the time dimension the
+// hypertable is chunked by: a query without both bounds has every chunk there is
+// to walk.
+//
+// Both casts are there for sqlc rather than for Postgres. time_bucket is not in
+// its catalog, so without ::timestamptz the bucket column comes out as an
+// interface{} in the generated row; and the width reaches interval through text
+// because a placeholder cast straight to interval generates a pgtype.Interval,
+// where the width the route carries is a string.
+//
+// row_cap bounds what one request materializes: the number of buckets grows with
+// the window divided by the width, and each bucket carries a row per cloud,
+// event type and source seen in it.
+func (q *Queries) CountEventBuckets(ctx context.Context, arg CountEventBucketsParams) ([]CountEventBucketsRow, error) {
+	rows, err := q.db.Query(ctx, countEventBuckets,
+		arg.BucketWidth,
+		arg.FromTs,
+		arg.ToTs,
+		arg.ScopeClouds,
+		arg.ScopeProjects,
+		arg.RowCap,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountEventBucketsRow
+	for rows.Next() {
+		var i CountEventBucketsRow
+		if err := rows.Scan(
+			&i.Bucket,
+			&i.Cloud,
+			&i.EventType,
+			&i.Source,
+			&i.Events,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countEventsForResource = `-- name: CountEventsForResource :one
 SELECT count(*)
 FROM (
@@ -142,6 +292,95 @@ func (q *Queries) CountEventsForResource(ctx context.Context, arg CountEventsFor
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const countProjectFoldEvents = `-- name: CountProjectFoldEvents :one
+SELECT count(*)
+FROM (
+    SELECT 1
+    FROM events e
+    JOIN (
+        SELECT DISTINCT own.resource_type, own.resource_id
+        FROM events own
+        WHERE own.cloud = $1 AND own.project_id = $2
+          AND own.timestamp < $3::timestamptz
+    ) touched ON touched.resource_type = e.resource_type
+             AND touched.resource_id = e.resource_id
+    WHERE e.cloud = $1 AND e.timestamp < $3::timestamptz
+    LIMIT $4
+) probe
+`
+
+type CountProjectFoldEventsParams struct {
+	Cloud      string
+	ProjectID  string
+	ToTs       pgtype.Timestamptz
+	ProbeLimit int32
+}
+
+// How many events one project summary folds, counted no further than
+// probe_limit. The summary asks this before it runs the read below, and it
+// counts that read's own row set rather than a narrower one: a project's own
+// events say nothing about how long the histories they pull in are, because a
+// resource it holds a single event of carries the events of every project it was
+// transferred between. Counting the project's events alone would therefore bound
+// nothing about the read, which materializes and sorts the joined set whole
+// before the caller sees the first row. The inner LIMIT is what stops the walk
+// at the rows the decision needs, and the answer saturates there rather than
+// reporting how long the set is.
+func (q *Queries) CountProjectFoldEvents(ctx context.Context, arg CountProjectFoldEventsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectFoldEvents,
+		arg.Cloud,
+		arg.ProjectID,
+		arg.ToTs,
+		arg.ProbeLimit,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countProjectResourcesByType = `-- name: CountProjectResourcesByType :many
+SELECT resource_type, count(*) AS resources
+FROM current_resources
+WHERE cloud = $1 AND project_id = $2 AND state <> 'deleted'
+GROUP BY resource_type
+`
+
+type CountProjectResourcesByTypeParams struct {
+	Cloud     string
+	ProjectID string
+}
+
+type CountProjectResourcesByTypeRow struct {
+	ResourceType string
+	Resources    int64
+}
+
+// What the project summary calls active now: per resource type, the resources
+// the projection holds for the project as it stands. It counts the present
+// rather than the window, so a resource that was transferred away counts for its
+// new owner and never here, whatever the window saw it do under this project. A
+// deleted resource keeps its projection row, so it is excluded by its state
+// rather than by its absence.
+func (q *Queries) CountProjectResourcesByType(ctx context.Context, arg CountProjectResourcesByTypeParams) ([]CountProjectResourcesByTypeRow, error) {
+	rows, err := q.db.Query(ctx, countProjectResourcesByType, arg.Cloud, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountProjectResourcesByTypeRow
+	for rows.Next() {
+		var i CountProjectResourcesByTypeRow
+		if err := rows.Scan(&i.ResourceType, &i.Resources); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const createAPIToken = `-- name: CreateAPIToken :one
@@ -1027,6 +1266,105 @@ func (q *Queries) ListEventsForResource(ctx context.Context, arg ListEventsForRe
 			&i.ProjectID,
 			&i.Source,
 			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectFoldEvents = `-- name: ListProjectFoldEvents :many
+SELECT e.event_id, e.timestamp, e.received_at, e.event_type, e.platform, e.cloud,
+       e.resource_type, e.resource_id, e.project_id, e.source
+FROM events e
+JOIN (
+    SELECT DISTINCT own.resource_type, own.resource_id
+    FROM events own
+    WHERE own.cloud = $1 AND own.project_id = $2
+      AND own.timestamp < $3::timestamptz
+) touched ON touched.resource_type = e.resource_type
+         AND touched.resource_id = e.resource_id
+WHERE e.cloud = $1 AND e.timestamp < $3::timestamptz
+ORDER BY e.timestamp, e.received_at, e.event_id
+LIMIT $4
+`
+
+type ListProjectFoldEventsParams struct {
+	Cloud     string
+	ProjectID string
+	ToTs      pgtype.Timestamptz
+	PageSize  int32
+}
+
+type ListProjectFoldEventsRow struct {
+	EventID      string
+	Timestamp    pgtype.Timestamptz
+	ReceivedAt   pgtype.Timestamptz
+	EventType    string
+	Platform     string
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	Source       string
+}
+
+// The events one project summary folds: for every resource the project holds an
+// event of, that resource's whole history up to an instant, ordered the way the
+// per-resource history read orders.
+//
+// The set is taken per resource rather than per event because a project's own
+// events do not say when a resource left it. An ownership transfer writes the
+// new project onto the event that moves the resource, so a slice narrowed to
+// project_id ends at the last event before the transfer and folds into an
+// interval that never closes, which the summary would then accrue up to the
+// instant of the request while the new owner accrues the same resource from the
+// transfer on. Reading each resource whole puts the transfer inside the fold,
+// where the project every interval carries is what says whose it is. The read
+// narrows on (cloud, resource_type, resource_id), which is what
+// idx_events_resource leads with and whose first two columns are what the
+// hypertable segments its compressed chunks by.
+//
+// No payload is read. The fold takes state and size out of it only to split a
+// run of intervals where the billable configuration changed, and the pieces of a
+// split run add up to the run itself, so no number this summary reports depends
+// on them. They are what this read would cost: the column is JSONB the schema
+// puts no bound on, and every row of it would be unmarshalled into a map.
+//
+// Only the upper bound of the window filters the read. The events before it are
+// what says which resources the project was already running when the window
+// opened, and the fold clips its intervals to the window itself. An event at or
+// after the bound cannot change anything inside [from, to), so that is the one
+// end the read can drop.
+func (q *Queries) ListProjectFoldEvents(ctx context.Context, arg ListProjectFoldEventsParams) ([]ListProjectFoldEventsRow, error) {
+	rows, err := q.db.Query(ctx, listProjectFoldEvents,
+		arg.Cloud,
+		arg.ProjectID,
+		arg.ToTs,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListProjectFoldEventsRow
+	for rows.Next() {
+		var i ListProjectFoldEventsRow
+		if err := rows.Scan(
+			&i.EventID,
+			&i.Timestamp,
+			&i.ReceivedAt,
+			&i.EventType,
+			&i.Platform,
+			&i.Cloud,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}

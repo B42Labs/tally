@@ -401,3 +401,133 @@ SELECT pg_advisory_unlock(hashtextextended('sync:' || $1::text, 0));
 SELECT platform, cloud, resource_type, state, COUNT(*) AS resources
 FROM current_resources
 GROUP BY platform, cloud, resource_type, state;
+
+-- The projection counted along all five dimensions the resource statistics can
+-- group by. The route takes any non-empty combination of them, which is
+-- thirty-one groupings and would be thirty-one static queries. A coarser
+-- grouping is the sum of these rows over the dimensions it drops, so this one
+-- query answers every combination and the handler adds the rows up in Go.
+--
+-- The status filter and the scope pair are the ones ListCurrentResources runs,
+-- so the counts cover the rows the list serves and nothing else.
+--
+-- row_cap bounds what one request materializes. Four of the five dimensions are
+-- low-cardinality, but project_id is one value per tenant, so the row set grows
+-- with the fleet's tenants rather than with the shapes it shows, and the answer
+-- is not paginated.
+-- name: CountCurrentResourcesGrouped :many
+SELECT cloud, platform, resource_type, state, project_id, count(*) AS resources
+FROM current_resources
+WHERE (sqlc.narg('deleted')::boolean IS NULL OR (state = 'deleted') = sqlc.narg('deleted'))
+  AND (sqlc.narg('scope_clouds')::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                         unnest(sqlc.narg('scope_projects')::text[])))
+GROUP BY cloud, platform, resource_type, state, project_id
+LIMIT sqlc.arg('row_cap');
+
+-- The event statistics route, as one row per bucket and group. The window is
+-- required and half-open, which is what keeps the read on the time dimension the
+-- hypertable is chunked by: a query without both bounds has every chunk there is
+-- to walk.
+--
+-- Both casts are there for sqlc rather than for Postgres. time_bucket is not in
+-- its catalog, so without ::timestamptz the bucket column comes out as an
+-- interface{} in the generated row; and the width reaches interval through text
+-- because a placeholder cast straight to interval generates a pgtype.Interval,
+-- where the width the route carries is a string.
+--
+-- row_cap bounds what one request materializes: the number of buckets grows with
+-- the window divided by the width, and each bucket carries a row per cloud,
+-- event type and source seen in it.
+-- name: CountEventBuckets :many
+SELECT time_bucket((sqlc.arg('bucket_width')::text)::interval, timestamp)::timestamptz AS bucket,
+       cloud, event_type, source, count(*) AS events
+FROM events
+WHERE timestamp >= sqlc.arg('from_ts')::timestamptz
+  AND timestamp < sqlc.arg('to_ts')::timestamptz
+  AND (sqlc.narg('scope_clouds')::text[] IS NULL
+       OR (cloud, project_id) IN (SELECT unnest(sqlc.narg('scope_clouds')::text[]),
+                                         unnest(sqlc.narg('scope_projects')::text[])))
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2, 3, 4
+LIMIT sqlc.arg('row_cap');
+
+-- How many events one project summary folds, counted no further than
+-- probe_limit. The summary asks this before it runs the read below, and it
+-- counts that read's own row set rather than a narrower one: a project's own
+-- events say nothing about how long the histories they pull in are, because a
+-- resource it holds a single event of carries the events of every project it was
+-- transferred between. Counting the project's events alone would therefore bound
+-- nothing about the read, which materializes and sorts the joined set whole
+-- before the caller sees the first row. The inner LIMIT is what stops the walk
+-- at the rows the decision needs, and the answer saturates there rather than
+-- reporting how long the set is.
+-- name: CountProjectFoldEvents :one
+SELECT count(*)
+FROM (
+    SELECT 1
+    FROM events e
+    JOIN (
+        SELECT DISTINCT own.resource_type, own.resource_id
+        FROM events own
+        WHERE own.cloud = $1 AND own.project_id = $2
+          AND own.timestamp < sqlc.arg('to_ts')::timestamptz
+    ) touched ON touched.resource_type = e.resource_type
+             AND touched.resource_id = e.resource_id
+    WHERE e.cloud = $1 AND e.timestamp < sqlc.arg('to_ts')::timestamptz
+    LIMIT sqlc.arg('probe_limit')
+) probe;
+
+-- The events one project summary folds: for every resource the project holds an
+-- event of, that resource's whole history up to an instant, ordered the way the
+-- per-resource history read orders.
+--
+-- The set is taken per resource rather than per event because a project's own
+-- events do not say when a resource left it. An ownership transfer writes the
+-- new project onto the event that moves the resource, so a slice narrowed to
+-- project_id ends at the last event before the transfer and folds into an
+-- interval that never closes, which the summary would then accrue up to the
+-- instant of the request while the new owner accrues the same resource from the
+-- transfer on. Reading each resource whole puts the transfer inside the fold,
+-- where the project every interval carries is what says whose it is. The read
+-- narrows on (cloud, resource_type, resource_id), which is what
+-- idx_events_resource leads with and whose first two columns are what the
+-- hypertable segments its compressed chunks by.
+--
+-- No payload is read. The fold takes state and size out of it only to split a
+-- run of intervals where the billable configuration changed, and the pieces of a
+-- split run add up to the run itself, so no number this summary reports depends
+-- on them. They are what this read would cost: the column is JSONB the schema
+-- puts no bound on, and every row of it would be unmarshalled into a map.
+--
+-- Only the upper bound of the window filters the read. The events before it are
+-- what says which resources the project was already running when the window
+-- opened, and the fold clips its intervals to the window itself. An event at or
+-- after the bound cannot change anything inside [from, to), so that is the one
+-- end the read can drop.
+-- name: ListProjectFoldEvents :many
+SELECT e.event_id, e.timestamp, e.received_at, e.event_type, e.platform, e.cloud,
+       e.resource_type, e.resource_id, e.project_id, e.source
+FROM events e
+JOIN (
+    SELECT DISTINCT own.resource_type, own.resource_id
+    FROM events own
+    WHERE own.cloud = $1 AND own.project_id = $2
+      AND own.timestamp < sqlc.arg('to_ts')::timestamptz
+) touched ON touched.resource_type = e.resource_type
+         AND touched.resource_id = e.resource_id
+WHERE e.cloud = $1 AND e.timestamp < sqlc.arg('to_ts')::timestamptz
+ORDER BY e.timestamp, e.received_at, e.event_id
+LIMIT sqlc.arg('page_size');
+
+-- What the project summary calls active now: per resource type, the resources
+-- the projection holds for the project as it stands. It counts the present
+-- rather than the window, so a resource that was transferred away counts for its
+-- new owner and never here, whatever the window saw it do under this project. A
+-- deleted resource keeps its projection row, so it is excluded by its state
+-- rather than by its absence.
+-- name: CountProjectResourcesByType :many
+SELECT resource_type, count(*) AS resources
+FROM current_resources
+WHERE cloud = $1 AND project_id = $2 AND state <> 'deleted'
+GROUP BY resource_type;

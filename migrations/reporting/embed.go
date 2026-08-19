@@ -18,4 +18,4 @@ var FS embed.FS
 // schema its code is newer than.
 //
 // Adding a migration means raising this; a test fails otherwise.
-const Version int64 = 6
+const Version int64 = 7
