@@ -1,0 +1,388 @@
+{
+  "uid": "tally-project-drilldown",
+  "title": "Tally / Project Drilldown",
+  "description": "One project: what it holds, how much volume capacity it uses, how close it runs to its compute quota, and the lifecycle events its cloud reports.",
+  "tags": ["tally"],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "platform",
+        "label": "Platform",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": "label_values(tally_current_resources, platform)",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": ["All"],
+          "value": ["$__all"]
+        },
+        "options": []
+      },
+      {
+        "name": "cloud",
+        "label": "Cloud",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": "label_values(tally_current_resources{platform=~\"$platform\"}, cloud)",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": ["All"],
+          "value": ["$__all"]
+        },
+        "options": []
+      },
+      {
+        "name": "project_id",
+        "label": "Project",
+        "description": "The owning project, which the exporter labels tenant_id. Read from the nova limits gauge: it carries one series per project, where the per-resource series carry one per instance and volume.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": "label_values(openstack_nova_limits_instances_used, tenant_id)",
+        "refresh": 1,
+        "sort": 1,
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "api_base",
+        "label": "Reporting API",
+        "description": "Base URL the event link points at. The dev overlay serves the API on port 8443.",
+        "type": "textbox",
+        "query": "https://api.tally.127-0-0-1.nip.io:8443",
+        "current": {
+          "selected": false,
+          "text": "https://api.tally.127-0-0-1.nip.io:8443",
+          "value": "https://api.tally.127-0-0-1.nip.io:8443"
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Resources by type",
+      "description": "Nova, cinder and glance name the owning project tenant_id; neutron and octavia name it project_id.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_nova_server_status{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "instances",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_cinder_volume_status{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "volumes",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_neutron_floating_ip{cloud=~\"$cloud\", project_id=~\"$project_id\"})",
+          "legendFormat": "floating IPs",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_neutron_router{cloud=~\"$cloud\", project_id=~\"$project_id\"})",
+          "legendFormat": "routers",
+          "range": true
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_glance_image_bytes{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "images",
+          "range": true
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(openstack_loadbalancer_loadbalancer_status{cloud=~\"$cloud\", project_id=~\"$project_id\"})",
+          "legendFormat": "load balancers",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Volume capacity",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decgbytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "sum(openstack_cinder_volume_gb{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "capacity",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "gauge",
+      "title": "Quota usage",
+      "description": "Used over max, from the nova limits collector, which is the only quota source that carries a project id.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.95
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "sum(openstack_nova_limits_instances_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_instances_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "instances",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "sum(openstack_nova_limits_vcpus_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_vcpus_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "vcpus",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "sum(openstack_nova_limits_memory_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_memory_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "legendFormat": "memory",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Recent lifecycle activity",
+      "description": "Ingested events carry no project label, so this panel is cloud-level. The link opens the project's events on the Reporting API.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "links": [
+        {
+          "title": "Event content (Reporting API)",
+          "url": "${api_base}/api/v1/events?project_id=${project_id}",
+          "targetBlank": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "expr": "sum by (event_type) (rate(tally_events_ingested_total{cloud=~\"$cloud\"}[5m]))",
+          "legendFormat": "{{event_type}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}
