@@ -143,6 +143,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 		syncer:           opts.Syncer,
 		metrics:          opts.Metrics,
 		metricsEnabled:   opts.MetricsEnabled,
+		now:              now,
 	}
 	// The dispatch middleware is handed to the generated wrapper rather than to
 	// chi, because it needs the route chi matched to know which guard applies.

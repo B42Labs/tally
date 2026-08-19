@@ -24,6 +24,11 @@ const resourceRoute = "/api/v1/resources/{cloud}/{resource_type}/{resource_id}"
 // be the pattern the generated wiring registers, letter for letter.
 const projectRoute = "/api/v1/projects/{id}"
 
+// projectSummaryRoute is the chi pattern the per-project summary is mounted
+// under. It is built from projectRoute because it hangs off it, and it has to be
+// the pattern the generated wiring registers, letter for letter.
+const projectSummaryRoute = projectRoute + "/summary"
+
 // The chi patterns the relation operations of one project are mounted under.
 // They are built from projectRoute because they hang off it, and each of them
 // has to be the pattern the generated wiring registers, letter for letter.
@@ -74,6 +79,17 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodPost + " " + projectRelationsRoute:  auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
 		http.MethodPatch + " " + projectRelationRoute:  auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
 		http.MethodDelete + " " + projectRelationRoute: auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+
+		// The statistics are the query endpoints seen in aggregate, so they are
+		// guarded the way those are. The summary hangs off a registry route whose
+		// read takes read_all, and it is guarded lower on purpose: it reports what
+		// a project ran rather than what the registry holds, so a project token
+		// reaches its own projects here, and the handler answers a foreign one the
+		// 404 an unknown id gets. Its answer names the project rather than
+		// carrying the registry row, which is what keeps the rule above intact.
+		http.MethodGet + " /api/v1/stats/resources": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
+		http.MethodGet + " /api/v1/stats/events":    auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
+		http.MethodGet + " " + projectSummaryRoute:  auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 
 		// The dead-letter list is admin-only like the two writes above and the
 		// registration below: a refused item carries whatever a collector sent,
