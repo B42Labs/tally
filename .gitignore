@@ -22,3 +22,6 @@ tilt_modules/
 .vscode/
 *.swp
 .DS_Store
+
+# Locally generated CA certificate
+tally-ca.crt
