@@ -31,6 +31,19 @@ secretGenerator:
   - name: tally-otlp-auth
     literals:
       - htpasswd=tally:tally-dev-otlp-password
+  # The key has to be admin-password: the Grafana Deployment reads the secret
+  # from /run/secrets/tally-grafana/admin-password and mounts that one key, so
+  # any other key fails the mount and the pod never starts.
+  - name: tally-grafana
+    literals:
+      - admin-password=tally-dev-grafana-password
+  # What VictoriaMetrics takes as -deleteAuthKey. Its only job is to stop
+  # /api/v1/admin/tsdb/delete_series answering an unauthenticated caller, which
+  # anything that can reach the store is otherwise able to do; a dev value in
+  # the clear is enough for that, the same as the credentials above.
+  - name: tally-vm-admin
+    literals:
+      - delete-auth-key=tally-dev-vm-delete-key
 
 patches:
   # Route every service to its nip.io hostname.
@@ -69,6 +82,15 @@ patches:
       - op: replace
         path: /spec/hostnames/0
         value: otlp-grpc.tally.127-0-0-1.nip.io
+
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: grafana
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: grafana.tally.127-0-0-1.nip.io
 
   # Serve that domain, signed by the dev CA.
   - target:
@@ -118,3 +140,31 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
+
+  # The one strategic merge patch in this file. It merges env entries by name,
+  # so it names the three variables it sets instead of indexing into the base
+  # env list, where a reorder in the base would move the values onto the wrong
+  # variables.
+  #
+  # The root URL carries the 8443 host port for the same reason the redirect
+  # above does: kind publishes https there, so a link Grafana renders without
+  # the port sends the browser to a closed port. The anonymous settings give an
+  # unauthenticated request the viewer role, which reads dashboards and saves
+  # nothing; admin still signs in with the generated password.
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+      spec:
+        template:
+          spec:
+            containers:
+              - name: grafana
+                env:
+                  - name: GF_SERVER_ROOT_URL
+                    value: https://grafana.tally.127-0-0-1.nip.io:8443
+                  - name: GF_AUTH_ANONYMOUS_ENABLED
+                    value: "true"
+                  - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+                    value: Viewer
