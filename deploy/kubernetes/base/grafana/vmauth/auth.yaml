@@ -1,0 +1,37 @@
+# The read-only face of VictoriaMetrics, and the only address the provisioned
+# datasource names.
+#
+# Grafana forwards a caller-supplied path to the datasource URL from two
+# endpoints the viewer role reaches: /api/datasources/proxy/uid/<uid>/<path> and
+# /api/datasources/uid/<uid>/resources/<path>. Both check datasources:query
+# alone, the second is what fills every variable dropdown, and neither can be
+# withheld at the Gateway without taking the dashboards with it. Whatever the
+# datasource URL answers is therefore reachable by anyone who can open a
+# dashboard, so it answers reads and nothing else.
+#
+# src_paths entries are regular expressions matched against the whole request
+# path. A path no entry matches is refused here with "missing route" and never
+# leaves the pod, which is what keeps /api/v1/write, /api/v1/import and
+# /api/v1/admin/tsdb/delete_series out of reach. Adding an entry widens what a
+# viewer can reach, so the list holds the Prometheus read API and stops there.
+#
+# /health, /metrics, /flags, /-/reload and /debug/pprof/* are answered by vmauth
+# itself, ahead of this map, so no entry here would bound them. They are moved
+# off the port the datasource URL names with -httpInternalListenAddr
+# (grafana.yaml), which is what leaves this map the only thing that port
+# consults and makes "no matching entry" mean "refused" for every path.
+unauthorized_user:
+  url_map:
+    - src_paths:
+        # What a panel query goes through.
+        - "/api/v1/query"
+        - "/api/v1/query_range"
+        # What the variable queries and the metrics browser go through.
+        - "/api/v1/series"
+        - "/api/v1/labels"
+        - "/api/v1/label/[^/]+/values"
+        - "/api/v1/metadata"
+        # What the datasource reads once to learn which of the two label-value
+        # endpoints above it may use.
+        - "/api/v1/status/buildinfo"
+      url_prefix: "http://victoriametrics:8428"

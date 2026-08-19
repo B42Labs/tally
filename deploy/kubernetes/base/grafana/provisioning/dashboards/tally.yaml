@@ -1,0 +1,14 @@
+# The provider that loads the dashboards Grafana serves. The files reach the
+# pod through the grafana-dashboards ConfigMap, mounted at the path below.
+apiVersion: 1
+
+providers:
+  - name: tally
+    folder: Tally
+    type: file
+    # The dashboards are kept in the repository. An edit or a delete in the UI
+    # would last until the next pod restart, so neither is allowed.
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

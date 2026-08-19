@@ -79,6 +79,23 @@ spec:
             - -retentionPeriod=13
             - -promscrape.config=/etc/vm/scrape.yaml
             - -storageDataPath=/victoria-metrics-data
+            # Without a key, /api/v1/admin/tsdb/delete_series answers whoever
+            # reaches port 8428 and drops a match of every series in the
+            # 13-month window. The Gateway route below withholds the path, but
+            # the route is not the only way in: the port is open to every pod in
+            # the namespace, so the endpoint has to be closed here rather than
+            # one hop away.
+            #
+            # The key arrives as an environment value rather than the mounted
+            # file the other components take, because the flag reads its value
+            # from the argument and Kubernetes expands $(VAR) in it.
+            - -deleteAuthKey=$(VM_DELETE_AUTH_KEY)
+          env:
+            - name: VM_DELETE_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tally-vm-admin
+                  key: delete-auth-key
           ports:
             - name: http
               containerPort: 8428
@@ -125,12 +142,11 @@ spec:
   hostnames:
     - vm.tally.example.com
   rules:
-    # Only the read paths are published. Port 8428 also serves
-    # /api/v1/write and /api/v1/admin/tsdb/delete_series, and VictoriaMetrics
-    # gates neither: it takes a remote write from anyone who reaches it, and
-    # with no -deleteAuthKey set one request to the delete API drops a match of
-    # every series in the 13-month window. Routing the whole port would publish
-    # both to the internet, so the route names the paths a reader needs instead.
+    # Only the read paths are published. Port 8428 also serves /api/v1/write,
+    # which VictoriaMetrics takes from anyone who reaches it, and
+    # /api/v1/admin/tsdb/delete_series, which -deleteAuthKey above now closes.
+    # Routing the whole port would publish the write API to the internet, so the
+    # route names the paths a reader needs instead.
     - matches:
         - path:
             type: PathPrefix
