@@ -18,8 +18,9 @@ info:
   description: >-
     Event ingestion, resource inventory, and usage reporting for Tally.
     This document covers the health probes, event ingestion, the queries over
-    events, resources, and lifecycles, the resource-type registry, the project
-    registry, dead-letter review, and the projection rebuild.
+    events, resources, and lifecycles, the statistics derived from them, the
+    resource-type registry, the project registry, dead-letter review, and the
+    projection rebuild.
 
 paths:
   /healthz:
@@ -466,6 +467,200 @@ paths:
         "401":
           $ref: "#/components/responses/Problem"
         "404":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/stats/resources:
+    get:
+      operationId: getResourceStats
+      summary: Count the current resources per group
+      description: >-
+        Returns the projection counted along the dimensions `group_by` names,
+        one item per combination of values that carries at least one resource. A
+        combination no resource carries is left out rather than served as a zero.
+        The order is `(cloud, resource_type, state, platform, project_id)`
+        ascending, where a dimension outside the grouping compares as the empty
+        string.
+
+        The answer is never paginated: one item stands for however many
+        resources the group holds, so the answer grows with the number of
+        combinations the fleet shows rather than with the fleet. Four of the
+        five dimensions carry a handful of values each; `project_id` carries one
+        per tenant, so a fleet showing more combinations than one answer holds
+        is refused 422 (`urn:tally:error:result_too_large`) rather than served
+        truncated. The counts are taken along all five dimensions whatever
+        `group_by` names, so a coarser grouping does not lower that bound; the
+        part of the fleet `status` selects is what does.
+
+        A project token counts the resources whose (cloud, project_id) pair one
+        of its projects names, which is the pair the resource list narrows its
+        rows by.
+      security:
+        - apiToken: []
+      parameters:
+        - name: group_by
+          in: query
+          required: true
+          description: >-
+            Which dimensions the counts are grouped by, as a comma-separated
+            list. `cloud` and `resource_type` have to be among them, because
+            they are what an item is read by; a grouping that leaves either out
+            is answered 400. The rule spans the members of one list, which this
+            schema cannot express, so the handler is what enforces it.
+          style: form
+          explode: false
+          schema:
+            type: array
+            uniqueItems: true
+            items:
+              type: string
+              enum: [cloud, resource_type, state, platform, project_id]
+        - name: status
+          in: query
+          description: >-
+            Which part of the fleet to count. `active` counts the rows whose
+            state is not deleted, `deleted` counts those alone, and `all` counts
+            both.
+          schema:
+            type: string
+            enum: [active, deleted, all]
+            default: active
+        - name: at
+          in: query
+          description: >-
+            The instant the counts describe. Leaving it out asks for the current
+            counts, which is what the projection holds.
+
+            Any value at all is answered 501
+            (`urn:tally:error:not_implemented`): counting a past instant means
+            replaying the histories, and the Phase 3 usage records are what
+            answer that. A value meaning "now" cannot be told from a historic
+            one, because the two differ by however long the request took, so
+            omitting the parameter rather than sending a timestamp is how the
+            current counts are asked for.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: The counts, one item per group.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceStatsList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+        "501":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/stats/events:
+    get:
+      operationId: getEventStats
+      summary: Count the stored events per time bucket
+      description: >-
+        Returns the stored events of the window counted per time bucket and per
+        combination of the dimensions `group_by` names. `from` and `to` select
+        the half-open window `[from, to)` on the event timestamp: an event at
+        exactly `from` is counted, one at exactly `to` is not, and a `from` at or
+        past `to` holds nothing. The buckets are aligned on UTC hours and days
+        rather than on `from`, so the first one can start before the window;
+        every bucket counts the events inside the window alone.
+
+        The order is `(bucket, cloud, event_type, source)` ascending, and a
+        bucket no event falls into is left out rather than served as a zero. The
+        answer is never paginated: a request that groups into more rows than one
+        answer carries is refused 422
+        (`urn:tally:error:result_too_large`) rather than answered with a
+        truncated count. The bound counts the finest grouping there is, which is
+        what the read returns, so a narrower window or a coarser interval is
+        what gets such a request through; leaving `source` out of `group_by`
+        does not lower it.
+
+        A second bound is read on the window itself, `to - from`, and it is
+        decided before anything is counted: the aggregate behind the count
+        walks every event of the window before its row limit discards
+        anything, so what a request costs is set by the events the window
+        holds rather than by the buckets it names. A window wider than a year
+        and a month is refused 422 whatever the interval, rather than
+        aggregated across the archive and then thrown away.
+
+        The counts are event-scoped the way the event list is: a project token
+        counts every event whose `project_id` names one of its projects,
+        including the events a resource carried before it was transferred away.
+      security:
+        - apiToken: []
+      parameters:
+        - name: group_by
+          in: query
+          required: true
+          description: >-
+            Which dimensions the counts are grouped by, as a comma-separated
+            list. `cloud` and `event_type` have to be among them, because they
+            are what an item is read by; a grouping that leaves either out is
+            answered 400. The rule spans the members of one list, which this
+            schema cannot express, so the handler is what enforces it.
+          style: form
+          explode: false
+          schema:
+            type: array
+            uniqueItems: true
+            items:
+              type: string
+              enum: [cloud, event_type, source]
+        - name: from
+          in: query
+          required: true
+          description: >-
+            Count only the events at or after this instant, the inclusive bound
+            of the window.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          description: >-
+            Count only the events before this instant, the exclusive bound of
+            the window.
+          schema:
+            type: string
+            format: date-time
+        - name: interval
+          in: query
+          required: true
+          description: How wide one bucket is.
+          schema:
+            type: string
+            enum: [1h, 1d]
+      responses:
+        "200":
+          description: The counts, one item per bucket and group.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventStatsList"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
           $ref: "#/components/responses/Problem"
         "422":
           $ref: "#/components/responses/Problem"
@@ -1024,6 +1219,91 @@ paths:
         "403":
           $ref: "#/components/responses/Problem"
         "404":
+          $ref: "#/components/responses/Problem"
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/projects/{id}/summary:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The project the summary is about.
+        schema:
+          $ref: "#/components/schemas/Uuid"
+    get:
+      operationId: getProjectSummary
+      summary: Summarize what one project ran inside a window
+      description: >-
+        Returns the project together with what each of its resource types did
+        inside the half-open window `[from, to)`: how many resources of the type
+        began or ended their life in it, how many minutes they ran within it,
+        and how many of the type the project holds right now.
+
+        The three window numbers come from folding the histories of the
+        project's resources with the fold every other read of a history runs,
+        clipped to the window, and an interval still open is counted up to the
+        instant of the request. A resource that changed hands counts here over
+        the part of the window this project held it: the transfer ends its
+        minutes here and begins the new owner's, so a resource is billed to one
+        project at a time. `created` and `deleted` are read off the project's
+        own events, so a transfer moves neither.
+        `active_now` is counted off the projection instead, so it describes the
+        present whatever the window covers. A `from` at or past `to` is an empty
+        window: created, deleted, and the minutes come out zero, while
+        `active_now` stays what it is.
+
+        A project this registry does not hold and a project outside the token's
+        scope are answered the same 404, body for body, so a caller cannot tell
+        the projects another token holds from ids that name nothing.
+
+        The embedded `project` names the project and nothing more. This route is
+        reachable with a `project` token, and the registry row it hangs off is
+        not: the name and the operator-set metadata are served by `getProject`,
+        which takes `read_all`.
+
+        A project whose history is longer than one summary folds at once is
+        answered 422 (`urn:tally:error:history_too_long`) rather than a summary
+        folded from part of it. The Phase 3 usage records are what answer a
+        history that long.
+      security:
+        - apiToken: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: >-
+            When the window starts, the inclusive bound.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          description: >-
+            When the window ends, the exclusive bound.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: The project and what its resource types did in the window.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSummary"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "422":
           $ref: "#/components/responses/Problem"
         "500":
           $ref: "#/components/responses/Problem"
@@ -1595,6 +1875,97 @@ components:
           items:
             type: string
 
+    ResourceStatsItem:
+      type: object
+      description: >-
+        One group of the resource counts: the values its dimensions carry, and
+        how many resources carry all of them.
+      required: [cloud, resource_type, count]
+      properties:
+        cloud:
+          type: string
+          description: The installation the counted resources live in.
+        resource_type:
+          type: string
+          description: The kind of resource that was counted.
+        state:
+          type: string
+          description: >-
+            The state the counted resources are in. The member is there exactly
+            when `group_by` names `state`.
+        platform:
+          type: string
+          description: >-
+            The platform the counted resources live on. The member is there
+            exactly when `group_by` names `platform`.
+        project_id:
+          type: string
+          description: >-
+            The project owning the counted resources, named the way its cloud
+            names it. The member is there exactly when `group_by` names
+            `project_id`.
+        count:
+          type: integer
+          format: int64
+          description: How many resources the group holds.
+
+    ResourceStatsList:
+      type: object
+      description: The resource counts of one grouping.
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: >-
+            The groups, ordered by cloud, resource type, state, platform, and
+            project id. It is the empty array when the grouping counts no
+            resource at all.
+          items:
+            $ref: "#/components/schemas/ResourceStatsItem"
+
+    EventStatsItem:
+      type: object
+      description: >-
+        One group of the event counts: the bucket it falls in, the values its
+        dimensions carry, and how many events carry all of them.
+      required: [bucket, cloud, event_type, count]
+      properties:
+        bucket:
+          type: string
+          format: date-time
+          description: >-
+            When the bucket starts, in UTC. A bucket covers `interval` from
+            there on, the start inclusive and the end exclusive.
+        cloud:
+          type: string
+          description: The installation the counted events came from.
+        event_type:
+          type: string
+          description: The type the counted events carry.
+        source:
+          type: string
+          description: >-
+            Which pipeline produced the counted events, collector or
+            reconciliation. The member is there exactly when `group_by` names
+            `source`.
+        count:
+          type: integer
+          format: int64
+          description: How many events the group holds.
+
+    EventStatsList:
+      type: object
+      description: The event counts of one window.
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: >-
+            The groups, ordered by bucket, cloud, event type, and source. It is
+            the empty array when the window holds no event.
+          items:
+            $ref: "#/components/schemas/EventStatsItem"
+
     ResourceType:
       type: object
       description: >-
@@ -1705,6 +2076,78 @@ components:
           description: >-
             Where the next page starts, passed back as `cursor`. It is null on
             the last page.
+
+    ProjectActivity:
+      type: object
+      description: >-
+        What one resource type of a project did inside the window of a summary.
+      required: [resource_type, active_now, created, deleted, total_minutes]
+      properties:
+        resource_type:
+          type: string
+          description: The kind of resource this row is about.
+        active_now:
+          type: integer
+          description: >-
+            How many resources of the type the project holds right now, counted
+            off the projection rows that are not deleted. It describes the
+            present rather than the window, so a type the window saw nothing of
+            still reports what the project runs of it today.
+        created:
+          type: integer
+          description: >-
+            How many resources of the type began their life inside the window.
+        deleted:
+          type: integer
+          description: >-
+            How many resources of the type ended their life inside the window.
+        total_minutes:
+          type: integer
+          format: int64
+          description: >-
+            How long the resources of the type ran inside the window, in whole
+            minutes, truncated. An interval still open is counted up to the
+            instant of the request, so a window reaching into the future carries
+            no time that has not been served yet.
+
+    ProjectRef:
+      type: object
+      description: >-
+        Which project an answer is about, as much of it as a project-scoped read
+        carries. The registry row itself — the name, the operator-set metadata,
+        the platform, and when it was registered — is what `getProject` serves,
+        and reading that takes `read_all`.
+      required: [id, cloud, external_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The project, as this API names it.
+        cloud:
+          type: string
+          description: >-
+            The installation the project lives in, os-prod-eu1 for example.
+        external_id:
+          type: string
+          description: >-
+            The project as its cloud names it, which is the id an event carries.
+
+    ProjectSummary:
+      type: object
+      description: >-
+        One project and what its resource types did inside one window.
+      required: [project, resource_types]
+      properties:
+        project:
+          $ref: "#/components/schemas/ProjectRef"
+        resource_types:
+          type: array
+          description: >-
+            One row per resource type the project has events or resources of,
+            ordered by resource type. It is the empty array for a project with
+            neither.
+          items:
+            $ref: "#/components/schemas/ProjectActivity"
 
     CreateProject:
       type: object

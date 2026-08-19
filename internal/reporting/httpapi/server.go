@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/b42labs/tally/internal/core/health"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
@@ -38,6 +39,10 @@ type server struct {
 	metrics *metrics.Metrics
 	// metricsEnabled is whether the scrape route serves the instruments at all.
 	metricsEnabled bool
+	// now is the clock the project summary clips an open interval at, so that a
+	// window reaching into the future reports no time that has not been served
+	// yet. It comes from Options.Now, which is what pins it in a test.
+	now func() time.Time
 }
 
 // writeJSON sends one successful response body under the 200 almost every

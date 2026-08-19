@@ -143,6 +143,33 @@ func TestAuthDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("puts the stats routes behind a credential", func(t *testing.T) {
+		// The three of them are the aggregate reads, and the summary is keyed on
+		// the pattern rather than on a path. What says the table names all of them
+		// is every one meeting a guard rather than being refused as a route no rule
+		// covers. Which role each demands is the integration test's business.
+		for _, tc := range []struct{ pattern, path string }{
+			{pattern: "/api/v1/stats/resources", path: "/api/v1/stats/resources"},
+			{pattern: "/api/v1/stats/events", path: "/api/v1/stats/events"},
+			{
+				pattern: projectSummaryRoute,
+				path:    "/api/v1/projects/00000000-0000-0000-0000-000000000000/summary",
+			},
+		} {
+			t.Run(tc.pattern, func(t *testing.T) {
+				ran := false
+				handler := dispatchOn(t, http.MethodGet, tc.pattern, &ran)
+
+				rec := serve(handler, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+				assertChallenged(t, rec)
+				if ran {
+					t.Error("the handler ran for a request carrying no credential")
+				}
+			})
+		}
+	})
+
 	t.Run("puts the resource reads behind a credential", func(t *testing.T) {
 		// The two per-resource routes are keyed on the pattern rather than on a
 		// path, so what says the table names them is a request whose path

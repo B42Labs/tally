@@ -370,14 +370,14 @@ func (s *server) loadScopedResource(w http.ResponseWriter, r *http.Request, scop
 // A request naming no status is served the active rows. The contract's default
 // says so, and the generated binding does not apply it, so it is applied here.
 func filterStatus(status *ListResourcesParamsStatus) pgtype.Bool {
-	value := Active
+	value := ListResourcesParamsStatusActive
 	if status != nil {
 		value = *status
 	}
-	if value == All {
+	if value == ListResourcesParamsStatusAll {
 		return pgtype.Bool{}
 	}
-	return pgtype.Bool{Bool: value == Deleted, Valid: true}
+	return pgtype.Bool{Bool: value == ListResourcesParamsStatusDeleted, Valid: true}
 }
 
 // resourceOf renders one projection row as the answer the contract promises. The
