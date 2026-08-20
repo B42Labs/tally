@@ -1,0 +1,253 @@
+# The notifier. What fires is posted here, and this is where it is grouped,
+# deduplicated, silenced, and handed to a receiver (config.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  labels:
+    app.kubernetes.io/name: alertmanager
+spec:
+  selector:
+    app.kubernetes.io/name: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http
+---
+# A StatefulSet rather than a Deployment, for the same reason VictoriaMetrics
+# and TimescaleDB are one: what --storage.path holds is state. The notification
+# log is what keeps a receiver from being told a second time about a group it
+# was already told about, and the silence store is what an on-call engineer put
+# a maintenance window into.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alertmanager
+  labels:
+    app.kubernetes.io/name: alertmanager
+spec:
+  serviceName: alertmanager
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+    spec:
+      # prom/alertmanager ends its Dockerfile with USER nobody, and the chown of
+      # /alertmanager that image does at build time is undone the moment a
+      # volume is mounted over that path. An emptyDir would still have worked,
+      # because the kubelet creates one mode 0777; the claim below does not.
+      # Most CSI drivers hand a freshly formatted volume back owned root:root
+      # 0755, and Kubernetes chowns a mount to the pod's fsGroup or not at all,
+      # so without one UID 65534 cannot create the notification log or a silence
+      # under --storage.path and the pod crash-loops. kind's local-path
+      # provisioner happens to mkdir 0777, so the failure would show up only
+      # where this base is deployed for real.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.34.0
+          # What the block above does not reach. Those fields name an identity;
+          # these four are per-container and default the permissive way, so a
+          # pod that stops at the identity still allows a setuid binary to raise
+          # this container's privileges, still carries the capability set the
+          # runtime grants by default, still has the whole image to write to,
+          # and still runs unconfined by seccomp. Alertmanager needs none of it:
+          # it binds 9093, which is above the privileged range, --config.file is
+          # a read-only ConfigMap mount, and --storage.path is the claim below,
+          # so the notification log and the silence store are the only things it
+          # writes and both land on a mounted volume.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - --config.file=/etc/alertmanager/config.yaml
+            - --storage.path=/alertmanager
+            # The flag reads its value from the argument and Kubernetes expands
+            # $(VAR) in it, the same way -deleteAuthKey takes its key in
+            # victoriametrics.yaml.
+            - --web.external-url=$(ALERTMANAGER_EXTERNAL_URL)
+            # The empty value turns the gossip cluster off. There is one
+            # replica, so there is no peer to settle with, and left at its
+            # default Alertmanager opens the port and logs "gossip not settled"
+            # at every start while it waits for members that never arrive.
+            - --cluster.listen-address=
+          env:
+            # A placeholder every overlay patches, the same way it patches
+            # GF_SERVER_ROOT_URL. Alertmanager builds the links it renders and
+            # the ones it puts in a notification from this value, so an
+            # unpatched one points a reader at a host that answers nothing.
+            - name: ALERTMANAGER_EXTERNAL_URL
+              value: https://alertmanager.tally.example.com
+          ports:
+            - name: http
+              containerPort: 9093
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: data
+              mountPath: /alertmanager
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+  # Editing config.yaml changes the generated ConfigMap name by design, which
+  # rolls the pod. On scratch storage that roll would take the notification log
+  # and every silence with it: each firing group would be delivered again at the
+  # next group_wait, and a maintenance window set minutes earlier would be gone.
+  # One replica with --cluster.listen-address= has no peer to replicate either
+  # back from, so the loss would be total rather than partial.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+---
+# The response the deny rule below sends. Envoy Gateway's extension filter, the
+# Gateway API having no core way to answer a request without a backend.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: alertmanager-deny-writes
+  labels:
+    app.kubernetes.io/name: alertmanager
+spec:
+  directResponse:
+    statusCode: 403
+    contentType: text/plain
+    body:
+      type: Inline
+      inline: "The Alertmanager write API is not published.\n"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: alertmanager
+  labels:
+    app.kubernetes.io/name: alertmanager
+spec:
+  parentRefs:
+    - name: tally
+      sectionName: https
+  hostnames:
+    - alertmanager.tally.example.com
+  rules:
+    # Port 9093 answers reads and writes on one API. Under /api/v2 a POST
+    # creates a silence or injects an alert, a PUT edits one and a DELETE
+    # expires one; /-/reload re-reads the config on demand, and /debug carries
+    # the pprof endpoints. The rule below publishes none of them, so this one is
+    # not what keeps them off the host: it is what answers them, so the UI's
+    # silence form is told why it was turned away rather than left with a 404.
+    #
+    # The rule below names longer prefixes than /api/v2, and the Gateway API
+    # ranks a longer prefix above a method match. Its matches therefore name
+    # GET, so a POST /api/v2/silences never reaches it and lands here.
+    #
+    # Silences are created from inside the cluster instead, with the amtool the
+    # image ships; docs/alerting.md carries the command.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v2
+          method: POST
+        - path:
+            type: PathPrefix
+            value: /api/v2
+          method: PUT
+        - path:
+            type: PathPrefix
+            value: /api/v2
+          method: DELETE
+        - path:
+            type: PathPrefix
+            value: /-/reload
+        - path:
+            type: PathPrefix
+            value: /debug
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: gateway.envoyproxy.io
+            kind: HTTPRouteFilter
+            name: alertmanager-deny-writes
+    # The published reads, named one at a time the way the vmalert and
+    # VictoriaMetrics routes name theirs. Carrying the rest of the host instead
+    # would publish two more: GET /api/v2/status answers with the loaded config,
+    # which is where config.yaml tells every deployment to put its
+    # webhook_configs or email_configs, and GET /metrics names the delivery
+    # integrations it is configured with alongside its alert counts. Neither is
+    # named here, so both get the Gateway's 404.
+    #
+    # What is named is what the UI calls: /api/v2/alerts with its /groups
+    # sub-path, /api/v2/silences for the list and /api/v2/silence/<id> for one
+    # of them, /api/v2/receivers for the filter bar, and the index with the
+    # hashed bundle under /assets and the icon. The UI routes on the fragment,
+    # so the index is matched exactly rather than by prefix. Its Status page
+    # reads /api/v2/status and therefore reports an error; that endpoint is the
+    # one this rule withholds.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v2/alerts
+          method: GET
+        - path:
+            type: PathPrefix
+            value: /api/v2/silences
+          method: GET
+        - path:
+            type: PathPrefix
+            value: /api/v2/silence
+          method: GET
+        - path:
+            type: PathPrefix
+            value: /api/v2/receivers
+          method: GET
+        - path:
+            type: PathPrefix
+            value: /assets
+          method: GET
+        - path:
+            type: Exact
+            value: /favicon.ico
+          method: GET
+        - path:
+            type: Exact
+            value: /
+          method: GET
+      backendRefs:
+        - name: alertmanager
+          port: 9093
