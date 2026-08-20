@@ -1,0 +1,169 @@
+# The rules vmalert evaluates against the store, in one group at a one-minute
+# interval: eleven alerting rules and the one series recorded for the anomaly
+# rule among them to read. The five critical alerts carry a runbook annotation
+# naming the page under docs/runbooks/ that a reader opens when the alert
+# arrives.
+#
+# rules_test.go pins the shape of this file: the alert names and their order,
+# the severities, the runbooks, the recorded series the anomaly rule reads, and
+# the scrape jobs the last three rules name.
+# `make check-alerting` loads it into the vmalert binary the cluster runs, which
+# is what says the expressions parse.
+groups:
+  - name: tally
+    interval: 1m
+    rules:
+      - alert: TallyCloudEventsSilent
+        expr: |
+          sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[1h])) == 0
+          and sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[24h])) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No collector events from {{ $labels.cloud }} for >1h (was active in last 24h)"
+          runbook: docs/runbooks/TallyCloudEventsSilent.md
+
+      - alert: TallyEventsRejected
+        expr: sum by (cloud, reason) (increase(tally_events_rejected_total[15m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value | printf "%.0f" }} events from {{ $labels.cloud }} rejected in 15m (reason {{ $labels.reason }})'
+
+      - alert: TallySyncErrors
+        expr: sum by (cloud) (increase(tally_sync_errors_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconciliation of {{ $labels.cloud }} reported errors in the last hour"
+
+      - alert: TallySyncStale
+        expr: sum by (cloud) (increase(tally_sync_runs_total{status="completed"}[30m])) == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "No completed reconciliation run for {{ $labels.cloud }} in 30m"
+          runbook: docs/runbooks/TallySyncStale.md
+
+      - alert: TallyReconciliationDriftHigh
+        expr: sum by (cloud) (increase(tally_sync_resources_reconciled_total[6h])) > 50
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Reconciliation corrected {{ $value | printf "%.0f" }} resources in {{ $labels.cloud }} over 6h'
+
+      - alert: TallyCollectorBufferAging
+        expr: tally_collector_oldest_buffered_seconds > 600
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Oldest buffered collector event is {{ $value | printf "%.0f" }}s old; the Reporting API is unreachable from the provider side'
+
+      # Recorded so the rule below reads one pre-aggregated series. Written as a
+      # subquery over the raw ones instead, the baseline made the engine repeat
+      # the aggregation once per step of the seven-day window on every one of
+      # the group's minute evaluations, against the single store that also
+      # serves Grafana and the Reporting API's query path. vmalert writes this
+      # series back through -remoteWrite.url and reads it through
+      # -datasource.url, the same pair that carries ALERTS_FOR_STATE.
+      - record: tally:current_resources:sum
+        expr: sum by (cloud, resource_type) (tally_current_resources)
+
+      # The offset keeps the current value out of the baseline it is measured
+      # against. Without it a rise pulls its own reference up as it goes, and
+      # the comparison is against an average that already contains the sample on
+      # the left. It also means the rule cannot fire before the store holds six
+      # hours of the recorded series, so a fresh cluster stays quiet rather than
+      # reporting every count as an anomaly against an empty window.
+      - alert: TallyResourceCountAnomaly
+        expr: |
+          tally:current_resources:sum
+            > 1.5 * (avg_over_time(tally:current_resources:sum[7d] offset 6h) + 10)
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.resource_type }} count in {{ $labels.cloud }} is above 1.5x its 7-day baseline"
+
+      # What watches the pair above. Reading the recorded series put both sides
+      # of that comparison behind vmalert's -remoteWrite.url: a queue that
+      # overflows or a store that was briefly unavailable leaves a hole in
+      # tally:current_resources:sum, the instant selector goes absent past the
+      # store's lookbehind, and the expression returns nothing on every
+      # evaluation. No `for` timer starts, nothing fires, and nothing is logged,
+      # so the rule above stops watching without saying so.
+      #
+      # The second clause is what keeps this quiet where it should be. absent()
+      # alone fires wherever nothing writes tally_current_resources at all: a
+      # dev cluster, or a production one before its first reconciliation run.
+      # Paired with the raw series it reports the one case that is a fault, the
+      # scrape path filling while the write path does not.
+      - alert: TallyRecordedSeriesMissing
+        expr: |
+          absent(tally:current_resources:sum)
+            and on () (count(tally_current_resources) > 0)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vmalert is not writing tally:current_resources:sum while tally_current_resources is still scraped, so TallyResourceCountAnomaly evaluates nothing"
+
+      # The regex names the four jobs of scrape.yaml, one more than the roadmap
+      # lists: the recorded Ceilometer default pushes to a gateway the
+      # ceilometer job scrapes (docs/openstack-metrics.md), so on that path the
+      # job carries metering data and a target of it that stops answering costs
+      # samples the same way the other three do.
+      - alert: TallyScrapeTargetDown
+        expr: up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.instance }} of job {{ $labels.job }} is down"
+          runbook: docs/runbooks/TallyScrapeTargetDown.md
+
+      # Scrape job gone entirely. `up` is a per-target series, and `reporting-api`
+      # and `otel-collector` discover their targets (see the scrape config), so a
+      # job that resolves to no targets emits no `up` series at all and
+      # TallyScrapeTargetDown stays silent. A Deployment scaled to zero, a
+      # renamed Service or port, a removed RoleBinding, or an unreachable API
+      # server all land here rather than there.
+      - alert: TallyScrapeJobMissing
+        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape job {{ $labels.job }} resolves to no targets"
+          runbook: docs/runbooks/TallyScrapeJobMissing.md
+
+      # Exporter answering 200 with a service missing. The database exporter opens
+      # one connection pool per service, and a scrape that runs out of connections
+      # on the exporter's database account (docs/openstack-metrics.md) loses whole
+      # services: their collectors emit nothing while the target stays up and the
+      # scrape duration stays normal, so neither of the two rules above sees it and
+      # the gap surfaces a month later as a short invoice. One series per billed
+      # resource is enough to see it. At a 300s scrape interval `for: 15m` wants
+      # three short scrapes in a row, so this reports a cap that is too low, not a
+      # single slow scrape.
+      #
+      # Matched on (cloud, instance) rather than on (cloud) alone: the left side is
+      # per-target, so a deployment running a second exporter target for one cloud
+      # would have the healthy one's series answer for the silent one and the rule
+      # would never fire. The right side carries the job selector for the same
+      # reason. Any other producer of a series by that name, a recording rule or a
+      # remote-write feed included, would otherwise suppress it for good.
+      - alert: TallyExporterServiceSilent
+        expr: |
+          (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_nova_total_vms{job="openstack-db-exporter"}
+          or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_cinder_volumes{job="openstack-db-exporter"}
+          or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_neutron_floating_ips{job="openstack-db-exporter"}
+          or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_glance_images{job="openstack-db-exporter"}
+          or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_loadbalancer_total_loadbalancers{job="openstack-db-exporter"}
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database exporter for {{ $labels.cloud }} is up but a whole service emits no series"
+          runbook: docs/runbooks/TallyExporterServiceSilent.md

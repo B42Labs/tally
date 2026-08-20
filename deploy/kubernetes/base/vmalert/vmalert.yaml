@@ -1,0 +1,126 @@
+# The rule evaluator. It queries the store on the group's interval, and an
+# expression that keeps returning a series for as long as its `for` says is
+# posted to Alertmanager as a firing alert (rules.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert
+  labels:
+    app.kubernetes.io/name: vmalert
+spec:
+  selector:
+    app.kubernetes.io/name: vmalert
+  ports:
+    - name: http
+      port: 8880
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmalert
+  labels:
+    app.kubernetes.io/name: vmalert
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmalert
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmalert
+    spec:
+      containers:
+        - name: vmalert
+          image: victoriametrics/vmalert:v1.148.0
+          args:
+            - -rule=/etc/vmalert/rules.yaml
+            - -datasource.url=http://victoriametrics:8428
+            - -notifier.url=http://alertmanager:9093
+            # The pair keeps the state of a pending alert outside the process.
+            # vmalert writes the ALERTS and ALERTS_FOR_STATE series to the store
+            # and reads them back at startup, so an alert that has been pending
+            # for ten of its fifteen minutes resumes there rather than starting
+            # its timer again. Without them an edit to rules.yaml, which rolls
+            # the pod through the generated ConfigMap name, would silently reset
+            # every `for` in the file.
+            - -remoteWrite.url=http://victoriametrics:8428
+            - -remoteRead.url=http://victoriametrics:8428
+            # The flag reads its value from the argument and Kubernetes expands
+            # $(VAR) in it, the same way -deleteAuthKey takes its key in
+            # victoriametrics.yaml. vmalert puts this value into the
+            # generatorURL of every alert it sends, which is the "Source" link
+            # the Alertmanager UI offers on an alert, so an unpatched one sends
+            # a reader to a host that answers nothing.
+            - -external.url=$(VMALERT_EXTERNAL_URL)
+          env:
+            # A placeholder every overlay patches, the same way it patches
+            # ALERTMANAGER_EXTERNAL_URL and GF_SERVER_ROOT_URL.
+            - name: VMALERT_EXTERNAL_URL
+              value: https://vmalert.tally.example.com
+          ports:
+            - name: http
+              containerPort: 8880
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: rules
+              mountPath: /etc/vmalert
+              readOnly: true
+      volumes:
+        - name: rules
+          configMap:
+            name: vmalert-rules
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vmalert
+  labels:
+    app.kubernetes.io/name: vmalert
+spec:
+  parentRefs:
+    - name: tally
+      sectionName: https
+  hostnames:
+    - vmalert.tally.example.com
+  rules:
+    # Three prefixes rather than the host. The UI and the JSON its pages read
+    # live under /vmalert/ and reference their assets relative to that prefix,
+    # and /api/v1/rules and /api/v1/alerts are the two read endpoints vmalert
+    # answers at the top level. What is left is /-/reload, /flags, /metrics and
+    # /debug/pprof, which vmalert serves at the root alone: under the /vmalert
+    # prefix they answer 400, and the route does not carry the root, so none of
+    # them is published. /-/reload stays reachable from inside the cluster,
+    # where it re-reads the mounted files and therefore changes nothing on its
+    # own.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /vmalert
+        - path:
+            type: PathPrefix
+            value: /api/v1/rules
+        - path:
+            type: PathPrefix
+            value: /api/v1/alerts
+      backendRefs:
+        - name: vmalert
+          port: 8880

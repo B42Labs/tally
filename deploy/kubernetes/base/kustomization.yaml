@@ -12,3 +12,4 @@ resources:
   - reporting-api
   - grafana
   - alertmanager
+  - vmalert
