@@ -671,5 +671,7 @@ the first symptom is an invoice that comes up short. A deployment that replaces
 this file therefore alerts on `up == 0` for both jobs — they are static targets,
 so their `up` series exists whatever the exporter is doing. The two discovered
 jobs need the second rule as well, on `absent(up{job="..."})`, for the reason
-above. Nothing in this tree alerts yet, because the tree carries no alerting
-component.
+above. `TallyScrapeTargetDown` and `TallyScrapeJobMissing` in
+[`deploy/kubernetes/base/vmalert/rules.yaml`](../deploy/kubernetes/base/vmalert/rules.yaml)
+are those two rules; [`alerting.md`](alerting.md) describes them and the eight
+others the tree ships.
