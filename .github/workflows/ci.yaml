@@ -31,3 +31,9 @@ jobs:
 
       - name: test
         run: go test ./...
+
+      # The rules file and the Alertmanager config are validated by the pinned
+      # images the cluster runs, so this step needs the same Docker the note
+      # above names.
+      - name: alerting
+        run: make check-alerting

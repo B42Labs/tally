@@ -41,7 +41,17 @@ KUBECTL := kubectl --context $(KUBE_CONTEXT)
 # a developer's psql takes.
 TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
 
-.PHONY: up down dev ca test lint fmt migrate generate images
+# Read from the manifests rather than pinned a second time here, so
+# `check-alerting` always validates the configs with the versions the cluster
+# runs.
+# The character class is what a tag may hold and nothing else. := expands the
+# shell once and stores the result, so whatever the manifest carries here is
+# what `docker run` below is handed: a class that admitted ';' or '$$' would let
+# a manifest line decide what CI runs.
+VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' deploy/kubernetes/base/vmalert/vmalert.yaml | head -n1)
+ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
+
+.PHONY: up down dev ca test lint fmt check-alerting migrate generate images
 
 ## up: create the kind cluster, install the add-ons, and deploy the dev overlay
 up:
@@ -80,6 +90,8 @@ up:
 	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/victoriametrics --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/otel-collector --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/grafana --timeout=300s
+	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/alertmanager --timeout=300s
+	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/vmalert --timeout=300s
 	$(KUBECTL) -n $(NAMESPACE) wait gateway/tally --for=condition=Programmed --timeout=300s
 	@# The API stays unready until the database carries its schema, and it never
 	@# migrates on its own, so the chain has to be applied before the rollout can
@@ -89,11 +101,15 @@ up:
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/reporting-api --timeout=300s
 	@echo
 	@echo 'Stack is up:'
-	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1  Reporting API'
-	@echo '  https://vm.tally.127-0-0-1.nip.io:8443          VictoriaMetrics'
-	@echo '  https://grafana.tally.127-0-0-1.nip.io:8443     Grafana'
-	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443        OTLP/HTTP'
-	@echo '  db.tally.127-0-0-1.nip.io:5432                  TimescaleDB'
+	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1        Reporting API'
+	@echo '  https://vm.tally.127-0-0-1.nip.io:8443                VictoriaMetrics'
+	@echo '  https://grafana.tally.127-0-0-1.nip.io:8443           Grafana'
+	@# vmalert is listed with its /vmalert/ prefix because the route publishes
+	@# that prefix and the two read endpoints, not the root.
+	@echo '  https://vmalert.tally.127-0-0-1.nip.io:8443/vmalert/  vmalert'
+	@echo '  https://alertmanager.tally.127-0-0-1.nip.io:8443      Alertmanager'
+	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443              OTLP/HTTP'
+	@echo '  db.tally.127-0-0-1.nip.io:5432                        TimescaleDB'
 	@echo
 	@echo 'Trust the dev CA with: make -s ca > tally-ca.crt'
 
@@ -131,6 +147,25 @@ lint:
 ## fmt: format every Go file with gofumpt, through golangci-lint's formatter
 fmt:
 	golangci-lint fmt
+
+# Each file is loaded by the binary that will evaluate it, so an expression or a
+# routing field the pinned version rejects fails here rather than in the
+# cluster. Docker is the only prerequisite; no cluster is involved.
+## check-alerting: validate the alert rules and the Alertmanager config
+check-alerting:
+	@[ -n '$(VMALERT_IMAGE)' ] || { \
+		echo 'ERROR: no vmalert image found in deploy/kubernetes/base/vmalert/vmalert.yaml' >&2; \
+		exit 1; \
+	}
+	@[ -n '$(ALERTMANAGER_IMAGE)' ] || { \
+		echo 'ERROR: no Alertmanager image found in deploy/kubernetes/base/alertmanager/alertmanager.yaml' >&2; \
+		exit 1; \
+	}
+	docker run --rm -v "$(CURDIR)/deploy/kubernetes/base/vmalert:/etc/vmalert:ro" \
+		'$(VMALERT_IMAGE)' -dryRun -rule=/etc/vmalert/rules.yaml
+	docker run --rm --entrypoint amtool \
+		-v "$(CURDIR)/deploy/kubernetes/base/alertmanager:/etc/alertmanager:ro" \
+		'$(ALERTMANAGER_IMAGE)' check-config /etc/alertmanager/config.yaml
 
 ## migrate: apply the reporting migration chain through the admin CLI
 migrate:

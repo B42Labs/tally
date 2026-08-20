@@ -43,3 +43,13 @@ k8s_resource(
     labels=['infrastructure'],
     links=[link('https://grafana.tally.127-0-0-1.nip.io:8443', 'Grafana')],
 )
+k8s_resource(
+    'alertmanager',
+    labels=['infrastructure'],
+    links=[link('https://alertmanager.tally.127-0-0-1.nip.io:8443', 'Alertmanager')],
+)
+k8s_resource(
+    'vmalert',
+    labels=['infrastructure'],
+    links=[link('https://vmalert.tally.127-0-0-1.nip.io:8443/vmalert/', 'vmalert')],
+)
