@@ -11,3 +11,4 @@ resources:
   - otel-collector
   - reporting-api
   - grafana
+  - alertmanager

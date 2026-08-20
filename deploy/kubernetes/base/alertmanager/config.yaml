@@ -1,0 +1,31 @@
+# Alertmanager routing.
+#
+# The single receiver names no integration, and it does so on purpose. Where an
+# alert is delivered is a property of a deployment, not of this repository, so
+# until one says otherwise an alert is grouped and held here, where the UI and
+# amtool show it.
+#
+# A deployment adds its own webhook_configs or email_configs by replacing this
+# generated ConfigMap from its overlay rather than by patching this file: a
+# configMapGenerator entry of its own for alertmanager-config, marked
+# behavior: replace, carrying the overlay's config.yaml. That is the mechanism
+# docs/openstack-metrics.md records for scrape.yaml under "Replacing the
+# placeholders".
+#
+# The child route below inherits the receiver from its parent and tightens
+# repeat_interval alone, so a deployment that names a receiver at the root
+# covers both branches with it.
+global:
+  resolve_timeout: 5m
+route:
+  receiver: default
+  group_by: [alertname, cloud]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      repeat_interval: 1h
+receivers:
+  - name: default
