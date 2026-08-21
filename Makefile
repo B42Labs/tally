@@ -27,8 +27,11 @@ SERVICES := tally-reporting
 # The two lists are not the same. SERVICES is what `up` deploys into kind, so it
 # is also what gets loaded into the cluster. IMAGES is everything `images`
 # builds: the collector image is built and publishable, but it runs beside the
-# broker of an OpenStack control plane rather than in the dev cluster.
-IMAGES := $(SERVICES) tally-openstack-collector
+# broker of an OpenStack control plane rather than in the dev cluster. The
+# engine image is built and publishable as well, and it has no workload in the
+# cluster until the scheduler CronJob lands (roadmap WP 3.8), so `up` does not
+# deploy or load it.
+IMAGES := $(SERVICES) tally-openstack-collector tally-engine
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
 # switches the current context, but reusing an existing one does not, so an
@@ -40,6 +43,9 @@ KUBECTL := kubectl --context $(KUBE_CONTEXT)
 # Reaches TimescaleDB through the Gateway's TCP listener, which is the same path
 # a developer's psql takes.
 TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
+
+# The engine's database, on the same listener beside the reporting one.
+TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 
 # Read from the manifests rather than pinned a second time here, so
 # `check-alerting` always validates the configs with the versions the cluster
@@ -167,9 +173,15 @@ check-alerting:
 		-v "$(CURDIR)/deploy/kubernetes/base/alertmanager:/etc/alertmanager:ro" \
 		'$(ALERTMANAGER_IMAGE)' check-config /etc/alertmanager/config.yaml
 
-## migrate: apply the reporting migration chain through the admin CLI
+# Both chains run through the Gateway's TCP listener. tally_engine is created
+# by the initdb script the timescaledb ConfigMap carries, and Postgres runs
+# initdb only against an empty data directory, so a dev cluster created before
+# that ConfigMap existed needs one `make down && make up` before the second line
+# below succeeds.
+## migrate: apply the reporting and the engine migration chains
 migrate:
 	TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin migrate
+	TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' go run ./cmd/tally-engine migrate
 
 ## generate: run the code generators
 generate:

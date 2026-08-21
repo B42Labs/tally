@@ -55,6 +55,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            # The Postgres entrypoint runs the scripts under this path only
+            # against an empty data directory, so they create tally_engine on a
+            # fresh volume's first start. A dev cluster whose volume predates
+            # this mount needs one `make down && make up` before the engine
+            # database exists.
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]
@@ -65,6 +72,12 @@ spec:
               command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]
             initialDelaySeconds: 30
             periodSeconds: 10
+      volumes:
+        # kustomize's name-reference transformer rewrites this to the generated
+        # name, which carries the hash of the script's content.
+        - name: initdb
+          configMap:
+            name: timescaledb-initdb
   volumeClaimTemplates:
     - metadata:
         name: data
