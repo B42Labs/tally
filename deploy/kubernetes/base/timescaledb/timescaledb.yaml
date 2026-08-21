@@ -55,13 +55,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
-            # The Postgres entrypoint runs the scripts under this path only
-            # against an empty data directory, so they create tally_engine on a
-            # fresh volume's first start. A dev cluster whose volume predates
-            # this mount needs one `make down && make up` before the engine
-            # database exists.
+            # Mounting the whole directory would hide the initdb scripts the
+            # image ships there, and those install the timescaledb extension,
+            # so the single script goes in beside them. The Postgres entrypoint
+            # runs that directory's scripts only against an empty data
+            # directory, so this one creates tally_engine on a fresh volume's
+            # first start. A dev cluster whose volume predates this mount needs
+            # one `make down && make up` before the engine database exists.
             - name: initdb
-              mountPath: /docker-entrypoint-initdb.d
+              mountPath: /docker-entrypoint-initdb.d/01-create-engine-db.sql
+              subPath: 01-create-engine-db.sql
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]

@@ -28,8 +28,11 @@ const (
 	// both files write rather than the one the cluster sees.
 	initdbConfigMap = "timescaledb-initdb"
 
-	// Where the Postgres entrypoint looks for the scripts it runs.
-	initdbDir = "/docker-entrypoint-initdb.d"
+	// Where the Postgres entrypoint looks for the scripts it runs, and the path
+	// our one script takes inside it. The mount names that file rather than the
+	// directory, because a directory mount hides what the image ships there.
+	initdbDir  = "/docker-entrypoint-initdb.d"
+	initdbPath = initdbDir + "/" + initdbScript
 )
 
 // object is the part of a manifest document this test asserts over. yaml.v3
@@ -58,6 +61,7 @@ type container struct {
 type volumeMount struct {
 	Name      string `yaml:"name"`
 	MountPath string `yaml:"mountPath"`
+	SubPath   string `yaml:"subPath"`
 }
 
 type volume struct {
@@ -141,9 +145,9 @@ func TestInitdbConfigMapIsMounted(t *testing.T) {
 		if m.Name != name {
 			continue
 		}
-		if m.MountPath != initdbDir {
-			t.Errorf("volume %q is mounted at %q, want %s; the entrypoint runs only what it finds under that path, so anywhere else the script is carried and ignored",
-				name, m.MountPath, initdbDir)
+		if m.MountPath != initdbPath || m.SubPath != initdbScript {
+			t.Errorf("volume %q is mounted at %q with subPath %q, want %q with subPath %s; a whole-directory mount over %s hides the initdb scripts the image ships there, which install the timescaledb extension, so a fresh cluster comes up without it and the reporting chain refuses to migrate",
+				name, m.MountPath, m.SubPath, initdbPath, initdbScript, initdbDir)
 		}
 		return
 	}
