@@ -15,15 +15,11 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 
 	"github.com/caarlos0/env/v11"
-)
 
-// fileSuffix names the companion variable of a secret: the value of
-// TALLY_REPORTING_DB_URL is read from the file at TALLY_REPORTING_DB_URL_FILE
-// when that variable holds a path.
-const fileSuffix = "_FILE"
+	"github.com/b42labs/tally/internal/core/envsecret"
+)
 
 // The variables this package reads. They are named here because the errors
 // quote them: an operator gets the variable to fix, not a Go field name.
@@ -50,11 +46,11 @@ var EnvNames = []string{
 	envLogLevel,
 	envHTTPPort,
 	envDBURL,
-	envDBURL + fileSuffix,
+	envDBURL + envsecret.Suffix,
 	envDBMaxConns,
 	envAuthMode,
 	envInternalToken,
-	envInternalToken + fileSuffix,
+	envInternalToken + envsecret.Suffix,
 	envUnhealthyThreshold,
 	envOIDCJWKSURL,
 	envRequireSizeSchema,
@@ -150,10 +146,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parsing the environment: %w", err)
 	}
 
-	if cfg.DBURL, err = resolveFileSecret(envDBURL, cfg.DBURL); err != nil {
+	if cfg.DBURL, err = envsecret.Resolve(envDBURL, cfg.DBURL); err != nil {
 		return Config{}, err
 	}
-	if cfg.InternalToken, err = resolveFileSecret(envInternalToken, cfg.InternalToken); err != nil {
+	if cfg.InternalToken, err = envsecret.Resolve(envInternalToken, cfg.InternalToken); err != nil {
 		return Config{}, err
 	}
 
@@ -189,32 +185,6 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
-}
-
-// resolveFileSecret applies the *_FILE convention to one variable: when its
-// companion holds a path, the file's content becomes the value. Kubernetes
-// writes Secret volumes with a trailing newline, so one is trimmed. An empty
-// file is rejected because it usually means the secret was never populated,
-// which would otherwise surface much later as an authentication failure.
-func resolveFileSecret(name, value string) (string, error) {
-	fileVar := name + fileSuffix
-	path := os.Getenv(fileVar)
-	if path == "" {
-		return value, nil
-	}
-	if value != "" {
-		return "", fmt.Errorf("set %s or %s, not both", name, fileVar)
-	}
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", fileVar, err)
-	}
-	secret := strings.TrimSuffix(string(content), "\n")
-	if secret == "" {
-		return "", fmt.Errorf("%s: file %s is empty", fileVar, path)
-	}
-	return secret, nil
 }
 
 // ValidateServer is the API server's startup gate. It refuses a configuration
