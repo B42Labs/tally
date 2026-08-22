@@ -58,3 +58,21 @@ func NewAmount(d decimal.Decimal) Amount {
 func (a Amount) MarshalJSON() ([]byte, error) {
 	return []byte(a.StringFixed(moneyPlaces)), nil
 }
+
+// Quantity is a usage quantity that serializes at the four-place scale derived
+// minute quantities are rounded at. A bare decimal renders 21600.0000 as 21600,
+// which hides the scale the quantity carries into JSONB.
+type Quantity struct {
+	decimal.Decimal
+}
+
+// NewQuantity wraps a decimal for serialization. It does not round: derive the
+// value with Minutes, which rounds to four places.
+func NewQuantity(d decimal.Decimal) Quantity {
+	return Quantity{Decimal: d}
+}
+
+// MarshalJSON renders the quantity as a JSON number with exactly four decimal places.
+func (q Quantity) MarshalJSON() ([]byte, error) {
+	return []byte(q.StringFixed(minutePlaces)), nil
+}

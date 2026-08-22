@@ -134,3 +134,46 @@ func TestAmountMarshalsInsideAStruct(t *testing.T) {
 		t.Errorf("Marshal() = %s, want %s", got, want)
 	}
 }
+
+func TestQuantityMarshalsWithFourDecimals(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "21600", want: "21600.0000"},
+		{in: "23039.9833", want: "23039.9833"},
+		{in: "0", want: "0.0000"},
+		{in: "-1.5", want: "-1.5000"},
+		// StringFixed rounds half away from zero, in both directions.
+		{in: "1.23455", want: "1.2346"},
+		{in: "-1.23456", want: "-1.2346"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := json.Marshal(money.NewQuantity(dec(t, tc.in)))
+			if err != nil {
+				t.Fatalf("Marshal() = %v, want nil", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("Marshal(%s) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuantityMarshalsInsideAStruct(t *testing.T) {
+	// Usage quantities reach JSONB nested in a usage map, so the four places
+	// must survive the enclosing struct rather than collapsing to 21600.
+	body := struct {
+		Minutes money.Quantity `json:"minutes"`
+	}{Minutes: money.NewQuantity(dec(t, "21600"))}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Marshal() = %v, want nil", err)
+	}
+	if want := `{"minutes":21600.0000}`; string(got) != want {
+		t.Errorf("Marshal() = %s, want %s", got, want)
+	}
+}
