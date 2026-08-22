@@ -67,9 +67,10 @@ type Config struct {
 	DBURL string `env:"TALLY_ENGINE_DB_URL"`
 	// ReportingDBURL is the PostgreSQL connection string of the Reporting API's
 	// database, which the engine reads events and resources from. It has no
-	// default for the same reason as DBURL. The read-only role it connects as is
-	// provisioned by the first package that reads that database, not here.
-	// Supports the *_FILE convention.
+	// default for the same reason as DBURL. Migration 0008 of the reporting
+	// chain creates the group role tally_engine_reader and grants it SELECT on
+	// the four tables metering reads; a deployment connects as a login role that
+	// is a member of it. Supports the *_FILE convention.
 	ReportingDBURL string `env:"TALLY_ENGINE_REPORTING_DB_URL"`
 	// VMURL is the base URL of the VictoriaMetrics instance the metricsql
 	// counter sources are queried against. It has no default because the

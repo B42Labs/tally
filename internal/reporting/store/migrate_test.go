@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"math/rand/v2"
 	"reflect"
@@ -9,6 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
@@ -152,6 +157,20 @@ func TestMigrate(t *testing.T) {
 		}
 
 		assertSeededResourceTypes(t, s)
+
+		// The role the metering engine reads through, without a login of its
+		// own: deployments grant membership in it to the role that connects.
+		var canLogin bool
+		err = s.Pool().QueryRow(t.Context(),
+			`SELECT rolcanlogin FROM pg_roles WHERE rolname = 'tally_engine_reader'`).Scan(&canLogin)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			t.Error("the chain left no role tally_engine_reader, so the engine has nothing to read the reporting database through")
+		case err != nil:
+			t.Fatalf("querying pg_roles: %v", err)
+		case canLogin:
+			t.Error("tally_engine_reader may log in, so the group role the grants hang on is an account of its own, whose password would have to live in the migration rather than in the deployment")
+		}
 	})
 
 	t.Run("a second run applies nothing", func(t *testing.T) {
@@ -535,6 +554,127 @@ func TestMigrate(t *testing.T) {
 				runs, total, len(chainVersions))
 		}
 	})
+}
+
+// TestMigrateDownWithoutTheReaderRole covers the branch of 0008's rollback
+// guard the chain-wide rollbacks above cannot reach: they roll down with
+// tally_engine_reader in place, while the guard is there for the server where
+// someone dropped the role by hand.
+//
+// Roles are cluster-wide, so the drop reaches every database of the server. It
+// runs in a container of its own for that reason: the database this migrated is
+// the only one holding grants that DROP ROLE would otherwise refuse to leave
+// behind.
+func TestMigrateDownWithoutTheReaderRole(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	// The operator's own DROP, which takes the grants of this database with it.
+	for _, stmt := range []string{
+		"DROP OWNED BY tally_engine_reader",
+		"DROP ROLE tally_engine_reader",
+	} {
+		if _, err := db.Store.Pool().Exec(t.Context(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	// One version below 0008, so the rollback runs that migration's Down.
+	const belowReaderRole = 7
+
+	if _, err := store.MigrateDownTo(t.Context(), db.URL, belowReaderRole); err != nil {
+		t.Fatalf("MigrateDownTo(%d) error = %v, want the rollback to tolerate the role that is gone",
+			belowReaderRole, err)
+	}
+}
+
+// TestMigrateUpAgainstAConcurrentRoleCreation covers the race 0008's guard
+// names: two chains on the same server reaching that migration together.
+// Roles are cluster-wide while goose's advisory lock is not, so nothing
+// serializes them, and the loser has to read the role the winner created as its
+// own rather than failing the deployment it is halfway through.
+//
+// The other session is held uncommitted rather than raced, so the outcome is
+// the same on every run. It is what makes the loser's error unique_violation
+// and not duplicate_object: CREATE ROLE reports duplicate_object from a catalog
+// lookup, which cannot see a role no session has committed yet, so this chain
+// walks past it into the unique index over pg_authid.rolname, waits there for
+// the other transaction, and fails on the index when it commits.
+func TestMigrateUpAgainstAConcurrentRoleCreation(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	// One version below 0008, so the run below is the one creating the role.
+	const belowReaderRole = 7
+
+	if _, err := store.MigrateDownTo(t.Context(), db.URL, belowReaderRole); err != nil {
+		t.Fatalf("MigrateDownTo(%d): %v", belowReaderRole, err)
+	}
+	if _, err := db.Store.Pool().Exec(t.Context(), "DROP ROLE tally_engine_reader"); err != nil {
+		t.Fatalf("dropping the role the run below creates: %v", err)
+	}
+
+	// The other chain, on another database of the same server.
+	other, err := pgx.Connect(t.Context(), db.NewSiblingDB(t, "concurrent_reader_role"))
+	if err != nil {
+		t.Fatalf("connecting to the sibling database: %v", err)
+	}
+	defer func() { _ = other.Close(t.Context()) }()
+
+	tx, err := other.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("opening the other session's transaction: %v", err)
+	}
+	if _, err := tx.Exec(t.Context(), "CREATE ROLE tally_engine_reader NOLOGIN"); err != nil {
+		t.Fatalf("creating the role in the other session: %v", err)
+	}
+
+	migrated := make(chan error, 1)
+	go func() {
+		_, err := store.Migrate(t.Context(), db.URL)
+		migrated <- err
+	}()
+
+	waitForTheBlockedRoleCreation(t, db.Store.Pool())
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing the other session: %v", err)
+	}
+	if err := <-migrated; err != nil {
+		t.Fatalf("Migrate() error = %v, want the chain to read the role the other session created as its own", err)
+	}
+
+	// The grant is the point of the migration, and it runs after the guard, so
+	// a swallowed error that left the chain short of it would pass the check
+	// above.
+	var granted bool
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		"SELECT has_table_privilege('tally_engine_reader', 'events', 'SELECT')").Scan(&granted); err != nil {
+		t.Fatalf("reading the grant: %v", err)
+	}
+	if !granted {
+		t.Error("tally_engine_reader holds no SELECT on events, so the chain ran past its own guard without granting")
+	}
+}
+
+// waitForTheBlockedRoleCreation blocks until a backend is waiting for another
+// transaction to end, which is where the chain under test sits once it reaches
+// the unique index the other session already wrote to. Polling the server
+// beats sleeping for a guess: the chain has seven migrations to apply first.
+func waitForTheBlockedRoleCreation(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	for t.Context().Err() == nil {
+		var waiting bool
+		if err := pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			                WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid')`).Scan(&waiting); err != nil {
+			t.Fatalf("reading pg_stat_activity: %v", err)
+		}
+		if waiting {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no backend ever waited on the other transaction, so the chain did not reach the role creation")
 }
 
 func TestMigrationStatus(t *testing.T) {
