@@ -47,7 +47,8 @@ type Span struct {
 }
 
 // Violation is one breached invariant. Invariant is one of the constants of
-// this package, Detail a sentence naming the instants involved, which reaches
+// this package, or one its caller names for a check of its own that fails the
+// same report; Detail is a sentence naming the instants involved, which reaches
 // an operator in the run's violation report rather than the code.
 type Violation struct {
 	Invariant string `json:"invariant"`
