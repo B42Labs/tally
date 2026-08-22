@@ -22,6 +22,9 @@ secretGenerator:
     literals:
       - password=tally-dev-password
       - db-url=postgres://tally:tally-dev-password@timescaledb:5432/tally_reporting?sslmode=disable
+      # What the initdb script creates the engine's login role with, and what
+      # TALLY_ENGINE_REPORTING_DB_URL carries on this cluster.
+      - engine-password=tally-dev-password
   - name: tally-internal-token
     literals:
       - token=tally-dev-internal-token

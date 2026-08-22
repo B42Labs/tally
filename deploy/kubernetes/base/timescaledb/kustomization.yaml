@@ -4,11 +4,12 @@ kind: Kustomization
 resources:
   - timescaledb.yaml
 
-# Generating the ConfigMap from the file means editing 01-create-engine-db.sql
-# re-rolls the pod through the generated name hash, rather than leaving it
-# mounting a script that is no longer in the repository. The roll by itself does
-# not re-run the script; timescaledb.yaml records what does.
+# Generating the ConfigMap from the files means editing one of them re-rolls the
+# pod through the generated name hash, rather than leaving it mounting a script
+# that is no longer in the repository. The roll by itself does not re-run the
+# scripts; timescaledb.yaml records what does.
 configMapGenerator:
   - name: timescaledb-initdb
     files:
       - 01-create-engine-db.sql
+      - 02-create-engine-reader.sh

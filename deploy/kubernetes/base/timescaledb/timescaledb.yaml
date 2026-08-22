@@ -48,6 +48,24 @@ spec:
                 secretKeyRef:
                   name: tally-db
                   key: password
+            # The password 02-create-engine-reader.sh creates the engine's
+            # login role with. It is a key of its own rather than the superuser
+            # password above, and it lives in the secret rather than in this
+            # directory, which dev and prod share: a password written into the
+            # base would be the password of every deployment built on it.
+            - name: TALLY_ENGINE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tally-db
+                  key: engine-password
+                  # Optional because kubelet resolves this on every container
+                  # start while the script that reads it runs against an empty
+                  # data directory alone. A secret that lost the key would
+                  # otherwise hold the pod in CreateContainerConfigError and
+                  # take the reporting database down over a value that start
+                  # would not have read anyway. The start that does read it
+                  # still fails on the script's own guard.
+                  optional: true
             # The volume root holds lost+found, which Postgres refuses to
             # initialize into, so the cluster lives one level down.
             - name: PGDATA
@@ -57,14 +75,19 @@ spec:
               mountPath: /var/lib/postgresql/data
             # Mounting the whole directory would hide the initdb scripts the
             # image ships there, and those install the timescaledb extension,
-            # so the single script goes in beside them. The Postgres entrypoint
-            # runs that directory's scripts only against an empty data
-            # directory, so this one creates tally_engine on a fresh volume's
-            # first start. A dev cluster whose volume predates this mount needs
-            # one `make down && make up` before the engine database exists.
+            # so the scripts go in beside them one file at a time. The Postgres
+            # entrypoint runs that directory's scripts only against an empty
+            # data directory, so on a fresh volume's first start these create
+            # the tally_engine database and the roles the engine reads the
+            # reporting database through. A dev cluster whose volume predates a
+            # mount needs one `make down && make up` before what it creates
+            # exists.
             - name: initdb
               mountPath: /docker-entrypoint-initdb.d/01-create-engine-db.sql
               subPath: 01-create-engine-db.sql
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d/02-create-engine-reader.sh
+              subPath: 02-create-engine-reader.sh
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "tally", "-d", "tally_reporting"]
