@@ -1,5 +1,6 @@
 # sqlc reads a goose migration chain as the schema and compiles the static
-# queries of the store beside it against that chain. One entry per service.
+# queries of the store beside it against that chain. One entry per service
+# store, plus the engine's read view over the reporting chain.
 # `make generate` runs it; the generated packages are committed so that a plain
 # `go build` needs no code generator.
 version: "2"
@@ -19,8 +20,7 @@ sql:
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
   # The engine chain takes sqlc's default pgtype mappings: the skeleton only
-  # prints the values it reads. The later packages add the overrides their own
-  # queries need, once those queries ask for richer types.
+  # prints the values it reads.
   - engine: postgresql
     schema: migrations/engine
     queries: internal/engine/store/queries.sql
@@ -29,3 +29,19 @@ sql:
         package: sqlcgen
         out: internal/engine/store/sqlcgen
         sql_package: pgx/v5
+  # The engine's read view over the Reporting schema: it reads the reporting
+  # chain (decision D1 has the engine query that database directly, read-only)
+  # but writes its package into internal/engine/source, beside the queries. The
+  # uuid override is the reporting entry's, so projects.id and the relation ids
+  # come out as uuid.UUID here too.
+  - engine: postgresql
+    schema: migrations/reporting
+    queries: internal/engine/source/queries.sql
+    gen:
+      go:
+        package: sqlcgen
+        out: internal/engine/source/sqlcgen
+        sql_package: pgx/v5
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
