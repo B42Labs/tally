@@ -1,0 +1,10 @@
+# The resource type carries modifiers but no dimension to apply them to.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      state_modifiers:
+        shutoff: "0.5"
