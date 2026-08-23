@@ -10,12 +10,12 @@
 // Nothing else migrates as a side effect, so a schema change stays an
 // operator's decision rather than something a scheduled run brings along.
 //
-// The migrate subcommands and periods list work. The rest of the tree is the
-// interface the later Phase 3 packages fill in: each of those subcommands
-// carries its full flag surface, checks what it was given, and then reports
-// that it is not implemented. The command line is fixed here so the packages
-// that arrive behind it change what a command does rather than how it is
-// called.
+// The migrate subcommands, periods list, and the pricing import and list
+// work. The rest of the tree is the interface the later Phase 3 packages fill
+// in: each of those subcommands carries its full flag surface, checks what it
+// was given, and then reports that it is not implemented. The command line is
+// fixed here so the packages that arrive behind it change what a command does
+// rather than how it is called.
 //
 // The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.1.
 package main
