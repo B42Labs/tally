@@ -1,0 +1,11 @@
+# The model says nothing about when it becomes valid.
+version: "2026-03"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"

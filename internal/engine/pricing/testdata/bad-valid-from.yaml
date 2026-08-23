@@ -1,0 +1,12 @@
+# valid_from is a string, but not an RFC 3339 timestamp.
+version: "2026-03"
+valid_from: "March 2026"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"

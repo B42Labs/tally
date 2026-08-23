@@ -1,0 +1,13 @@
+# The time_gauge dimension carries both prices.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"
+          price_per_unit: "0.09"

@@ -1,0 +1,12 @@
+# The currency is not the ISO 4217 spelling.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "eur"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"

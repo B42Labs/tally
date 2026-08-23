@@ -1,0 +1,13 @@
+# The counter dimension carries both prices.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "egress_gb"
+          type: "counter"
+          price_per_unit: "0.09"
+          price_per_unit_hour: "0.02"

@@ -1,0 +1,13 @@
+# The root carries a key the model form does not know.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+valid_until: "2026-04-01T00:00:00Z"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"

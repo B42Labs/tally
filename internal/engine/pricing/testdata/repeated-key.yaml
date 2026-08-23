@@ -1,0 +1,13 @@
+# The currency was corrected in place, leaving the key set twice.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+currency: "USD"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"

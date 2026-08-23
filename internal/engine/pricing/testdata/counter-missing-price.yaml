@@ -1,0 +1,11 @@
+# The counter dimension carries neither price.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "egress_gb"
+          type: "counter"

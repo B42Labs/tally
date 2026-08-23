@@ -1,0 +1,14 @@
+# The state modifier is negative, which would credit the resource.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"
+      state_modifiers:
+        shutoff: -0.5

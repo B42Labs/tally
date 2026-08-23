@@ -1,0 +1,4 @@
+# The model prices nothing at all.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
