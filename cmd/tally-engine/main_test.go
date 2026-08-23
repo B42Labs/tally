@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/engine/counters"
+	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
 )
@@ -300,6 +303,175 @@ func TestPeriodsList(t *testing.T) {
 	})
 }
 
+func TestPricingCLI(t *testing.T) {
+	db := storetest.NewDB(t)
+	useDatabase(t, db.URL)
+
+	stdout, stderr, err := runCLI(t, "pricing", "list")
+	if err != nil {
+		t.Fatalf("pricing list error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "no pricing models\n"; stdout != want {
+		t.Errorf("stdout of a database without pricing models = %q, want %q", stdout, want)
+	}
+
+	// The committed example, which is the file the operator documentation points
+	// at. Importing it here is what keeps it importable.
+	const example = "../../pricing/2026-03.yaml"
+
+	stdout, stderr, err = runCLI(t, "pricing", "import", example)
+	if err != nil {
+		t.Fatalf("pricing import error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "imported pricing model 2026-03 valid from 2026-03-01T00:00:00Z\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	// The same file again. A version is imported once, so the second run reports
+	// what is already stored instead of writing or refusing.
+	stdout, stderr, err = runCLI(t, "pricing", "import", example)
+	if err != nil {
+		t.Fatalf("the second pricing import error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "pricing model 2026-03 already imported\n"; stdout != want {
+		t.Errorf("stdout of the second import = %q, want %q", stdout, want)
+	}
+
+	// A version that becomes valid before the one already stored. The listing
+	// orders by valid_from, so it comes out first however late it was imported.
+	earlier := writeModel(t, "2026-02.yaml", modelYAML("2026-02", "2026-02-01T00:00:00Z", "0.02"))
+	stdout, stderr, err = runCLI(t, "pricing", "import", earlier)
+	if err != nil {
+		t.Fatalf("importing the earlier model error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "imported pricing model 2026-02 valid from 2026-02-01T00:00:00Z\n"; stdout != want {
+		t.Errorf("stdout of the earlier model = %q, want %q", stdout, want)
+	}
+
+	stdout, stderr, err = runCLI(t, "pricing", "list")
+	if err != nil {
+		t.Fatalf("pricing list error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("2026-02 valid_from=2026-02-01T00:00:00Z currency=EUR imported_at=%s\n"+
+		"2026-03 valid_from=2026-03-01T00:00:00Z currency=EUR imported_at=%s\n",
+		importedAt(t, db, "2026-02"), importedAt(t, db, "2026-03"))
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	t.Run("refuses a model the schema does not accept", func(t *testing.T) {
+		// A currency that is not a three-letter code. Nothing else about the file
+		// differs, so what the import ends on is the validation.
+		invalid := strings.Replace(modelYAML("2026-04", "2026-04-01T00:00:00Z", "0.02"), `"EUR"`, `"Euro"`, 1)
+		path := writeModel(t, "bad-currency.yaml", invalid)
+
+		stdout, _, err := runCLI(t, "pricing", "import", path)
+		if err == nil {
+			t.Fatal("pricing import error = nil, want the invalid model reported")
+		}
+		if want := "validating the pricing model"; !strings.Contains(err.Error(), want) {
+			t.Errorf("pricing import error = %q, want it to contain %q", err, want)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("pricing import error = %q, want it to name the file %q", err, path)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an import that was refused", stdout)
+		}
+	})
+
+	t.Run("refuses a stored version that prices something else", func(t *testing.T) {
+		// The version the example imported above, under another price. An invoice
+		// names the version it was rated from, so a corrected price belongs in a
+		// new version rather than over this one.
+		path := writeModel(t, "conflict.yaml", modelYAML("2026-03", "2026-03-01T00:00:00Z", "0.03"))
+
+		stdout, _, err := runCLI(t, "pricing", "import", path)
+		if err == nil {
+			t.Fatal("pricing import error = nil, want the version conflict reported")
+		}
+		if !errors.Is(err, pricing.ErrVersionConflict) {
+			t.Errorf("pricing import error = %v, want one matching ErrVersionConflict", err)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an import that was refused", stdout)
+		}
+	})
+
+	t.Run("reports a file it cannot read", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.yaml")
+
+		stdout, _, err := runCLI(t, "pricing", "import", path)
+		if err == nil {
+			t.Fatal("pricing import error = nil, want the unreadable file reported")
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("pricing import error = %q, want it to name the file %q", err, path)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an import that read nothing", stdout)
+		}
+	})
+
+	t.Run("refuses a configuration without a database url", func(t *testing.T) {
+		blankEnvironment(t)
+
+		stdout, _, err := runCLI(t, "pricing", "list")
+		if err == nil {
+			t.Fatal("pricing list error = nil, want the missing database url reported")
+		}
+		if want := "TALLY_ENGINE_DB_URL: must be set"; !strings.Contains(err.Error(), want) {
+			t.Errorf("pricing list error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed for a query that never ran", stdout)
+		}
+	})
+}
+
+// modelYAML is the smallest model the schema accepts: one platform, one
+// resource type, one dimension. The price is a string, the way the committed
+// example spells its prices.
+func modelYAML(version, validFrom, price string) string {
+	return fmt.Sprintf(`version: %q
+valid_from: %q
+currency: "EUR"
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: %q
+`, version, validFrom, price)
+}
+
+// writeModel puts a pricing model file in a directory of its own and returns
+// its path.
+func writeModel(t *testing.T, name, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", name, err)
+	}
+	return path
+}
+
+// importedAt is when the database stamped the given version, in the form the
+// listing prints it. The column is filled by the database itself, so the
+// expected output can only be built from what was stored.
+func importedAt(t *testing.T, db storetest.DB, version string) string {
+	t.Helper()
+
+	var stamp time.Time
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		"SELECT imported_at FROM pricing_models WHERE version = $1", version).Scan(&stamp); err != nil {
+		t.Fatalf("reading imported_at of the pricing model %s: %v", version, err)
+	}
+	return stamp.UTC().Format(time.RFC3339)
+}
+
 // TestWriteReportsAFailedWrite pins what write promises: output the operator's
 // terminal never received must not leave the process with a zero exit status.
 // Every command above writes into a bytes.Buffer, whose writes never fail, so
@@ -334,9 +506,6 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 			{"finalize", "--period", "2026-03", "--run", runID},
 			{"detect-late", "--period", "2026-03"},
 			{"correct", "--period", "2026-03"},
-			// The file is never opened here, so it does not have to exist.
-			{"pricing", "import", "pricing/2026-03.yaml"},
-			{"pricing", "list"},
 			{"export", "--run", runID, "--format", "json", "--out", "./out"},
 			{"export", "--run", runID, "--format", "csv", "--out", "./out"},
 			{"tick"},

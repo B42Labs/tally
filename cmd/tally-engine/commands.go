@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/b42labs/tally/internal/engine/period"
+	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/store"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
@@ -294,11 +296,33 @@ func newPricingImportCmd() *cobra.Command {
 			"A catalog is imported once and then referred to by its version, which every rated record carries, " +
 			"so a price change never rewrites what an earlier run billed.",
 		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// Whether the file exists and prices the counters it names is decided
-			// by the package that reads it (WP 3.5), so the path is taken as given
-			// rather than checked against the filesystem here.
-			return errNotImplemented
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := os.ReadFile(args[0])
+			if err != nil {
+				return fmt.Errorf("reading the pricing model: %w", err)
+			}
+			// What the parse reports is what is wrong with the model, not which
+			// file held it, and an operator keeps one file per version.
+			model, doc, err := pricing.Parse(data)
+			if err != nil {
+				return fmt.Errorf("%s: %w", args[0], err)
+			}
+
+			db, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			alreadyImported, err := pricing.Import(cmd.Context(), sqlcgen.New(db.Pool()), model, doc)
+			if err != nil {
+				return err
+			}
+			if alreadyImported {
+				return write(cmd.OutOrStdout(), fmt.Sprintf("pricing model %s already imported", model.Version))
+			}
+			return write(cmd.OutOrStdout(), fmt.Sprintf("imported pricing model %s valid from %s",
+				model.Version, model.ValidFrom.Format(time.RFC3339)))
 		},
 	}
 }
@@ -312,8 +336,30 @@ func newPricingListCmd() *cobra.Command {
 			"A line is a catalog's version and when it was imported, which is what a run's pricing version " +
 			"refers back to.",
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return errNotImplemented
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			db, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			rows, err := sqlcgen.New(db.Pool()).ListPricingModels(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("listing the pricing models: %w", err)
+			}
+			if len(rows) == 0 {
+				return write(cmd.OutOrStdout(), "no pricing models")
+			}
+
+			lines := make([]string, 0, len(rows))
+			for _, row := range rows {
+				lines = append(lines, fmt.Sprintf("%s valid_from=%s currency=%s imported_at=%s",
+					row.Version,
+					row.ValidFrom.Time.UTC().Format(time.RFC3339),
+					row.Currency,
+					row.ImportedAt.Time.UTC().Format(time.RFC3339)))
+			}
+			return write(cmd.OutOrStdout(), lines...)
 		},
 	}
 }
