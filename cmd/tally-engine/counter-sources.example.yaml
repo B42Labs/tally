@@ -1,0 +1,56 @@
+# Counter sources of the metering engine, read from the path
+# TALLY_ENGINE_COUNTER_SOURCES names (default
+# /etc/tally/counter-sources.yaml). A counter is measured per usage interval of
+# a resource, so a counter is sliced wherever metering split that resource.
+#
+# An events source counts the events of its event_type the resource recorded
+# inside the interval, read from the reporting database. A metricsql source
+# runs its query as an instant query against VictoriaMetrics
+# (TALLY_ENGINE_VM_URL, needed only when a metricsql source exists) at the
+# interval's end; an empty result is 0 and the query has to aggregate to a
+# single series. Either way the value is billed at four decimal places, so a
+# metric measured one way and later the other keeps one shape.
+#
+# A query may use four placeholders: {cloud}, {resource_id}, {project_id} (the
+# project of the interval) and {window} (the interval's length, rendered like
+# 360h, 90m or 61s; an interval shorter than a second is measured over 1s). The
+# three identity values come from ingested event data and are substituted as
+# they are rather than escaped into the query, so one holding a character
+# MetricsQL reads as syntax -- a quote, a backtick, a space, a brace -- is
+# refused. That refusal fails a required source like any other failure, because
+# a resource id is not what may decide whether a billed counter is measured; an
+# optional source is warned under counter_identity_not_queryable instead, which
+# is its own code because no rerun clears it. The values are inert as a literal
+# only: a query may not match one with =~ or !~, where the value is read as a
+# pattern and the dot an id may hold matches any character, and it may not call
+# label_replace, label_transform, label_match or label_mismatch, whose pattern
+# argument reads it the same way without a matcher to mark it.
+#
+# required applies to metricsql sources only and defaults to true: a failing
+# required source fails the run. required: false turns that failure into a
+# counter_source_failed warning and leaves the metric out of that interval,
+# which is what a metric that is only reported wants.
+#
+# The keys of an entry are platform, resource_type, metric and kind, plus
+# event_type for an events source and query (with optional required) for a
+# metricsql source. Any other key is refused. The metric names minutes and
+# count are reserved by the engine, and one (platform, resource_type, metric)
+# may appear once.
+#
+# The series name in the first entry is the roadmap's illustration. A
+# deployment queries the series name its own Ceilometer pipeline stores; see
+# docs/openstack-metrics.md.
+
+sources:
+  - platform: openstack
+    resource_type: instance
+    metric: egress_gb
+    kind: metricsql
+    query: >
+      sum(increase(ceilometer_network_outgoing_bytes{cloud="{cloud}",
+          resource_id="{resource_id}"}[{window}])) / 1e9
+  - platform: harbor
+    resource_type: repository
+    metric: pulls
+    kind: events
+    event_type: repository.pull

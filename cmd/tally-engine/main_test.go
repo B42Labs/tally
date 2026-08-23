@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/b42labs/tally/internal/engine/config"
+	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
 )
@@ -450,6 +451,65 @@ func TestEnvExampleListsEveryVariable(t *testing.T) {
 		if !strings.Contains(string(example), name) {
 			t.Errorf(".env.example does not mention %s", name)
 		}
+	}
+}
+
+// TestCounterSourcesExampleLoads keeps the example sources file loadable: a
+// format change that is not mirrored there would leave an operator with an
+// example the engine refuses.
+func TestCounterSourcesExampleLoads(t *testing.T) {
+	cfg, err := counters.Load("counter-sources.example.yaml")
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if len(cfg.Sources) != 2 {
+		t.Fatalf("len(cfg.Sources) = %d, want 2", len(cfg.Sources))
+	}
+
+	egress := cfg.Sources[0]
+	if egress.Platform != "openstack" {
+		t.Errorf("sources[0].Platform = %q, want %q", egress.Platform, "openstack")
+	}
+	if egress.ResourceType != "instance" {
+		t.Errorf("sources[0].ResourceType = %q, want %q", egress.ResourceType, "instance")
+	}
+	if egress.Metric != "egress_gb" {
+		t.Errorf("sources[0].Metric = %q, want %q", egress.Metric, "egress_gb")
+	}
+	if egress.Kind != counters.KindMetricsQL {
+		t.Errorf("sources[0].Kind = %q, want %q", egress.Kind, counters.KindMetricsQL)
+	}
+	if !egress.Required {
+		t.Error("sources[0].Required = false, want true")
+	}
+	for _, placeholder := range []string{"{cloud}", "{resource_id}", "{window}"} {
+		if !strings.Contains(egress.Query, placeholder) {
+			t.Errorf("sources[0].Query = %q, want it to contain %s", egress.Query, placeholder)
+		}
+	}
+
+	pulls := cfg.Sources[1]
+	if pulls.Platform != "harbor" {
+		t.Errorf("sources[1].Platform = %q, want %q", pulls.Platform, "harbor")
+	}
+	if pulls.ResourceType != "repository" {
+		t.Errorf("sources[1].ResourceType = %q, want %q", pulls.ResourceType, "repository")
+	}
+	if pulls.Metric != "pulls" {
+		t.Errorf("sources[1].Metric = %q, want %q", pulls.Metric, "pulls")
+	}
+	if pulls.Kind != counters.KindEvents {
+		t.Errorf("sources[1].Kind = %q, want %q", pulls.Kind, counters.KindEvents)
+	}
+	if pulls.EventType != "repository.pull" {
+		t.Errorf("sources[1].EventType = %q, want %q", pulls.EventType, "repository.pull")
+	}
+	if !pulls.Required {
+		t.Error("sources[1].Required = false, want true")
+	}
+
+	if !cfg.HasMetricsQL() {
+		t.Error("cfg.HasMetricsQL() = false, want true")
 	}
 }
 
