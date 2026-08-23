@@ -272,6 +272,78 @@ func TestHistory(t *testing.T) {
 	})
 }
 
+// TestCountEvents pins what an events-kind counter is handed: the events of
+// one type inside the half-open interval, keyed by the cloud and the resource
+// type beside the id rather than by the id alone.
+func TestCountEvents(t *testing.T) {
+	db := storetest.NewDB(t)
+	pool := db.Store.Pool()
+
+	repo := source.Resource{
+		Cloud: "harbor-prod", Platform: "harbor", ResourceType: "repository", ResourceID: "team-alpha/app",
+	}
+	// A sibling of the same cloud and type, the same repository in another
+	// cloud, and repo's own id under another type of the same cloud. An id is
+	// unique only within the cloud and the resource type, so none of them is
+	// repo.
+	other := source.Resource{
+		Cloud: "harbor-prod", Platform: "harbor", ResourceType: "repository", ResourceID: "team-alpha/other",
+	}
+	staged := source.Resource{
+		Cloud: "harbor-stage", Platform: "harbor", ResourceType: "repository", ResourceID: "team-alpha/app",
+	}
+	otherType := source.Resource{
+		Cloud: "harbor-prod", Platform: "harbor", ResourceType: "project", ResourceID: "team-alpha/app",
+	}
+
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC)
+	pulled := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	justBefore := time.Date(2026, 2, 28, 23, 59, 59, 0, time.UTC)
+	elsewhere := time.Date(2026, 3, 5, 0, 0, 0, 0, time.UTC)
+
+	// The interval is half-open, so the pull at its first instant counts and
+	// the one at its last belongs to the next interval.
+	seedEvent(t, pool, repo, "count-at-from", "repository.pull", from, from, nil)
+	seedEvent(t, pool, repo, "count-inside", "repository.pull", pulled, pulled, nil)
+	seedEvent(t, pool, repo, "count-at-to", "repository.pull", to, to, nil)
+	seedEvent(t, pool, repo, "count-before", "repository.pull", justBefore, justBefore, nil)
+	// Inside the interval, but not what this counter counts: another event type
+	// of repo, and the pull of a resource repo shares only part of its key
+	// with — the id, the cloud, or the resource type.
+	seedEvent(t, pool, repo, "count-push", "repository.push", elsewhere, elsewhere, nil)
+	seedEvent(t, pool, other, "count-other-id", "repository.pull", elsewhere, elsewhere, nil)
+	seedEvent(t, pool, staged, "count-other-cloud", "repository.pull", elsewhere, elsewhere, nil)
+	seedEvent(t, pool, otherType, "count-other-type", "repository.pull", elsewhere, elsewhere, nil)
+
+	t.Run("counts the events of the type inside the half-open interval", func(t *testing.T) {
+		snap := openSnapshot(t, db.URL)
+
+		got, err := snap.CountEvents(t.Context(), repo, "repository.pull", from, to)
+		if err != nil {
+			t.Fatalf("CountEvents() error = %v, want nil", err)
+		}
+		if want := int64(2); got != want {
+			t.Errorf("CountEvents() = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("a resource without events counts zero", func(t *testing.T) {
+		snap := openSnapshot(t, db.URL)
+
+		empty := source.Resource{
+			Cloud: "harbor-prod", Platform: "harbor", ResourceType: "repository", ResourceID: "team-alpha/empty",
+		}
+		got, err := snap.CountEvents(t.Context(), empty, "repository.pull", from, to)
+		if err != nil {
+			t.Fatalf("CountEvents() error = %v, want nil", err)
+		}
+		if got != 0 {
+			t.Errorf("CountEvents() = %d, want 0", got)
+		}
+	})
+}
+
 // TestSnapshot pins what makes the transaction a snapshot: a run reads one
 // version of the reporting data however long it takes, and it knows which
 // version that was.
@@ -546,6 +618,16 @@ func TestReaderRole(t *testing.T) {
 		if want := []source.Relation{relation}; !reflect.DeepEqual(relations, want) {
 			t.Errorf("Relations() = %+v, want %+v", relations, want)
 		}
+
+		// The same grant on the events hypertable, exercised through an
+		// aggregate rather than through the rows themselves.
+		events, err := snap.CountEvents(t.Context(), metered, "instance.create", periodFrom, periodTo)
+		if err != nil {
+			t.Fatalf("CountEvents() error = %v, want nil", err)
+		}
+		if events != 1 {
+			t.Errorf("CountEvents() = %d, want 1", events)
+		}
 	})
 
 	t.Run("writes nothing and reads no credentials", func(t *testing.T) {
@@ -629,6 +711,13 @@ func TestReadsReportTheQueryThatFailed(t *testing.T) {
 				return err
 			},
 			want: "listing the project relations:",
+		},
+		"CountEvents": {
+			read: func() error {
+				_, err := snap.CountEvents(t.Context(), metered, "instance.create", periodFrom, periodTo)
+				return err
+			},
+			want: "counting the instance.create events of " + cloud + "/instance/i-1:",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

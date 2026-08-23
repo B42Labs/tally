@@ -5,11 +5,11 @@
 // through the tally_engine_reader role, and this package writes nothing, here
 // or anywhere else.
 //
-// Every reporting read of the engine is a method on Snapshot. The transaction
-// itself stays unexported, so a later package that needs another query, such as
-// the event count a counter measures, adds a method here rather than taking a
-// handle on the transaction and running its own statements outside the
-// snapshot.
+// Every reporting read of the engine is a method on Snapshot, the event count a
+// counter measures included (CountEvents). The transaction itself stays
+// unexported, so a later package that needs another query adds a method here
+// rather than taking a handle on the transaction and running its own statements
+// outside the snapshot.
 //
 // A snapshot holds one connection for its lifetime and pins the reporting
 // database's vacuum horizon while it is open, which keeps dead tuples from
@@ -208,6 +208,27 @@ func (s *Snapshot) History(ctx context.Context, r Resource, periodTo time.Time) 
 		events = append(events, stored)
 	}
 	return events, nil
+}
+
+// CountEvents counts the events of one type of r whose timestamp lies in the
+// half-open interval [from, to). It is the count an events-kind counter source
+// measures per usage interval, and it runs inside the snapshot transaction, so
+// the count and the history the interval was folded from see the same data. A
+// resource with no matching events counts as 0 and no error.
+func (s *Snapshot) CountEvents(ctx context.Context, r Resource, eventType string, from, to time.Time) (int64, error) {
+	count, err := s.queries.CountEvents(ctx, sqlcgen.CountEventsParams{
+		Cloud:        r.Cloud,
+		ResourceType: r.ResourceType,
+		ResourceID:   r.ResourceID,
+		EventType:    eventType,
+		FromTs:       timestamptz(from),
+		ToTs:         timestamptz(to),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("counting the %s events of %s/%s/%s: %w",
+			eventType, r.Cloud, r.ResourceType, r.ResourceID, err)
+	}
+	return count, nil
 }
 
 // Project is one entry of the project registry.

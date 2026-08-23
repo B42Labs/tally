@@ -47,3 +47,19 @@ WHERE relation_type = ANY(sqlc.arg('relation_types')::text[])
   AND valid_from < sqlc.arg('period_to')::timestamptz
   AND (valid_to IS NULL OR valid_to > sqlc.arg('period_from')::timestamptz)
 ORDER BY id;
+
+-- The events of one type a counter measures inside one usage interval. The
+-- interval is half-open, [from_ts, to_ts), the same bound the interval itself
+-- has, and the key carries the cloud and the resource type beside the id
+-- because an id is unique only within both. idx_events_resource serves the
+-- predicate on uncompressed chunks; a chunk past the 90-day compression policy
+-- is segmented by (cloud, resource_type) alone, so the resource id and the
+-- event type are filtered after decompression, which is what a correction of an
+-- older period pays.
+-- name: CountEvents :one
+SELECT count(*)
+FROM events
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+  AND event_type = sqlc.arg('event_type')
+  AND timestamp >= sqlc.arg('from_ts')::timestamptz
+  AND timestamp < sqlc.arg('to_ts')::timestamptz;
