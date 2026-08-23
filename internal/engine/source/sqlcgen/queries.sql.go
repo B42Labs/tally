@@ -12,6 +12,46 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countEvents = `-- name: CountEvents :one
+SELECT count(*)
+FROM events
+WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
+  AND event_type = $4
+  AND timestamp >= $5::timestamptz
+  AND timestamp < $6::timestamptz
+`
+
+type CountEventsParams struct {
+	Cloud        string
+	ResourceType string
+	ResourceID   string
+	EventType    string
+	FromTs       pgtype.Timestamptz
+	ToTs         pgtype.Timestamptz
+}
+
+// The events of one type a counter measures inside one usage interval. The
+// interval is half-open, [from_ts, to_ts), the same bound the interval itself
+// has, and the key carries the cloud and the resource type beside the id
+// because an id is unique only within both. idx_events_resource serves the
+// predicate on uncompressed chunks; a chunk past the 90-day compression policy
+// is segmented by (cloud, resource_type) alone, so the resource id and the
+// event type are filtered after decompression, which is what a correction of an
+// older period pays.
+func (q *Queries) CountEvents(ctx context.Context, arg CountEventsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countEvents,
+		arg.Cloud,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.EventType,
+		arg.FromTs,
+		arg.ToTs,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const listCandidates = `-- name: ListCandidates :many
 SELECT cloud, platform, resource_type, resource_id
 FROM current_resources
