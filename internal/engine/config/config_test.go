@@ -192,6 +192,35 @@ func TestAttributingTypesExplicitEmpty(t *testing.T) {
 	})
 }
 
+func TestCounterSourcesExplicitEmpty(t *testing.T) {
+	t.Run("an explicitly empty value configures no counter sources", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_DB_URL":          "postgres://tally@localhost/engine",
+			"TALLY_ENGINE_COUNTER_SOURCES": "",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if cfg.CounterSourcesPath != "" {
+			t.Errorf("CounterSourcesPath = %q, want the empty path", cfg.CounterSourcesPath)
+		}
+	})
+
+	t.Run("an unset variable keeps the default path", func(t *testing.T) {
+		setEnv(t, nil)
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if want := "/etc/tally/counter-sources.yaml"; cfg.CounterSourcesPath != want {
+			t.Errorf("CounterSourcesPath = %q, want %q", cfg.CounterSourcesPath, want)
+		}
+	})
+}
+
 func TestLogLevelRejected(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_ENGINE_DB_URL": "postgres://tally@localhost/engine",

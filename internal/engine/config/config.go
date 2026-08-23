@@ -73,9 +73,10 @@ type Config struct {
 	// is a member of it. Supports the *_FILE convention.
 	ReportingDBURL string `env:"TALLY_ENGINE_REPORTING_DB_URL"`
 	// VMURL is the base URL of the VictoriaMetrics instance the metricsql
-	// counter sources are queried against. It has no default because the
-	// endpoint differs per deployment, and no gate here: the package that
-	// queries VictoriaMetrics adds its own.
+	// counter sources are queried against. It is needed only when the counter
+	// sources file declares metricsql sources. It has no default because the
+	// endpoint differs per deployment, and no gate here: the first subcommand
+	// that queries VictoriaMetrics adds its own.
 	VMURL string `env:"TALLY_ENGINE_VM_URL"`
 	// GraceHours is how long a run waits after its billing period ends before it
 	// executes, so events that arrive late still reach the run that bills them.
@@ -91,10 +92,14 @@ type Config struct {
 	// its own. Setting the variable to the empty string yields that empty list.
 	AttributingRelationTypes []string `env:"TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES" envDefault:"infrastructure_tenant"`
 	// CounterSourcesPath is the path to the counter sources YAML, the file that
-	// declares which counters exist and how each one is measured. It has no
-	// *_FILE companion because the value is a path already, not a secret.
-	// Whether the file exists and parses is checked by the package that reads
-	// it, not here.
+	// declares which counters exist and how each one is measured;
+	// cmd/tally-engine/counter-sources.example.yaml shows the format. Setting
+	// the variable to the empty string means no counter sources, which
+	// counters.Load reads as the zero configuration; a path to a file that does
+	// not exist is an error when the file is read, not a run without counters.
+	// It has no *_FILE companion because the value is a path already, not a
+	// secret. Whether the file parses is checked by the package that reads it,
+	// not here.
 	CounterSourcesPath string `env:"TALLY_ENGINE_COUNTER_SOURCES" envDefault:"/etc/tally/counter-sources.yaml"`
 }
 
@@ -134,6 +139,12 @@ func Load() (Config, error) {
 	}
 	if slices.Contains(cfg.AttributingRelationTypes, "") {
 		return Config{}, fmt.Errorf("%s: %q must not contain an empty relation type", envAttributingTypes, raw)
+	}
+	// The counter sources path is read the same way: only the explicit empty
+	// value means no counter sources, which counters.Load honors by reading
+	// nothing, while an unset variable keeps the default path.
+	if raw, isSet := os.LookupEnv(envCounterSources); isSet && raw == "" {
+		cfg.CounterSourcesPath = ""
 	}
 
 	return cfg, nil
