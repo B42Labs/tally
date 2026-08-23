@@ -623,3 +623,220 @@ func TestHasMetricsQL(t *testing.T) {
 		})
 	}
 }
+
+func TestWindow(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int64
+		want    string
+	}{
+		{name: "a month of 30 days is whole hours", seconds: 1296000, want: "360h"},
+		{name: "an hour and a half is whole minutes", seconds: 5400, want: "90m"},
+		{name: "a minute and a second is neither", seconds: 61, want: "61s"},
+		{name: "one hour", seconds: 3600, want: "1h"},
+		{name: "one minute", seconds: 60, want: "1m"},
+		// A draft shorter than a second still needs a window MetricsQL
+		// measures over, and [0s] is not one.
+		{name: "a draft shorter than a second", seconds: 0, want: "1s"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := counters.Window(tc.seconds); got != tc.want {
+				t.Errorf("Window(%d) = %q, want %q", tc.seconds, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderQuery(t *testing.T) {
+	t.Run("a query is rendered for the draft it measures", func(t *testing.T) {
+		tests := []struct {
+			name                         string
+			query                        string
+			cloud, resourceID, projectID string
+			want                         string
+		}{
+			{
+				name:  "the roadmap's query",
+				query: `sum(increase(ceilometer_network_outgoing_bytes{cloud="{cloud}", resource_id="{resource_id}"}[{window}])) / 1e9`,
+				want:  `sum(increase(ceilometer_network_outgoing_bytes{cloud="os-prod-eu1", resource_id="abc-123"}[360h])) / 1e9`,
+			},
+			{
+				name:  "a query selecting the project",
+				query: `sum(metric{cloud="{cloud}", project="{project_id}"})`,
+				want:  `sum(metric{cloud="os-prod-eu1", project="proj-456"})`,
+			},
+			{
+				name:       "a repository id, which carries a slash",
+				query:      `sum(metric{repository="{resource_id}"})`,
+				resourceID: "team-alpha/app",
+				want:       `sum(metric{repository="team-alpha/app"})`,
+			},
+			{
+				name:  "an empty query",
+				query: "",
+				want:  "",
+			},
+			{
+				name:  "a query without placeholders",
+				query: "sum(metric)",
+				want:  "sum(metric)",
+			},
+			{
+				// The placeholder the value would be refused for is not in
+				// this query, so the value never reaches it.
+				name:       "a value a query does not substitute",
+				query:      `sum(metric{cloud="{cloud}"})`,
+				resourceID: `x"} or vector(1e12) #`,
+				want:       `sum(metric{cloud="os-prod-eu1"})`,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				cloud, resourceID, projectID := tc.cloud, tc.resourceID, tc.projectID
+				if cloud == "" {
+					cloud = "os-prod-eu1"
+				}
+				if resourceID == "" {
+					resourceID = "abc-123"
+				}
+				if projectID == "" {
+					projectID = "proj-456"
+				}
+
+				got, err := counters.RenderQuery(tc.query, cloud, resourceID, projectID, 1296000)
+				if err != nil {
+					t.Fatalf("RenderQuery() error = %v, want nil", err)
+				}
+				if got != tc.want {
+					t.Errorf("RenderQuery() = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+
+	// The identity values reach the engine from ingested event data, and the
+	// query around them is text an operator wrote. Nothing here can tell which
+	// of MetricsQL's three string literal forms a placeholder sits in, or
+	// whether it sits in one at all, so a value that is not inert is refused
+	// rather than escaped for one of them.
+	t.Run("an identity a query may not carry is refused", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			query   string
+			value   string
+			wantErr string
+		}{
+			{
+				name:    "a resource id ending the double-quoted matcher it sits in",
+				query:   `sum(increase(metric{resource_id="{resource_id}"}[{window}]))`,
+				value:   `x"}[1s])) or vector(1e12) #`,
+				wantErr: `the resource_id "x\"}[1s])) or vector(1e12) #" holds a character`,
+			},
+			{
+				name:    "a resource id ending a single-quoted matcher",
+				query:   `sum(metric{resource_id='{resource_id}'})`,
+				value:   `x'} or vector(1e12) or metric{a='`,
+				wantErr: "the resource_id",
+			},
+			{
+				name:    "a resource id ending a backquoted matcher",
+				query:   "sum(metric{resource_id=`{resource_id}`})",
+				value:   "x`} or vector(1e12) or metric{a=`",
+				wantErr: "the resource_id",
+			},
+			{
+				name:    "a resource id holding a backslash",
+				query:   `sum(metric{resource_id="{resource_id}"})`,
+				value:   `a\b`,
+				wantErr: "the resource_id",
+			},
+			{
+				name:    "a resource id holding a line break, which no literal carries",
+				query:   `sum(metric{resource_id="{resource_id}"})`,
+				value:   "a\nb",
+				wantErr: "the resource_id",
+			},
+			{
+				// A regex matcher needs no quote at all to be subverted.
+				name:    "a resource id that is a regex matching everything",
+				query:   `sum(metric{resource_id=~"{resource_id}"})`,
+				value:   ".*",
+				wantErr: "the resource_id",
+			},
+			{
+				name:    "a placeholder written outside a literal",
+				query:   "sum(metric{resource_id={resource_id}})",
+				value:   "x} or vector(1e12) or metric{a=b",
+				wantErr: "the resource_id",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := counters.RenderQuery(tc.query, "os-prod-eu1", tc.value, "proj-456", 1296000)
+				if err == nil {
+					t.Fatalf("RenderQuery() error = nil, want %q", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("RenderQuery() error = %q, want it to contain %q", err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	// The cloud and the project id come from ingested event data the same way
+	// the resource id does, and they land in the same matcher.
+	t.Run("every substituted identity is checked, not only the resource id", func(t *testing.T) {
+		tests := []struct {
+			name                         string
+			query                        string
+			cloud, resourceID, projectID string
+			wantErr                      string
+		}{
+			{
+				name:    "a cloud holding a quote",
+				query:   `sum(metric{cloud="{cloud}"})`,
+				cloud:   `a"b`,
+				wantErr: `the cloud "a\"b" holds a character`,
+			},
+			{
+				name:      "a project id holding a quote",
+				query:     `sum(metric{project="{project_id}"})`,
+				projectID: `c"d`,
+				wantErr:   `the project_id "c\"d" holds a character`,
+			},
+			{
+				name:       "a resource id holding a quote",
+				query:      `sum(metric{resource_id="{resource_id}"})`,
+				resourceID: `e"f`,
+				wantErr:    `the resource_id "e\"f" holds a character`,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				cloud, resourceID, projectID := tc.cloud, tc.resourceID, tc.projectID
+				if cloud == "" {
+					cloud = "os-prod-eu1"
+				}
+				if resourceID == "" {
+					resourceID = "abc-123"
+				}
+				if projectID == "" {
+					projectID = "proj-456"
+				}
+
+				_, err := counters.RenderQuery(tc.query, cloud, resourceID, projectID, 1296000)
+				if err == nil {
+					t.Fatalf("RenderQuery() error = nil, want %q", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("RenderQuery() error = %q, want it to contain %q", err, tc.wantErr)
+				}
+			})
+		}
+	})
+}
