@@ -1,0 +1,100 @@
+# Example pricing model from the concept, section 3.4 (README section
+# "Pricing Model"). A price may be written as a number or as a string: either
+# way it keeps the digits spelled here and is read with decimal.NewFromString,
+# never through a float. `tally-engine pricing import` loads this file.
+version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+        - metric: "disk_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.001"
+        - metric: "egress_gb"
+          type: "counter"
+          price_per_unit: "0.09"
+      state_modifiers:
+        shelved: "0.0"
+        shutoff: "0.5"
+    volume:
+      dimensions:
+        - metric: "size_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.0001"
+      type_modifiers:
+        ssd: "1.0"
+        hdd: "0.5"
+    floating_ip:
+      dimensions:
+        - metric: "count"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+
+  hetzner:
+    server:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.015"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.004"
+        - metric: "disk_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.0008"
+      state_modifiers:
+        "off": "0.5"
+
+  stackit:
+    server:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.025"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.006"
+        - metric: "disk_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.0012"
+
+  ionos:
+    server:
+      dimensions:
+        - metric: "cores"
+          type: "time_gauge"
+          price_per_unit_hour: "0.022"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+
+  gardener:
+    shoot:
+      dimensions:
+        - metric: "worker_count"
+          type: "time_gauge"
+          price_per_unit_hour: "0.10"
+      state_modifiers:
+        hibernated: "0.0"
+
+  harbor:
+    repository:
+      dimensions:
+        - metric: "storage_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.00005"
+        - metric: "egress_gb"
+          type: "counter"
+          price_per_unit: "0.12"
+        - metric: "pulls"
+          type: "counter"
+          price_per_unit: "0.0"
