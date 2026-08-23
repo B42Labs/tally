@@ -68,6 +68,33 @@ func TestMinutes(t *testing.T) {
 	}
 }
 
+func TestRoundQuantity(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		want      string
+		wantFixed string
+	}{
+		{name: "half up at the fifth place", in: "22.49995", want: "22.5", wantFixed: "22.5000"},
+		{name: "smallest value that rounds up", in: "0.00005", want: "0.0001", wantFixed: "0.0001"},
+		{name: "largest value that rounds down", in: "0.00004", want: "0", wantFixed: "0.0000"},
+		{name: "half away from zero on the negative side", in: "-1.23455", want: "-1.2346", wantFixed: "-1.2346"},
+		{name: "counter value left unchanged", in: "812", want: "812", wantFixed: "812.0000"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := money.RoundQuantity(dec(t, tc.in))
+			if !got.Equal(dec(t, tc.want)) {
+				t.Errorf("RoundQuantity(%s) = %s, want %s", tc.in, got, tc.want)
+			}
+			if fixed := got.StringFixed(4); fixed != tc.wantFixed {
+				t.Errorf("RoundQuantity(%s).StringFixed(4) = %s, want %s", tc.in, fixed, tc.wantFixed)
+			}
+		})
+	}
+}
+
 func TestDivPrecision(t *testing.T) {
 	// One third at the working precision: 28 digits after the point, and the
 	// last one rounded up rather than truncated.
