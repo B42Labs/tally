@@ -11,6 +11,51 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getPricingModel = `-- name: GetPricingModel :one
+SELECT version, valid_from, currency, document, imported_at
+FROM pricing_models
+WHERE version = $1
+`
+
+func (q *Queries) GetPricingModel(ctx context.Context, version string) (PricingModel, error) {
+	row := q.db.QueryRow(ctx, getPricingModel, version)
+	var i PricingModel
+	err := row.Scan(
+		&i.Version,
+		&i.ValidFrom,
+		&i.Currency,
+		&i.Document,
+		&i.ImportedAt,
+	)
+	return i, err
+}
+
+const insertPricingModel = `-- name: InsertPricingModel :execrows
+INSERT INTO pricing_models (version, valid_from, currency, document)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (version) DO NOTHING
+`
+
+type InsertPricingModelParams struct {
+	Version   string
+	ValidFrom pgtype.Timestamptz
+	Currency  string
+	Document  []byte
+}
+
+func (q *Queries) InsertPricingModel(ctx context.Context, arg InsertPricingModelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertPricingModel,
+		arg.Version,
+		arg.ValidFrom,
+		arg.Currency,
+		arg.Document,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listBillingPeriods = `-- name: ListBillingPeriods :many
 SELECT period_from, status, finalized_run_id, finalized_at
 FROM billing_periods
@@ -47,4 +92,63 @@ func (q *Queries) ListBillingPeriods(ctx context.Context) ([]ListBillingPeriodsR
 		return nil, err
 	}
 	return items, nil
+}
+
+const listPricingModels = `-- name: ListPricingModels :many
+SELECT version, valid_from, currency, imported_at
+FROM pricing_models
+ORDER BY valid_from
+`
+
+type ListPricingModelsRow struct {
+	Version    string
+	ValidFrom  pgtype.Timestamptz
+	Currency   string
+	ImportedAt pgtype.Timestamptz
+}
+
+func (q *Queries) ListPricingModels(ctx context.Context) ([]ListPricingModelsRow, error) {
+	rows, err := q.db.Query(ctx, listPricingModels)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPricingModelsRow
+	for rows.Next() {
+		var i ListPricingModelsRow
+		if err := rows.Scan(
+			&i.Version,
+			&i.ValidFrom,
+			&i.Currency,
+			&i.ImportedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pricingModelForPeriod = `-- name: PricingModelForPeriod :one
+SELECT version, valid_from, currency, document, imported_at
+FROM pricing_models
+WHERE valid_from <= $1
+ORDER BY valid_from DESC
+LIMIT 1
+`
+
+func (q *Queries) PricingModelForPeriod(ctx context.Context, validFrom pgtype.Timestamptz) (PricingModel, error) {
+	row := q.db.QueryRow(ctx, pricingModelForPeriod, validFrom)
+	var i PricingModel
+	err := row.Scan(
+		&i.Version,
+		&i.ValidFrom,
+		&i.Currency,
+		&i.Document,
+		&i.ImportedAt,
+	)
+	return i, err
 }
