@@ -12,8 +12,9 @@ import (
 const (
 	// moneyPlaces is the scale every monetary value is rounded and rendered at.
 	moneyPlaces = 2
-	// minutePlaces is the scale derived minute quantities are rounded at.
-	minutePlaces = 4
+	// quantityPlaces is the scale usage quantities, minutes and counters alike,
+	// are rounded and rendered at.
+	quantityPlaces = 4
 	// divisionScale is the working precision every division runs at, set
 	// explicitly so no result depends on decimal.DivisionPrecision.
 	divisionScale = 28
@@ -31,7 +32,14 @@ func Round2(d decimal.Decimal) decimal.Decimal {
 // decimal places. Interval arithmetic is done in integer seconds; this is where
 // it becomes a billable quantity.
 func Minutes(seconds int64) decimal.Decimal {
-	return Div(decimal.NewFromInt(seconds), decimal.NewFromInt(60)).Round(minutePlaces)
+	return Div(decimal.NewFromInt(seconds), decimal.NewFromInt(60)).Round(quantityPlaces)
+}
+
+// RoundQuantity rounds a usage quantity to four decimal places, half away from
+// zero, the way Round2 rounds money. It is the rounding a counter value read
+// from a metrics store goes through before it is carried as a Quantity.
+func RoundQuantity(d decimal.Decimal) decimal.Decimal {
+	return d.Round(quantityPlaces)
 }
 
 // Div divides at an explicit working precision. Dividing by zero panics, as it
@@ -59,20 +67,21 @@ func (a Amount) MarshalJSON() ([]byte, error) {
 	return []byte(a.StringFixed(moneyPlaces)), nil
 }
 
-// Quantity is a usage quantity that serializes at the four-place scale derived
-// minute quantities are rounded at. A bare decimal renders 21600.0000 as 21600,
-// which hides the scale the quantity carries into JSONB.
+// Quantity is a usage quantity that serializes at the four-place scale Minutes
+// and RoundQuantity round to. A bare decimal renders 21600.0000 as 21600, which
+// hides the scale the quantity carries into JSONB.
 type Quantity struct {
 	decimal.Decimal
 }
 
 // NewQuantity wraps a decimal for serialization. It does not round: derive the
-// value with Minutes, which rounds to four places.
+// value with Minutes, or round it with RoundQuantity, which both round to four
+// places.
 func NewQuantity(d decimal.Decimal) Quantity {
 	return Quantity{Decimal: d}
 }
 
 // MarshalJSON renders the quantity as a JSON number with exactly four decimal places.
 func (q Quantity) MarshalJSON() ([]byte, error) {
-	return []byte(q.StringFixed(minutePlaces)), nil
+	return []byte(q.StringFixed(quantityPlaces)), nil
 }
