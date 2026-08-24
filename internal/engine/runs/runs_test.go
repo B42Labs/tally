@@ -2,11 +2,14 @@ package runs
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
@@ -521,6 +524,55 @@ func TestRatedRowsMisalignedResources(t *testing.T) {
 		want := "the rated resource " + name(metered) + " carries 1 records for 2 usage drafts"
 		if err.Error() != want {
 			t.Errorf("ratedRows() error = %q, want %q", err, want)
+		}
+	})
+}
+
+// TestLateEventsError pins what a failed read of the late events reports. The
+// read of a period past the reporting database's compression policy is bounded
+// by the statement_timeout alone, and that period is the one a late-arrival
+// correction is most likely due for, so the timeout is named for what it is and
+// carries the correction that books the events without the report. Every other
+// failure is the database's own and passes through unchanged, a statement
+// somebody canceled by hand included: Postgres reports that under the same
+// SQLSTATE and only the message tells the two apart.
+func TestLateEventsError(t *testing.T) {
+	t.Run("the statement timeout", func(t *testing.T) {
+		timedOut := fmt.Errorf("listing the late events: %w", &pgconn.PgError{
+			Code: queryCanceled, Message: "canceling statement due to statement timeout",
+		})
+
+		err := lateEventsError("2025-01", timedOut)
+		for _, want := range []string{
+			"statement timeout", "compression policy",
+			"tally-engine correct --period 2025-01",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("lateEventsError() error = %q, want it to name %q", err, want)
+			}
+		}
+		if !errors.Is(err, timedOut) {
+			t.Errorf("lateEventsError() error = %v, want the database's own error wrapped", err)
+		}
+	})
+
+	t.Run("a canceled statement that is not the timeout", func(t *testing.T) {
+		canceled := fmt.Errorf("listing the late events: %w", &pgconn.PgError{
+			Code: queryCanceled, Message: "canceling statement due to user request",
+		})
+
+		if err := lateEventsError("2025-01", canceled); err != canceled {
+			t.Errorf("lateEventsError() error = %v, want the read's own error %v", err, canceled)
+		}
+	})
+
+	t.Run("any other failure", func(t *testing.T) {
+		dropped := fmt.Errorf("listing the late events: %w", &pgconn.PgError{
+			Code: "42P01", Message: `relation "events" does not exist`,
+		})
+
+		if err := lateEventsError("2025-01", dropped); err != dropped {
+			t.Errorf("lateEventsError() error = %v, want the read's own error %v", err, dropped)
 		}
 	})
 }
