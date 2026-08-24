@@ -364,8 +364,14 @@ func TestTick(t *testing.T) {
 		if !equal(calls, []string{"2026-03"}) {
 			t.Errorf("the executor was called for %v, want the one call of the first tick", calls)
 		}
-		if report[0].RunID != uuid.Nil {
-			t.Errorf("RunID = %s, want none: the month was metered by the tick before", report[0].RunID)
+		// The month was metered by the tick before, so this tick started no run
+		// of its own. What it reports is the run it closed the month over, which
+		// is what the CLI names in its output.
+		if report[0].RunID == uuid.Nil {
+			t.Fatal("RunID = none, want the run the tick closed the month over")
+		}
+		if report[0].RunID != runID {
+			t.Errorf("RunID = %s, want the run %s the tick before metered", report[0].RunID, runID)
 		}
 		if !report[0].Finalized {
 			t.Error("Finalized = false, want the tick to report the month it closed")
