@@ -18,6 +18,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/runs"
 	"github.com/b42labs/tally/internal/engine/scheduler"
+	"github.com/b42labs/tally/internal/engine/source"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 	reportingtest "github.com/b42labs/tally/internal/reporting/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
@@ -558,6 +559,179 @@ func TestRunAndFinalizeCLI(t *testing.T) {
 	})
 }
 
+// TestDetectLateAndCorrectCLI drives a finalized month through the two
+// subcommands that deal with what reached it afterwards: detect-late names the
+// resources whose events arrived after the run read the period, and correct
+// books the difference between the finalized numbers and a fresh metering.
+func TestDetectLateAndCorrectCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+
+	from, _ := billingMonth(-3)
+	month := period.Format(from)
+	const (
+		cloud      = "os-cli-correct"
+		project    = "proj-cli-correct"
+		resourceID = "i-cli-correct"
+		resizeID   = "ev-resize-" + resourceID
+	)
+	f.seedProject(t, cloud, project)
+	f.seedInstance(t, cloud, resourceID, project, from)
+
+	if _, stderr, err := runCLI(t, "run", "--period", month, "--clouds", cloud); err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	id := f.completedRun(t, from)
+
+	stdout, stderr, err := runCLI(t, "finalize", "--period", month, "--run", id.String())
+	if err != nil {
+		t.Fatalf("finalize error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := fmt.Sprintf("run %s finalized, period %s closed\n", id, month); stdout != want {
+		t.Errorf("stdout of finalize = %q, want %q", stdout, want)
+	}
+
+	// Nothing reached the reporting database since the run read it, which is
+	// what a month that is simply done answers.
+	stdout, stderr, err = runCLI(t, "detect-late", "--period", month)
+	if err != nil {
+		t.Fatalf("detect-late error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("run %s read %s at %s\nno events arrived later\n", id, month, f.snapshotAt(t, id))
+	if stdout != want {
+		t.Errorf("stdout of detect-late = %q, want %q", stdout, want)
+	}
+
+	// A resize halfway through the instance's life, which halves its vcpus for
+	// the second half of it. The event is dated inside the finalized month and
+	// stamped received now, so the finalized run billed the month without it.
+	f.seedEvent(t, cloud, resourceID, project, resizeID, "compute.instance.resize.end", from.Add(48*time.Hour),
+		`{"state":"active","size":{"vcpus":2,"ram_gb":8,"disk_gb":80,"flavor":"m1.large"}}`)
+
+	stdout, stderr, err = runCLI(t, "detect-late", "--period", month)
+	if err != nil {
+		t.Fatalf("the second detect-late error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s read %s at %s\n"+
+		"%s/openstack/instance/%s: 1 late events, last received %s\n"+
+		"book them with tally-engine correct --period %s\n",
+		id, month, f.snapshotAt(t, id), cloud, resourceID, f.receivedAt(t, resizeID), month)
+	if stdout != want {
+		t.Errorf("stdout of detect-late = %q, want %q", stdout, want)
+	}
+
+	stdout, stderr, err = runCLI(t, "correct", "--period", month)
+	if err != nil {
+		t.Fatalf("correct error = %v, want nil (stderr %q)", err, stderr)
+	}
+	correction := f.completedCorrection(t, from)
+	want = fmt.Sprintf("run %s completed as a correction of run %s for %s with pricing model %s\n"+
+		"metered 1 candidates into 2 usage records and 2 rated records\n"+
+		"1 deltas in 1 credit notes\n", correction, id, month, modelVersion)
+	if stdout != want {
+		t.Errorf("stdout of correct = %q, want %q", stdout, want)
+	}
+
+	// The one delta behind that count: the finalized run billed 48 hours at 4
+	// vcpus, the correction 24 hours at 4 and 24 at 2, both at 0.02 per hour.
+	var dimension, oldAmount, newAmount, delta string
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT dimension, old_amount::text, new_amount::text, delta::text
+		 FROM correction_deltas WHERE run_id = $1`, correction).
+		Scan(&dimension, &oldAmount, &newAmount, &delta); err != nil {
+		t.Fatalf("reading the delta of the correction %s: %v", correction, err)
+	}
+	if dimension != "vcpus" || oldAmount != "3.84" || newAmount != "2.88" || delta != "-0.96" {
+		t.Errorf("the delta = %s %s -> %s (%s), want vcpus 3.84 -> 2.88 (-0.96)",
+			dimension, oldAmount, newAmount, delta)
+	}
+
+	stdout, stderr, err = runCLI(t, "finalize", "--period", month, "--run", correction.String())
+	if err != nil {
+		t.Fatalf("finalizing the correction error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := fmt.Sprintf("correction run %s finalized for %s\n", correction, month); stdout != want {
+		t.Errorf("stdout of the correction's finalize = %q, want %q", stdout, want)
+	}
+
+	// The same month again, now against the finalized correction. Nothing
+	// arrived since, so the fresh metering matches it and there is nothing to
+	// book.
+	stdout, stderr, err = runCLI(t, "correct", "--period", month)
+	if err != nil {
+		t.Fatalf("the second correct error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s completed as a correction of run %s for %s with pricing model %s\n"+
+		"metered 1 candidates into 2 usage records and 2 rated records\n"+
+		"no deltas: the finalized numbers of %s stand\n",
+		f.completedCorrection(t, from), correction, month, modelVersion, month)
+	if stdout != want {
+		t.Errorf("stdout of the second correct = %q, want %q", stdout, want)
+	}
+
+	// A correction closes itself alone, so the period still names the regular
+	// run that closed it and the instant that closed it.
+	stdout, stderr, err = runCLI(t, "periods", "list")
+	if err != nil {
+		t.Fatalf("periods list error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("%s finalized finalized_run=%s finalized_at=%s\n", month, id, f.finalizedAt(t, from))
+	if stdout != want {
+		t.Errorf("stdout of periods list = %q, want %q", stdout, want)
+	}
+
+	t.Run("detect-late needs no counter sources", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing.yaml")
+		t.Setenv("TALLY_ENGINE_COUNTER_SOURCES", missing)
+
+		// Nothing is measured, so the file is never read. The run the late events
+		// are held against is now the finalized correction.
+		stdout, stderr, err := runCLI(t, "detect-late", "--period", month)
+		if err != nil {
+			t.Fatalf("detect-late error = %v, want nil (stderr %q)", err, stderr)
+		}
+		if want := fmt.Sprintf("run %s read %s at ", correction, month); !strings.HasPrefix(stdout, want) {
+			t.Errorf("stdout of detect-late = %q, want it to start with %q", stdout, want)
+		}
+
+		// correct meters the month again, so it fails on the file a run fails on.
+		_, _, correctErr := runCLI(t, "correct", "--period", month)
+		if correctErr == nil {
+			t.Fatal("correct error = nil, want the unreadable counter sources reported")
+		}
+		_, _, runErr := runCLI(t, "run", "--period", month)
+		if runErr == nil {
+			t.Fatal("run error = nil, want the unreadable counter sources reported")
+		}
+		if correctErr.Error() != runErr.Error() {
+			t.Errorf("correct error = %q, want the same as the run error %q", correctErr, runErr)
+		}
+		for _, want := range []string{"reading the counter sources " + missing, "no such file"} {
+			if !strings.Contains(correctErr.Error(), want) {
+				t.Errorf("correct error = %q, want it to contain %q", correctErr, want)
+			}
+		}
+	})
+
+	// detect-late is the one subcommand that opens the two databases through
+	// openDatabases rather than through openPipeline, so the gate over the
+	// reporting url is a call site of its own and is refused here rather than at
+	// the first query.
+	t.Run("refuses a configuration without a reporting database url", func(t *testing.T) {
+		useDatabase(t, f.engine.URL)
+
+		stdout, _, err := runCLI(t, "detect-late", "--period", month)
+		if err == nil {
+			t.Fatal("detect-late error = nil, want the missing reporting database url reported")
+		}
+		if want := "TALLY_ENGINE_REPORTING_DB_URL: must be set"; !strings.Contains(err.Error(), want) {
+			t.Errorf("detect-late error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a detect-late that never opened", stdout)
+		}
+	})
+}
+
 // TestTickCLI drives the scheduler entrypoint over both databases: what it
 // prints is the whole of what the CronJob's log holds.
 func TestTickCLI(t *testing.T) {
@@ -697,6 +871,27 @@ func (f pipelineFixture) seedInstance(t *testing.T, cloud, resourceID, projectID
 	}
 }
 
+// seedEvent writes one event of a resource that already has a projection row.
+// received_at is left to the database, which stamps it now, so an event seeded
+// after a run is one that reached the reporting database after that run read
+// it.
+func (f pipelineFixture) seedEvent(
+	t *testing.T,
+	cloud, resourceID, projectID, eventID, eventType string,
+	at time.Time,
+	payload string,
+) {
+	t.Helper()
+
+	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+		`INSERT INTO events (event_id, timestamp, event_type, platform, cloud,
+		                     resource_type, resource_id, project_id, payload)
+		 VALUES ($1, $2, $3, 'openstack', $4, 'instance', $5, $6, $7::jsonb)`,
+		eventID, at, eventType, cloud, resourceID, projectID, payload); err != nil {
+		t.Fatalf("seeding the event %s: %v", eventID, err)
+	}
+}
+
 // seedPeriod writes a billing period in the status a case starts from, which is
 // what puts its month into the walk of a tick.
 func (f pipelineFixture) seedPeriod(t *testing.T, from, to time.Time, status string) {
@@ -720,6 +915,53 @@ func (f pipelineFixture) completedRun(t *testing.T, from time.Time) uuid.UUID {
 		t.Fatalf("reading the completed run of %s: %v", period.Format(from), err)
 	}
 	return id
+}
+
+// completedCorrection is the correction the CLI completed for a month. A
+// correction that has been finalized no longer matches, so this names the one
+// the last correct left behind.
+func (f pipelineFixture) completedCorrection(t *testing.T, from time.Time) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT id FROM runs WHERE period_from = $1 AND kind = 'correction' AND status = 'completed'`,
+		from).Scan(&id); err != nil {
+		t.Fatalf("reading the completed correction of %s: %v", period.Format(from), err)
+	}
+	return id
+}
+
+// snapshotAt is the instant a run read the reporting database at, in the form
+// detect-late prints it. The run recorded it in its stats, so the expected
+// output can only be built from what was stored.
+func (f pipelineFixture) snapshotAt(t *testing.T, id uuid.UUID) string {
+	t.Helper()
+
+	var stamp string
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT stats->>'snapshot_at' FROM runs WHERE id = $1`, id).Scan(&stamp); err != nil {
+		t.Fatalf("reading snapshot_at of the run %s: %v", id, err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		t.Fatalf("parsing snapshot_at %q of the run %s: %v", stamp, id, err)
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
+// receivedAt is when the reporting database stamped an event, in the form
+// detect-late prints it. The column is filled by the database itself, so the
+// expected output can only be built from what was stored.
+func (f pipelineFixture) receivedAt(t *testing.T, eventID string) string {
+	t.Helper()
+
+	var stamp time.Time
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`SELECT received_at FROM events WHERE event_id = $1`, eventID).Scan(&stamp); err != nil {
+		t.Fatalf("reading received_at of the event %s: %v", eventID, err)
+	}
+	return stamp.UTC().Format(time.RFC3339)
 }
 
 // finalizedAt is when the database stamped the closed period, in the form the
@@ -769,6 +1011,45 @@ func TestTickLinesReportsWhatTheWalkLeftBehind(t *testing.T) {
 	}
 }
 
+// TestDetectLateLinesCountsWhatItDidNotName pins the line that stands for the
+// resources the report left out. A period finalized before its ingest had
+// settled carries a late resource per resource of the fleet, and the report
+// names at most source.LateResourceLimit of them; without this line an operator
+// would read the ones it named as the whole of what a correction re-meters.
+func TestDetectLateLinesCountsWhatItDidNotName(t *testing.T) {
+	id := uuid.MustParse(runID)
+	readAt := time.Date(2026, 4, 2, 3, 4, 5, 0, time.UTC)
+
+	lines := detectLateLines("2026-03", runs.LateReport{
+		RunID:      id,
+		Kind:       runs.KindRegular,
+		SnapshotAt: readAt,
+		Resources: []source.LateResource{{
+			Resource: source.Resource{
+				Cloud: "os-prod", Platform: "openstack", ResourceType: "instance", ResourceID: "abc-123",
+			},
+			Events:         2,
+			LastReceivedAt: readAt.Add(time.Hour),
+		}},
+		Truncated: 41,
+	})
+
+	want := []string{
+		"run " + id.String() + " read 2026-03 at 2026-04-02T03:04:05Z",
+		"os-prod/openstack/instance/abc-123: 2 late events, last received 2026-04-02T04:04:05Z",
+		"and 41 more resources with late events",
+		"book them with tally-engine correct --period 2026-03",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("detectLateLines() = %q, want %q", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("detectLateLines()[%d] = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
 // TestWriteReportsAFailedWrite pins what write promises: output the operator's
 // terminal never received must not leave the process with a zero exit status.
 // Every command above writes into a bytes.Buffer, whose writes never fail, so
@@ -798,8 +1079,6 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 
 	t.Run("flags that check out end in the not-implemented report", func(t *testing.T) {
 		for _, args := range [][]string{
-			{"detect-late", "--period", "2026-03"},
-			{"correct", "--period", "2026-03"},
 			{"export", "--run", runID, "--format", "json", "--out", "./out"},
 			{"export", "--run", runID, "--format", "csv", "--out", "./out"},
 		} {
@@ -904,6 +1183,26 @@ func TestFlagsAreCheckedBeforeTheConfiguration(t *testing.T) {
 		}
 		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
 			t.Errorf("finalize error = %q, want it to contain %q", err, want)
+		}
+	})
+
+	t.Run("detect-late refuses a period that is not a month", func(t *testing.T) {
+		_, _, err := runCLI(t, "detect-late", "--period", "2026-3")
+		if err == nil {
+			t.Fatal("detect-late error = nil, want the malformed period reported")
+		}
+		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
+			t.Errorf("detect-late error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("correct refuses a period that is not a month", func(t *testing.T) {
+		_, _, err := runCLI(t, "correct", "--period", "2026-3")
+		if err == nil {
+			t.Fatal("correct error = nil, want the malformed period reported")
+		}
+		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
+			t.Errorf("correct error = %q, want %q", err, want)
 		}
 	})
 }

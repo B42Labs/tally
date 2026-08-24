@@ -11,11 +11,11 @@
 // operator's decision rather than something a scheduled run brings along.
 //
 // The migrate subcommands, periods list, the pricing import and list, and run,
-// finalize and tick work. What is left is the interface the later Phase 3
-// packages fill in: detect-late, correct and export each carry their full flag
-// surface, check what they were given, and then report that they are not
-// implemented. The command line is fixed here so the packages that arrive
-// behind it change what a command does rather than how it is called.
+// finalize, detect-late, correct and tick work. What is left is export, the
+// interface a later Phase 3 package fills in: it carries its full flag surface,
+// checks what it was given, and then reports that it is not implemented. The
+// command line is fixed here so the package that arrives behind it changes what
+// the command does rather than how it is called.
 //
 // The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.1.
 package main
@@ -137,15 +137,62 @@ func openEngine(ctx context.Context, cfg config.Config) (*store.Store, error) {
 	return db, nil
 }
 
-// pipeline is everything a run needs beside the month it meters: the engine
-// database it is written to, the reporting database it is read from, the
-// counter sources it measures, and the client that answers the metricsql ones.
-// run assembles it for the period it was given, tick for every period that is
-// due.
+// databases is the pair a period is worked over: the engine database the runs
+// are written to, and the reporting database the resources and events are read
+// from, under the one configuration that named both.
+type databases struct {
+	cfg       config.Config
+	engine    *store.Store
+	reporting *source.DB
+}
+
+// Close gives both pools back.
+func (d *databases) Close() {
+	d.reporting.Close()
+	d.engine.Close()
+}
+
+// openDatabases reads the configuration, gates it over both databases, and
+// opens them. It is what a subcommand that reads both and measures nothing
+// works from: detect-late opens this alone, so a counter sources file the
+// machine does not have does not keep an operator from listing the late events
+// of a period. The caller closes the databases.
+func openDatabases(ctx context.Context) (*databases, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	// The reporting database is where the resources and events of a period come
+	// from, so a subcommand without it is refused here rather than at the first
+	// query.
+	if err := cfg.ValidateReporting(); err != nil {
+		return nil, fmt.Errorf("checking the configuration: %w", err)
+	}
+	return connectDatabases(ctx, cfg)
+}
+
+// connectDatabases dials the two databases cfg names. The engine pool is given
+// back where the reporting one cannot be opened, so a failure here leaves no
+// connection behind.
+func connectDatabases(ctx context.Context, cfg config.Config) (*databases, error) {
+	engine, err := openEngine(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	reporting, err := source.New(ctx, cfg.ReportingDBURL)
+	if err != nil {
+		engine.Close()
+		return nil, err
+	}
+	return &databases{cfg: cfg, engine: engine, reporting: reporting}, nil
+}
+
+// pipeline is everything a run needs beside the month it meters: the two
+// databases it works over, the counter sources it measures, and the client that
+// answers the metricsql ones. run assembles it for the period it was given,
+// tick for every period that is due.
 type pipeline struct {
-	cfg            config.Config
-	engine         *store.Store
-	reporting      *source.DB
+	databases
 	counterSources counters.Config
 	vm             counters.Querier
 }
@@ -183,26 +230,13 @@ func openPipeline(ctx context.Context) (*pipeline, error) {
 		vm = client
 	}
 
-	engine, err := openEngine(ctx, cfg)
+	dbs, err := connectDatabases(ctx, cfg)
 	if err != nil {
-		return nil, err
-	}
-	reporting, err := source.New(ctx, cfg.ReportingDBURL)
-	if err != nil {
-		engine.Close()
 		return nil, err
 	}
 	return &pipeline{
-		cfg:            cfg,
-		engine:         engine,
-		reporting:      reporting,
+		databases:      *dbs,
 		counterSources: counterSources,
 		vm:             vm,
 	}, nil
-}
-
-// Close gives both pools back.
-func (p *pipeline) Close() {
-	p.reporting.Close()
-	p.engine.Close()
 }

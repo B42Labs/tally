@@ -21,9 +21,8 @@ import (
 )
 
 // errNotImplemented is what a subcommand whose package has not arrived yet
-// returns once it has checked its flags. The message is the same for all of
-// them: which Phase 3 package is missing is nothing an operator can act on,
-// that the command is not usable yet is.
+// returns once it has checked its flags. Which Phase 3 package is missing is
+// nothing an operator can act on, that the command is not usable yet is.
 var errNotImplemented = errors.New("not implemented: arrives with a later Phase 3 package")
 
 // newMigrateCmd builds the migrate subcommand.
@@ -303,11 +302,25 @@ func newDetectLateCmd() *cobra.Command {
 			"It names what the reporting database received after the run that bills the period read it. " +
 			"Nothing is changed: booking those events is what correct does.",
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if _, _, err := validatePeriod(month); err != nil {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			from, to, err := validatePeriod(month)
+			if err != nil {
 				return err
 			}
-			return errNotImplemented
+
+			// Nothing is metered here, so the counter sources are not read: a
+			// machine that does not carry the file still lists the late events.
+			dbs, err := openDatabases(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer dbs.Close()
+
+			report, err := runs.DetectLate(cmd.Context(), dbs.engine.Pool(), dbs.reporting, from, to)
+			if err != nil {
+				return err
+			}
+			return write(cmd.OutOrStdout(), detectLateLines(month, report)...)
 		},
 	}
 
@@ -324,14 +337,43 @@ func newCorrectCmd() *cobra.Command {
 		Use:   "correct",
 		Short: "Meter a finalized billing period again as a correction",
 		Long: "Meter a finalized billing period again as a correction.\n\n" +
-			"The correction run supersedes the run that billed the period and records the difference between " +
-			"the two. The finalized run stays as it is, because its numbers may already have reached an ERP.",
+			"The correction meters the month again from the full event history with the pricing version the " +
+			"finalized run used, stores every non-zero difference against the latest finalized run as a credit " +
+			"or debit delta, and renders one credit note per affected project. The finalized run stays as it " +
+			"is, because its numbers may already have reached an ERP; a completed correction is finalized with " +
+			"finalize, and the next correction diffs against it.",
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if _, _, err := validatePeriod(month); err != nil {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			from, to, err := validatePeriod(month)
+			if err != nil {
 				return err
 			}
-			return errNotImplemented
+
+			p, err := openPipeline(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer p.Close()
+
+			result, err := runs.Correct(cmd.Context(), p.engine.Pool(), p.reporting, runs.CorrectOptions{
+				PeriodFrom:               from,
+				PeriodTo:                 to,
+				AttributingRelationTypes: p.cfg.AttributingRelationTypes,
+				Counters:                 p.counterSources,
+				VM:                       p.vm,
+			})
+			// A correction that committed and then failed to give its period lock
+			// back booked the deltas: what it produced is printed and the failure
+			// named beside it, rather than leaving the operator with an error and
+			// no run id to tell whether the month was corrected at all.
+			if err != nil && !errors.Is(err, runs.ErrLockReleaseFailed) {
+				return err
+			}
+			lines := correctLines(month, result)
+			if err != nil {
+				lines = append(lines, fmt.Sprintf("warning: %s", err))
+			}
+			return write(cmd.OutOrStdout(), lines...)
 		},
 	}
 
@@ -509,20 +551,85 @@ func runLines(month string, result runs.Result) []string {
 		lines = append(lines, fmt.Sprintf("warning: %s: %s", warning.Code, warning.Detail))
 	}
 
-	// The findings of the passes are counted rather than printed: a period of a
-	// large deployment carries thousands of them, and runs.stats holds every one
-	// in full for the operator who goes looking.
-	stats := result.Stats
-	recorded := len(stats.MeteringWarnings) + len(stats.CounterWarnings) + len(stats.AttributionWarnings) +
-		len(stats.Unpriced) + len(stats.Unreadable) + len(stats.UnregisteredProjects)
-	if recorded > 0 {
-		lines = append(lines, fmt.Sprintf(
-			"warnings recorded in runs.stats: %d metering, %d counter, %d attribution, "+
-				"%d unpriced resource types, %d unreadable fields, %d unregistered projects",
-			len(stats.MeteringWarnings), len(stats.CounterWarnings), len(stats.AttributionWarnings),
-			len(stats.Unpriced), len(stats.Unreadable), len(stats.UnregisteredProjects)))
+	if line, ok := recordedWarningsLine(result.Stats); ok {
+		lines = append(lines, line)
 	}
 	return lines
+}
+
+// detectLateLines is what detect-late prints: the run the events are held
+// against and when it read the period, then the resources whose events arrived
+// after that, and how a period that has some is booked. The resources the
+// report left out are counted rather than named, the way recordedWarningsLine
+// counts: what a correction re-meters is a number, and the fleet decides how
+// big it is.
+func detectLateLines(month string, report runs.LateReport) []string {
+	lines := []string{
+		fmt.Sprintf("run %s read %s at %s", report.RunID, month, report.SnapshotAt.UTC().Format(time.RFC3339)),
+	}
+	if len(report.Resources) == 0 {
+		return append(lines, "no events arrived later")
+	}
+
+	for _, late := range report.Resources {
+		lines = append(lines, fmt.Sprintf("%s/%s/%s/%s: %d late events, last received %s",
+			late.Resource.Cloud, late.Resource.Platform, late.Resource.ResourceType, late.Resource.ResourceID,
+			late.Events, late.LastReceivedAt.UTC().Format(time.RFC3339)))
+	}
+	if report.Truncated > 0 {
+		lines = append(lines, fmt.Sprintf("and %d more resources with late events", report.Truncated))
+	}
+	return append(lines, fmt.Sprintf("book them with tally-engine correct --period %s", month))
+}
+
+// correctLines is what correct prints for a finished correction: the runs of
+// the period it took over, the finalized run it diffed against, what it
+// metered, and the deltas it wrote. A correction that found none says so, which
+// is the answer an operator who ran it after a detect-late gets.
+func correctLines(month string, result runs.CorrectionResult) []string {
+	var lines []string
+	for _, id := range result.Reclaimed {
+		lines = append(lines, fmt.Sprintf("reclaimed stale run %s", id))
+	}
+	lines = append(lines,
+		fmt.Sprintf("run %s completed as a correction of run %s for %s with pricing model %s",
+			result.RunID, result.CorrectsRunID, month, result.PricingVersion),
+		fmt.Sprintf("metered %d candidates into %d usage records and %d rated records",
+			result.Stats.Candidates, result.Stats.UsageRecords, result.Stats.RatedRecords))
+	if result.Stats.Deltas > 0 {
+		lines = append(lines, fmt.Sprintf("%d deltas in %d credit notes",
+			result.Stats.Deltas, result.Stats.Statements))
+	} else {
+		lines = append(lines, fmt.Sprintf("no deltas: the finalized numbers of %s stand", month))
+	}
+	for _, id := range result.Superseded {
+		lines = append(lines, fmt.Sprintf("superseded correction run %s", id))
+	}
+	for _, warning := range result.Stats.Warnings {
+		lines = append(lines, fmt.Sprintf("warning: %s: %s", warning.Code, warning.Detail))
+	}
+
+	if line, ok := recordedWarningsLine(result.Stats.Stats); ok {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// recordedWarningsLine counts the findings of the passes rather than printing
+// them: a period of a large deployment carries thousands of them, and runs.stats
+// holds every one in full for the operator who goes looking. A pass that found
+// nothing gets no line.
+func recordedWarningsLine(stats runs.Stats) (string, bool) {
+	recorded := len(stats.MeteringWarnings) + len(stats.CounterWarnings) + len(stats.AttributionWarnings) +
+		len(stats.Unpriced) + len(stats.Unreadable) + len(stats.UnregisteredProjects)
+	if recorded == 0 {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"warnings recorded in runs.stats: %d metering, %d counter, %d attribution, "+
+			"%d unpriced resource types, %d unreadable fields, %d unregistered projects",
+		len(stats.MeteringWarnings), len(stats.CounterWarnings), len(stats.AttributionWarnings),
+		len(stats.Unpriced), len(stats.Unreadable), len(stats.UnregisteredProjects)), true
 }
 
 // tickLines is what tick prints: one line per step a month took, in the order
