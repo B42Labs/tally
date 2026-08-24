@@ -104,8 +104,8 @@ type MonthReport struct {
 	// Transition is the period status change this tick wrote, empty where it
 	// wrote none. The only one it writes is "open -> grace".
 	Transition string
-	// RunID is the run this tick had metered, the zero id where it started
-	// none.
+	// RunID is the run this tick metered or closed the month over, the zero id
+	// where it did neither.
 	RunID uuid.UUID
 	// Finalized says the tick closed the month over a completed run.
 	Finalized bool
@@ -327,10 +327,17 @@ func bill(ctx context.Context, engine *pgxpool.Pool, due Month, now time.Time, o
 		}
 		return fmt.Errorf("reading the completed run of %s: %w", month, err)
 	}
-	if err := runs.Finalize(ctx, engine, due.From, uuid.UUID(runID.Bytes)); err != nil {
+	finalized := uuid.UUID(runID.Bytes)
+	if err := runs.Finalize(ctx, engine, due.From, finalized); err != nil {
 		return fmt.Errorf("closing %s: %w", month, err)
 	}
 	report.Finalized = true
+	// The tick's output names the run it closed. A month an earlier tick metered
+	// leaves the execution above unrun, so the run being closed is the only id
+	// this month has.
+	if report.RunID == uuid.Nil {
+		report.RunID = finalized
+	}
 	return nil
 }
 
