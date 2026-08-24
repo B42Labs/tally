@@ -14,15 +14,19 @@ import (
 
 	"github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/engine/counters"
+	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/pricing"
+	"github.com/b42labs/tally/internal/engine/runs"
+	"github.com/b42labs/tally/internal/engine/scheduler"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
+	reportingtest "github.com/b42labs/tally/internal/reporting/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
 )
 
-// runID stands in for a run wherever a subcommand takes one. The subcommands
-// that would read one are not implemented, so nothing has to exist behind it
-// there; the periods list test seeds the run itself, because
-// billing_periods.finalized_run_id points at runs.
+// runID stands in for a run wherever a subcommand takes one. Nothing has to
+// exist behind it: the cases that pass it stop at their flags or end in the
+// not-implemented report. The periods list test seeds the run it names itself,
+// because billing_periods.finalized_run_id points at runs.
 const runID = "3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4"
 
 // notImplemented is what every subcommand a later Phase 3 package fills in
@@ -472,6 +476,299 @@ func importedAt(t *testing.T, db storetest.DB, version string) string {
 	return stamp.UTC().Format(time.RFC3339)
 }
 
+// TestRunAndFinalizeCLI drives one billing month through the two subcommands
+// that bill it: run meters it over both databases, finalize closes it, and
+// periods list reads back what that left behind.
+func TestRunAndFinalizeCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+
+	from, _ := billingMonth(-2)
+	month := period.Format(from)
+	const cloud = "os-cli-run"
+	f.seedProject(t, cloud, "proj-cli-run")
+	f.seedInstance(t, cloud, "i-cli-run", "proj-cli-run", from)
+
+	stdout, stderr, err := runCLI(t, "run", "--period", month, "--clouds", cloud)
+	if err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	// The id is the database's, not the test's, so the expected output is built
+	// from the run the CLI opened.
+	id := f.completedRun(t, from)
+	want := fmt.Sprintf("run %s completed for %s with pricing model %s\n"+
+		"metered 1 candidates into 1 usage records, 1 rated records and 1 project statements\n",
+		id, month, modelVersion)
+	if stdout != want {
+		t.Errorf("stdout of run = %q, want %q", stdout, want)
+	}
+
+	stdout, stderr, err = runCLI(t, "finalize", "--period", month, "--run", id.String())
+	if err != nil {
+		t.Fatalf("finalize error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := fmt.Sprintf("run %s finalized, period %s closed\n", id, month); stdout != want {
+		t.Errorf("stdout of finalize = %q, want %q", stdout, want)
+	}
+
+	stdout, stderr, err = runCLI(t, "periods", "list")
+	if err != nil {
+		t.Fatalf("periods list error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("%s finalized finalized_run=%s finalized_at=%s\n", month, id, f.finalizedAt(t, from))
+	if stdout != want {
+		t.Errorf("stdout of periods list = %q, want %q", stdout, want)
+	}
+
+	t.Run("warns about a month that has not ended", func(t *testing.T) {
+		current, currentTo := billingMonth(0)
+		currentMonth := period.Format(current)
+
+		// No --clouds, which meters every cloud. The one resource above lived in
+		// another month, so this month has nothing in it but the warning.
+		stdout, stderr, err := runCLI(t, "run", "--period", currentMonth)
+		if err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		for _, want := range []string{
+			fmt.Sprintf("run %s completed for %s with pricing model %s\n",
+				f.completedRun(t, current), currentMonth, modelVersion),
+			"metered 0 candidates into 0 usage records, 0 rated records and 0 project statements\n",
+			fmt.Sprintf("warning: %s: period_to %s has not passed yet",
+				runs.WarningPeriodNotEnded, currentTo.Format(time.RFC3339)),
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+			}
+		}
+	})
+
+	t.Run("refuses a configuration without a reporting database url", func(t *testing.T) {
+		useDatabase(t, f.engine.URL)
+
+		stdout, _, err := runCLI(t, "run", "--period", month)
+		if err == nil {
+			t.Fatal("run error = nil, want the missing reporting database url reported")
+		}
+		if want := "TALLY_ENGINE_REPORTING_DB_URL: must be set"; !strings.Contains(err.Error(), want) {
+			t.Errorf("run error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a run that never opened", stdout)
+		}
+	})
+}
+
+// TestTickCLI drives the scheduler entrypoint over both databases: what it
+// prints is the whole of what the CronJob's log holds.
+func TestTickCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+
+	// The running month is the only period the engine knows, so the walk that
+	// starts at the earliest period row reaches no month that has ended.
+	current, currentTo := billingMonth(0)
+	f.seedPeriod(t, current, currentTo, "open")
+
+	stdout, stderr, err := runCLI(t, "tick")
+	if err != nil {
+		t.Fatalf("tick error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "nothing due\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	// A month in grace whose window has long passed, which is what the tick
+	// meters. The month between it and the running one has no row yet and is
+	// walked as well, so the tick opens it and ends its open phase.
+	due, dueTo := billingMonth(-2)
+	f.seedPeriod(t, due, dueTo, "grace")
+	previous, _ := billingMonth(-1)
+
+	stdout, stderr, err = runCLI(t, "tick")
+	if err != nil {
+		t.Fatalf("the second tick error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("%s run %s completed\n%s open -> grace\n",
+		period.Format(due), f.completedRun(t, due), period.Format(previous))
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	t.Run("refuses a configuration without a reporting database url", func(t *testing.T) {
+		useDatabase(t, f.engine.URL)
+
+		stdout, _, err := runCLI(t, "tick")
+		if err == nil {
+			t.Fatal("tick error = nil, want the missing reporting database url reported")
+		}
+		if want := "TALLY_ENGINE_REPORTING_DB_URL: must be set"; !strings.Contains(err.Error(), want) {
+			t.Errorf("tick error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a tick that never walked", stdout)
+		}
+	})
+}
+
+// modelVersion is the version of the pricing model the run and tick cases are
+// rated with, which they print beside the run.
+const modelVersion = "v1"
+
+// pipelineFixture is the pair of databases a run works over: the engine
+// database it is written to, and the reporting database it reads its resources
+// and events from. The CLI is pointed at both through the environment, the way
+// an operator points it at them.
+type pipelineFixture struct {
+	engine    storetest.DB
+	reporting reportingtest.DB
+}
+
+// newPipelineFixture starts both databases and imports the pricing model every
+// case is rated with, through the CLI that an operator imports it with.
+func newPipelineFixture(t *testing.T) pipelineFixture {
+	t.Helper()
+
+	f := pipelineFixture{engine: storetest.NewDB(t), reporting: reportingtest.NewDB(t)}
+	usePipeline(t, f.engine.URL, f.reporting.URL)
+
+	// Valid from long before every month the cases meter, so each of them
+	// resolves this one model.
+	validFrom, _ := billingMonth(-36)
+	path := writeModel(t, "pipeline.yaml", modelYAML(modelVersion, validFrom.Format(time.RFC3339), "0.02"))
+	if _, stderr, err := runCLI(t, "pricing", "import", path); err != nil {
+		t.Fatalf("importing the pricing model: %v (stderr %q)", err, stderr)
+	}
+	return f
+}
+
+// billingMonth is the UTC billing month offset months from the one the test
+// runs in: 0 is the running month, -2 two months back. The months are derived
+// from the clock rather than written down, because whether a month has ended is
+// what one of the cases is about and what the others must not run into.
+func billingMonth(offset int) (from, to time.Time) {
+	now := time.Now().UTC()
+	from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, offset, 0)
+	return from, from.AddDate(0, 1, 0)
+}
+
+// seedProject registers a project, which is what gets its statement a document
+// keyed to the registry rather than an entry in unregistered_projects.
+func (f pipelineFixture) seedProject(t *testing.T, cloud, externalID string) {
+	t.Helper()
+
+	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+		`INSERT INTO projects (platform, cloud, external_id) VALUES ('openstack', $1, $2)`,
+		cloud, externalID); err != nil {
+		t.Fatalf("seeding the project %s: %v", externalID, err)
+	}
+}
+
+// seedInstance writes the projection row and the create and delete events of
+// one instance, alive from the second day of its month to the fourth. Being
+// created and deleted inside its own month is what confines it to that month.
+func (f pipelineFixture) seedInstance(t *testing.T, cloud, resourceID, projectID string, from time.Time) {
+	t.Helper()
+
+	created, deleted := from.Add(24*time.Hour), from.Add(72*time.Hour)
+	const size = `{"vcpus":4,"ram_gb":8,"disk_gb":80,"flavor":"m1.large"}`
+
+	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id, project_id,
+		                                state, size, created_at, deleted_at, last_event_type, last_event_at)
+		 VALUES ($1, 'openstack', 'instance', $2, $3, 'deleted', $4::jsonb, $5, $6,
+		         'compute.instance.delete.end', $6)`,
+		cloud, resourceID, projectID, size, created, deleted); err != nil {
+		t.Fatalf("seeding the projection row of %s: %v", resourceID, err)
+	}
+	for _, ev := range []struct {
+		id, eventType string
+		at            time.Time
+		payload       any
+	}{
+		{"ev-create-" + resourceID, "compute.instance.create.end", created, `{"state":"active","size":` + size + `}`},
+		{"ev-delete-" + resourceID, "compute.instance.delete.end", deleted, nil},
+	} {
+		if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+			`INSERT INTO events (event_id, timestamp, event_type, platform, cloud,
+			                     resource_type, resource_id, project_id, payload)
+			 VALUES ($1, $2, $3, 'openstack', $4, 'instance', $5, $6, $7::jsonb)`,
+			ev.id, ev.at, ev.eventType, cloud, resourceID, projectID, ev.payload); err != nil {
+			t.Fatalf("seeding the event %s: %v", ev.id, err)
+		}
+	}
+}
+
+// seedPeriod writes a billing period in the status a case starts from, which is
+// what puts its month into the walk of a tick.
+func (f pipelineFixture) seedPeriod(t *testing.T, from, to time.Time, status string) {
+	t.Helper()
+
+	if _, err := f.engine.Store.Pool().Exec(t.Context(),
+		`INSERT INTO billing_periods (period_from, period_to, status) VALUES ($1, $2, $3)`,
+		from, to, status); err != nil {
+		t.Fatalf("seeding the %s period %s: %v", status, period.Format(from), err)
+	}
+}
+
+// completedRun is the run the CLI completed for a month. The id is read back
+// rather than parsed out of the output the assertions are about.
+func (f pipelineFixture) completedRun(t *testing.T, from time.Time) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT id FROM runs WHERE period_from = $1 AND status = 'completed'`, from).Scan(&id); err != nil {
+		t.Fatalf("reading the completed run of %s: %v", period.Format(from), err)
+	}
+	return id
+}
+
+// finalizedAt is when the database stamped the closed period, in the form the
+// listing prints it. The column is filled by the database itself, so the
+// expected output can only be built from what was stored.
+func (f pipelineFixture) finalizedAt(t *testing.T, from time.Time) string {
+	t.Helper()
+
+	var stamp time.Time
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT finalized_at FROM billing_periods WHERE period_from = $1`, from).Scan(&stamp); err != nil {
+		t.Fatalf("reading finalized_at of the period %s: %v", period.Format(from), err)
+	}
+	return stamp.UTC().Format(time.RFC3339)
+}
+
+// TestTickLinesReportsWhatTheWalkLeftBehind pins the two lines a tick prints
+// beside the steps a month took. Both stand for a month that is not fine while
+// the tick's exit status is zero, so nothing else would say they happened: the
+// months the walk's cap left out are never reached again by any tick, and a run
+// whose period lock stayed behind billed its month all the same.
+func TestTickLinesReportsWhatTheWalkLeftBehind(t *testing.T) {
+	billed := uuid.MustParse(runID)
+
+	lines := tickLines(scheduler.Report{
+		{
+			Month:         "2023-04",
+			SkippedBefore: 12,
+			RunID:         billed,
+			Warning:       errors.New("metering 2023-04: the period lock could not be released"),
+		},
+		{Month: "2023-05"},
+	})
+
+	want := []string{
+		"12 months before 2023-04 were skipped, and are billed with tally-engine run --period",
+		"2023-04 run " + billed.String() + " completed",
+		"2023-04 warning: metering 2023-04: the period lock could not be released",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("tickLines() = %q, want %q", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("tickLines()[%d] = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
 // TestWriteReportsAFailedWrite pins what write promises: output the operator's
 // terminal never received must not leave the process with a zero exit status.
 // Every command above writes into a bytes.Buffer, whose writes never fail, so
@@ -501,14 +798,10 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 
 	t.Run("flags that check out end in the not-implemented report", func(t *testing.T) {
 		for _, args := range [][]string{
-			{"run", "--period", "2026-03"},
-			{"run", "--period", "2026-03", "--clouds", "os-prod-eu1,os-prod-eu2"},
-			{"finalize", "--period", "2026-03", "--run", runID},
 			{"detect-late", "--period", "2026-03"},
 			{"correct", "--period", "2026-03"},
 			{"export", "--run", runID, "--format", "json", "--out", "./out"},
 			{"export", "--run", runID, "--format", "csv", "--out", "./out"},
-			{"tick"},
 		} {
 			t.Run(strings.Join(args, " "), func(t *testing.T) {
 				stdout, _, err := runCLI(t, args...)
@@ -554,26 +847,6 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 		}
 	})
 
-	t.Run("run refuses a period that is not a month", func(t *testing.T) {
-		_, _, err := runCLI(t, "run", "--period", "2026-3")
-		if err == nil {
-			t.Fatal("run error = nil, want the malformed period reported")
-		}
-		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
-			t.Errorf("run error = %q, want %q", err, want)
-		}
-	})
-
-	t.Run("finalize refuses a run that is not a uuid", func(t *testing.T) {
-		_, _, err := runCLI(t, "finalize", "--period", "2026-03", "--run", "not-a-uuid")
-		if err == nil {
-			t.Fatal("finalize error = nil, want the malformed run id reported")
-		}
-		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
-			t.Errorf("finalize error = %q, want it to contain %q", err, want)
-		}
-	})
-
 	t.Run("export refuses a format it does not write", func(t *testing.T) {
 		_, _, err := runCLI(t, "export", "--run", runID, "--format", "xml", "--out", "./out")
 		if err == nil {
@@ -603,6 +876,34 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 					t.Errorf("pricing import error = %q, want it to contain %q", err, want)
 				}
 			})
+		}
+	})
+}
+
+// TestFlagsAreCheckedBeforeTheConfiguration pins the order the subcommands that
+// bill a period work in: what they were given is checked before anything is
+// read. An operator who mistyped a flag gets that flag back, on a machine that
+// has no configuration and reaches no database.
+func TestFlagsAreCheckedBeforeTheConfiguration(t *testing.T) {
+	blankEnvironment(t)
+
+	t.Run("run refuses a period that is not a month", func(t *testing.T) {
+		_, _, err := runCLI(t, "run", "--period", "2026-3")
+		if err == nil {
+			t.Fatal("run error = nil, want the malformed period reported")
+		}
+		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
+			t.Errorf("run error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("finalize refuses a run that is not a uuid", func(t *testing.T) {
+		_, _, err := runCLI(t, "finalize", "--period", "2026-03", "--run", "not-a-uuid")
+		if err == nil {
+			t.Fatal("finalize error = nil, want the malformed run id reported")
+		}
+		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
+			t.Errorf("finalize error = %q, want it to contain %q", err, want)
 		}
 	})
 }
@@ -699,6 +1000,16 @@ func useDatabase(t *testing.T, dbURL string) {
 
 	blankEnvironment(t)
 	t.Setenv("TALLY_ENGINE_DB_URL", dbURL)
+}
+
+// usePipeline points the CLI at both databases a run works over. Everything
+// else stays blank, which leaves the counter sources at the empty path: the
+// zero configuration, measuring no counter metric.
+func usePipeline(t *testing.T, dbURL, reportingURL string) {
+	t.Helper()
+
+	useDatabase(t, dbURL)
+	t.Setenv("TALLY_ENGINE_REPORTING_DB_URL", reportingURL)
 }
 
 // runCLI executes one command in process and returns its stdout, its stderr,
