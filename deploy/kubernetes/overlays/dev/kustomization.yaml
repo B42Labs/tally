@@ -25,6 +25,13 @@ secretGenerator:
       # What the initdb script creates the engine's login role with, and what
       # TALLY_ENGINE_REPORTING_DB_URL carries on this cluster.
       - engine-password=tally-dev-password
+      # The engine's own database, which it writes its runs and records to.
+      - engine-db-url=postgres://tally:tally-dev-password@timescaledb:5432/tally_engine?sslmode=disable
+      # The reporting database, read as the login role
+      # deploy/kubernetes/base/timescaledb/02-create-engine-reader.sh creates.
+      # It is a member of the group role the reporting chain grants SELECT to,
+      # so this connection reads the four metering tables and nothing else.
+      - engine-reporting-db-url=postgres://tally_engine:tally-dev-password@timescaledb:5432/tally_reporting?sslmode=disable
   - name: tally-internal-token
     literals:
       - token=tally-dev-internal-token
@@ -160,6 +167,16 @@ patches:
     patch: |
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+
+  # The image is built locally and side-loaded with `kind load`, so pulling it
+  # would only ever fail.
+  - target:
+      kind: CronJob
+      name: tally-engine
+    patch: |
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
         value: Never
 
   # The three strategic merge patches in this file. They merge env entries by
