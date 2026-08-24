@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/rating"
 	"github.com/b42labs/tally/internal/engine/source"
@@ -126,6 +127,67 @@ func ratedRows(runID uuid.UUID, rated rating.Result, ids map[source.Resource][]u
 		}
 	}
 	return rows, nil
+}
+
+// deltaRows builds the correction deltas of one run: one row per non-zero
+// difference the diff found, in the order it produced them, each naming the
+// finalized run whose amounts the old side comes from.
+//
+// An amount past what the column holds is refused before the first insert,
+// named by its resource and its dimension, for the reason ratedRows refuses
+// one: the transaction that would report it has already written the usage
+// records the retry would collide with. All three amounts of a delta are
+// checked, because the difference of two amounts the column holds is one it
+// need not hold.
+func deltaRows(runID, correctsRunID uuid.UUID, deltas []corrections.Delta, currency string) (
+	[]sqlcgen.CreateCorrectionDeltasParams, error,
+) {
+	rows := make([]sqlcgen.CreateCorrectionDeltasParams, 0, len(deltas))
+	for _, delta := range deltas {
+		// The three columns are NUMERIC(14,2), and the decimals reach them as
+		// the text of the amounts rather than through a float.
+		var amounts [3]pgtype.Numeric
+		for i, amount := range [3]decimal.Decimal{delta.Old, delta.New, delta.Delta} {
+			if amount.Abs().GreaterThan(maxRatedAmount) {
+				return nil, fmt.Errorf(
+					"the %s delta of %s is %s, past the %s the column holds: "+
+						"a usage value it was rated from is out of range",
+					delta.Dimension, name(resourceOf(delta.Key)), amount.StringFixed(2), maxRatedAmount)
+			}
+			if err := amounts[i].Scan(amount.StringFixed(2)); err != nil {
+				return nil, fmt.Errorf("reading the %s delta of %s: %w",
+					delta.Dimension, name(resourceOf(delta.Key)), err)
+			}
+		}
+
+		rows = append(rows, sqlcgen.CreateCorrectionDeltasParams{
+			ID:            uuidValue(uuid.New()),
+			RunID:         uuidValue(runID),
+			CorrectsRunID: uuidValue(correctsRunID),
+			Cloud:         delta.Cloud,
+			Platform:      delta.Platform,
+			ResourceType:  delta.ResourceType,
+			ResourceID:    delta.ResourceID,
+			ProjectID:     delta.ProjectID,
+			Dimension:     delta.Dimension,
+			OldAmount:     amounts[0],
+			NewAmount:     amounts[1],
+			Delta:         amounts[2],
+			Currency:      currency,
+		})
+	}
+	return rows, nil
+}
+
+// resourceOf is the resource a delta's key names, which is what an error about
+// that delta identifies it by.
+func resourceOf(key corrections.Key) source.Resource {
+	return source.Resource{
+		Cloud:        key.Cloud,
+		Platform:     key.Platform,
+		ResourceType: key.ResourceType,
+		ResourceID:   key.ResourceID,
+	}
 }
 
 // uuidValue maps an id to the parameter the engine queries take.

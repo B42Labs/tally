@@ -12,6 +12,7 @@ import (
 
 	"github.com/b42labs/tally/internal/core/money"
 	"github.com/b42labs/tally/internal/engine/attribution"
+	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/invariants"
 	"github.com/b42labs/tally/internal/engine/metering"
@@ -144,6 +145,210 @@ func TestStatsJSONOmitsEmptyLists(t *testing.T) {
 	want := `{"candidates":1,"usage_records":2,"rated_records":4,"statements":1}`
 	if string(got) != want {
 		t.Errorf("Marshal = %s, want %s", got, want)
+	}
+}
+
+// TestCorrectionStatsJSONShape pins the object a correction stores in
+// runs.stats: the keys of a regular run, flattened, with the delta count beside
+// them. An operator reads a correction the way they read a run, and the one key
+// that is new is the one that says how much it found.
+func TestCorrectionStatsJSONShape(t *testing.T) {
+	snapshotAt := instantOf(t, "2026-03-01T00:00:00Z")
+
+	got, err := json.Marshal(CorrectionStats{
+		Stats: Stats{
+			SnapshotAt: &snapshotAt, Candidates: 3, UsageRecords: 4, RatedRecords: 5,
+			Statements: 2, Error: "x",
+		},
+		Deltas: 7,
+	})
+	if err != nil {
+		t.Fatalf("Marshal error = %v, want nil", err)
+	}
+
+	want := `{"snapshot_at":"2026-03-01T00:00:00Z",` +
+		`"candidates":3,"usage_records":4,"rated_records":5,"statements":2,` +
+		`"error":"x","deltas":7}`
+	if string(got) != want {
+		t.Errorf("Marshal =\n%s\nwant\n%s", got, want)
+	}
+
+	// A correction that found nothing reports its counts and a delta count of
+	// zero: the key stays, because no deltas is what such a correction says.
+	got, err = json.Marshal(CorrectionStats{
+		Stats: Stats{Candidates: 1, UsageRecords: 2, RatedRecords: 4, Statements: 1},
+	})
+	if err != nil {
+		t.Fatalf("Marshal error = %v, want nil", err)
+	}
+	want = `{"candidates":1,"usage_records":2,"rated_records":4,"statements":1,"deltas":0}`
+	if string(got) != want {
+		t.Errorf("Marshal = %s, want %s", got, want)
+	}
+}
+
+// deltaOf is one difference over the resource the pure cases build their rows
+// from, at the two amounts the case passes as text.
+func deltaOf(t *testing.T, dimension, old, current string) corrections.Delta {
+	t.Helper()
+
+	oldAmount, err := decimal.NewFromString(old)
+	if err != nil {
+		t.Fatalf("parsing the old amount %q: %v", old, err)
+	}
+	newAmount, err := decimal.NewFromString(current)
+	if err != nil {
+		t.Fatalf("parsing the new amount %q: %v", current, err)
+	}
+	return corrections.Delta{
+		Key: corrections.Key{
+			Cloud: metered.Cloud, Platform: metered.Platform,
+			ResourceType: metered.ResourceType, ResourceID: metered.ResourceID,
+			ProjectID: "proj-456", Dimension: dimension,
+		},
+		Old: oldAmount, New: newAmount, Delta: newAmount.Sub(oldAmount),
+	}
+}
+
+// numericText is what a numeric parameter carries, as the text it reaches the
+// column as. It keeps the assertions on money off floats
+// (roadmap/00-conventions.md section 6).
+func numericText(t *testing.T, value pgtype.Numeric) string {
+	t.Helper()
+
+	stored, err := value.Value()
+	if err != nil {
+		t.Fatalf("reading the numeric back: %v", err)
+	}
+	text, isText := stored.(string)
+	if !isText {
+		t.Fatalf("the numeric reads as a %T, want the text of the amount", stored)
+	}
+	return text
+}
+
+// TestDeltaRowsOversized refuses a delta whose old amount, new amount or
+// difference is past what NUMERIC(14,2) holds. Two amounts the column holds can
+// differ by one it does not, so all three are checked, and a refusal comes back
+// with no rows at all.
+func TestDeltaRowsOversized(t *testing.T) {
+	t.Run("the largest amount the column holds is written", func(t *testing.T) {
+		rows, err := deltaRows(uuid.New(), uuid.New(),
+			[]corrections.Delta{deltaOf(t, "vcpus", "0.00", "999999999999.99")}, "EUR")
+		if err != nil {
+			t.Fatalf("deltaRows() error = %v, want nil", err)
+		}
+		if len(rows) != 1 {
+			t.Errorf("deltaRows() = %d rows, want the delta at the bound written", len(rows))
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		old, given string
+	}{
+		{name: "the old amount past the bound", old: "1000000000000.00", given: "0.00"},
+		{name: "the new amount past the bound", old: "0.00", given: "1000000000000.00"},
+		// Both amounts fit and their difference does not, which is the one of
+		// the three the two sides alone do not report.
+		{name: "the difference past the bound", old: "-600000000000.00", given: "600000000000.00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := deltaRows(uuid.New(), uuid.New(), []corrections.Delta{
+				deltaOf(t, "ram_gb", "1.00", "2.00"),
+				deltaOf(t, "vcpus", tc.old, tc.given),
+			}, "EUR")
+			if err == nil {
+				t.Fatal("deltaRows() error = nil, want the oversized delta refused")
+			}
+			if rows != nil {
+				t.Errorf("deltaRows() = %v, want no rows: a refused delta leaves nothing to write", rows)
+			}
+			if !strings.Contains(err.Error(), name(metered)) {
+				t.Errorf("deltaRows() error = %q, want it to name the resource %q", err, name(metered))
+			}
+			if !strings.Contains(err.Error(), "vcpus") {
+				t.Errorf("deltaRows() error = %q, want it to name the dimension vcpus", err)
+			}
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("deltaRows() error = %q, want it to say a usage value is out of range", err)
+			}
+		})
+	}
+}
+
+// TestDeltaRowsEmpty is a correction that found nothing: no rows, and the empty
+// slice rather than a nil one, because the write skips a delta list of no
+// length rather than passing a nil through the COPY.
+func TestDeltaRowsEmpty(t *testing.T) {
+	rows, err := deltaRows(uuid.New(), uuid.New(), nil, "EUR")
+	if err != nil {
+		t.Fatalf("deltaRows() error = %v, want nil", err)
+	}
+	if rows == nil {
+		t.Fatal("deltaRows() = nil, want an empty slice")
+	}
+	if len(rows) != 0 {
+		t.Errorf("deltaRows() = %d rows, want none", len(rows))
+	}
+}
+
+// TestDeltaRowsShape is what one delta reaches the column as: the two runs it
+// names, the six fields of its key, and the three amounts as the text of the
+// decimals rather than as floats.
+func TestDeltaRowsShape(t *testing.T) {
+	runID, correctsRunID := uuid.New(), uuid.New()
+
+	rows, err := deltaRows(runID, correctsRunID, []corrections.Delta{
+		deltaOf(t, "vcpus", "59.52", "49.92"),
+		deltaOf(t, "ram_gb", "29.76", "24.96"),
+	}, "EUR")
+	if err != nil {
+		t.Fatalf("deltaRows() error = %v, want nil", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("deltaRows() = %d rows, want one per delta", len(rows))
+	}
+
+	row := rows[0]
+	if row.RunID != uuidValue(runID) || row.CorrectsRunID != uuidValue(correctsRunID) {
+		t.Errorf("row runs = (%v, %v), want (%v, %v)",
+			row.RunID, row.CorrectsRunID, uuidValue(runID), uuidValue(correctsRunID))
+	}
+	if row.Cloud != metered.Cloud || row.Platform != metered.Platform ||
+		row.ResourceType != metered.ResourceType || row.ResourceID != metered.ResourceID {
+		t.Errorf("row resource = %s/%s/%s/%s, want %s",
+			row.Cloud, row.Platform, row.ResourceType, row.ResourceID, name(metered))
+	}
+	if row.ProjectID != "proj-456" || row.Dimension != "vcpus" {
+		t.Errorf("row key = (%s, %s), want (proj-456, vcpus)", row.ProjectID, row.Dimension)
+	}
+	if row.Currency != "EUR" {
+		t.Errorf("row currency = %q, want EUR", row.Currency)
+	}
+	for _, tc := range []struct {
+		field string
+		value pgtype.Numeric
+		want  string
+	}{
+		{field: "old_amount", value: row.OldAmount, want: "59.52"},
+		{field: "new_amount", value: row.NewAmount, want: "49.92"},
+		{field: "delta", value: row.Delta, want: "-9.60"},
+	} {
+		if got := numericText(t, tc.value); got != tc.want {
+			t.Errorf("row %s = %s, want %s", tc.field, got, tc.want)
+		}
+	}
+
+	// The ids are generated here rather than left to the column default,
+	// because COPY evaluates no defaults.
+	if rows[0].ID == rows[1].ID {
+		t.Error("both rows carry one id, want an id per row")
+	}
+	for i, row := range rows {
+		if row.ID == (pgtype.UUID{}) {
+			t.Errorf("row %d carries no id, want the one it is written under", i)
+		}
 	}
 }
 

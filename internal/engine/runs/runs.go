@@ -12,6 +12,14 @@
 // 'failed' with the reason in its stats, and the previously completed run keeps
 // standing.
 //
+// A correction (Correct) is a run of kind 'correction' over a finalized period,
+// through the same lock, the same run row, the same snapshot and the same write
+// transaction. What it adds is the diff: its rated amounts are held against
+// those of the latest finalized run of the period, and the differences are
+// stored as correction deltas and as one credit note per affected project. The
+// report ahead of it is DetectLate, which lists the resources whose events
+// arrived after that run read the reporting database.
+//
 // The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.8,
 // with one deviation from its literal SQL: the roadmap takes the period lock as
 // pg_advisory_xact_lock, which lives for one transaction, while a run opens
@@ -80,7 +88,7 @@ var ErrRunInProgress = errors.New("another run of this period is in progress")
 
 // ErrPeriodFinalized is what Execute returns for a period that is closed. A
 // regular run leaves it alone, because its records are immutable; what changes
-// a finalized period is a correction run (WP 3.9).
+// a finalized period is a correction run (Correct).
 var ErrPeriodFinalized = errors.New("the billing period is finalized")
 
 // ErrLockReleaseFailed marks the one failure of a run that leaves its output
@@ -381,17 +389,7 @@ func produce(
 	if err != nil {
 		return nil, err
 	}
-	// A month that has not ended is metered as if it had: metering clips every
-	// interval that is still open to the period's end, so the amounts are the
-	// whole month's rather than the part of it that has passed.
-	if opts.PeriodTo.After(time.Now()) {
-		stats.Warnings = append(stats.Warnings, Warning{
-			Code: WarningPeriodNotEnded,
-			Detail: fmt.Sprintf(
-				"period_to %s has not passed yet, so every resource that is still alive is billed for the whole month",
-				opts.PeriodTo.UTC().Format(time.RFC3339)),
-		})
-	}
+	warnPeriodNotEnded(stats, opts.PeriodTo)
 
 	// The rest of the pass is arithmetic over what the snapshot handed out: it
 	// reads nothing and runs with the reporting connection already given back.
@@ -420,7 +418,27 @@ func produce(
 	stats.RatedRecords = len(amounts)
 	stats.Statements = len(built.Statements)
 
-	return write(ctx, engine, opts.PeriodFrom, runID, usage, amounts, built.Statements, *stats)
+	payload, err := json.Marshal(*stats)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling the stats of run %s: %w", runID, err)
+	}
+	return write(ctx, engine, opts.PeriodFrom, runID, KindRegular, usage, amounts, nil, built.Statements, payload)
+}
+
+// warnPeriodNotEnded warns about a month that has not ended, which is metered
+// as if it had: metering clips every interval that is still open to the
+// period's end, so the amounts are the whole month's rather than the part of it
+// that has passed.
+func warnPeriodNotEnded(stats *Stats, periodTo time.Time) {
+	if !periodTo.After(time.Now()) {
+		return
+	}
+	stats.Warnings = append(stats.Warnings, Warning{
+		Code: WarningPeriodNotEnded,
+		Detail: fmt.Sprintf(
+			"period_to %s has not passed yet, so every resource that is still alive is billed for the whole month",
+			periodTo.UTC().Format(time.RFC3339)),
+	})
 }
 
 // meter reads everything one run takes from the reporting database: the drafts
@@ -493,7 +511,12 @@ func meter(ctx context.Context, reporting *source.DB, opts Options, stats *Stats
 // write stores one run's output and ends the run, in one transaction: the
 // records, the supersede of the runs this one replaces, and the completion
 // become visible together, so no reader of the period ever sees two completed
-// runs or a completed run whose records are still arriving.
+// runs or a completed run whose records are still arriving. It is the one write
+// transaction of a regular run and of a correction. What tells the two apart is
+// kind, which decides whether the period's completed regular run or its
+// completed correction is superseded, and the deltas, which only a correction
+// carries. The stats arrive marshalled, because the two kinds store different
+// objects under them.
 //
 // The run row is taken FOR NO KEY UPDATE first. Every record insert fires the
 // trigger that locks it FOR SHARE, and escalating that lock afterwards
@@ -504,16 +527,13 @@ func write(
 	engine *pgxpool.Pool,
 	periodFrom time.Time,
 	runID uuid.UUID,
+	kind string,
 	usage []sqlcgen.CreateUsageRecordsParams,
 	amounts []sqlcgen.CreateRatedRecordsParams,
+	deltas []sqlcgen.CreateCorrectionDeltasParams,
 	sts []statements.Statement,
-	stats Stats,
+	payload []byte,
 ) ([]uuid.UUID, error) {
-	payload, err := json.Marshal(stats)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling the stats of run %s: %w", runID, err)
-	}
-
 	tx, err := engine.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("opening the write transaction of run %s: %w", runID, err)
@@ -540,19 +560,24 @@ func write(
 	if _, err := q.CreateRatedRecords(ctx, amounts); err != nil {
 		return nil, fmt.Errorf("writing the rated records of run %s: %w", runID, err)
 	}
+	if len(deltas) > 0 {
+		if _, err := q.CreateCorrectionDeltas(ctx, deltas); err != nil {
+			return nil, fmt.Errorf("writing the correction deltas of run %s: %w", runID, err)
+		}
+	}
 	if err := statements.Persist(ctx, q, runID, sts); err != nil {
 		return nil, err
 	}
 	superseded, err := q.SupersedeCompletedRuns(ctx, sqlcgen.SupersedeCompletedRunsParams{
 		PeriodFrom: timestamptz(periodFrom),
-		Kind:       KindRegular,
+		Kind:       kind,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("superseding the completed runs of %s: %w", period.Format(periodFrom), err)
 	}
 	// A run this process still believes it owns can have been reclaimed while it
 	// was metering, and the reclaim is the period's decision: writing over it
-	// would leave the period with two completed regular runs, one of them
+	// would leave the period with two completed runs of this kind, one of them
 	// declared dead. The rollback of this transaction takes the records with it.
 	completed, err := q.CompleteRun(ctx, sqlcgen.CompleteRunParams{ID: uuidValue(runID), Stats: payload})
 	if err != nil {
@@ -567,17 +592,18 @@ func write(
 	return uuidsOf(superseded), nil
 }
 
-// recordFailure ends a run that broke and returns what Execute fails with,
-// which is the cause and nothing else while the bookkeeping itself holds. The
-// stats it writes are the ones the run got to, error included, so a failed run
-// is read for how far it came.
+// recordFailure ends a run that broke and returns what Execute or Correct fails
+// with, which is the cause and nothing else while the bookkeeping itself holds.
+// The stats it writes are the ones the run got to, error included, so a failed
+// run is read for how far it came. They are taken as they are given, a Stats or
+// a CorrectionStats, because what a run counts is what its own kind counts.
 //
 // The write runs on a context the caller's cancellation does not reach: a run
 // canceled mid-pass is a run that has to be written down as failed, and one
 // left at 'running' would block its period until the next run reclaims it.
 // Nothing here touches the run this one was going to supersede, because the
 // supersede only ever runs inside the write transaction that completes a run.
-func recordFailure(ctx context.Context, engine *pgxpool.Pool, runID uuid.UUID, stats Stats, cause error) error {
+func recordFailure(ctx context.Context, engine *pgxpool.Pool, runID uuid.UUID, stats any, cause error) error {
 	failCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
 	defer cancel()
 

@@ -60,6 +60,30 @@ pricing:
           price_per_unit: "0.5"
 `
 
+// correctionPricingDocument is the model the correction cases are rated with:
+// the three time_gauge dimensions of the concept's example, and the state
+// modifier that halves a powered-off instance, which is what a late power cycle
+// changes the amounts by.
+const correctionPricingDocument = `version: "v1"
+valid_from: %q
+currency: "EUR"
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+        - metric: "disk_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.001"
+      state_modifiers:
+        shutoff: "0.5"
+`
+
 // month is the UTC billing month offset months from the one the test runs in:
 // -3 is three months back, 0 the current one. The periods are derived from the
 // wall clock rather than written down, because whether a period has ended is
@@ -68,6 +92,29 @@ func month(offset int) (from, to time.Time) {
 	now := time.Now().UTC()
 	from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, offset, 0)
 	return from, from.AddDate(0, 1, 0)
+}
+
+// thirtyOneDayMonth is the n-th most recent month of 31 days, counted back from
+// two months ago: n = 1 is the first such month, n = 2 the one before it. The
+// cases that bill a resource for a whole month need one, because 744 hours is
+// what the concept's amounts were computed over, and which offset carries 31
+// days moves with the wall clock the periods are derived from.
+//
+// The walk starts at offset -2 so that no month it returns is the one a test
+// runs in or the one before it. Seven months of twelve have 31 days, so the
+// third one is at most five offsets further back, which is what the offsets the
+// other cases pick stay clear of.
+func thirtyOneDayMonth(n int) (from, to time.Time) {
+	for offset := -2; ; offset-- {
+		from, to = month(offset)
+		if to.Sub(from) != 31*24*time.Hour {
+			continue
+		}
+		n--
+		if n == 0 {
+			return from, to
+		}
+	}
 }
 
 // fixture is the pair of databases the cases run against: the engine database a
@@ -79,21 +126,30 @@ type fixture struct {
 	source    *source.DB
 }
 
-// newFixture starts both databases and imports the pricing model. It is called
-// once per test function: the cases inside share the containers and keep to
-// their own period and their own cloud.
+// newFixture starts both databases and imports the model every case of a run is
+// rated with. It is called once per test function: the cases inside share the
+// containers and keep to their own period and their own cloud.
 func newFixture(t *testing.T) fixture {
+	t.Helper()
+
+	return newFixtureWith(t, pricingDocument)
+}
+
+// newFixtureWith starts both databases and imports the pricing model the test
+// passes, whose valid_from is filled in with an instant before every period the
+// cases meter.
+func newFixtureWith(t *testing.T, document string) fixture {
 	t.Helper()
 
 	engineDB := enginetest.NewDB(t)
 	reportingDB := reportingtest.NewDB(t)
 
 	validFrom, _ := month(-36)
-	model, document, err := pricing.Parse([]byte(fmt.Sprintf(pricingDocument, validFrom.Format(time.RFC3339))))
+	model, doc, err := pricing.Parse([]byte(fmt.Sprintf(document, validFrom.Format(time.RFC3339))))
 	if err != nil {
 		t.Fatalf("parsing the pricing model: %v", err)
 	}
-	if _, err := pricing.Import(t.Context(), sqlcgen.New(engineDB.Store.Pool()), model, document); err != nil {
+	if _, err := pricing.Import(t.Context(), sqlcgen.New(engineDB.Store.Pool()), model, doc); err != nil {
 		t.Fatalf("importing the pricing model: %v", err)
 	}
 
@@ -151,6 +207,19 @@ func instance(cloud, id, project string, from time.Time, size string) resource {
 	}
 }
 
+// wholeMonth describes a resource that bills the whole of the period it is
+// metered in: created a day before it and deleted a day after it. The delete
+// event lies at or past the period end, which is where History stops reading,
+// so the fold leaves the resource alive and metering clips its one interval to
+// the period. It is what the concept's 744-hour amounts are metered from.
+func wholeMonth(cloud, id, project string, from, to time.Time, size string) resource {
+	return resource{
+		cloud: cloud, id: id, project: project,
+		created: from.Add(-24 * time.Hour), deleted: to.Add(24 * time.Hour),
+		size: size,
+	}
+}
+
 // seedResource writes the projection row and the create and delete events of
 // one resource.
 func (f fixture) seedResource(t *testing.T, r resource) {
@@ -194,6 +263,33 @@ func (f fixture) seedEvent(t *testing.T, r resource, eventID, eventType string, 
 	}
 }
 
+// seedEventReceived writes one event with the instant it reached the reporting
+// database, which the column otherwise defaults to now(). An event received
+// after a run took its snapshot is what that run never saw and what a
+// correction of the period re-meters.
+func (f fixture) seedEventReceived(
+	t *testing.T,
+	r resource,
+	eventID, eventType string,
+	ts, receivedAt time.Time,
+	payload string,
+) {
+	t.Helper()
+
+	var body any
+	if payload != "" {
+		body = payload
+	}
+	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+		`INSERT INTO events (event_id, timestamp, received_at, event_type, platform, cloud,
+		                     resource_type, resource_id, project_id, payload)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+		eventID, ts, receivedAt, eventType, platform, r.cloud, resourceType,
+		r.id, r.project, body); err != nil {
+		t.Fatalf("seeding the event %s: %v", eventID, err)
+	}
+}
+
 // seedProject registers a project, which is what gets its statement a document
 // keyed to the registry rather than an entry in unregistered_projects.
 func (f fixture) seedProject(t *testing.T, cloud, externalID string) {
@@ -207,7 +303,10 @@ func (f fixture) seedProject(t *testing.T, cloud, externalID string) {
 }
 
 // runRow is a runs row as the cases read it back, past the package under test.
+// corrects_run_id is nullable, and a regular run reads as the zero id.
 type runRow struct {
+	kind           string
+	correctsRunID  uuid.UUID
 	status         string
 	pricingVersion string
 	clouds         []string
@@ -220,10 +319,16 @@ func (f fixture) readRun(t *testing.T, runID uuid.UUID) runRow {
 	t.Helper()
 
 	var row runRow
+	var corrects *uuid.UUID
 	if err := f.engine.Store.Pool().QueryRow(t.Context(),
-		`SELECT status, pricing_version, clouds, started_at, completed_at FROM runs WHERE id = $1`, runID,
-	).Scan(&row.status, &row.pricingVersion, &row.clouds, &row.startedAt, &row.completedAt); err != nil {
+		`SELECT kind, corrects_run_id, status, pricing_version, clouds, started_at, completed_at
+		 FROM runs WHERE id = $1`, runID,
+	).Scan(&row.kind, &corrects, &row.status, &row.pricingVersion, &row.clouds,
+		&row.startedAt, &row.completedAt); err != nil {
 		t.Fatalf("reading run %s: %v", runID, err)
+	}
+	if corrects != nil {
+		row.correctsRunID = *corrects
 	}
 	return row
 }
@@ -338,6 +443,89 @@ func (f fixture) readStatements(t *testing.T, runID uuid.UUID) []string {
 		t.Fatalf("reading the statements of run %s: %v", runID, err)
 	}
 	return keys
+}
+
+// deltaRow is a correction_deltas row as the cases read it back. The three
+// amounts are read as text, which is what keeps the assertion off floats
+// (roadmap/00-conventions.md section 6).
+type deltaRow struct {
+	correctsRunID uuid.UUID
+	projectID     string
+	dimension     string
+	oldAmount     string
+	newAmount     string
+	delta         string
+	currency      string
+}
+
+// readDeltas reads a correction's deltas, ordered the way the diff produces
+// them.
+func (f fixture) readDeltas(t *testing.T, runID uuid.UUID) []deltaRow {
+	t.Helper()
+
+	rows, err := f.engine.Store.Pool().Query(t.Context(),
+		`SELECT corrects_run_id, project_id, dimension, old_amount::text, new_amount::text,
+		        delta::text, currency
+		 FROM correction_deltas WHERE run_id = $1
+		 ORDER BY cloud, resource_id, project_id, dimension`, runID)
+	if err != nil {
+		t.Fatalf("reading the deltas of run %s: %v", runID, err)
+	}
+	defer rows.Close()
+
+	var deltas []deltaRow
+	for rows.Next() {
+		var row deltaRow
+		if err := rows.Scan(&row.correctsRunID, &row.projectID, &row.dimension,
+			&row.oldAmount, &row.newAmount, &row.delta, &row.currency); err != nil {
+			t.Fatalf("scanning a delta of run %s: %v", runID, err)
+		}
+		deltas = append(deltas, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the deltas of run %s: %v", runID, err)
+	}
+	return deltas
+}
+
+// readStatementTotals is what a run's statements total, per key, as the text
+// the column holds.
+func (f fixture) readStatementTotals(t *testing.T, runID uuid.UUID) map[string]string {
+	t.Helper()
+
+	rows, err := f.engine.Store.Pool().Query(t.Context(),
+		`SELECT project_id, total::text FROM project_statements WHERE run_id = $1`, runID)
+	if err != nil {
+		t.Fatalf("reading the statement totals of run %s: %v", runID, err)
+	}
+	defer rows.Close()
+
+	totals := make(map[string]string)
+	for rows.Next() {
+		var key, total string
+		if err := rows.Scan(&key, &total); err != nil {
+			t.Fatalf("scanning a statement total of run %s: %v", runID, err)
+		}
+		totals[key] = total
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the statement totals of run %s: %v", runID, err)
+	}
+	return totals
+}
+
+// readStatementDocument reads one stored statement as the values a case asserts
+// over.
+func (f fixture) readStatementDocument(t *testing.T, runID uuid.UUID, key string) map[string]any {
+	t.Helper()
+
+	var raw []byte
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT document FROM project_statements WHERE run_id = $1 AND project_id = $2`,
+		runID, key).Scan(&raw); err != nil {
+		t.Fatalf("reading the statement of run %s for %s: %v", runID, key, err)
+	}
+	return decodeJSON(t, raw)
 }
 
 // readStats reads a run's stats as the generic values a case asserts over.
