@@ -22,16 +22,14 @@ SQLC_VERSION ?= v1.31.1
 CLUSTER_NAME ?= tally
 NAMESPACE ?= tally
 DEV_OVERLAY := deploy/kubernetes/overlays/dev
-SERVICES := tally-reporting
+SERVICES := tally-reporting tally-engine
 
 # The two lists are not the same. SERVICES is what `up` deploys into kind, so it
-# is also what gets loaded into the cluster. IMAGES is everything `images`
-# builds: the collector image is built and publishable, but it runs beside the
-# broker of an OpenStack control plane rather than in the dev cluster. The
-# engine image is built and publishable as well, and it has no workload in the
-# cluster until the scheduler CronJob lands (roadmap WP 3.8), so `up` does not
-# deploy or load it.
-IMAGES := $(SERVICES) tally-openstack-collector tally-engine
+# is also what gets loaded into the cluster: the engine ships as the scheduler
+# CronJob, so it belongs there beside the Reporting API. IMAGES is everything
+# `images` builds: the collector image is built and publishable, but it runs
+# beside the broker of an OpenStack control plane rather than in the dev cluster.
+IMAGES := $(SERVICES) tally-openstack-collector
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
 # switches the current context, but reusing an existing one does not, so an
