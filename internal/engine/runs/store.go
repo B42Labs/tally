@@ -1,0 +1,163 @@
+package runs
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
+
+	"github.com/b42labs/tally/internal/engine/metering"
+	"github.com/b42labs/tally/internal/engine/rating"
+	"github.com/b42labs/tally/internal/engine/source"
+	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
+)
+
+// maxRatedAmount is the largest amount rated_records.amount holds:
+// NUMERIC(14,2) leaves twelve digits ahead of the point. It is the bound
+// statements.Persist holds a document's total to, one level down, and it is
+// checked for the same reason: nothing upstream bounds a usage quantity, the
+// database reports the overflow by naming the column alone, and the event the
+// amount was rated from is immutable, so every re-run of the period fails the
+// same way until someone is told which resource and which dimension to look at.
+var maxRatedAmount = decimal.RequireFromString("999999999999.99")
+
+// usageRows builds the usage records of one run, one per draft, in the order
+// metering produced them. Beside the rows it returns the ids of each resource's
+// records, indexed the way its drafts are, which is what lets a rated record
+// name the usage record it was rated from before either row is written.
+//
+// The ids are generated here rather than left to the column default, because
+// COPY evaluates no defaults and both tables go in over COPY.
+//
+// Its only error is a usage object that does not marshal, named by the resource
+// it belongs to.
+func usageRows(runID uuid.UUID, resources []metering.ResourceUsage) (
+	[]sqlcgen.CreateUsageRecordsParams, map[source.Resource][]uuid.UUID, error,
+) {
+	rows := make([]sqlcgen.CreateUsageRecordsParams, 0, len(resources))
+	ids := make(map[source.Resource][]uuid.UUID, len(resources))
+
+	for _, resource := range resources {
+		drafts := make([]uuid.UUID, 0, len(resource.Drafts))
+		for _, draft := range resource.Drafts {
+			usage, err := json.Marshal(draft.Usage)
+			if err != nil {
+				return nil, nil, fmt.Errorf("marshalling the usage of %s over [%s, %s): %w",
+					name(resource.Resource), instant(draft.FromTS), instant(draft.ToTS), err)
+			}
+
+			id := uuid.New()
+			drafts = append(drafts, id)
+			rows = append(rows, sqlcgen.CreateUsageRecordsParams{
+				ID:           uuidValue(id),
+				RunID:        uuidValue(runID),
+				Cloud:        resource.Resource.Cloud,
+				Platform:     resource.Resource.Platform,
+				ResourceType: resource.Resource.ResourceType,
+				ResourceID:   resource.Resource.ResourceID,
+				ProjectID:    draft.ProjectID,
+				State:        draft.State,
+				FromTs:       timestamptz(draft.FromTS),
+				ToTs:         timestamptz(draft.ToTS),
+				Seconds:      draft.Seconds,
+				Usage:        usage,
+			})
+		}
+		ids[resource.Resource] = drafts
+	}
+	return rows, ids, nil
+}
+
+// ratedRows builds the rated records of one run: one per dimension of every
+// rated record, each naming the usage record of the draft it rates. ids is what
+// usageRows returned, so record j of a resource is stored against draft j of
+// the same resource.
+//
+// A rated resource the metering pass did not produce, and one whose record
+// count differs from its draft count, are errors naming that resource rather
+// than rows written against whichever usage record lines up. So is an amount
+// past what the column holds, named by its resource and its dimension: it is
+// refused here, before the first insert, because the transaction that would
+// report it has already written the usage records the retry would collide with.
+func ratedRows(runID uuid.UUID, rated rating.Result, ids map[source.Resource][]uuid.UUID) (
+	[]sqlcgen.CreateRatedRecordsParams, error,
+) {
+	rows := make([]sqlcgen.CreateRatedRecordsParams, 0, len(rated.Resources))
+
+	for _, resource := range rated.Resources {
+		drafts, metered := ids[resource.Resource]
+		if !metered {
+			return nil, fmt.Errorf("the rated resource %s carries no metered usage", name(resource.Resource))
+		}
+		if len(resource.Records) != len(drafts) {
+			return nil, fmt.Errorf("the rated resource %s carries %d records for %d usage drafts",
+				name(resource.Resource), len(resource.Records), len(drafts))
+		}
+
+		for i, record := range resource.Records {
+			for _, dimension := range record.Amounts {
+				if dimension.Amount.Abs().GreaterThan(maxRatedAmount) {
+					return nil, fmt.Errorf(
+						"the %s amount of %s is %s, past the %s the column holds: "+
+							"a usage value it was rated from is out of range",
+						dimension.Metric, name(resource.Resource), dimension.Amount.StringFixed(2), maxRatedAmount)
+				}
+
+				// The column is NUMERIC(14,2), and the decimal reaches it as the
+				// text of the amount rather than through a float.
+				var amount pgtype.Numeric
+				if err := amount.Scan(dimension.Amount.StringFixed(2)); err != nil {
+					return nil, fmt.Errorf("reading the %s amount of %s: %w",
+						dimension.Metric, name(resource.Resource), err)
+				}
+
+				rows = append(rows, sqlcgen.CreateRatedRecordsParams{
+					ID:            uuidValue(uuid.New()),
+					RunID:         uuidValue(runID),
+					UsageRecordID: uuidValue(drafts[i]),
+					Dimension:     dimension.Metric,
+					Amount:        amount,
+					Currency:      rated.Currency,
+				})
+			}
+		}
+	}
+	return rows, nil
+}
+
+// uuidValue maps an id to the parameter the engine queries take.
+func uuidValue(id uuid.UUID) pgtype.UUID {
+	return pgtype.UUID{Bytes: id, Valid: true}
+}
+
+// uuidsOf maps the ids a query returned back. An empty result is nil, which is
+// what a run reports when it superseded or reclaimed nothing.
+func uuidsOf(values []pgtype.UUID) []uuid.UUID {
+	if len(values) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(values))
+	for _, value := range values {
+		ids = append(ids, uuid.UUID(value.Bytes))
+	}
+	return ids
+}
+
+// timestamptz maps an instant to the query parameter.
+func timestamptz(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
+}
+
+// name identifies a resource in an error.
+func name(resource source.Resource) string {
+	return fmt.Sprintf("%s/%s/%s/%s",
+		resource.Cloud, resource.Platform, resource.ResourceType, resource.ResourceID)
+}
+
+// instant formats a draft boundary in an error, at the scale the events carry.
+func instant(ts time.Time) string {
+	return ts.Format(time.RFC3339Nano)
+}
