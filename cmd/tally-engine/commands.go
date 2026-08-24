@@ -249,7 +249,10 @@ func newFinalizeCmd() *cobra.Command {
 		Short: "Finalize a completed run and close its billing period",
 		Long: "Finalize a completed run and close its billing period.\n\n" +
 			"The run's records become immutable and the period stops taking new ones. What arrives afterwards " +
-			"is booked by a correction, which supersedes the finalized run instead of changing it.",
+			"is booked by a correction, which records the difference between the finalized run and a fresh " +
+			"metering as credit and debit deltas; the finalized run stays as it is. A completed correction is " +
+			"finalized through this same command, which makes its deltas and credit notes immutable and leaves " +
+			"the period naming the run that closed it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			from, _, err := validatePeriod(month)
@@ -269,8 +272,14 @@ func newFinalizeCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			if err := runs.Finalize(cmd.Context(), db.Pool(), from, id); err != nil {
+			kind, err := runs.Finalize(cmd.Context(), db.Pool(), from, id)
+			if err != nil {
 				return err
+			}
+			// A correction closes itself alone: the period keeps naming the
+			// regular run that closed it, which is what periods list prints.
+			if kind == runs.KindCorrection {
+				return write(cmd.OutOrStdout(), fmt.Sprintf("correction run %s finalized for %s", id, month))
 			}
 			return write(cmd.OutOrStdout(), fmt.Sprintf("run %s finalized, period %s closed", id, month))
 		},
