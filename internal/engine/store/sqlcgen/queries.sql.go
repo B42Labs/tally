@@ -11,6 +11,172 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const completeRun = `-- name: CompleteRun :execrows
+UPDATE runs
+SET status = 'completed', completed_at = now(), stats = $2
+WHERE id = $1 AND status = 'running'
+`
+
+type CompleteRunParams struct {
+	ID    pgtype.UUID
+	Stats []byte
+}
+
+// The three ends of a run. stats carries what the run counted, and the failed
+// one keeps it: a run that broke halfway is read for how far it got.
+//
+// The two ends of a run in flight name the status they move from and report how
+// many rows they moved. A run this process opened can have been failed
+// underneath it by the reclaim below, and putting it back would return a run
+// the period has already replaced to that period's numbers: trg_runs_immutable
+// fires on OLD.status = 'finalized' alone, so 'failed' -> 'completed' passes the
+// database untouched. The caller reads the count and refuses rather than
+// writing over a status another process settled.
+func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeRun, arg.ID, arg.Stats)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const consecutiveFailedRuns = `-- name: ConsecutiveFailedRuns :one
+WITH last_success AS (
+    SELECT coalesce(max(started_at), '-infinity'::timestamptz) AS started_at
+    FROM runs
+    WHERE period_from = $1 AND kind = 'regular'
+      AND status IN ('completed', 'finalized', 'superseded')
+)
+SELECT count(*)::int AS failures, max(runs.completed_at)::timestamptz AS last_failure
+FROM runs, last_success
+WHERE runs.period_from = $1 AND runs.kind = 'regular' AND runs.status = 'failed'
+  AND runs.started_at > last_success.started_at
+`
+
+type ConsecutiveFailedRunsRow struct {
+	Failures    int32
+	LastFailure pgtype.Timestamptz
+}
+
+// How often the metering of a period failed in a row: the failed regular runs it
+// carries since the last one that got to the end, and when the last of them
+// stopped. Without this the tick meters a month again on every hourly pass for
+// as long as it keeps failing, and a month that never stops failing -- an event
+// ordering its history carries and no later event repairs -- costs a full
+// metering pass and another stats blob every hour for the life of the
+// deployment. The scheduler spaces its retries out over this count.
+func (q *Queries) ConsecutiveFailedRuns(ctx context.Context, periodFrom pgtype.Timestamptz) (ConsecutiveFailedRunsRow, error) {
+	row := q.db.QueryRow(ctx, consecutiveFailedRuns, periodFrom)
+	var i ConsecutiveFailedRunsRow
+	err := row.Scan(&i.Failures, &i.LastFailure)
+	return i, err
+}
+
+type CreateRatedRecordsParams struct {
+	ID            pgtype.UUID
+	RunID         pgtype.UUID
+	UsageRecordID pgtype.UUID
+	Dimension     string
+	Amount        pgtype.Numeric
+	Currency      string
+}
+
+type CreateUsageRecordsParams struct {
+	ID           pgtype.UUID
+	RunID        pgtype.UUID
+	Cloud        string
+	Platform     string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	State        string
+	FromTs       pgtype.Timestamptz
+	ToTs         pgtype.Timestamptz
+	Seconds      int64
+	Usage        []byte
+}
+
+const earliestBillingPeriod = `-- name: EarliestBillingPeriod :one
+SELECT min(period_from)::timestamptz FROM billing_periods
+`
+
+// The first period the engine knows, where the scheduler starts its walk. The
+// aggregate answers over an empty table too, with one NULL row.
+func (q *Queries) EarliestBillingPeriod(ctx context.Context) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, earliestBillingPeriod)
+	var column_1 pgtype.Timestamptz
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const failRun = `-- name: FailRun :execrows
+UPDATE runs
+SET status = 'failed', completed_at = now(), stats = $2
+WHERE id = $1 AND status = 'running'
+`
+
+type FailRunParams struct {
+	ID    pgtype.UUID
+	Stats []byte
+}
+
+func (q *Queries) FailRun(ctx context.Context, arg FailRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, failRun, arg.ID, arg.Stats)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const finalizeBillingPeriod = `-- name: FinalizeBillingPeriod :exec
+UPDATE billing_periods
+SET status = 'finalized', finalized_run_id = $2, finalized_at = now()
+WHERE period_from = $1
+`
+
+type FinalizeBillingPeriodParams struct {
+	PeriodFrom     pgtype.Timestamptz
+	FinalizedRunID pgtype.UUID
+}
+
+// Closes a period. The three columns move in one statement because the check
+// constraint on billing_periods ties them together: a period is finalized
+// exactly when it names the run that closed it and the time that happened.
+func (q *Queries) FinalizeBillingPeriod(ctx context.Context, arg FinalizeBillingPeriodParams) error {
+	_, err := q.db.Exec(ctx, finalizeBillingPeriod, arg.PeriodFrom, arg.FinalizedRunID)
+	return err
+}
+
+const finalizeRun = `-- name: FinalizeRun :exec
+UPDATE runs
+SET status = 'finalized'
+WHERE id = $1
+`
+
+func (q *Queries) FinalizeRun(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, finalizeRun, id)
+	return err
+}
+
+const getBillingPeriod = `-- name: GetBillingPeriod :one
+SELECT period_from, period_to, status, finalized_run_id, finalized_at
+FROM billing_periods
+WHERE period_from = $1
+`
+
+func (q *Queries) GetBillingPeriod(ctx context.Context, periodFrom pgtype.Timestamptz) (BillingPeriod, error) {
+	row := q.db.QueryRow(ctx, getBillingPeriod, periodFrom)
+	var i BillingPeriod
+	err := row.Scan(
+		&i.PeriodFrom,
+		&i.PeriodTo,
+		&i.Status,
+		&i.FinalizedRunID,
+		&i.FinalizedAt,
+	)
+	return i, err
+}
+
 const getPricingModel = `-- name: GetPricingModel :one
 SELECT version, valid_from, currency, document, imported_at
 FROM pricing_models
@@ -28,6 +194,51 @@ func (q *Queries) GetPricingModel(ctx context.Context, version string) (PricingM
 		&i.ImportedAt,
 	)
 	return i, err
+}
+
+const getRunForUpdate = `-- name: GetRunForUpdate :one
+SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
+       status, clouds, stats, started_at, completed_at
+FROM runs
+WHERE id = $1
+FOR NO KEY UPDATE
+`
+
+// Reads a run under that same lock, which is how finalization sees a status
+// that no concurrent writer can move underneath it.
+func (q *Queries) GetRunForUpdate(ctx context.Context, id pgtype.UUID) (Run, error) {
+	row := q.db.QueryRow(ctx, getRunForUpdate, id)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PeriodFrom,
+		&i.PeriodTo,
+		&i.Kind,
+		&i.CorrectsRunID,
+		&i.PricingVersion,
+		&i.Status,
+		&i.Clouds,
+		&i.Stats,
+		&i.StartedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
+const hasCompleteRegularRun = `-- name: HasCompleteRegularRun :one
+SELECT EXISTS (
+    SELECT 1 FROM runs
+    WHERE period_from = $1 AND kind = 'regular' AND status IN ('completed', 'finalized')
+)
+`
+
+// Whether the period already has a regular run that got to the end. A
+// finalized run counts as one: it is a completed run that closed its period.
+func (q *Queries) HasCompleteRegularRun(ctx context.Context, periodFrom pgtype.Timestamptz) (bool, error) {
+	row := q.db.QueryRow(ctx, hasCompleteRegularRun, periodFrom)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const insertPricingModel = `-- name: InsertPricingModel :execrows
@@ -78,6 +289,58 @@ func (q *Queries) InsertProjectStatement(ctx context.Context, arg InsertProjectS
 		arg.Currency,
 	)
 	return err
+}
+
+const insertRun = `-- name: InsertRun :one
+INSERT INTO runs (period_from, period_to, kind, pricing_version, clouds)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, started_at
+`
+
+type InsertRunParams struct {
+	PeriodFrom     pgtype.Timestamptz
+	PeriodTo       pgtype.Timestamptz
+	Kind           string
+	PricingVersion pgtype.Text
+	Clouds         []string
+}
+
+type InsertRunRow struct {
+	ID        pgtype.UUID
+	StartedAt pgtype.Timestamptz
+}
+
+// Opens a run. status stays at the column default 'running' and completed_at
+// stays null until the run ends. The caller writes its records under the
+// returned id and reports the returned start time.
+func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (InsertRunRow, error) {
+	row := q.db.QueryRow(ctx, insertRun,
+		arg.PeriodFrom,
+		arg.PeriodTo,
+		arg.Kind,
+		arg.PricingVersion,
+		arg.Clouds,
+	)
+	var i InsertRunRow
+	err := row.Scan(&i.ID, &i.StartedAt)
+	return i, err
+}
+
+const latestCompletedRegularRun = `-- name: LatestCompletedRegularRun :one
+SELECT id FROM runs
+WHERE period_from = $1 AND kind = 'regular' AND status = 'completed'
+ORDER BY started_at DESC
+LIMIT 1
+`
+
+// The run a period's current numbers come from. Superseding leaves at most one
+// completed regular run per period, and the ordering settles which one a reader
+// takes if it ever sees more.
+func (q *Queries) LatestCompletedRegularRun(ctx context.Context, periodFrom pgtype.Timestamptz) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, latestCompletedRegularRun, periodFrom)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listBillingPeriods = `-- name: ListBillingPeriods :many
@@ -190,6 +453,23 @@ func (q *Queries) ListProjectStatements(ctx context.Context, runID pgtype.UUID) 
 	return items, nil
 }
 
+const lockRun = `-- name: LockRun :one
+SELECT id FROM runs WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// The first statement of a transaction that writes records. The trigger on the
+// record tables locks the run FOR SHARE for every row it checks, and a
+// transaction holding that lock which then updates the same run row has to
+// escalate to FOR NO KEY UPDATE, which deadlocks two writers of one run.
+// Taking the stronger lock up front is the ordering the comment on
+// forbid_finalized_mutation in migration 0001 asks for.
+func (q *Queries) LockRun(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockRun, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const pricingModelForPeriod = `-- name: PricingModelForPeriod :one
 SELECT version, valid_from, currency, document, imported_at
 FROM pricing_models
@@ -209,4 +489,145 @@ func (q *Queries) PricingModelForPeriod(ctx context.Context, validFrom pgtype.Ti
 		&i.ImportedAt,
 	)
 	return i, err
+}
+
+const reclaimStaleRuns = `-- name: ReclaimStaleRuns :many
+UPDATE runs
+SET status = 'failed',
+    completed_at = now(),
+    stats = stats || jsonb_build_object('error', 'the run''s process ended without completing it')
+WHERE period_from = $1
+  AND status = 'running'
+  AND started_at < now() - interval '2 hours'
+RETURNING id
+`
+
+// Reclaims the runs of a period that are still in flight with no process
+// behind them. A killed process leaves its run at 'running' forever, and the
+// period is blocked for as long as that row reads as a run in progress. The
+// reason is merged into stats rather than written over it, so whatever the run
+// had already counted survives.
+//
+// Age is what stands for the missing process, and the period lock cannot: that
+// lock is session scoped on one pooled connection which stays protocol-idle for
+// the whole run, so anything that closes only that connection -- an idle
+// timeout, a reaper, a failover -- releases it while the process keeps metering.
+// Two hours is longer than a run that is still alive: the CronJob's Job is
+// killed after fifty minutes (activeDeadlineSeconds), and a month an operator
+// meters by hand is minutes of work. Waiting costs nothing, because no query
+// counts a 'running' row.
+func (q *Queries) ReclaimStaleRuns(ctx context.Context, periodFrom pgtype.Timestamptz) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, reclaimStaleRuns, periodFrom)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setBillingPeriodStatus = `-- name: SetBillingPeriodStatus :exec
+UPDATE billing_periods
+SET status = $2
+WHERE period_from = $1
+`
+
+type SetBillingPeriodStatusParams struct {
+	PeriodFrom pgtype.Timestamptz
+	Status     string
+}
+
+func (q *Queries) SetBillingPeriodStatus(ctx context.Context, arg SetBillingPeriodStatusParams) error {
+	_, err := q.db.Exec(ctx, setBillingPeriodStatus, arg.PeriodFrom, arg.Status)
+	return err
+}
+
+const supersedeCompletedRuns = `-- name: SupersedeCompletedRuns :many
+UPDATE runs
+SET status = 'superseded'
+WHERE period_from = $1 AND kind = 'regular' AND status = 'completed'
+RETURNING id
+`
+
+// Retires the regular runs a new regular run replaces, so that sums over the
+// period count one set of records. It runs inside the new run's write
+// transaction while that run is still 'running', so the filter on 'completed'
+// never matches the run doing the superseding.
+func (q *Queries) SupersedeCompletedRuns(ctx context.Context, periodFrom pgtype.Timestamptz) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, supersedeCompletedRuns, periodFrom)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const tryLockPeriod = `-- name: TryLockPeriod :one
+SELECT pg_try_advisory_lock(hashtextextended('period:' || $1::text, 0))
+`
+
+// One process at a time meters a period. The lock is an advisory one rather
+// than a row lock, because it is taken before the billing_periods row of the
+// period exists. Its key is hashed from the period start as text, which the
+// caller renders in UTC and RFC 3339, so that the same instant always reaches
+// the same key: a timestamptz argument would be rendered by the server and the
+// key would follow that session's DateStyle and TimeZone.
+func (q *Queries) TryLockPeriod(ctx context.Context, periodFrom string) (bool, error) {
+	row := q.db.QueryRow(ctx, tryLockPeriod, periodFrom)
+	var pg_try_advisory_lock bool
+	err := row.Scan(&pg_try_advisory_lock)
+	return pg_try_advisory_lock, err
+}
+
+const unlockPeriod = `-- name: UnlockPeriod :one
+SELECT pg_advisory_unlock(hashtextextended('period:' || $1::text, 0))
+`
+
+// Releases what TryLockPeriod took. An advisory lock is released by key, so the
+// key expression has to stay identical to the one above.
+func (q *Queries) UnlockPeriod(ctx context.Context, periodFrom string) (bool, error) {
+	row := q.db.QueryRow(ctx, unlockPeriod, periodFrom)
+	var pg_advisory_unlock bool
+	err := row.Scan(&pg_advisory_unlock)
+	return pg_advisory_unlock, err
+}
+
+const upsertBillingPeriod = `-- name: UpsertBillingPeriod :exec
+INSERT INTO billing_periods (period_from, period_to)
+VALUES ($1, $2)
+ON CONFLICT (period_from) DO NOTHING
+`
+
+type UpsertBillingPeriodParams struct {
+	PeriodFrom pgtype.Timestamptz
+	PeriodTo   pgtype.Timestamptz
+}
+
+// Records that a period exists. The scheduler walks the months it is
+// responsible for and calls this for each of them, so a period already known
+// keeps the status and the finalization columns it has.
+func (q *Queries) UpsertBillingPeriod(ctx context.Context, arg UpsertBillingPeriodParams) error {
+	_, err := q.db.Exec(ctx, upsertBillingPeriod, arg.PeriodFrom, arg.PeriodTo)
+	return err
 }
