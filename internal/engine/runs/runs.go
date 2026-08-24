@@ -80,6 +80,18 @@ var ErrRunInProgress = errors.New("another run of this period is in progress")
 // a finalized period is a correction run (WP 3.9).
 var ErrPeriodFinalized = errors.New("the billing period is finalized")
 
+// ErrLockReleaseFailed marks the one failure of a run that leaves its output
+// standing: the run itself came through and only the release of the period lock
+// did not. The Result beside such an error is the committed run, so a caller
+// reports the month as billed and this as a warning rather than losing the run
+// id and metering the month again. It marks nothing else: a run that broke
+// comes back as the error that broke it, whether its lock was released or not.
+//
+// A connection pooler in transaction pooling mode is what produces it in
+// practice: the session lock lands on one server connection and its release on
+// another, so every run of the deployment ends here.
+var ErrLockReleaseFailed = errors.New("the period lock could not be released")
+
 // Options is what one run meters.
 type Options struct {
 	// PeriodFrom and PeriodTo are the half-open interval of the billing month,
@@ -152,29 +164,51 @@ type Warning struct {
 // one an error wrapping ErrPeriodFinalized; neither writes a row. Any failure
 // once the run row exists ends that row as 'failed' with the reason in its
 // stats and comes back as the error that caused it, so the caller reports what
-// went wrong rather than that something did.
-func Execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, opts Options) (result Result, err error) {
-	month := period.Format(opts.PeriodFrom)
+// went wrong rather than that something did. The one exception is the release
+// of the period lock: it happens after the run is committed, so a failure there
+// comes back wrapping ErrLockReleaseFailed beside the Result of a run that is
+// done.
+func Execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, opts Options) (Result, error) {
+	var result Result
+	retry := "tally-engine run --period " + period.Format(opts.PeriodFrom)
+	err := withPeriodLock(ctx, engine, opts.PeriodFrom, retry, func() (err error) {
+		result, err = execute(ctx, engine, reporting, opts)
+		return err
+	})
+	return result, err
+}
+
+// withPeriodLock runs fn under the period lock of periodFrom. retryHint is the
+// command the caller is retried with, which the refusal of a period another
+// process holds names.
+func withPeriodLock(
+	ctx context.Context,
+	engine *pgxpool.Pool,
+	periodFrom time.Time,
+	retryHint string,
+	fn func() error,
+) (err error) {
+	month := period.Format(periodFrom)
 
 	// One connection for the whole call: the lock below is session scoped, so
 	// the release has to reach the session that took it.
 	conn, err := engine.Acquire(ctx)
 	if err != nil {
-		return Result{}, fmt.Errorf("acquiring the connection of the %s period lock: %w", month, err)
+		return fmt.Errorf("acquiring the connection of the %s period lock: %w", month, err)
 	}
 	defer conn.Release()
 
 	// The key is the period start as text, rendered here rather than by the
 	// server: see TryLockPeriod in internal/engine/store/queries.sql.
-	key := opts.PeriodFrom.UTC().Format(time.RFC3339)
+	key := periodFrom.UTC().Format(time.RFC3339)
 	locked, err := sqlcgen.New(conn).TryLockPeriod(ctx, key)
 	if err != nil {
-		return Result{}, fmt.Errorf("locking the period %s: %w", month, err)
+		return fmt.Errorf("locking the period %s: %w", month, err)
 	}
 	if !locked {
-		return Result{}, fmt.Errorf(
-			"%w: %s is being metered by another process, and tally-engine run --period %s is retried once that run has ended",
-			ErrRunInProgress, month, month)
+		return fmt.Errorf(
+			"%w: %s is being metered by another process, and %s is retried once that run has ended",
+			ErrRunInProgress, month, retryHint)
 	}
 	defer func() {
 		// On the connection the lock was taken on, and on a context the caller's
@@ -183,8 +217,10 @@ func Execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, op
 		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
 		defer cancel()
 
+		var lockErr error
 		released, unlockErr := sqlcgen.New(conn).UnlockPeriod(unlockCtx, key)
-		if unlockErr != nil {
+		switch {
+		case unlockErr != nil:
 			// Whether the session still holds the lock is exactly what this error
 			// leaves open, and pgxpool resets no session state: a connection put
 			// back holding it hands the lock to whoever draws it next, and every
@@ -195,17 +231,29 @@ func Execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, op
 			// Whether the close itself succeeds changes nothing: the connection is
 			// out of the pool either way, and its socket is gone with it.
 			_ = conn.Hijack().Close(unlockCtx)
-			err = errors.Join(err, fmt.Errorf("unlocking the period %s: %w", month, unlockErr))
+			lockErr = fmt.Errorf("unlocking the period %s: %w", month, unlockErr)
+		case !released:
+			// The session did not hold the lock, so the connection is clean. That
+			// it got here at all means the lock was lost underneath the run, or
+			// that a pooler put its release on another server connection than its
+			// acquisition.
+			lockErr = fmt.Errorf("unlocking the period %s: the session no longer held the lock", month)
+		default:
 			return
 		}
-		if !released {
-			// The session did not hold the lock, so the connection is clean. That
-			// it got here at all means the lock was lost underneath the run.
-			err = errors.Join(err, fmt.Errorf("unlocking the period %s: the session no longer held the lock", month))
+		// The lock's bookkeeping is not the run: fn either wrote its whole output
+		// or none of it, and neither branch above touches that. Where fn came
+		// through, the sentinel is what tells the caller it still has a billed
+		// month and a run id to report; where it did not, its own error stays
+		// what the call failed with and this is joined beside it.
+		if err == nil {
+			err = fmt.Errorf("%w: %w", ErrLockReleaseFailed, lockErr)
+			return
 		}
+		err = errors.Join(err, lockErr)
 	}()
 
-	return execute(ctx, engine, reporting, opts)
+	return fn()
 }
 
 // execute is Execute under the period lock: everything from the billing period
