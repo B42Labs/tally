@@ -9,6 +9,50 @@ import (
 	"context"
 )
 
+// iteratorForCreateCorrectionDeltas implements pgx.CopyFromSource.
+type iteratorForCreateCorrectionDeltas struct {
+	rows                 []CreateCorrectionDeltasParams
+	skippedFirstNextCall bool
+}
+
+func (r *iteratorForCreateCorrectionDeltas) Next() bool {
+	if len(r.rows) == 0 {
+		return false
+	}
+	if !r.skippedFirstNextCall {
+		r.skippedFirstNextCall = true
+		return true
+	}
+	r.rows = r.rows[1:]
+	return len(r.rows) > 0
+}
+
+func (r iteratorForCreateCorrectionDeltas) Values() ([]interface{}, error) {
+	return []interface{}{
+		r.rows[0].ID,
+		r.rows[0].RunID,
+		r.rows[0].CorrectsRunID,
+		r.rows[0].Cloud,
+		r.rows[0].Platform,
+		r.rows[0].ResourceType,
+		r.rows[0].ResourceID,
+		r.rows[0].ProjectID,
+		r.rows[0].Dimension,
+		r.rows[0].OldAmount,
+		r.rows[0].NewAmount,
+		r.rows[0].Delta,
+		r.rows[0].Currency,
+	}, nil
+}
+
+func (r iteratorForCreateCorrectionDeltas) Err() error {
+	return nil
+}
+
+func (q *Queries) CreateCorrectionDeltas(ctx context.Context, arg []CreateCorrectionDeltasParams) (int64, error) {
+	return q.db.CopyFrom(ctx, []string{"correction_deltas"}, []string{"id", "run_id", "corrects_run_id", "cloud", "platform", "resource_type", "resource_id", "project_id", "dimension", "old_amount", "new_amount", "delta", "currency"}, &iteratorForCreateCorrectionDeltas{rows: arg})
+}
+
 // iteratorForCreateRatedRecords implements pgx.CopyFromSource.
 type iteratorForCreateRatedRecords struct {
 	rows                 []CreateRatedRecordsParams
@@ -87,7 +131,7 @@ func (r iteratorForCreateUsageRecords) Err() error {
 
 // The record writes of a run, over the COPY protocol: a month of metering is
 // tens of thousands of rows, and one round trip per row is what that costs.
-// Both name id rather than leaving it to the column default, because COPY
+// All three name id rather than leaving it to the column default, because COPY
 // evaluates no defaults. The caller generating the ids is also what lets a
 // rated record name the usage record it was rated from before either row is
 // written.

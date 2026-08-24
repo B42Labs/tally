@@ -82,10 +82,12 @@ SELECT min(period_from)::timestamptz FROM billing_periods;
 
 -- Opens a run. status stays at the column default 'running' and completed_at
 -- stays null until the run ends. The caller writes its records under the
--- returned id and reports the returned start time.
+-- returned id and reports the returned start time. A regular run binds NULL for
+-- corrects_run_id, which is an invalid pgtype.UUID; a correction binds the run
+-- it corrects.
 -- name: InsertRun :one
-INSERT INTO runs (period_from, period_to, kind, pricing_version, clouds)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO runs (period_from, period_to, kind, corrects_run_id, pricing_version, clouds)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, started_at;
 
 -- The first statement of a transaction that writes records. The trigger on the
@@ -131,14 +133,15 @@ UPDATE runs
 SET status = 'finalized'
 WHERE id = $1;
 
--- Retires the regular runs a new regular run replaces, so that sums over the
--- period count one set of records. It runs inside the new run's write
--- transaction while that run is still 'running', so the filter on 'completed'
--- never matches the run doing the superseding.
+-- Retires the completed runs of the given kind that a new run of that kind
+-- replaces, so that a period carries at most one completed run per kind and a
+-- sum over that kind counts one set of records. It runs inside the new run's
+-- write transaction while that run is still 'running', so the filter on
+-- 'completed' never matches the run doing the superseding.
 -- name: SupersedeCompletedRuns :many
 UPDATE runs
 SET status = 'superseded'
-WHERE period_from = $1 AND kind = 'regular' AND status = 'completed'
+WHERE period_from = $1 AND kind = $2 AND status = 'completed'
 RETURNING id;
 
 -- Reclaims the runs of a period that are still in flight with no process
@@ -201,9 +204,33 @@ WHERE period_from = $1 AND kind = 'regular' AND status = 'completed'
 ORDER BY started_at DESC
 LIMIT 1;
 
+-- The latest finalized truth of a period, which a correction diffs against and
+-- then names in corrects_run_id: the regular run that closed the period for
+-- the first correction, the last finalized correction after that (roadmap
+-- WP 3.9, item 5). detect-late reads the snapshot time out of its stats.
+-- name: LatestFinalizedRun :one
+SELECT id, kind, corrects_run_id, pricing_version, clouds, stats, started_at
+FROM runs
+WHERE period_from = $1 AND status = 'finalized'
+ORDER BY started_at DESC
+LIMIT 1;
+
+-- The amounts of one run summed per the key a correction diffs by (decision D6:
+-- cloud, platform, resource type, resource id, project id, dimension). The
+-- currency is grouped too, so a run rated in one currency yields one row per
+-- key. idx_rated_run serves the filter.
+-- name: SumRatedByRun :many
+SELECT u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension,
+       sum(r.amount)::numeric AS amount, r.currency
+FROM rated_records r
+JOIN usage_records u ON u.id = r.usage_record_id
+WHERE r.run_id = $1
+GROUP BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension, r.currency
+ORDER BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension;
+
 -- The record writes of a run, over the COPY protocol: a month of metering is
 -- tens of thousands of rows, and one round trip per row is what that costs.
--- Both name id rather than leaving it to the column default, because COPY
+-- All three name id rather than leaving it to the column default, because COPY
 -- evaluates no defaults. The caller generating the ids is also what lets a
 -- rated record name the usage record it was rated from before either row is
 -- written.
@@ -215,3 +242,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
 -- name: CreateRatedRecords :copyfrom
 INSERT INTO rated_records (id, run_id, usage_record_id, dimension, amount, currency)
 VALUES ($1, $2, $3, $4, $5, $6);
+
+-- name: CreateCorrectionDeltas :copyfrom
+INSERT INTO correction_deltas (id, run_id, corrects_run_id, cloud, platform, resource_type, resource_id,
+                               project_id, dimension, old_amount, new_amount, delta, currency)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);

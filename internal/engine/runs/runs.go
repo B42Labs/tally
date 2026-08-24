@@ -52,10 +52,13 @@ import (
 // such a run produces are a forecast of the month rather than its invoice.
 const WarningPeriodNotEnded = "period_not_ended"
 
-// The run kind this package opens and the period status it refuses. A
-// correction run over a finalized period is WP 3.9's.
+// KindRegular and KindCorrection are the two values runs.kind carries: a
+// regular run meters a period, a correction re-meters a finalized one and
+// stores the differences. statusFinalized is the period status this package
+// refuses to meter.
 const (
-	kindRegular     = "regular"
+	KindRegular     = "regular"
+	KindCorrection  = "correction"
 	statusFinalized = "finalized"
 )
 
@@ -336,11 +339,12 @@ func execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, op
 		clouds = []string{}
 	}
 	// This insert commits on its own, so a process killed from here on leaves a
-	// 'running' row for the next run of the period to reclaim above.
+	// 'running' row for the next run of the period to reclaim above. The zero
+	// CorrectsRunID binds NULL, which is what a run that corrects nothing stores.
 	run, err := q.InsertRun(ctx, sqlcgen.InsertRunParams{
 		PeriodFrom:     timestamptz(opts.PeriodFrom),
 		PeriodTo:       timestamptz(opts.PeriodTo),
-		Kind:           kindRegular,
+		Kind:           KindRegular,
 		PricingVersion: pgtype.Text{String: model.Version, Valid: true},
 		Clouds:         clouds,
 	})
@@ -539,7 +543,10 @@ func write(
 	if err := statements.Persist(ctx, q, runID, sts); err != nil {
 		return nil, err
 	}
-	superseded, err := q.SupersedeCompletedRuns(ctx, timestamptz(periodFrom))
+	superseded, err := q.SupersedeCompletedRuns(ctx, sqlcgen.SupersedeCompletedRunsParams{
+		PeriodFrom: timestamptz(periodFrom),
+		Kind:       KindRegular,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("superseding the completed runs of %s: %w", period.Format(periodFrom), err)
 	}

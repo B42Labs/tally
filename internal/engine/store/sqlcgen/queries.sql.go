@@ -72,6 +72,22 @@ func (q *Queries) ConsecutiveFailedRuns(ctx context.Context, periodFrom pgtype.T
 	return i, err
 }
 
+type CreateCorrectionDeltasParams struct {
+	ID            pgtype.UUID
+	RunID         pgtype.UUID
+	CorrectsRunID pgtype.UUID
+	Cloud         string
+	Platform      string
+	ResourceType  string
+	ResourceID    string
+	ProjectID     string
+	Dimension     string
+	OldAmount     pgtype.Numeric
+	NewAmount     pgtype.Numeric
+	Delta         pgtype.Numeric
+	Currency      string
+}
+
 type CreateRatedRecordsParams struct {
 	ID            pgtype.UUID
 	RunID         pgtype.UUID
@@ -292,8 +308,8 @@ func (q *Queries) InsertProjectStatement(ctx context.Context, arg InsertProjectS
 }
 
 const insertRun = `-- name: InsertRun :one
-INSERT INTO runs (period_from, period_to, kind, pricing_version, clouds)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO runs (period_from, period_to, kind, corrects_run_id, pricing_version, clouds)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, started_at
 `
 
@@ -301,6 +317,7 @@ type InsertRunParams struct {
 	PeriodFrom     pgtype.Timestamptz
 	PeriodTo       pgtype.Timestamptz
 	Kind           string
+	CorrectsRunID  pgtype.UUID
 	PricingVersion pgtype.Text
 	Clouds         []string
 }
@@ -312,12 +329,15 @@ type InsertRunRow struct {
 
 // Opens a run. status stays at the column default 'running' and completed_at
 // stays null until the run ends. The caller writes its records under the
-// returned id and reports the returned start time.
+// returned id and reports the returned start time. A regular run binds NULL for
+// corrects_run_id, which is an invalid pgtype.UUID; a correction binds the run
+// it corrects.
 func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (InsertRunRow, error) {
 	row := q.db.QueryRow(ctx, insertRun,
 		arg.PeriodFrom,
 		arg.PeriodTo,
 		arg.Kind,
+		arg.CorrectsRunID,
 		arg.PricingVersion,
 		arg.Clouds,
 	)
@@ -341,6 +361,43 @@ func (q *Queries) LatestCompletedRegularRun(ctx context.Context, periodFrom pgty
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const latestFinalizedRun = `-- name: LatestFinalizedRun :one
+SELECT id, kind, corrects_run_id, pricing_version, clouds, stats, started_at
+FROM runs
+WHERE period_from = $1 AND status = 'finalized'
+ORDER BY started_at DESC
+LIMIT 1
+`
+
+type LatestFinalizedRunRow struct {
+	ID             pgtype.UUID
+	Kind           string
+	CorrectsRunID  pgtype.UUID
+	PricingVersion pgtype.Text
+	Clouds         []string
+	Stats          []byte
+	StartedAt      pgtype.Timestamptz
+}
+
+// The latest finalized truth of a period, which a correction diffs against and
+// then names in corrects_run_id: the regular run that closed the period for
+// the first correction, the last finalized correction after that (roadmap
+// WP 3.9, item 5). detect-late reads the snapshot time out of its stats.
+func (q *Queries) LatestFinalizedRun(ctx context.Context, periodFrom pgtype.Timestamptz) (LatestFinalizedRunRow, error) {
+	row := q.db.QueryRow(ctx, latestFinalizedRun, periodFrom)
+	var i LatestFinalizedRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.CorrectsRunID,
+		&i.PricingVersion,
+		&i.Clouds,
+		&i.Stats,
+		&i.StartedAt,
+	)
+	return i, err
 }
 
 const listBillingPeriods = `-- name: ListBillingPeriods :many
@@ -552,19 +609,79 @@ func (q *Queries) SetBillingPeriodStatus(ctx context.Context, arg SetBillingPeri
 	return err
 }
 
+const sumRatedByRun = `-- name: SumRatedByRun :many
+SELECT u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension,
+       sum(r.amount)::numeric AS amount, r.currency
+FROM rated_records r
+JOIN usage_records u ON u.id = r.usage_record_id
+WHERE r.run_id = $1
+GROUP BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension, r.currency
+ORDER BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension
+`
+
+type SumRatedByRunRow struct {
+	Cloud        string
+	Platform     string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	Dimension    string
+	Amount       pgtype.Numeric
+	Currency     string
+}
+
+// The amounts of one run summed per the key a correction diffs by (decision D6:
+// cloud, platform, resource type, resource id, project id, dimension). The
+// currency is grouped too, so a run rated in one currency yields one row per
+// key. idx_rated_run serves the filter.
+func (q *Queries) SumRatedByRun(ctx context.Context, runID pgtype.UUID) ([]SumRatedByRunRow, error) {
+	rows, err := q.db.Query(ctx, sumRatedByRun, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SumRatedByRunRow
+	for rows.Next() {
+		var i SumRatedByRunRow
+		if err := rows.Scan(
+			&i.Cloud,
+			&i.Platform,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.Dimension,
+			&i.Amount,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const supersedeCompletedRuns = `-- name: SupersedeCompletedRuns :many
 UPDATE runs
 SET status = 'superseded'
-WHERE period_from = $1 AND kind = 'regular' AND status = 'completed'
+WHERE period_from = $1 AND kind = $2 AND status = 'completed'
 RETURNING id
 `
 
-// Retires the regular runs a new regular run replaces, so that sums over the
-// period count one set of records. It runs inside the new run's write
-// transaction while that run is still 'running', so the filter on 'completed'
-// never matches the run doing the superseding.
-func (q *Queries) SupersedeCompletedRuns(ctx context.Context, periodFrom pgtype.Timestamptz) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, supersedeCompletedRuns, periodFrom)
+type SupersedeCompletedRunsParams struct {
+	PeriodFrom pgtype.Timestamptz
+	Kind       string
+}
+
+// Retires the completed runs of the given kind that a new run of that kind
+// replaces, so that a period carries at most one completed run per kind and a
+// sum over that kind counts one set of records. It runs inside the new run's
+// write transaction while that run is still 'running', so the filter on
+// 'completed' never matches the run doing the superseding.
+func (q *Queries) SupersedeCompletedRuns(ctx context.Context, arg SupersedeCompletedRunsParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, supersedeCompletedRuns, arg.PeriodFrom, arg.Kind)
 	if err != nil {
 		return nil, err
 	}
