@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
+	reportingmigrations "github.com/b42labs/tally/migrations/reporting"
 )
 
 // errCallback is what a failing WithTx callback returns, so a test can prove the
@@ -87,6 +89,36 @@ func TestReady(t *testing.T) {
 		}
 		if want := "schema version"; !strings.Contains(err.Error(), want) {
 			t.Errorf("Ready() error = %q, want it to mention %q", err, want)
+		}
+	})
+
+	t.Run("a database one migration behind is not ready", func(t *testing.T) {
+		// The case a deploy produces when the image rolls before the chain is
+		// applied: the schema is whole enough for every query the handlers make
+		// and one version too old for the code, and readiness says which two
+		// versions those are so that the operator knows what to run.
+		behind := db.NewSiblingDB(t, "ready_one_behind")
+		if _, err := store.Migrate(t.Context(), behind); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if _, err := store.MigrateDownTo(t.Context(), behind, reportingmigrations.Version-1); err != nil {
+			t.Fatalf("MigrateDownTo(%d) error = %v, want nil", reportingmigrations.Version-1, err)
+		}
+
+		s, err := store.New(t.Context(), behind, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		err = s.Ready(t.Context())
+		if err == nil {
+			t.Fatal("Ready() error = nil, want the schema version reported")
+		}
+		want := fmt.Sprintf("the database is on schema version %d, this build needs %d",
+			reportingmigrations.Version-1, reportingmigrations.Version)
+		if err.Error() != want {
+			t.Errorf("Ready() error = %q, want %q", err, want)
 		}
 	})
 

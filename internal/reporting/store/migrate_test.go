@@ -276,7 +276,11 @@ func TestMigrate(t *testing.T) {
 			t.Fatalf("New() error = %v, want nil", err)
 		}
 		defer s.Close()
-		for _, index := range []string{"idx_events_cloud_project", "idx_rejected_events_received"} {
+		for _, index := range []string{
+			"idx_events_cloud_project",
+			"idx_rejected_events_received",
+			"idx_events_received",
+		} {
 			if _, err := s.Pool().Exec(t.Context(), "DROP INDEX "+index); err != nil {
 				t.Fatalf("dropping %s the way an interrupted rollback leaves it: %v", index, err)
 			}
@@ -345,6 +349,40 @@ func TestMigrate(t *testing.T) {
 		}
 		if indexExists(t, s, "idx_current_resources_fleet") {
 			t.Error("the fleet index survived the repeated upgrade")
+		}
+	})
+
+	t.Run("the late-event index comes and goes with 0009", func(t *testing.T) {
+		// The index 0001 left out until something read received_at, which
+		// detect-late is. A sibling of its own is what makes the step visible in
+		// both directions: the database the other cases share carries the whole
+		// chain, so the index is there before and after whatever they do.
+		received := db.NewSiblingDB(t, "migrate_received_index")
+		if _, err := store.Migrate(t.Context(), received); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), received, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		if !indexExists(t, s, "idx_events_received") {
+			t.Fatal("the late-event index is missing after the chain")
+		}
+
+		if _, err := store.MigrateDownTo(t.Context(), received, 8); err != nil {
+			t.Fatalf("MigrateDownTo(8) error = %v, want nil", err)
+		}
+		if indexExists(t, s, "idx_events_received") {
+			t.Error("the late-event index survived the rollback to 8")
+		}
+
+		if _, err := store.Migrate(t.Context(), received); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if !indexExists(t, s, "idx_events_received") {
+			t.Error("the late-event index is missing after the repeated upgrade")
 		}
 	})
 
