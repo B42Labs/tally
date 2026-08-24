@@ -25,6 +25,12 @@ var ErrVersionConflict = errors.New(
 // every metered resource at zero rather than say what is missing.
 var ErrNoModel = errors.New("no pricing model is valid for this period")
 
+// ErrVersionNotFound is what ByVersion returns for a version no stored model
+// carries. A correction rates with the version its finalized run recorded, and
+// a version the database does not hold prices nothing, so the correction is
+// refused before it opens a run rather than rated against no model.
+var ErrVersionNotFound = errors.New("no pricing model is stored under this version")
+
 // The unique key over valid_from, as Postgres names it and as it reports a
 // write that breaks it. Matching the constraint rather than the SQLSTATE alone
 // is what keeps another unique violation from being reported as two versions
@@ -105,6 +111,29 @@ func ForPeriod(ctx context.Context, q *sqlcgen.Queries, periodFrom time.Time) (M
 	model, err := ParseDocument(row.Document)
 	if err != nil {
 		return Model{}, fmt.Errorf("reading the stored pricing model %s: %w", row.Version, err)
+	}
+	return model, nil
+}
+
+// ByVersion returns the stored model of one version. It is what a correction
+// rates with: a correction rates a finalized month with the version the
+// finalized run recorded, whatever was imported since, so it corrects the
+// usage of that month and leaves its prices where they were (D6).
+//
+// A version no stored model carries yields an error wrapping
+// ErrVersionNotFound.
+func ByVersion(ctx context.Context, q *sqlcgen.Queries, version string) (Model, error) {
+	row, err := q.GetPricingModel(ctx, version)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Model{}, fmt.Errorf("reading the pricing model %s: %w", version, ErrVersionNotFound)
+		}
+		return Model{}, fmt.Errorf("reading the pricing model %s: %w", version, err)
+	}
+
+	model, err := ParseDocument(row.Document)
+	if err != nil {
+		return Model{}, fmt.Errorf("reading the stored pricing model %s: %w", version, err)
 	}
 	return model, nil
 }
