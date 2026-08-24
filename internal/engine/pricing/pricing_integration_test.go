@@ -512,6 +512,79 @@ func TestForPeriod(t *testing.T) {
 	})
 }
 
+func TestByVersion(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	models := importMonths(t, q,
+		month{"2026-01", "2026-01-01T00:00:00Z", "0.01"},
+		month{"2026-03", "2026-03-01T00:00:00Z", "0.03"},
+		month{"2026-05", "2026-05-01T00:00:00Z", "0.05"},
+	)
+
+	// A version is read by its name and never by the period it prices, so a
+	// correction of January rates with January's version while May is stored.
+	for _, version := range []string{"2026-01", "2026-03", "2026-05"} {
+		t.Run("returns the model stored under "+version, func(t *testing.T) {
+			got, err := pricing.ByVersion(t.Context(), q, version)
+			if err != nil {
+				t.Fatalf("ByVersion() error = %v, want nil", err)
+			}
+			if got.Version != version {
+				t.Fatalf("ByVersion() version = %q, want %q", got.Version, version)
+			}
+			if !got.Equal(models[version]) {
+				t.Error("ByVersion() does not equal the imported model, want them equal")
+			}
+		})
+	}
+
+	t.Run("an unknown version has no model", func(t *testing.T) {
+		const version = "2099-01"
+
+		got, err := pricing.ByVersion(t.Context(), q, version)
+		if !errors.Is(err, pricing.ErrVersionNotFound) {
+			t.Fatalf("ByVersion() error = %v, want one matching ErrVersionNotFound", err)
+		}
+		if !strings.Contains(err.Error(), version) {
+			t.Errorf("ByVersion() error = %q, want it to name the version %s", err, version)
+		}
+		if got.Version != "" {
+			t.Errorf("ByVersion() version = %q, want the zero model beside the error", got.Version)
+		}
+	})
+
+	// Last, because it leaves a version behind that no longer reads.
+	t.Run("names the version of a stored document it cannot read", func(t *testing.T) {
+		const version = "2026-03"
+		if _, err := db.Store.Pool().Exec(t.Context(),
+			`UPDATE pricing_models SET document = $2::jsonb WHERE version = $1`,
+			// Empty on purpose: what names the version in the error is the
+			// wrapping, not something the document still spells.
+			version, `{}`,
+		); err != nil {
+			t.Fatalf("overwriting the stored document of %s: %v", version, err)
+		}
+
+		got, err := pricing.ByVersion(t.Context(), q, version)
+		if err == nil {
+			t.Fatal("ByVersion() error = nil, want the unreadable document reported")
+		}
+		if !strings.Contains(err.Error(), version) {
+			t.Errorf("ByVersion() error = %q, want it to name the version %s", err, version)
+		}
+		// A stored version that no longer parses is not a missing one: the
+		// document is what an operator has to look at, and reporting it as a
+		// version nobody imported would send them after the wrong thing.
+		if errors.Is(err, pricing.ErrVersionNotFound) {
+			t.Errorf("ByVersion() error = %v, want it to differ from ErrVersionNotFound", err)
+		}
+		if got.Version != "" {
+			t.Errorf("ByVersion() version = %q, want the zero model beside the error", got.Version)
+		}
+	})
+}
+
 func TestListPricingModels(t *testing.T) {
 	db := storetest.NewDB(t)
 	q := sqlcgen.New(db.Store.Pool())
