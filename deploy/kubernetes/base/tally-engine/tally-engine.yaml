@@ -1,0 +1,136 @@
+# The metering scheduler. Every hour the tick advances each billing period whose
+# next step is due: a month whose grace window has passed gets its run, and a
+# completed run is finalized where TALLY_ENGINE_AUTO_FINALIZE allows it. A tick
+# that finds nothing due prints that and exits zero.
+#
+# On a fresh cluster the first tick past a period's grace window fails that month
+# with "no pricing model is valid for this period", and the Job's exit status
+# shows it. That is the intended signal: the period is due and nothing prices it.
+# `tally-engine pricing import` puts a catalog in, and the next hour runs the
+# month.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tally-engine
+  labels:
+    app.kubernetes.io/name: tally-engine
+spec:
+  schedule: "0 * * * *"
+  # A run takes an advisory lock on the period it meters and fails rather than
+  # waits when another process holds it, so a tick that outlasts its hour would
+  # make the next one fail on the month it is still working through.
+  concurrencyPolicy: Forbid
+  # Forbid needs an end to the tick it is holding the next one behind. A query
+  # that stops answering -- a failover that drops the connection without an RST,
+  # a partition, a lock held by a dump -- leaves the Job Active rather than
+  # Failed, and nothing else would ever start another one. Fifty minutes is
+  # longer than a tick that is working and short enough to leave the next hour
+  # free. The deadline on the CronJob is the other half: without it the
+  # controller counts the missed schedules forever and refuses to start the Job
+  # at all past a hundred of them, which deleting the stuck Job does not undo.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3000
+      # A tick that failed is retried by the next hour rather than immediately.
+      # What it broke on is a database that is down or a month nothing prices,
+      # neither of which a few seconds fix, and the walk it did finish moved the
+      # other months along.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: tally-engine
+        spec:
+          restartPolicy: Never
+          # The tick calls no Kubernetes API, so the token of the default
+          # ServiceAccount would be an exposure and nothing else.
+          automountServiceAccountToken: false
+          # The image ends in distroless nonroot with USER nonroot:nonroot, which
+          # names an identity and nothing more; this is what asks the kubelet to
+          # hold the pod to it. 65532 is that user.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          containers:
+            - name: tally-engine
+              image: tally-engine:dev
+              # What the block above does not reach. These four are per-container
+              # and every one of them defaults the permissive way, so a pod that
+              # names only the identity still lets a setuid binary raise this
+              # container's privileges, still carries the capability set the
+              # runtime grants by default, still has the whole image to write to,
+              # and still runs unconfined by seccomp. The tick needs none of it:
+              # it opens two database connections and writes to neither the
+              # filesystem nor a port. Both connection strings are mounted into
+              # this container, which is what the confinement is worth.
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+                seccompProfile:
+                  type: RuntimeDefault
+              # A tick holds a whole billing month in memory at once: the metered
+              # resources, the rated amounts, the statements and the parameter
+              # rows of both COPY writes, which is tens of thousands of rows per
+              # month and more where a walk catches several up. Without a request
+              # the pod is BestEffort, first in line for eviction and placed on a
+              # node that had nothing to bin-pack it against, and an eviction
+              # mid-run leaves the month unbilled until the next hour.
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+              # The image's entrypoint is the engine binary (see the Dockerfile),
+              # so the subcommand is what the arguments carry.
+              args: ["tick"]
+              env:
+                # Secrets follow the *_FILE convention so they arrive as a mounted
+                # file rather than an environment value. The two are separate
+                # databases: the engine writes its own and reads the Reporting
+                # API's through a role that only selects.
+                - name: TALLY_ENGINE_DB_URL_FILE
+                  value: /run/secrets/tally/engine-db-url
+                - name: TALLY_ENGINE_REPORTING_DB_URL_FILE
+                  value: /run/secrets/tally/engine-reporting-db-url
+                # How long a month waits after it has ended before its run
+                # executes, so events that arrive late still reach the run that
+                # bills them.
+                - name: TALLY_ENGINE_GRACE_HOURS
+                  value: "72"
+                # A finalized run is immutable and its numbers may reach an ERP,
+                # so closing a period stays an operator's step.
+                - name: TALLY_ENGINE_AUTO_FINALIZE
+                  value: "false"
+                - name: TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES
+                  value: infrastructure_tenant
+                # Where the metricsql counter sources are queried. Nothing reads
+                # it while the sources below are empty, because the client is
+                # built only for a source that needs it.
+                - name: TALLY_ENGINE_VM_URL
+                  value: http://victoriametrics:8428
+                # The empty path is the zero configuration and the only value that
+                # works without a mounted file: the default path errors when
+                # nothing is mounted there. An installation that measures counters
+                # mounts its own sources file and points this variable at it.
+                - name: TALLY_ENGINE_COUNTER_SOURCES
+                  value: ""
+              volumeMounts:
+                - name: db-credentials
+                  mountPath: /run/secrets/tally
+                  readOnly: true
+          volumes:
+            - name: db-credentials
+              secret:
+                secretName: tally-db
+                items:
+                  - key: engine-db-url
+                    path: engine-db-url
+                  - key: engine-reporting-db-url
+                    path: engine-reporting-db-url
