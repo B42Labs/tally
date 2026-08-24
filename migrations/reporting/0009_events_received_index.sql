@@ -1,0 +1,66 @@
+-- The index late-event detection seeks through. ListLateEvents in
+-- internal/engine/source/queries.sql, the query tally-engine detect-late
+-- issues, asks for the events of one billing period that arrived after the
+-- finalized run took its snapshot: a range over timestamp, which the
+-- hypertable's own partitioning answers by excluding every chunk outside the
+-- period, and a lower bound on received_at, which nothing indexes. Inside the
+-- chunks the period leaves, that bound is a filter every row is read for, and
+-- it keeps almost none of them: the chunks hold the period's whole ingest and
+-- the late arrivals are what came in after the run.
+--
+-- The index serves the uncompressed chunks, which is what CountEvents already
+-- says of its own predicate. 0001_init.sql:52 segments a compressed chunk by
+-- (cloud, resource_type) and orders it by nothing, so its batches carry a
+-- minimum and a maximum for timestamp and those two columns alone: none of them
+-- can be excluded on received_at, and a period past the 90-day compression
+-- policy is filtered after decompression. The LIMIT ListLateEvents carries
+-- bounds the rows the report names rather than the events the query reads: it
+-- sits over the aggregate, which the server has finished before the first row
+-- leaves it. What bounds the read of a period past the compression policy is
+-- the statement_timeout source.New sets, and a read that runs into it is
+-- reported as the timeout it is, naming the correction that books the events
+-- without the report. A compression setting that would let the batches be
+-- excluded on received_at is a change to 0001's compression and a recompression
+-- of every existing chunk.
+--
+-- This is the index 0001_init.sql:59 leaves out and names. received_at is
+-- strictly increasing, so every insert on the ingest path writes to the same
+-- leaf page and they contend there, and 0001 defers that cost until something
+-- reads the column. WP 3.9 is what reads it, and the contention is the price of
+-- the feature.
+--
+-- The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.9.
+--
+-- The build runs per chunk and therefore outside a transaction, for the reason
+-- 0003 gives: a plain CREATE INDEX on a hypertable takes a SHARE lock on every
+-- chunk and holds all of them until the last one is built, and SHARE conflicts
+-- with the ROW EXCLUSIVE an INSERT needs, so ingestion would stop for the length
+-- of the whole build. The per-chunk form releases each chunk's lock when that
+-- chunk is done, so writes to every other chunk keep flowing while it works.
+--
+-- A build that dies partway leaves the chunks it finished indexed and the
+-- migration unrecorded, so a rerun fails on the index that is already there
+-- rather than silently leaving the rest unindexed. Dropping the index and
+-- rerunning is what recovers from that.
+--
+-- The directive is read per file rather than per direction, so the rollback runs
+-- outside a transaction too: goose drops the index and records the rollback as
+-- two separable steps, and a rollback that dies between them leaves the index
+-- gone with the migration still recorded as applied. The drop says IF EXISTS so
+-- that rerunning it is what repairs that, rather than failing on the index it
+-- already dropped and leaving the version row to be edited by hand.
+--
+-- This file takes the chain to version 9, which is the version a binary built
+-- from this tree expects: the Reporting API's readiness refuses a database on 8
+-- and the pod stays out of rotation until the chain is applied. Running
+-- tally-reporting-admin migrate is therefore part of the deploy that rolls a
+-- Reporting API image built from here, and it goes first. In the dev cluster
+-- make up covers it, because it runs make migrate.
+
+-- +goose NO TRANSACTION
+-- +goose Up
+CREATE INDEX idx_events_received ON events (received_at)
+    WITH (timescaledb.transaction_per_chunk);
+
+-- +goose Down
+DROP INDEX IF EXISTS idx_events_received;
