@@ -152,11 +152,21 @@ func Load() (Config, error) {
 
 // ValidateDB is the gate of the subcommands backed by the engine's database. It
 // refuses a configuration they cannot honor instead of failing at the first
-// query. The reporting database and the VictoriaMetrics URL get their gates
-// from the packages that first use them.
+// query. The VictoriaMetrics URL gets its gate from the package that first uses
+// it.
 func (c Config) ValidateDB() error {
 	if c.DBURL == "" {
 		return fmt.Errorf("%s: must be set", envDBURL)
+	}
+	return nil
+}
+
+// ValidateReporting is the gate of the subcommands that read the reporting
+// database. It refuses a configuration they cannot honor instead of failing at
+// the first query.
+func (c Config) ValidateReporting() error {
+	if c.ReportingDBURL == "" {
+		return fmt.Errorf("%s: must be set", envReportingDBURL)
 	}
 	return nil
 }
