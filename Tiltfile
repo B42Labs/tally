@@ -14,6 +14,15 @@ docker_build(
     only=['go.mod', 'go.sum', 'cmd', 'internal', 'migrations', 'Dockerfile'],
 )
 
+docker_build(
+    'tally-engine',
+    context='.',
+    build_args={'CMD': 'tally-engine'},
+    # Only a Go change or a migration can alter the binary, which embeds the
+    # migration chain, so nothing else triggers a rebuild.
+    only=['go.mod', 'go.sum', 'cmd', 'internal', 'migrations', 'Dockerfile'],
+)
+
 k8s_yaml(kustomize('deploy/kubernetes/overlays/dev'))
 
 # Every service is reachable through the Gateway, so no port-forward is
@@ -27,6 +36,9 @@ k8s_resource(
     labels=['tally'],
     links=[link('https://api.tally.127-0-0-1.nip.io:8443/api/v1', 'API')],
 )
+# The scheduler serves nothing, so it carries no link: what it did is in the
+# logs of the hourly Job.
+k8s_resource('tally-engine', labels=['tally'])
 k8s_resource('timescaledb', labels=['infrastructure'])
 k8s_resource(
     'victoriametrics',
