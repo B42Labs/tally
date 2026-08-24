@@ -344,6 +344,118 @@ func TestCountEvents(t *testing.T) {
 	})
 }
 
+// TestLateEvents pins what detect-late is handed: the events dated inside the
+// period whose rows reached the database after the finalized run read it,
+// counted per resource. Both bounds keep one side out, so the seeds sit on
+// them: an event received at the snapshot itself is one the run saw, and an
+// event dated at the period end belongs to the next period however late it
+// arrived.
+func TestLateEvents(t *testing.T) {
+	db := storetest.NewDB(t)
+	pool := db.Store.Pool()
+
+	// The snapshot the finalized run of the period took.
+	since := insidePeriod
+
+	// Two resources of the metered cloud, and one of another cloud. The ids are
+	// seeded in the order the query returns them in only if it sorts.
+	late := resource("instance", "b-late")
+	bounds := resource("instance", "a-bounds")
+	far := source.Resource{
+		Cloud: otherCloud, Platform: platform, ResourceType: "instance", ResourceID: "a-other-cloud",
+	}
+
+	firstLate := since.Add(time.Hour)
+	lastLate := since.Add(2 * time.Hour)
+	farLate := since.Add(90 * time.Minute)
+	wellAfter := since.Add(3 * time.Hour)
+
+	// What makes an event late is a received_at strictly after the snapshot: the
+	// one received at the snapshot itself is a row the run already read.
+	seedEvent(t, pool, late, "late-at-snapshot", "instance.update", insidePeriod, since, activePayload)
+	seedEvent(t, pool, late, "late-before-snapshot", "instance.update",
+		insidePeriod, since.Add(-time.Hour), activePayload)
+	seedEvent(t, pool, late, "late-first", "instance.update", insidePeriod, firstLate, activePayload)
+	seedEvent(t, pool, late, "late-last", "instance.update",
+		insidePeriod.Add(time.Hour), lastLate, nil)
+	// All three of these arrived after the snapshot, so it is the timestamp
+	// alone that decides which of them the period holds.
+	seedEvent(t, pool, bounds, "bounds-at-period-start", "instance.create", periodFrom, wellAfter, activePayload)
+	seedEvent(t, pool, bounds, "bounds-at-period-end", "instance.update", periodTo, wellAfter, activePayload)
+	seedEvent(t, pool, bounds, "bounds-before-period", "instance.update", beforePeriod, wellAfter, activePayload)
+	seedEvent(t, pool, far, "far-late", "instance.create", insidePeriod, farLate, activePayload)
+
+	// Ordered by cloud, platform, resource type, resource id.
+	want := []source.LateResource{
+		{Resource: bounds, Events: 1, LastReceivedAt: wellAfter},
+		{Resource: late, Events: 2, LastReceivedAt: lastLate},
+		{Resource: far, Events: 1, LastReceivedAt: farLate},
+	}
+
+	t.Run("counts the events received after the snapshot per resource", func(t *testing.T) {
+		snap := openSnapshot(t, db.URL)
+
+		got, total, err := snap.LateEvents(t.Context(), periodFrom, periodTo, since)
+		if err != nil {
+			t.Fatalf("LateEvents() error = %v, want nil", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("LateEvents() = %+v, want %+v", got, want)
+		}
+		if total != len(want) {
+			t.Errorf("LateEvents() total = %d, want %d, the resources it listed", total, len(want))
+		}
+		for _, entry := range got {
+			if entry.LastReceivedAt.Location() != time.UTC {
+				t.Errorf("LateEvents() last received_at zone of %s = %v, want UTC",
+					entry.Resource.ResourceID, entry.LastReceivedAt.Location())
+			}
+		}
+	})
+
+	t.Run("lists nothing for a period nothing reached late", func(t *testing.T) {
+		snap := openSnapshot(t, db.URL)
+
+		got, total, err := snap.LateEvents(t.Context(), periodFrom, periodTo, afterPeriod)
+		if err != nil {
+			t.Fatalf("LateEvents() error = %v, want nil", err)
+		}
+		wantEmpty(t, "LateEvents()", got)
+		if total != 0 {
+			t.Errorf("LateEvents() total = %d, want none", total)
+		}
+	})
+
+	// A period finalized before its ingest had settled: every resource of the
+	// fleet carries a late event, which is more than a caller can print. It is
+	// metered two months on from the one above, which no other seed here reaches
+	// into, so the fleet is the whole of what the read finds.
+	t.Run("lists at most the limit and counts the rest", func(t *testing.T) {
+		const fleet = source.LateResourceLimit + 2
+		overflowFrom, overflowTo := afterPeriod, afterPeriod.AddDate(0, 1, 0)
+		seedLateFleet(t, pool, overflowFrom.Add(24*time.Hour), wellAfter, fleet)
+
+		snap := openSnapshot(t, db.URL)
+
+		got, total, err := snap.LateEvents(t.Context(), overflowFrom, overflowTo, since)
+		if err != nil {
+			t.Fatalf("LateEvents() error = %v, want nil", err)
+		}
+		if len(got) != source.LateResourceLimit {
+			t.Errorf("LateEvents() listed %d resources, want the %d the limit lets through",
+				len(got), source.LateResourceLimit)
+		}
+		if total != fleet {
+			t.Errorf("LateEvents() total = %d, want the %d that arrived late", total, fleet)
+		}
+		// The limit cuts the tail of the order the query sorts in rather than an
+		// arbitrary hundred of them.
+		if len(got) > 0 && got[0].Resource.ResourceID != "i-fleet-000001" {
+			t.Errorf("the first resource listed is %s, want i-fleet-000001", got[0].Resource.ResourceID)
+		}
+	})
+}
+
 // TestSnapshot pins what makes the transaction a snapshot: a run reads one
 // version of the reporting data however long it takes, and it knows which
 // version that was.
@@ -628,6 +740,18 @@ func TestReaderRole(t *testing.T) {
 		if events != 1 {
 			t.Errorf("CountEvents() = %d, want 1", events)
 		}
+
+		// The grouped read over the same hypertable, which detect-late issues.
+		// The seeded event was received inside the period, so a snapshot taken
+		// before it counts it as late.
+		lateEvents, _, err := snap.LateEvents(t.Context(), periodFrom, periodTo, beforePeriod)
+		if err != nil {
+			t.Fatalf("LateEvents() error = %v, want nil", err)
+		}
+		want := []source.LateResource{{Resource: metered, Events: 1, LastReceivedAt: insidePeriod}}
+		if !reflect.DeepEqual(lateEvents, want) {
+			t.Errorf("LateEvents() = %+v, want %+v", lateEvents, want)
+		}
 	})
 
 	t.Run("writes nothing and reads no credentials", func(t *testing.T) {
@@ -718,6 +842,13 @@ func TestReadsReportTheQueryThatFailed(t *testing.T) {
 				return err
 			},
 			want: "counting the instance.create events of " + cloud + "/instance/i-1:",
+		},
+		"LateEvents": {
+			read: func() error {
+				_, _, err := snap.LateEvents(t.Context(), periodFrom, periodTo, insidePeriod)
+				return err
+			},
+			want: "listing the late events:",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -866,6 +997,24 @@ func seedEvent(t *testing.T, pool *pgxpool.Pool, r source.Resource, eventID, eve
 		eventID, timestamp, receivedAt, eventType, r.Platform, r.Cloud,
 		r.ResourceType, r.ResourceID, projectID, payload); err != nil {
 		t.Fatalf("seeding the event %s: %v", eventID, err)
+	}
+}
+
+// seedLateFleet writes one late event for each of count resources, in one
+// statement: what the case it serves is about is how many of them a read lists
+// rather than what any one of them holds. The ids are padded so that the order
+// the query sorts in is the order they were seeded in.
+func seedLateFleet(t *testing.T, pool *pgxpool.Pool, timestamp, receivedAt time.Time, count int) {
+	t.Helper()
+
+	if _, err := pool.Exec(t.Context(),
+		`INSERT INTO events (event_id, timestamp, received_at, event_type, platform, cloud,
+		                     resource_type, resource_id, project_id, source)
+		 SELECT 'ev-fleet-' || n, $1, $2, 'instance.update', $3, $4, 'instance',
+		        'i-fleet-' || lpad(n::text, 6, '0'), $5, 'collector'
+		 FROM generate_series(1, $6) AS n`,
+		timestamp, receivedAt, platform, cloud, projectID, count); err != nil {
+		t.Fatalf("seeding %d late resources: %v", count, err)
 	}
 }
 
