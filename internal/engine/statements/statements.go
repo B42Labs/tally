@@ -335,8 +335,8 @@ type builder struct {
 
 // related is one related-costs entry and the pair of the project it bills,
 // which is what the entries of a root are sorted by. The pair rather than the
-// key it renders to: the escaping statementKey applies would order two entries
-// by where their halves happen to carry a separator rather than by whose costs
+// key it renders to: the escaping Key applies would order two entries by
+// where their halves happen to carry a separator rather than by whose costs
 // they are.
 type related struct {
 	key  ownerKey
@@ -401,8 +401,8 @@ func (o *owner) lineItems() []LineItem {
 // document holds is decided before any text is joined: merging two pairs would
 // put one customer's resource ids, states, hours and costs on the other's
 // invoice while the project the document is named after is whichever of them
-// was reached first. statementKey escapes both halves, so the two documents
-// carry two keys as well.
+// was reached first. Key escapes both halves, so the two documents carry two
+// keys as well.
 //
 // The project a document names is the one it is keyed to, so a root reached
 // over an attributed project first is named after the root rather than after
@@ -411,7 +411,7 @@ func documentOf(documents map[ownerKey]*builder, key ownerKey, projectID, platfo
 	document, held := documents[key]
 	if !held {
 		document = &builder{
-			key:       statementKey(key.cloud, key.projectID),
+			key:       Key(key.cloud, key.projectID),
 			projectID: projectID,
 			platform:  platform,
 			items:     []LineItem{},
@@ -523,11 +523,12 @@ func sum(items []LineItem) decimal.Decimal {
 	return total
 }
 
-// statementKey joins a cloud and a project id into the key a statement is
-// stored under. Both halves are escaped first, so the slash between them is the
-// only separator the key holds and no two pairs render the same one: see
-// Statement.Key.
-func statementKey(cloud, projectID string) string {
+// Key joins a cloud and a project id into the key a statement is stored under.
+// Both halves are escaped first, so the slash between them is the only
+// separator the key holds and no two pairs render the same one: see
+// Statement.Key. A credit note of a correction run is stored under the same
+// key, so a project's credit note lands where its statement did.
+func Key(cloud, projectID string) string {
 	return fmt.Sprintf("%s/%s", url.PathEscape(cloud), url.PathEscape(projectID))
 }
 
