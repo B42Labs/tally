@@ -178,6 +178,36 @@ func Execute(ctx context.Context, engine *pgxpool.Pool, reporting *source.DB, op
 	return result, err
 }
 
+// Reclaim fails the runs of one period whose process is gone and returns the
+// ids it took. It is what a caller that does not meter the period itself
+// reclaims through: the scheduler counts a month's failed runs before it
+// decides whether to meter it again, and a killed run that nothing has failed
+// yet counts as no failure at all.
+//
+// The period is locked the way Execute locks it, and for the same reason. What
+// stands for the missing process is the age of the run row, and that age bounds
+// no run of tally-engine run --period: a month large enough to meter for longer
+// than it would be failed underneath the process that is still metering it, and
+// the write that process is heading for would then be discarded whole. Under
+// the lock a run that still reads as 'running' has no process behind it.
+//
+// A period another process is metering yields an error wrapping
+// ErrRunInProgress and nothing is written, which is the answer the reclaim was
+// asking for: that run is the process the age was standing in for.
+func Reclaim(ctx context.Context, engine *pgxpool.Pool, periodFrom time.Time) ([]uuid.UUID, error) {
+	var reclaimed []uuid.UUID
+	month := period.Format(periodFrom)
+	err := withPeriodLock(ctx, engine, periodFrom, "tally-engine tick", func() error {
+		ids, err := sqlcgen.New(engine).ReclaimStaleRuns(ctx, timestamptz(periodFrom))
+		if err != nil {
+			return fmt.Errorf("reclaiming the stale runs of %s: %w", month, err)
+		}
+		reclaimed = uuidsOf(ids)
+		return nil
+	})
+	return reclaimed, err
+}
+
 // withPeriodLock runs fn under the period lock of periodFrom. retryHint is the
 // command the caller is retried with, which the refusal of a period another
 // process holds names.
