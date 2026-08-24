@@ -6,10 +6,11 @@
 // or anywhere else.
 //
 // Every reporting read of the engine is a method on Snapshot, the event count a
-// counter measures included (CountEvents). The transaction itself stays
-// unexported, so a later package that needs another query adds a method here
-// rather than taking a handle on the transaction and running its own statements
-// outside the snapshot.
+// counter measures included (CountEvents) and the late events a correction is
+// due for (LateEvents). The transaction itself stays unexported, so a later
+// package that needs another query adds a method here rather than taking a
+// handle on the transaction and running its own statements outside the
+// snapshot.
 //
 // A snapshot holds one connection for its lifetime and pins the reporting
 // database's vacuum horizon while it is open, which keeps dead tuples from
@@ -229,6 +230,74 @@ func (s *Snapshot) CountEvents(ctx context.Context, r Resource, eventType string
 			eventType, r.Cloud, r.ResourceType, r.ResourceID, err)
 	}
 	return count, nil
+}
+
+// LateResource is one resource of a period whose events reached the reporting
+// database after a run read it: how many arrived late, and when the last of
+// them did, in UTC.
+type LateResource struct {
+	Resource       Resource
+	Events         int64
+	LastReceivedAt time.Time
+}
+
+// LateResourceLimit is how many resources one LateEvents call lists. A period
+// finalized before its ingest had settled — a collector backlog that flushed
+// afterwards, a cloud re-synced from its history — has one late group per
+// resource of the fleet, and what the caller does with a group is print a line.
+// A hundred of them name what a period needs a correction for; a fleet's worth
+// of them is a terminal dump nobody reads and a row per resource carried across
+// the wire for it. What the limit leaves out is counted rather than dropped, so
+// how much arrived late is exact either way.
+const LateResourceLimit = 100
+
+// LateEvents counts, per (cloud, platform, resource_type, resource_id), the
+// events dated in [periodFrom, periodTo) whose received_at lies strictly after
+// since, which a caller passes as the snapshot time of the finalized run of the
+// period. The groups come back ordered by those four fields, and LastReceivedAt
+// is in UTC. A period nothing reached late is an empty slice rather than a nil
+// one, and no error.
+//
+// At most LateResourceLimit groups come back. The second return is how many
+// resources arrived late altogether, which is the length of the slice where the
+// limit left nothing out and larger where it did.
+//
+// It is what tally-engine detect-late reports: the resources a correction of
+// the period would re-meter from events the finalized run never saw.
+func (s *Snapshot) LateEvents(ctx context.Context, periodFrom, periodTo, since time.Time) (
+	[]LateResource, int, error,
+) {
+	rows, err := s.queries.ListLateEvents(ctx, sqlcgen.ListLateEventsParams{
+		MaxResources: LateResourceLimit,
+		PeriodFrom:   timestamptz(periodFrom),
+		PeriodTo:     timestamptz(periodTo),
+		Since:        timestamptz(since),
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing the late events: %w", err)
+	}
+
+	// Every row carries the same count, taken over the groups before the limit
+	// cut any of them off. No row at all is a period nothing reached late.
+	var total int
+	if len(rows) > 0 {
+		total = int(rows[0].Resources)
+	}
+
+	late := make([]LateResource, 0, len(rows))
+	for _, row := range rows {
+		late = append(late, LateResource{
+			Resource: Resource{
+				Cloud:        row.Cloud,
+				Platform:     row.Platform,
+				ResourceType: row.ResourceType,
+				ResourceID:   row.ResourceID,
+			},
+			Events:         row.Events,
+			LastReceivedAt: row.LastReceivedAt.Time.UTC(),
+		})
+	}
+	return late, total, nil
 }
 
 // Project is one entry of the project registry.

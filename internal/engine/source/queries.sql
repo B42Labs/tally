@@ -63,3 +63,43 @@ WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
   AND event_type = sqlc.arg('event_type')
   AND timestamp >= sqlc.arg('from_ts')::timestamptz
   AND timestamp < sqlc.arg('to_ts')::timestamptz;
+
+-- The late events of one billing period, the detection of WP 3.9
+-- (roadmap/03-phase-3-metering-rating.md, under "Late-event detection"): the
+-- events dated inside the period that were received strictly after the instant
+-- the caller passes, the runs.stats.snapshot_at of the finalized run, grouped
+-- per resource. The range over timestamp is answered by chunk exclusion, and
+-- the lower bound on received_at by idx_events_received (reporting migration
+-- 0009) on the uncompressed chunks; a chunk past the 90-day compression policy
+-- is segmented by (cloud, resource_type) and ordered by nothing, so its batches
+-- carry no bounds on received_at and are filtered after decompression, which is
+-- what detecting the late events of an older period pays.
+--
+-- The groups are bounded by max_resources. A period finalized before its ingest
+-- had settled has one group per resource of the fleet, and what a caller does
+-- with the groups is print one line each. The groups the limit cuts off are
+-- counted all the same: resources is how many arrived late whatever the limit
+-- let through, and every row carries it, so a caller that read one row knows
+-- how many it did not.
+--
+-- The strict comparison leaves one window open, and the issue holds it as a
+-- Non-Goal: an ingest transaction that began before the snapshot and committed
+-- after it carries a received_at below snapshot_at, so its events are not
+-- listed here although a correction of the period re-meters them. Ingest
+-- transactions are milliseconds long, and the window is recorded here rather
+-- than papered over with a margin.
+-- name: ListLateEvents :many
+WITH late AS (
+    SELECT cloud, platform, resource_type, resource_id,
+           count(*)::bigint AS events, max(received_at)::timestamptz AS last_received_at
+    FROM events
+    WHERE timestamp >= sqlc.arg('period_from')::timestamptz
+      AND timestamp < sqlc.arg('period_to')::timestamptz
+      AND received_at > sqlc.arg('since')::timestamptz
+    GROUP BY cloud, platform, resource_type, resource_id
+)
+SELECT cloud, platform, resource_type, resource_id, events, last_received_at,
+       (count(*) OVER ())::bigint AS resources
+FROM late
+ORDER BY cloud, platform, resource_type, resource_id
+LIMIT sqlc.arg('max_resources')::bigint;
