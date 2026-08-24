@@ -267,6 +267,37 @@ func TestValidateDB(t *testing.T) {
 	})
 }
 
+func TestValidateReporting(t *testing.T) {
+	t.Run("the reporting database url is required", func(t *testing.T) {
+		setEnv(t, map[string]string{"TALLY_ENGINE_DB_URL": "postgres://tally@localhost/engine"})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+
+		err = cfg.ValidateReporting()
+		if err == nil {
+			t.Fatal("ValidateReporting() error = nil, want an error")
+		}
+		if want := "TALLY_ENGINE_REPORTING_DB_URL: must be set"; err.Error() != want {
+			t.Errorf("ValidateReporting() error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("the reporting database url alone is enough", func(t *testing.T) {
+		setEnv(t, map[string]string{"TALLY_ENGINE_REPORTING_DB_URL": "postgres://tally-ro@localhost/tally"})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if err := cfg.ValidateReporting(); err != nil {
+			t.Errorf("ValidateReporting() error = %v, want nil", err)
+		}
+	})
+}
+
 // TestEnvNamesCoversEveryField keeps the exported list and the struct tags from
 // drifting apart. A variable missing from EnvNames is one the tests stop
 // removing, which makes them depend on the shell they run in.
