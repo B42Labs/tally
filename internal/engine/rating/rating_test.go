@@ -70,6 +70,31 @@ pricing:
           price_per_unit: "1"
 `
 
+// roundingModel is what makes the fifth decimal place of a quantity, and the
+// sixth of a state modifier, visible in the two-place amount they are billed
+// into: a counter priced at ten thousand per unit, and a time_gauge priced at a
+// thousand per unit-hour under a state modifier of six places. The schema takes
+// any non-negative price, so a modifier finer than a quantity is rendered at is
+// a model an operator can write.
+const roundingModel = `version: "2026-03"
+valid_from: "2026-03-01T00:00:00Z"
+currency: "EUR"
+pricing:
+  openstack:
+    bucket:
+      dimensions:
+        - metric: "egress_gb"
+          type: "counter"
+          price_per_unit: "10000"
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "1000"
+      state_modifiers:
+        shutoff: "0.123456"
+`
+
 // The resources the cases rate. Only the platform and the resource type select
 // a pricing entry; the rest travels through the pass untouched.
 var (
@@ -147,6 +172,32 @@ func assertAmounts(t *testing.T, got []rating.DimensionAmount, want []wantAmount
 	}
 }
 
+// assertQuantities holds a record's amounts against the quantities they were
+// rated from, in the same order and by value, so 18 and 18.0 are the same
+// quantity.
+func assertQuantities(t *testing.T, got []rating.DimensionAmount, want []string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("amounts = %d, want %d quantities", len(got), len(want))
+	}
+	for i, w := range want {
+		if expected := decimal.RequireFromString(w); !got[i].Quantity.Equal(expected) {
+			t.Errorf("%s quantity = %s, want %s", got[i].Metric, got[i].Quantity, w)
+		}
+	}
+}
+
+// assertModifier holds a record's state modifier against the one the pricing
+// entry names for the state of its draft.
+func assertModifier(t *testing.T, got rating.RecordRating, want string) {
+	t.Helper()
+
+	if expected := decimal.RequireFromString(want); !got.StateModifier.Equal(expected) {
+		t.Errorf("StateModifier = %s, want %s", got.StateModifier, want)
+	}
+}
+
 // rateOne rates the drafts of a single resource and returns its records. It
 // fails the case where the resource type was not priced.
 func rateOne(t *testing.T, model pricing.Model, resource source.Resource, drafts ...metering.UsageDraft) []rating.RecordRating {
@@ -197,29 +248,42 @@ func TestRateEndToEndExample(t *testing.T) {
 	records := []struct {
 		name string
 		want []wantAmount
+		// The quantities and the modifier the amounts were rated from, which a
+		// statement shows beside them: the size of the m1.large, the egress of
+		// the period, and what the state of the draft was billed at.
+		quantities []string
+		modifier   string
 	}{
 		{
 			name: "active for 240 hours",
 			want: []wantAmount{
 				{"vcpus", "19.20"}, {"ram_gb", "9.60"}, {"disk_gb", "19.20"}, {"egress_gb", "1.62"},
 			},
+			quantities: []string{"4", "8", "80", "18.0"},
+			modifier:   "1",
 		},
 		{
 			name: "shut off for 240 hours, at half the time_gauge price",
 			want: []wantAmount{
 				{"vcpus", "9.60"}, {"ram_gb", "4.80"}, {"disk_gb", "9.60"}, {"egress_gb", "0.00"},
 			},
+			quantities: []string{"4", "8", "80", "0"},
+			modifier:   "0.5",
 		},
 		{
 			name: "active for 264 hours, the egress rounded half away from zero",
 			want: []wantAmount{
 				{"vcpus", "21.12"}, {"ram_gb", "10.56"}, {"disk_gb", "21.12"}, {"egress_gb", "2.03"},
 			},
+			quantities: []string{"4", "8", "80", "22.5"},
+			modifier:   "1",
 		},
 	}
 	for i, record := range records {
 		t.Run(record.name, func(t *testing.T) {
 			assertAmounts(t, rated.Records[i].Amounts, record.want)
+			assertQuantities(t, rated.Records[i].Amounts, record.quantities)
+			assertModifier(t, rated.Records[i], record.modifier)
 		})
 	}
 }
@@ -232,6 +296,9 @@ func TestRateModifiers(t *testing.T) {
 			draft("in-use", 17280, map[string]any{"size_gb": float64(200), "type": "hdd"}))
 
 		assertAmounts(t, records[0].Amounts, []wantAmount{{"size_gb", "2.88"}})
+		// The volume entry names no state at all, so what halved the amount is
+		// the type and the record says as much.
+		assertModifier(t, records[0], "1")
 	})
 
 	t.Run("a state modifier of zero rates every time_gauge dimension as zero", func(t *testing.T) {
@@ -241,6 +308,7 @@ func TestRateModifiers(t *testing.T) {
 		assertAmounts(t, records[0].Amounts, []wantAmount{
 			{"vcpus", "0.00"}, {"ram_gb", "0.00"}, {"disk_gb", "0.00"}, {"egress_gb", "0.36"},
 		})
+		assertModifier(t, records[0], "0")
 	})
 
 	t.Run("a floating ip is priced by the count of one", func(t *testing.T) {
@@ -256,6 +324,9 @@ func TestRateModifiers(t *testing.T) {
 		assertAmounts(t, records[0].Amounts, []wantAmount{
 			{"vcpus", "9.60"}, {"ram_gb", "4.80"}, {"disk_gb", "9.60"}, {"egress_gb", "1.62"},
 		})
+		// The record carries the modifier of its state whatever the counter was
+		// rated at, because the statement shows it per period.
+		assertModifier(t, records[0], "0.5")
 	})
 
 	t.Run("a type nothing names is billed unmodified", func(t *testing.T) {
@@ -275,6 +346,9 @@ func TestRateEmitsEveryDimension(t *testing.T) {
 	free := []wantAmount{
 		{"vcpus", "0.00"}, {"ram_gb", "0.00"}, {"disk_gb", "0.00"}, {"egress_gb", "0.00"},
 	}
+	// A dimension billed at zero for want of a quantity carries zero as the
+	// quantity too, so a statement line shows no size beside the empty amount.
+	nothing := []string{"0", "0", "0", "0"}
 
 	cases := []struct {
 		name  string
@@ -298,6 +372,7 @@ func TestRateEmitsEveryDimension(t *testing.T) {
 			records := rateOne(t, model, instance, tc.draft)
 
 			assertAmounts(t, records[0].Amounts, free)
+			assertQuantities(t, records[0].Amounts, nothing)
 		})
 	}
 }
@@ -339,6 +414,33 @@ func TestQuantityTypes(t *testing.T) {
 			assertAmounts(t, records[0].Amounts, []wantAmount{{"egress_gb", tc.want}})
 		})
 	}
+}
+
+// TestRateRoundsToTheRenderedScale rates a quantity and a state modifier that
+// carry more places than a statement renders them at. Both are rounded to four
+// places before anything is billed at them, because the document of WP 3.7
+// prints them at that scale: a line a customer recomputes from the numbers it
+// shows has to come out at what it was charged.
+func TestRateRoundsToTheRenderedScale(t *testing.T) {
+	model := mustParse(t, roundingModel)
+
+	t.Run("the quantity an amount is rated from", func(t *testing.T) {
+		records := rateOne(t, model, bucket, draft("active", 60, map[string]any{"egress_gb": "10.00005"}))
+
+		assertQuantities(t, records[0].Amounts, []string{"10.0001"})
+		// 10.0001 at ten thousand per unit, and not the 100000.50 the unrounded
+		// 10.00005 the collector reported would have cost.
+		assertAmounts(t, records[0].Amounts, []wantAmount{{"egress_gb", "100001.00"}})
+	})
+
+	t.Run("the state modifier a period is billed at", func(t *testing.T) {
+		records := rateOne(t, model, instance, draft("shutoff", 60, map[string]any{"vcpus": float64(1)}))
+
+		assertModifier(t, records[0], "0.1235")
+		// One vcpu for one hour at a thousand, taken to 0.1235 and not to the
+		// 0.123456 the entry spells, which would have cost 123.46.
+		assertAmounts(t, records[0].Amounts, []wantAmount{{"vcpus", "123.50"}})
+	})
 }
 
 // TestUnpriced rates resources of types the model does not price, interleaved
@@ -532,9 +634,12 @@ func TestUnreadableQuantities(t *testing.T) {
 
 		// The dimension is still emitted, at the amount an absent quantity
 		// would have been billed at, so the record shows what it was held
-		// against either way.
+		// against either way. The flavor name is no quantity either, and the
+		// zero it leaves behind is what Unreadable above tells from a vCPU
+		// count nobody reported.
 		assertAmounts(t, result.Resources[0].Records[0].Amounts, []wantAmount{
 			{"vcpus", "0.00"}, {"ram_gb", "0.00"}, {"disk_gb", "0.00"}, {"egress_gb", "0.00"},
 		})
+		assertQuantities(t, result.Resources[0].Records[0].Amounts, []string{"0", "0", "0", "0"})
 	})
 }

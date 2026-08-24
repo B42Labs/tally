@@ -82,6 +82,12 @@ type ResourceRating struct {
 // resource type's pricing entry, in the order the entry lists them.
 type RecordRating struct {
 	Amounts []DimensionAmount
+	// StateModifier is what the draft's state was billed at, and one where the
+	// entry names no modifier for it, rounded to the four places a quantity is
+	// rendered at. It is held per record however few dimensions it reached: only
+	// a time_gauge dimension is multiplied by it, while a statement shows the
+	// modifier of the period it rated.
+	StateModifier decimal.Decimal
 }
 
 // DimensionAmount is what one dimension of one record costs, rounded with
@@ -91,6 +97,11 @@ type RecordRating struct {
 type DimensionAmount struct {
 	Metric string
 	Amount decimal.Decimal
+	// Quantity is what the amount was rated from: the value the record carried
+	// under Metric rounded to four places, and zero where it carried none, a
+	// null, or one no quantity reads from. It is not the amount over the price.
+	// Hours and both modifiers stand between the two on a time_gauge dimension.
+	Quantity decimal.Decimal
 }
 
 // UnpricedResourceType is a resource type the model does not price, and how
@@ -154,8 +165,8 @@ func Rate(model pricing.Model, resources []metering.ResourceUsage) Result {
 
 		records := make([]RecordRating, 0, len(resource.Drafts))
 		for _, draft := range resource.Drafts {
-			amounts, fields := rateDraft(entry, draft)
-			records = append(records, RecordRating{Amounts: amounts})
+			rated, fields := rateDraft(entry, draft)
+			records = append(records, rated)
 			for _, field := range fields {
 				unreadable[unreadableKey{
 					resource.Resource.Platform, resource.Resource.ResourceType, field,
@@ -202,10 +213,10 @@ func Rate(model pricing.Model, resources []metering.ResourceUsage) Result {
 }
 
 // rateDraft rates one draft against the pricing entry of its resource type, in
-// the order the entry lists its dimensions. Beside the amounts it returns the
+// the order the entry lists its dimensions. Beside the rating it returns the
 // usage fields it found a value under that it could not read, each named once
 // however many dimensions were rated from it.
-func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) ([]DimensionAmount, []string) {
+func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) (RecordRating, []string) {
 	var unreadable []string
 	note := func(field string) {
 		if !slices.Contains(unreadable, field) {
@@ -213,7 +224,12 @@ func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) ([]Dime
 		}
 	}
 
-	stateModifier := modifierOr1(entry.StateModifiers, draft.State)
+	// The statement of WP 3.7 shows this modifier for the period, at the four
+	// places a quantity is rendered at, so it is rounded to that scale before
+	// anything is billed at it: what a customer reads off the line is what the
+	// line was computed with. The type modifier reaches no document and stays as
+	// the operator wrote it.
+	stateModifier := money.RoundQuantity(modifierOr1(entry.StateModifiers, draft.State))
 	typeModifier := unmodified
 	// A size field named type is what the type modifiers of volumes and ionos
 	// servers key on. A resource that carries no type at all has none to be
@@ -234,6 +250,13 @@ func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) ([]Dime
 		if !readable {
 			note(dimension.Metric)
 		}
+		// A usage quantity is a four-place value (roadmap/00-conventions.md
+		// section 6) and the statement renders it as one. Rounding it here rather
+		// than where it is rendered is what keeps the amount computed from the
+		// quantity the document shows: a collector reporting 10.00005 GB is
+		// billed for the 10.0001 the line prints, not for a number the line does
+		// not carry.
+		quantity = money.RoundQuantity(quantity)
 
 		// A dimension type the schema does not allow cannot reach here, and
 		// would be billed as zero rather than at a price it does not carry.
@@ -254,11 +277,12 @@ func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) ([]Dime
 		}
 
 		amounts = append(amounts, DimensionAmount{
-			Metric: dimension.Metric,
-			Amount: money.Round2(cost),
+			Metric:   dimension.Metric,
+			Amount:   money.Round2(cost),
+			Quantity: quantity,
 		})
 	}
-	return amounts, unreadable
+	return RecordRating{Amounts: amounts, StateModifier: stateModifier}, unreadable
 }
 
 // modifierOr1 is the modifier a key carries, or one where the entry names
