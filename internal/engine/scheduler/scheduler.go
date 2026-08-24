@@ -328,7 +328,7 @@ func bill(ctx context.Context, engine *pgxpool.Pool, due Month, now time.Time, o
 		return fmt.Errorf("reading the completed run of %s: %w", month, err)
 	}
 	finalized := uuid.UUID(runID.Bytes)
-	if err := runs.Finalize(ctx, engine, due.From, finalized); err != nil {
+	if _, err := runs.Finalize(ctx, engine, due.From, finalized); err != nil {
 		return fmt.Errorf("closing %s: %w", month, err)
 	}
 	report.Finalized = true
