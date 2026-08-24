@@ -56,6 +56,30 @@ func (q *Queries) InsertPricingModel(ctx context.Context, arg InsertPricingModel
 	return result.RowsAffected(), nil
 }
 
+const insertProjectStatement = `-- name: InsertProjectStatement :exec
+INSERT INTO project_statements (run_id, project_id, document, total, currency)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertProjectStatementParams struct {
+	RunID     pgtype.UUID
+	ProjectID string
+	Document  []byte
+	Total     pgtype.Numeric
+	Currency  string
+}
+
+func (q *Queries) InsertProjectStatement(ctx context.Context, arg InsertProjectStatementParams) error {
+	_, err := q.db.Exec(ctx, insertProjectStatement,
+		arg.RunID,
+		arg.ProjectID,
+		arg.Document,
+		arg.Total,
+		arg.Currency,
+	)
+	return err
+}
+
 const listBillingPeriods = `-- name: ListBillingPeriods :many
 SELECT period_from, status, finalized_run_id, finalized_at
 FROM billing_periods
@@ -121,6 +145,40 @@ func (q *Queries) ListPricingModels(ctx context.Context) ([]ListPricingModelsRow
 			&i.ValidFrom,
 			&i.Currency,
 			&i.ImportedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectStatements = `-- name: ListProjectStatements :many
+SELECT id, run_id, project_id, document, total, currency
+FROM project_statements
+WHERE run_id = $1
+ORDER BY project_id
+`
+
+func (q *Queries) ListProjectStatements(ctx context.Context, runID pgtype.UUID) ([]ProjectStatement, error) {
+	rows, err := q.db.Query(ctx, listProjectStatements, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectStatement
+	for rows.Next() {
+		var i ProjectStatement
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunID,
+			&i.ProjectID,
+			&i.Document,
+			&i.Total,
+			&i.Currency,
 		); err != nil {
 			return nil, err
 		}
