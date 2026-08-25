@@ -1,0 +1,16 @@
+sources:
+  - platform: harbor
+    resource_type: repository
+    metric: pulls
+    kind: events
+    event_type: repository.pull
+  - platform: harbor
+    resource_type: repository
+    metric: pushes
+    kind: events
+    event_type: repository.push
+  - platform: harbor
+    resource_type: repository
+    metric: egress_gb
+    kind: metricsql
+    query: 'egress_gb{cloud="{cloud}",resource_id="{resource_id}"}[{window}]'

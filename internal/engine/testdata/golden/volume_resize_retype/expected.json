@@ -1,0 +1,70 @@
+{
+  "clouds": ["os-golden-volume"],
+  "stats": {"candidates": 1, "usage_records": 3, "rated_records": 3, "statements": 1},
+  "usage": [
+    {
+      "cloud": "os-golden-volume",
+      "platform": "openstack",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "state": "in-use",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-10T00:00:00Z",
+      "seconds": 777600,
+      "usage": {"minutes": "12960", "count": "1", "size_gb": "100", "type": "ssd"}
+    },
+    {
+      "cloud": "os-golden-volume",
+      "platform": "openstack",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "state": "in-use",
+      "from": "2026-03-10T00:00:00Z",
+      "to": "2026-03-20T00:00:00Z",
+      "seconds": 864000,
+      "usage": {"minutes": "14400", "count": "1", "size_gb": "200", "type": "ssd"}
+    },
+    {
+      "cloud": "os-golden-volume",
+      "platform": "openstack",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "state": "in-use",
+      "from": "2026-03-20T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1036800,
+      "usage": {"minutes": "17280", "count": "1", "size_gb": "200", "type": "hdd"}
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-volume", "resource_id": "vol-789", "from": "2026-03-01T00:00:00Z", "dimension": "size_gb", "quantity": "100", "amount": "2.16"},
+    {"cloud": "os-golden-volume", "resource_id": "vol-789", "from": "2026-03-10T00:00:00Z", "dimension": "size_gb", "quantity": "200", "amount": "4.80"},
+    {"cloud": "os-golden-volume", "resource_id": "vol-789", "from": "2026-03-20T00:00:00Z", "dimension": "size_gb", "quantity": "200", "amount": "2.88"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-volume/proj-456",
+      "total": "9.84",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-456",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "vol-789",
+          "total": "9.84",
+          "periods": [
+            {"state": "in-use", "hours": "216.00", "state_modifier": "1", "usage": {"size_gb": "100"}, "cost": {"size_gb": "2.16", "total": "2.16"}},
+            {"state": "in-use", "hours": "240.00", "state_modifier": "1", "usage": {"size_gb": "200"}, "cost": {"size_gb": "4.80", "total": "4.80"}},
+            {"state": "in-use", "hours": "288.00", "state_modifier": "1", "usage": {"size_gb": "200"}, "cost": {"size_gb": "2.88", "total": "2.88"}}
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

@@ -1,0 +1,82 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-team-alpha-app",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "repository.create",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {
+        "state": "active",
+        "size": {"storage_gb": 10}
+      }
+    },
+    {
+      "event_id": "ev-push-team-alpha-app",
+      "timestamp": "2026-03-18T00:00:00Z",
+      "event_type": "repository.push",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {
+        "state": "active",
+        "size": {"storage_gb": 15}
+      }
+    }
+  ],
+  "bulk": [
+    {
+      "event_type": "repository.pull",
+      "count": 812,
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-18T00:00:00Z",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {"state": "active"}
+    },
+    {
+      "event_type": "repository.pull",
+      "count": 711,
+      "from": "2026-03-18T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {"state": "active"}
+    },
+    {
+      "event_type": "repository.push",
+      "count": 47,
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-18T00:00:00Z",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {"state": "active"}
+    },
+    {
+      "event_type": "repository.push",
+      "count": 22,
+      "from": "2026-03-18T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "platform": "harbor",
+      "cloud": "hb-golden-harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "payload": {"state": "active"}
+    }
+  ]
+}

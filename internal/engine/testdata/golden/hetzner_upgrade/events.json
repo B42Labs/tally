@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-srv-001",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "server.create",
+      "platform": "hetzner",
+      "cloud": "hz-golden-upgrade",
+      "resource_type": "server",
+      "resource_id": "srv-001",
+      "project_id": "hetzner-proj-42",
+      "payload": {
+        "state": "running",
+        "size": {"vcpus": 2, "ram_gb": 4, "disk_gb": 40, "server_type": "cx21"}
+      }
+    },
+    {
+      "event_id": "ev-resize-srv-001",
+      "timestamp": "2026-03-15T00:00:00Z",
+      "event_type": "server.resize",
+      "platform": "hetzner",
+      "cloud": "hz-golden-upgrade",
+      "resource_type": "server",
+      "resource_id": "srv-001",
+      "project_id": "hetzner-proj-42",
+      "payload": {
+        "state": "running",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "server_type": "cx31"}
+      }
+    }
+  ],
+  "bulk": []
+}

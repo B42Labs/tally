@@ -1,0 +1,6 @@
+{
+  "projects": [
+    {"platform": "hetzner", "cloud": "hz-golden-upgrade", "external_id": "hetzner-proj-42"}
+  ],
+  "relations": []
+}

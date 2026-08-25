@@ -1,0 +1,86 @@
+{
+  "clouds": ["hz-golden-upgrade"],
+  "stats": {"candidates": 1, "usage_records": 2, "rated_records": 6, "statements": 1},
+  "usage": [
+    {
+      "cloud": "hz-golden-upgrade",
+      "platform": "hetzner",
+      "resource_type": "server",
+      "resource_id": "srv-001",
+      "project_id": "hetzner-proj-42",
+      "state": "running",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-15T00:00:00Z",
+      "seconds": 1209600,
+      "usage": {
+        "minutes": "20160",
+        "count": "1",
+        "vcpus": "2",
+        "ram_gb": "4",
+        "disk_gb": "40",
+        "server_type": "cx21"
+      }
+    },
+    {
+      "cloud": "hz-golden-upgrade",
+      "platform": "hetzner",
+      "resource_type": "server",
+      "resource_id": "srv-001",
+      "project_id": "hetzner-proj-42",
+      "state": "running",
+      "from": "2026-03-15T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1468800,
+      "usage": {
+        "minutes": "24480",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "server_type": "cx31"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "2", "amount": "10.08"},
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "4", "amount": "5.38"},
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "40", "amount": "10.75"},
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-15T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "24.48"},
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-15T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "13.06"},
+    {"cloud": "hz-golden-upgrade", "resource_id": "srv-001", "from": "2026-03-15T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "26.11"}
+  ],
+  "statements": [
+    {
+      "key": "hz-golden-upgrade/hetzner-proj-42",
+      "total": "89.86",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "hetzner-proj-42",
+      "platform": "hetzner",
+      "line_items": [
+        {
+          "resource_id": "srv-001",
+          "total": "89.86",
+          "periods": [
+            {
+              "state": "running",
+              "hours": "336.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "2", "ram_gb": "4", "disk_gb": "40"},
+              "cost": {"vcpus": "10.08", "ram_gb": "5.38", "disk_gb": "10.75", "total": "26.21"}
+            },
+            {
+              "state": "running",
+              "hours": "408.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80"},
+              "cost": {"vcpus": "24.48", "ram_gb": "13.06", "disk_gb": "26.11", "total": "63.65"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

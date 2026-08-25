@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-shoot-abc",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "shoot.create.end",
+      "platform": "gardener",
+      "cloud": "gd-golden-related",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "payload": {
+        "state": "active",
+        "size": {"worker_count": 3, "machine_type": "m1.xlarge"}
+      }
+    },
+    {
+      "event_id": "ev-create-worker-1",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-related",
+      "resource_type": "instance",
+      "resource_id": "worker-1",
+      "project_id": "shoot-abc-os-tenant",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 8, "ram_gb": 16, "disk_gb": 160, "flavor": "m1.xlarge"}
+      }
+    }
+  ],
+  "bulk": []
+}

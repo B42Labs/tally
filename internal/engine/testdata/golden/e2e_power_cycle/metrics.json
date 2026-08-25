@@ -1,0 +1,17 @@
+[
+  {
+    "query": "egress_gb{cloud=\"os-golden-e2e\",resource_id=\"abc-123\"}[240h]",
+    "at": "2026-03-11T00:00:00Z",
+    "value": "18.0"
+  },
+  {
+    "query": "egress_gb{cloud=\"os-golden-e2e\",resource_id=\"abc-123\"}[240h]",
+    "at": "2026-03-21T00:00:00Z",
+    "value": "0"
+  },
+  {
+    "query": "egress_gb{cloud=\"os-golden-e2e\",resource_id=\"abc-123\"}[264h]",
+    "at": "2026-04-01T00:00:00Z",
+    "value": "22.5"
+  }
+]

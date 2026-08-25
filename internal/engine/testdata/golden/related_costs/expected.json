@@ -1,0 +1,87 @@
+{
+  "clouds": ["gd-golden-related", "os-golden-related"],
+  "stats": {"candidates": 2, "usage_records": 2, "rated_records": 5, "statements": 1},
+  "usage": [
+    {
+      "cloud": "gd-golden-related",
+      "platform": "gardener",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {"minutes": "44640", "count": "1", "worker_count": "3", "machine_type": "m1.xlarge"}
+    },
+    {
+      "cloud": "os-golden-related",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "worker-1",
+      "project_id": "shoot-abc-os-tenant",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {
+        "minutes": "44640",
+        "count": "1",
+        "vcpus": "8",
+        "ram_gb": "16",
+        "disk_gb": "160",
+        "flavor": "m1.xlarge"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "gd-golden-related", "resource_id": "shoot-abc", "from": "2026-03-01T00:00:00Z", "dimension": "worker_count", "quantity": "3", "amount": "223.20"},
+    {"cloud": "os-golden-related", "resource_id": "worker-1", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "8", "amount": "119.04"},
+    {"cloud": "os-golden-related", "resource_id": "worker-1", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "16", "amount": "59.52"},
+    {"cloud": "os-golden-related", "resource_id": "worker-1", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "160", "amount": "119.04"},
+    {"cloud": "os-golden-related", "resource_id": "worker-1", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "gd-golden-related/team-alpha",
+      "total": "520.80",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "team-alpha",
+      "platform": "gardener",
+      "line_items": [
+        {
+          "resource_id": "shoot-abc",
+          "total": "223.20",
+          "periods": [
+            {"state": "active", "hours": "744.00", "state_modifier": "1", "usage": {"worker_count": "3"}, "cost": {"worker_count": "223.20", "total": "223.20"}}
+          ]
+        }
+      ],
+      "related_costs": [
+        {
+          "relation_type": "infrastructure_tenant",
+          "project_id": "shoot-abc-os-tenant",
+          "platform": "openstack",
+          "total": "297.60",
+          "line_items": [
+            {
+              "resource_id": "worker-1",
+              "total": "297.60",
+              "periods": [
+                {
+                  "state": "active",
+                  "hours": "744.00",
+                  "state_modifier": "1",
+                  "usage": {"vcpus": "8", "ram_gb": "16", "disk_gb": "160", "egress_gb": "0"},
+                  "cost": {"vcpus": "119.04", "ram_gb": "59.52", "disk_gb": "119.04", "egress_gb": "0.00", "total": "297.60"}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "absent_statements": ["os-golden-related/shoot-abc-os-tenant"]
+}

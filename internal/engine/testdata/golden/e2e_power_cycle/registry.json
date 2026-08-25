@@ -1,0 +1,6 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-e2e", "external_id": "proj-456"}
+  ],
+  "relations": []
+}

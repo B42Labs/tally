@@ -1,0 +1,121 @@
+{
+  "clouds": ["os-golden-e2e"],
+  "stats": {"candidates": 1, "usage_records": 3, "rated_records": 12, "statements": 1},
+  "usage": [
+    {
+      "cloud": "os-golden-e2e",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-11T00:00:00Z",
+      "seconds": 864000,
+      "usage": {
+        "minutes": "14400",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large",
+        "egress_gb": "18.0"
+      }
+    },
+    {
+      "cloud": "os-golden-e2e",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "state": "shutoff",
+      "from": "2026-03-11T00:00:00Z",
+      "to": "2026-03-21T00:00:00Z",
+      "seconds": 864000,
+      "usage": {
+        "minutes": "14400",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large",
+        "egress_gb": "0"
+      }
+    },
+    {
+      "cloud": "os-golden-e2e",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "state": "active",
+      "from": "2026-03-21T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 950400,
+      "usage": {
+        "minutes": "15840",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large",
+        "egress_gb": "22.5"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "19.20"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "9.60"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "19.20"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "18", "amount": "1.62"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-11T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "9.60"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-11T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "4.80"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-11T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "9.60"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-11T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-21T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "21.12"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-21T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "10.56"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-21T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "21.12"},
+    {"cloud": "os-golden-e2e", "resource_id": "abc-123", "from": "2026-03-21T00:00:00Z", "dimension": "egress_gb", "quantity": "22.5", "amount": "2.03"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-e2e/proj-456",
+      "total": "128.45",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-456",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "abc-123",
+          "total": "128.45",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "240.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "18"},
+              "cost": {"vcpus": "19.20", "ram_gb": "9.60", "disk_gb": "19.20", "egress_gb": "1.62", "total": "49.62"}
+            },
+            {
+              "state": "shutoff",
+              "hours": "240.00",
+              "state_modifier": "0.5",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "0"},
+              "cost": {"vcpus": "9.60", "ram_gb": "4.80", "disk_gb": "9.60", "egress_gb": "0.00", "total": "24.00"}
+            },
+            {
+              "state": "active",
+              "hours": "264.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "22.5"},
+              "cost": {"vcpus": "21.12", "ram_gb": "10.56", "disk_gb": "21.12", "egress_gb": "2.03", "total": "54.83"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

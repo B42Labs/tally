@@ -1,0 +1,6 @@
+{
+  "projects": [
+    {"platform": "gardener", "cloud": "gd-golden-shoot", "external_id": "team-alpha"}
+  ],
+  "relations": []
+}

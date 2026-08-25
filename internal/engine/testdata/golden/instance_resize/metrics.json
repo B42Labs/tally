@@ -1,0 +1,12 @@
+[
+  {
+    "query": "egress_gb{cloud=\"os-golden-resize\",resource_id=\"def-456\"}[360h]",
+    "at": "2026-03-16T00:00:00Z",
+    "value": "12.3"
+  },
+  {
+    "query": "egress_gb{cloud=\"os-golden-resize\",resource_id=\"def-456\"}[384h]",
+    "at": "2026-04-01T00:00:00Z",
+    "value": "24.7"
+  }
+]

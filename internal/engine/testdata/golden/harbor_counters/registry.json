@@ -1,0 +1,6 @@
+{
+  "projects": [
+    {"platform": "harbor", "cloud": "hb-golden-harbor", "external_id": "harbor-team-alpha"}
+  ],
+  "relations": []
+}

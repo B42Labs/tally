@@ -1,0 +1,86 @@
+{
+  "clouds": ["hb-golden-harbor"],
+  "stats": {"candidates": 1, "usage_records": 2, "rated_records": 6, "statements": 1},
+  "usage": [
+    {
+      "cloud": "hb-golden-harbor",
+      "platform": "harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-18T00:00:00Z",
+      "seconds": 1468800,
+      "usage": {
+        "minutes": "24480",
+        "count": "1",
+        "storage_gb": "10",
+        "pulls": "812",
+        "pushes": "47",
+        "egress_gb": "38.5"
+      }
+    },
+    {
+      "cloud": "hb-golden-harbor",
+      "platform": "harbor",
+      "resource_type": "repository",
+      "resource_id": "team-alpha/app",
+      "project_id": "harbor-team-alpha",
+      "state": "active",
+      "from": "2026-03-18T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1209600,
+      "usage": {
+        "minutes": "20160",
+        "count": "1",
+        "storage_gb": "15",
+        "pulls": "711",
+        "pushes": "23",
+        "egress_gb": "31.2"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-01T00:00:00Z", "dimension": "storage_gb", "quantity": "10", "amount": "0.20"},
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "38.5", "amount": "4.62"},
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-01T00:00:00Z", "dimension": "pulls", "quantity": "812", "amount": "0.00"},
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-18T00:00:00Z", "dimension": "storage_gb", "quantity": "15", "amount": "0.25"},
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-18T00:00:00Z", "dimension": "egress_gb", "quantity": "31.2", "amount": "3.74"},
+    {"cloud": "hb-golden-harbor", "resource_id": "team-alpha/app", "from": "2026-03-18T00:00:00Z", "dimension": "pulls", "quantity": "711", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "hb-golden-harbor/harbor-team-alpha",
+      "total": "8.81",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "harbor-team-alpha",
+      "platform": "harbor",
+      "line_items": [
+        {
+          "resource_id": "team-alpha/app",
+          "total": "8.81",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "408.00",
+              "state_modifier": "1",
+              "usage": {"storage_gb": "10", "egress_gb": "38.5", "pulls": "812"},
+              "cost": {"storage_gb": "0.20", "egress_gb": "4.62", "pulls": "0.00", "total": "4.82"}
+            },
+            {
+              "state": "active",
+              "hours": "336.00",
+              "state_modifier": "1",
+              "usage": {"storage_gb": "15", "egress_gb": "31.2", "pulls": "711"},
+              "cost": {"storage_gb": "0.25", "egress_gb": "3.74", "pulls": "0.00", "total": "3.99"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

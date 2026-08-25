@@ -1,0 +1,84 @@
+{
+  "clouds": ["gd-golden-shoot"],
+  "stats": {"candidates": 1, "usage_records": 4, "rated_records": 4, "statements": 1},
+  "usage": [
+    {
+      "cloud": "gd-golden-shoot",
+      "platform": "gardener",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-12T00:00:00Z",
+      "seconds": 950400,
+      "usage": {"minutes": "15840", "count": "1", "worker_count": "3", "machine_type": "m1.xlarge"}
+    },
+    {
+      "cloud": "gd-golden-shoot",
+      "platform": "gardener",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "state": "active",
+      "from": "2026-03-12T00:00:00Z",
+      "to": "2026-03-25T00:00:00Z",
+      "seconds": 1123200,
+      "usage": {"minutes": "18720", "count": "1", "worker_count": "5", "machine_type": "m1.xlarge"}
+    },
+    {
+      "cloud": "gd-golden-shoot",
+      "platform": "gardener",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "state": "hibernated",
+      "from": "2026-03-25T00:00:00Z",
+      "to": "2026-03-28T00:00:00Z",
+      "seconds": 259200,
+      "usage": {"minutes": "4320", "count": "1", "worker_count": "5", "machine_type": "m1.xlarge"}
+    },
+    {
+      "cloud": "gd-golden-shoot",
+      "platform": "gardener",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "state": "active",
+      "from": "2026-03-28T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 345600,
+      "usage": {"minutes": "5760", "count": "1", "worker_count": "5", "machine_type": "m1.xlarge"}
+    }
+  ],
+  "rated": [
+    {"cloud": "gd-golden-shoot", "resource_id": "shoot-abc", "from": "2026-03-01T00:00:00Z", "dimension": "worker_count", "quantity": "3", "amount": "79.20"},
+    {"cloud": "gd-golden-shoot", "resource_id": "shoot-abc", "from": "2026-03-12T00:00:00Z", "dimension": "worker_count", "quantity": "5", "amount": "156.00"},
+    {"cloud": "gd-golden-shoot", "resource_id": "shoot-abc", "from": "2026-03-25T00:00:00Z", "dimension": "worker_count", "quantity": "5", "amount": "0.00"},
+    {"cloud": "gd-golden-shoot", "resource_id": "shoot-abc", "from": "2026-03-28T00:00:00Z", "dimension": "worker_count", "quantity": "5", "amount": "48.00"}
+  ],
+  "statements": [
+    {
+      "key": "gd-golden-shoot/team-alpha",
+      "total": "283.20",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "team-alpha",
+      "platform": "gardener",
+      "line_items": [
+        {
+          "resource_id": "shoot-abc",
+          "total": "283.20",
+          "periods": [
+            {"state": "active", "hours": "264.00", "state_modifier": "1", "usage": {"worker_count": "3"}, "cost": {"worker_count": "79.20", "total": "79.20"}},
+            {"state": "active", "hours": "312.00", "state_modifier": "1", "usage": {"worker_count": "5"}, "cost": {"worker_count": "156.00", "total": "156.00"}},
+            {"state": "hibernated", "hours": "72.00", "state_modifier": "0", "usage": {"worker_count": "5"}, "cost": {"worker_count": "0.00", "total": "0.00"}},
+            {"state": "active", "hours": "96.00", "state_modifier": "1", "usage": {"worker_count": "5"}, "cost": {"worker_count": "48.00", "total": "48.00"}}
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

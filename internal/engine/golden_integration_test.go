@@ -19,6 +19,9 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/b42labs/tally/internal/engine/export"
+	"github.com/b42labs/tally/internal/engine/runs"
 )
 
 // TestGoldenStubQuerier pins the stub the metricsql sources of the suite are
@@ -144,4 +147,45 @@ func TestGoldenExpandBulk(t *testing.T) {
 			t.Errorf("distinct event ids = %d, want the 19 the six generators stand for", len(ids))
 		}
 	})
+}
+
+// TestGolden runs the cases that meter one period once and read the result
+// back. Each of them gets its own pair of databases inside the containers the
+// fixture starts, so the cases share the containers and run in any order.
+func TestGolden(t *testing.T) {
+	f := newGoldenFixture(t)
+
+	for _, name := range []string{
+		"instance_resize",
+		"hetzner_upgrade",
+		"volume_resize_retype",
+		"shoot_scale_hibernate",
+		"harbor_counters",
+		"e2e_power_cycle",
+		"related_costs",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := loadCase(t, name)
+			want := loadExpected(t, name)
+			dbs := f.caseDatabases(t, name)
+
+			seedRegistry(t, dbs, c.Registry)
+			seedEvents(t, dbs, c.Events)
+
+			result, err := runs.Execute(t.Context(), dbs.engine, dbs.source, c.options(t, want.Clouds))
+			if err != nil {
+				t.Fatalf("runs.Execute: %v", err)
+			}
+			assertClean(t, result)
+			assertStats(t, result.Stats, want.Stats)
+			assertUsage(t, dbs, result.RunID, want.Usage)
+
+			run, err := export.Load(t.Context(), dbs.engine, result.RunID)
+			if err != nil {
+				t.Fatalf("export.Load: %v", err)
+			}
+			assertRated(t, run.Rated, want.Rated)
+			assertStatements(t, run.Statements, want.Statements, want.AbsentStatements)
+		})
+	}
 }
