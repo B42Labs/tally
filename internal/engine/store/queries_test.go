@@ -9,9 +9,14 @@
 //
 // The queries a correction is built from are held here too: which run it takes
 // as its baseline, the key it diffs by, and the delta rows it writes.
+//
+// The reads an export loads a run through are held here as well: the run row
+// itself, taken without a lock, and the two listings whose ordering is what
+// makes two exports of one run identical.
 package store_test
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -217,6 +222,98 @@ func TestLatestFinalizedRun(t *testing.T) {
 	})
 }
 
+// TestGetRun pins the read an export loads a run through. Every column of the
+// row has to arrive, a run that does not exist has to read as no row rather
+// than as an empty one, and the read must take no lock: an export runs beside
+// the finalization of another run, and a read that queued behind that row would
+// hold the finalization up in turn.
+func TestGetRun(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	corrected := openRun(t, db, "finalized")
+	// A fixed instant rather than now(): timestamptz keeps microseconds, and an
+	// assertion over the column is only exact if what went in was.
+	startedAt := periodTo.Add(time.Hour)
+	runID := openSeededRun(t, db, runSeed{
+		kind: "correction", status: "completed", correctsRunID: corrected, startedAt: startedAt,
+	})
+
+	t.Run("reads every column of a run", func(t *testing.T) {
+		row, err := q.GetRun(t.Context(), runID)
+		if err != nil {
+			t.Fatalf("GetRun() error = %v, want nil", err)
+		}
+		if row.ID != runID {
+			t.Errorf("GetRun() = %s, want %s", uuid.UUID(row.ID.Bytes), uuid.UUID(runID.Bytes))
+		}
+		if stamp(row.PeriodFrom.Time) != stamp(periodFrom) || stamp(row.PeriodTo.Time) != stamp(periodTo) {
+			t.Errorf("the run covers %s to %s, want %s to %s",
+				stamp(row.PeriodFrom.Time), stamp(row.PeriodTo.Time), stamp(periodFrom), stamp(periodTo))
+		}
+		if row.Kind != "correction" {
+			t.Errorf("the run is a %q run, want correction", row.Kind)
+		}
+		if row.CorrectsRunID != corrected {
+			t.Errorf("the run corrects %s, want %s",
+				uuid.UUID(row.CorrectsRunID.Bytes), uuid.UUID(corrected.Bytes))
+		}
+		if row.PricingVersion.String != "v1" {
+			t.Errorf("the run priced against %q, want v1", row.PricingVersion.String)
+		}
+		if row.Status != "completed" {
+			t.Errorf("the run is %q, want completed", row.Status)
+		}
+		if len(row.Clouds) != 0 {
+			t.Errorf("the run names the clouds %v, want the empty default", row.Clouds)
+		}
+		if string(row.Stats) != "{}" {
+			t.Errorf("the run carries the stats %s, want the empty default", row.Stats)
+		}
+		if stamp(row.StartedAt.Time) != stamp(startedAt) {
+			t.Errorf("the run started %s, want %s", stamp(row.StartedAt.Time), stamp(startedAt))
+		}
+		if row.CompletedAt.Valid {
+			t.Errorf("the run completed %s, want the null of a run no end was written for",
+				stamp(row.CompletedAt.Time))
+		}
+	})
+
+	t.Run("reports no row for a run that does not exist", func(t *testing.T) {
+		unknown := pgtype.UUID{Bytes: uuid.New(), Valid: true}
+
+		_, err := q.GetRun(t.Context(), unknown)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("GetRun() error = %v, want %v", err, pgx.ErrNoRows)
+		}
+	})
+
+	t.Run("reads a run another transaction holds locked", func(t *testing.T) {
+		tx, err := db.Store.Pool().Begin(t.Context())
+		if err != nil {
+			t.Fatalf("beginning the locking transaction: %v", err)
+		}
+		defer func() {
+			if err := tx.Rollback(t.Context()); err != nil {
+				t.Errorf("rolling the locking transaction back: %v", err)
+			}
+		}()
+		if _, err := sqlcgen.New(tx).GetRunForUpdate(t.Context(), runID); err != nil {
+			t.Fatalf("GetRunForUpdate() error = %v, want nil", err)
+		}
+
+		// The transaction above holds FOR NO KEY UPDATE on the row until the
+		// rollback. A GetRun carrying a FOR clause would wait it out, which is
+		// what the deadline turns from a hung test into a failing one.
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+
+		if _, err := q.GetRun(ctx, runID); err != nil {
+			t.Fatalf("GetRun() error = %v, want nil: the read must not queue behind the row lock", err)
+		}
+	})
+}
+
 // TestSumRatedByRun pins the key a correction diffs by. One resource is metered
 // into as many usage drafts as its history has intervals, and the diff is over
 // the resource rather than over those drafts: the amounts of one dimension have
@@ -270,6 +367,89 @@ func TestSumRatedByRun(t *testing.T) {
 		}
 		if len(rows) != 0 {
 			t.Errorf("SumRatedByRun() = %v, want no rows", rows)
+		}
+	})
+}
+
+// TestListRatedRecords pins the order an export walks the rated records of a
+// run in. Two exports of one run have to come out byte-identical, and that
+// holds only where the ordering is a total one: the drafts of one resource
+// never overlap, so from_ts settles the records of a resource and the dimension
+// settles the amounts of a draft.
+func TestListRatedRecords(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	runID := openRun(t, db, "completed")
+	middle := periodFrom.AddDate(0, 0, 10)
+	// The resource ids sort against their clouds, so an ordering that read the
+	// resource before the cloud would hand the two resources back the other way
+	// round.
+	early := seedUsageRecordIn(t, db, runID, "os-a", "z-9", "tenant-z", periodFrom, middle)
+	late := seedUsageRecordIn(t, db, runID, "os-a", "z-9", "tenant-z", middle, periodTo)
+	other := seedUsageRecordIn(t, db, runID, "os-b", "a-1", "tenant-a", periodFrom, periodTo)
+	// Written in none of the orders the case asserts.
+	seedRatedRecord(t, db, runID, late, "vcpus", "5.50")
+	seedRatedRecord(t, db, runID, other, "vcpus", "1.00")
+	seedRatedRecord(t, db, runID, early, "vcpus", "10.00")
+	seedRatedRecord(t, db, runID, late, "ram_gb", "1.25")
+	seedRatedRecord(t, db, runID, early, "ram_gb", "2.25")
+
+	type record struct {
+		cloud, platform, resourceType, resourceID, projectID, state string
+		from, to, usage, dimension, amount, currency                string
+	}
+
+	t.Run("reads the rated records of a run in cloud, resource, time and dimension order", func(t *testing.T) {
+		rows, err := q.ListRatedRecords(t.Context(), runID)
+		if err != nil {
+			t.Fatalf("ListRatedRecords() error = %v, want nil", err)
+		}
+		got := make([]record, 0, len(rows))
+		for _, row := range rows {
+			got = append(got, record{
+				row.Cloud, row.Platform, row.ResourceType, row.ResourceID, row.ProjectID, row.State,
+				stamp(row.FromTs.Time), stamp(row.ToTs.Time), string(row.Usage),
+				row.Dimension, amountText(t, row.Amount), row.Currency,
+			})
+		}
+		usage := `{"vcpus": 4}`
+		want := []record{
+			{
+				"os-a", "compute", "vm", "z-9", "tenant-z", "active",
+				stamp(periodFrom), stamp(middle), usage, "ram_gb", "2.25", "EUR",
+			},
+			{
+				"os-a", "compute", "vm", "z-9", "tenant-z", "active",
+				stamp(periodFrom), stamp(middle), usage, "vcpus", "10.00", "EUR",
+			},
+			{
+				"os-a", "compute", "vm", "z-9", "tenant-z", "active",
+				stamp(middle), stamp(periodTo), usage, "ram_gb", "1.25", "EUR",
+			},
+			{
+				"os-a", "compute", "vm", "z-9", "tenant-z", "active",
+				stamp(middle), stamp(periodTo), usage, "vcpus", "5.50", "EUR",
+			},
+			{
+				"os-b", "compute", "vm", "a-1", "tenant-a", "active",
+				stamp(periodFrom), stamp(periodTo), usage, "vcpus", "1.00", "EUR",
+			},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ListRatedRecords() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("reports nothing for a run that rated nothing", func(t *testing.T) {
+		empty := openRun(t, db, "completed")
+
+		rows, err := q.ListRatedRecords(t.Context(), empty)
+		if err != nil {
+			t.Fatalf("ListRatedRecords() error = %v, want nil", err)
+		}
+		if len(rows) != 0 {
+			t.Errorf("ListRatedRecords() = %v, want no rows", rows)
 		}
 	})
 }
@@ -345,6 +525,70 @@ func TestCreateCorrectionDeltas(t *testing.T) {
 	})
 }
 
+// TestListCorrectionDeltas pins the order an export walks the deltas of a
+// correction in, which is the order corrections.Diff sorted them in before they
+// were written. The rows land through a copy, and a copy keeps no order of its
+// own, so the ordering the reader gets has to come from the statement.
+func TestListCorrectionDeltas(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	corrected := openRun(t, db, "finalized")
+	correction := openSeededRun(t, db, runSeed{
+		kind: "correction", status: "running", correctsRunID: corrected,
+	})
+	// Written in none of the orders the case asserts, and with the resource ids
+	// sorting against their clouds and one resource split over two projects, so
+	// that every key column of the ordering is read.
+	seedCorrectionDelta(t, db, correction, corrected, "os-b", "a-1", "tenant-a", "vcpus", "8.00", "6.00", "-2.00")
+	seedCorrectionDelta(t, db, correction, corrected, "os-a", "z-9", "tenant-a", "vcpus", "59.52", "49.92", "-9.60")
+	seedCorrectionDelta(t, db, correction, corrected, "os-a", "z-9", "tenant-b", "vcpus", "4.00", "5.00", "1.00")
+	seedCorrectionDelta(t, db, correction, corrected, "os-a", "z-9", "tenant-a", "ram_gb", "29.76", "24.96", "-4.80")
+
+	type delta struct {
+		cloud, platform, resourceType, resourceID, projectID, dimension string
+		oldAmount, newAmount, difference, currency                      string
+	}
+
+	t.Run("reads the deltas of a correction in the order they were diffed in", func(t *testing.T) {
+		rows, err := q.ListCorrectionDeltas(t.Context(), correction)
+		if err != nil {
+			t.Fatalf("ListCorrectionDeltas() error = %v, want nil", err)
+		}
+		got := make([]delta, 0, len(rows))
+		for _, row := range rows {
+			got = append(got, delta{
+				row.Cloud, row.Platform, row.ResourceType, row.ResourceID, row.ProjectID, row.Dimension,
+				amountText(t, row.OldAmount), amountText(t, row.NewAmount),
+				amountText(t, row.Delta), row.Currency,
+			})
+		}
+		want := []delta{
+			{"os-a", "compute", "vm", "z-9", "tenant-a", "ram_gb", "29.76", "24.96", "-4.80", "EUR"},
+			{"os-a", "compute", "vm", "z-9", "tenant-a", "vcpus", "59.52", "49.92", "-9.60", "EUR"},
+			{"os-a", "compute", "vm", "z-9", "tenant-b", "vcpus", "4.00", "5.00", "1.00", "EUR"},
+			{"os-b", "compute", "vm", "a-1", "tenant-a", "vcpus", "8.00", "6.00", "-2.00", "EUR"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ListCorrectionDeltas() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("reports nothing for a run that corrected nothing", func(t *testing.T) {
+		empty := openSeededRun(t, db, runSeed{
+			kind: "correction", status: "running", correctsRunID: corrected,
+		})
+
+		rows, err := q.ListCorrectionDeltas(t.Context(), empty)
+		if err != nil {
+			t.Fatalf("ListCorrectionDeltas() error = %v, want nil", err)
+		}
+		if len(rows) != 0 {
+			t.Errorf("ListCorrectionDeltas() = %v, want no rows", rows)
+		}
+	})
+}
+
 // runSeed is the run a case starts from: its kind, the status it carries, the
 // run it corrects where it is a correction, and the time it started. An
 // invalid correctsRunID is the NULL a run that corrects nothing stores, and a
@@ -396,13 +640,29 @@ func seedUsageRecord(
 ) pgtype.UUID {
 	t.Helper()
 
+	return seedUsageRecordIn(t, db, runID, "openstack", resourceID, projectID, from, to)
+}
+
+// seedUsageRecordIn writes that draft into the cloud a case names. The cloud
+// leads the order the listings hand their rows back in, so a case pinning that
+// order needs drafts in more than the one cloud above.
+func seedUsageRecordIn(
+	t *testing.T,
+	db storetest.DB,
+	runID pgtype.UUID,
+	cloud, resourceID, projectID string,
+	from, to time.Time,
+) pgtype.UUID {
+	t.Helper()
+
 	var id uuid.UUID
 	if err := db.Store.Pool().QueryRow(t.Context(),
 		`INSERT INTO usage_records (run_id, cloud, platform, resource_type, resource_id, project_id,
 		                            state, from_ts, to_ts, seconds, usage)
-		 VALUES ($1, 'openstack', 'compute', 'vm', $2, $3, 'active', $4, $5, $6, '{"vcpus": 4}')
+		 VALUES ($1, $2, 'compute', 'vm', $3, $4, 'active', $5, $6, $7, '{"vcpus": 4}')
 		 RETURNING id`,
-		runID, resourceID, projectID, from, to, int64(to.Sub(from)/time.Second)).Scan(&id); err != nil {
+		runID, cloud, resourceID, projectID, from, to,
+		int64(to.Sub(from)/time.Second)).Scan(&id); err != nil {
 		t.Fatalf("seeding the usage record of %s: %v", resourceID, err)
 	}
 	return pgtype.UUID{Bytes: id, Valid: true}
@@ -422,6 +682,29 @@ func seedRatedRecord(
 		 VALUES ($1, $2, $3, $4, 'EUR')`,
 		runID, usageRecordID, dimension, numeric(t, amount)); err != nil {
 		t.Fatalf("seeding the %s amount %s: %v", dimension, amount, err)
+	}
+}
+
+// seedCorrectionDelta writes one delta row of a correction. The insert is plain
+// SQL for the reason openSeededRun's is: the statement under test is the read,
+// so it is not also what sets the rows up.
+func seedCorrectionDelta(
+	t *testing.T,
+	db storetest.DB,
+	runID, correctsRunID pgtype.UUID,
+	cloud, resourceID, projectID, dimension string,
+	oldAmount, newAmount, difference string,
+) {
+	t.Helper()
+
+	if _, err := db.Store.Pool().Exec(t.Context(),
+		`INSERT INTO correction_deltas (run_id, corrects_run_id, cloud, platform, resource_type,
+		                                resource_id, project_id, dimension,
+		                                old_amount, new_amount, delta, currency)
+		 VALUES ($1, $2, $3, 'compute', 'vm', $4, $5, $6, $7, $8, $9, 'EUR')`,
+		runID, correctsRunID, cloud, resourceID, projectID, dimension,
+		numeric(t, oldAmount), numeric(t, newAmount), numeric(t, difference)); err != nil {
+		t.Fatalf("seeding the %s delta of %s: %v", dimension, resourceID, err)
 	}
 }
 
@@ -477,6 +760,14 @@ func amountText(t *testing.T, amount pgtype.Numeric) string {
 		t.Fatalf("the stored amount is a %T, want it as text", value)
 	}
 	return text
+}
+
+// stamp renders a timestamp the way a case compares it. Two instants that are
+// the same moment in different locations are not the same time.Time, and what
+// pgx hands back carries the session's location rather than the one a case
+// wrote.
+func stamp(ts time.Time) string {
+	return ts.UTC().Format(time.RFC3339)
 }
 
 // readRunStatus reads back what a run is stored as.

@@ -108,6 +108,15 @@ FROM runs
 WHERE id = $1
 FOR NO KEY UPDATE;
 
+-- The same eleven columns without a FOR clause. An export only reads a run, so
+-- it takes no row lock: the FOR NO KEY UPDATE above would queue the export
+-- behind a run being finalized, and hold that finalization up in turn.
+-- name: GetRun :one
+SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
+       status, clouds, stats, started_at, completed_at
+FROM runs
+WHERE id = $1;
+
 -- The three ends of a run. stats carries what the run counted, and the failed
 -- one keeps it: a run that broke halfway is read for how far it got.
 --
@@ -227,6 +236,30 @@ JOIN usage_records u ON u.id = r.usage_record_id
 WHERE r.run_id = $1
 GROUP BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension, r.currency
 ORDER BY u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, r.dimension;
+
+-- One row per rated record of a run, joined to the usage record it rates. The
+-- ordering is a total one: the drafts of one resource never overlap (draftsOf
+-- in internal/engine/metering/metering.go builds them from the intervals of a
+-- folded history), so from_ts is unique per resource within a run, and rating
+-- emits one record per usage record and dimension. That total order is what
+-- makes two exports of one run byte-identical. idx_rated_run serves the filter.
+-- name: ListRatedRecords :many
+SELECT u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, u.state,
+       u.from_ts, u.to_ts, u.usage, r.dimension, r.amount, r.currency
+FROM rated_records r
+JOIN usage_records u ON u.id = r.usage_record_id
+WHERE r.run_id = $1
+ORDER BY u.cloud, u.platform, u.resource_type, u.resource_id, u.from_ts, r.dimension;
+
+-- The delta rows of a correction run, in the order corrections.Diff sorts by
+-- (internal/engine/corrections/corrections.go), so an export prints them as the
+-- correction computed them. idx_delta_run serves the filter.
+-- name: ListCorrectionDeltas :many
+SELECT cloud, platform, resource_type, resource_id, project_id, dimension,
+       old_amount, new_amount, delta, currency
+FROM correction_deltas
+WHERE run_id = $1
+ORDER BY cloud, platform, resource_type, resource_id, project_id, dimension;
 
 -- The record writes of a run, over the COPY protocol: a month of metering is
 -- tens of thousands of rows, and one round trip per row is what that costs.

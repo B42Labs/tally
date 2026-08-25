@@ -212,6 +212,35 @@ func (q *Queries) GetPricingModel(ctx context.Context, version string) (PricingM
 	return i, err
 }
 
+const getRun = `-- name: GetRun :one
+SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
+       status, clouds, stats, started_at, completed_at
+FROM runs
+WHERE id = $1
+`
+
+// The same eleven columns without a FOR clause. An export only reads a run, so
+// it takes no row lock: the FOR NO KEY UPDATE above would queue the export
+// behind a run being finalized, and hold that finalization up in turn.
+func (q *Queries) GetRun(ctx context.Context, id pgtype.UUID) (Run, error) {
+	row := q.db.QueryRow(ctx, getRun, id)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PeriodFrom,
+		&i.PeriodTo,
+		&i.Kind,
+		&i.CorrectsRunID,
+		&i.PricingVersion,
+		&i.Status,
+		&i.Clouds,
+		&i.Stats,
+		&i.StartedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const getRunForUpdate = `-- name: GetRunForUpdate :one
 SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
        status, clouds, stats, started_at, completed_at
@@ -438,6 +467,61 @@ func (q *Queries) ListBillingPeriods(ctx context.Context) ([]ListBillingPeriodsR
 	return items, nil
 }
 
+const listCorrectionDeltas = `-- name: ListCorrectionDeltas :many
+SELECT cloud, platform, resource_type, resource_id, project_id, dimension,
+       old_amount, new_amount, delta, currency
+FROM correction_deltas
+WHERE run_id = $1
+ORDER BY cloud, platform, resource_type, resource_id, project_id, dimension
+`
+
+type ListCorrectionDeltasRow struct {
+	Cloud        string
+	Platform     string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	Dimension    string
+	OldAmount    pgtype.Numeric
+	NewAmount    pgtype.Numeric
+	Delta        pgtype.Numeric
+	Currency     string
+}
+
+// The delta rows of a correction run, in the order corrections.Diff sorts by
+// (internal/engine/corrections/corrections.go), so an export prints them as the
+// correction computed them. idx_delta_run serves the filter.
+func (q *Queries) ListCorrectionDeltas(ctx context.Context, runID pgtype.UUID) ([]ListCorrectionDeltasRow, error) {
+	rows, err := q.db.Query(ctx, listCorrectionDeltas, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCorrectionDeltasRow
+	for rows.Next() {
+		var i ListCorrectionDeltasRow
+		if err := rows.Scan(
+			&i.Cloud,
+			&i.Platform,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.Dimension,
+			&i.OldAmount,
+			&i.NewAmount,
+			&i.Delta,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPricingModels = `-- name: ListPricingModels :many
 SELECT version, valid_from, currency, imported_at
 FROM pricing_models
@@ -498,6 +582,69 @@ func (q *Queries) ListProjectStatements(ctx context.Context, runID pgtype.UUID) 
 			&i.ProjectID,
 			&i.Document,
 			&i.Total,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRatedRecords = `-- name: ListRatedRecords :many
+SELECT u.cloud, u.platform, u.resource_type, u.resource_id, u.project_id, u.state,
+       u.from_ts, u.to_ts, u.usage, r.dimension, r.amount, r.currency
+FROM rated_records r
+JOIN usage_records u ON u.id = r.usage_record_id
+WHERE r.run_id = $1
+ORDER BY u.cloud, u.platform, u.resource_type, u.resource_id, u.from_ts, r.dimension
+`
+
+type ListRatedRecordsRow struct {
+	Cloud        string
+	Platform     string
+	ResourceType string
+	ResourceID   string
+	ProjectID    string
+	State        string
+	FromTs       pgtype.Timestamptz
+	ToTs         pgtype.Timestamptz
+	Usage        []byte
+	Dimension    string
+	Amount       pgtype.Numeric
+	Currency     string
+}
+
+// One row per rated record of a run, joined to the usage record it rates. The
+// ordering is a total one: the drafts of one resource never overlap (draftsOf
+// in internal/engine/metering/metering.go builds them from the intervals of a
+// folded history), so from_ts is unique per resource within a run, and rating
+// emits one record per usage record and dimension. That total order is what
+// makes two exports of one run byte-identical. idx_rated_run serves the filter.
+func (q *Queries) ListRatedRecords(ctx context.Context, runID pgtype.UUID) ([]ListRatedRecordsRow, error) {
+	rows, err := q.db.Query(ctx, listRatedRecords, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRatedRecordsRow
+	for rows.Next() {
+		var i ListRatedRecordsRow
+		if err := rows.Scan(
+			&i.Cloud,
+			&i.Platform,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.ProjectID,
+			&i.State,
+			&i.FromTs,
+			&i.ToTs,
+			&i.Usage,
+			&i.Dimension,
+			&i.Amount,
 			&i.Currency,
 		); err != nil {
 			return nil, err
