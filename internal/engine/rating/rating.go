@@ -246,7 +246,7 @@ func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) (Record
 
 	amounts := make([]DimensionAmount, 0, len(entry.Dimensions))
 	for _, dimension := range entry.Dimensions {
-		quantity, readable := quantityOf(draft.Usage, dimension.Metric)
+		quantity, readable := QuantityOf(draft.Usage, dimension.Metric)
 		if !readable {
 			note(dimension.Metric)
 		}
@@ -263,7 +263,7 @@ func rateDraft(entry pricing.ResourcePricing, draft metering.UsageDraft) (Record
 		var cost decimal.Decimal
 		switch dimension.Type {
 		case pricing.TypeTimeGauge:
-			minutes, readable := quantityOf(draft.Usage, usageMinutes)
+			minutes, readable := QuantityOf(draft.Usage, usageMinutes)
 			if !readable {
 				note(usageMinutes)
 			}
@@ -294,7 +294,7 @@ func modifierOr1(modifiers map[string]decimal.Decimal, key string) decimal.Decim
 	return unmodified
 }
 
-// quantityOf reads one quantity out of a draft's usage map. The map holds what
+// QuantityOf reads one quantity out of a draft's usage map. The map holds what
 // metering put there, which is the quantities the engine derived beside the
 // size fields the payload envelope decoded, so a JSON number arrives as a
 // float64. A float never reaches decimal.NewFromFloat: it goes through the
@@ -312,7 +312,10 @@ func modifierOr1(modifiers map[string]decimal.Decimal, key string) decimal.Decim
 // 0.00. A value nothing reads a number from, a flavor name or a boolean, is
 // zero and unreadable, which is what tells a resource that consumed nothing
 // from one whose quantity arrived in a form nothing bills from.
-func quantityOf(usage map[string]any, metric string) (decimal.Decimal, bool) {
+//
+// The export reads a stored usage object back through this function, so the
+// quantity a CSV shows is the quantity its amount was rated from.
+func QuantityOf(usage map[string]any, metric string) (decimal.Decimal, bool) {
 	switch value := usage[metric].(type) {
 	case money.Quantity:
 		return value.Decimal, true
