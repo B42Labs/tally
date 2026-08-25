@@ -965,3 +965,81 @@ func TestBuildDeterministicOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestParseKey reads a stored key back into the pair Key joined. The run.json
+// index of an export names the cloud and the project id beside every statement
+// file, and both are recovered from the key alone, so a half holding a slash
+// or a percent has to survive the round trip. A key no Key ever rendered is
+// refused rather than split at some slash anyway, which would name a pair
+// nothing was stored under.
+func TestParseKey(t *testing.T) {
+	roundTrips := []struct {
+		name      string
+		cloud     string
+		projectID string
+	}{
+		{name: "a pair holding neither slash nor percent", cloud: openstackCloud, projectID: "proj-456"},
+		{name: "a cloud holding a slash", cloud: openstackCloud + "/a", projectID: "b"},
+		{name: "a project id holding a slash", cloud: openstackCloud, projectID: "a/b"},
+		{name: "both halves holding what escaping rewrites", cloud: "50%", projectID: "eu/acme"},
+		{name: "the empty project id of a draft naming none", cloud: openstackCloud, projectID: ""},
+	}
+	for _, tc := range roundTrips {
+		t.Run(tc.name, func(t *testing.T) {
+			key := statements.Key(tc.cloud, tc.projectID)
+			cloud, projectID, err := statements.ParseKey(key)
+			if err != nil {
+				t.Fatalf("ParseKey(%q) error = %v, want the pair it was built from", key, err)
+			}
+			if cloud != tc.cloud || projectID != tc.projectID {
+				t.Errorf("ParseKey(%q) = %q, %q, want %q, %q", key, cloud, projectID, tc.cloud, tc.projectID)
+			}
+		})
+	}
+
+	refused := []struct {
+		name string
+		key  string
+	}{
+		{name: "no slash to separate two halves", key: "os-prod"},
+		{name: "a second slash no escaping would have left", key: "a/b/c"},
+		{name: "a half no unescaping reads", key: "os-prod/%zz"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			cloud, projectID, err := statements.ParseKey(tc.key)
+			if err == nil {
+				t.Fatalf("ParseKey(%q) = %q, %q, error = nil, want the key refused", tc.key, cloud, projectID)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("%q", tc.key)) {
+				t.Errorf("ParseKey(%q) error = %v, want the key named", tc.key, err)
+			}
+		})
+	}
+}
+
+// FuzzParseKeyRoundTrip holds ParseKey to the algebraic invariant it carries:
+// every pair Key joined comes back out of it as that pair. Clouds and project
+// ids come from a cloud registry rather than from the engine, so the pairs the
+// two functions have to survive are not a list anybody wrote down: a project id
+// that is literally %2F, one holding control bytes, and one that is not valid
+// UTF-8 all reach Key, and the interaction between escaping both halves and
+// escaping the joined key again is where a pair would come back as another one.
+func FuzzParseKeyRoundTrip(f *testing.F) {
+	f.Add("os-prod", "proj-456")
+	f.Add("os-prod/a", "b")
+	f.Add("50%", "eu/acme")
+	f.Add("os-prod", "%2F")
+	f.Add("", "")
+
+	f.Fuzz(func(t *testing.T, cloud, projectID string) {
+		key := statements.Key(cloud, projectID)
+		gotCloud, gotProject, err := statements.ParseKey(key)
+		if err != nil {
+			t.Fatalf("ParseKey(%q) error = %v, want the pair Key joined", key, err)
+		}
+		if gotCloud != cloud || gotProject != projectID {
+			t.Errorf("ParseKey(%q) = %q, %q, want %q, %q", key, gotCloud, gotProject, cloud, projectID)
+		}
+	})
+}

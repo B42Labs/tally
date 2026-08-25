@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -530,6 +531,28 @@ func sum(items []LineItem) decimal.Decimal {
 // key, so a project's credit note lands where its statement did.
 func Key(cloud, projectID string) string {
 	return fmt.Sprintf("%s/%s", url.PathEscape(cloud), url.PathEscape(projectID))
+}
+
+// ParseKey splits the key Key rendered back into the cloud and the project id
+// it was built from: the run.json index of an export names both beside every
+// statement file, which is all a stored key has to be read back for. Exactly
+// one slash is required, because escaping both halves leaves the separator as
+// the only slash a key holds. A key with none or with two was never rendered
+// by Key, and guessing which slash separated it would name a pair nothing was
+// ever stored under. An empty half is a key of its own: a draft that names no
+// project is stored under an empty project half.
+func ParseKey(key string) (cloud, projectID string, err error) {
+	if n := strings.Count(key, "/"); n != 1 {
+		return "", "", fmt.Errorf("the statement key %q is not cloud/project: it holds %d slashes, not one", key, n)
+	}
+	escapedCloud, escapedProject, _ := strings.Cut(key, "/")
+	if cloud, err = url.PathUnescape(escapedCloud); err != nil {
+		return "", "", fmt.Errorf("the statement key %q is not cloud/project: %w", key, err)
+	}
+	if projectID, err = url.PathUnescape(escapedProject); err != nil {
+		return "", "", fmt.Errorf("the statement key %q is not cloud/project: %w", key, err)
+	}
+	return cloud, projectID, nil
 }
 
 // name identifies a resource in an error.
