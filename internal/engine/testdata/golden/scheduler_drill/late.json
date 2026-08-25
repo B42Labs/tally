@@ -1,0 +1,27 @@
+{
+  "events": [
+    {
+      "event_id": "ev-late-off-abc-123",
+      "timestamp": "2026-03-11T00:00:00Z",
+      "event_type": "compute.instance.power_off.end",
+      "platform": "openstack",
+      "cloud": "os-golden-drill",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "payload": {"state": "shutoff"}
+    },
+    {
+      "event_id": "ev-late-on-abc-123",
+      "timestamp": "2026-03-21T00:00:00Z",
+      "event_type": "compute.instance.power_on.end",
+      "platform": "openstack",
+      "cloud": "os-golden-drill",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "payload": {"state": "active"}
+    }
+  ],
+  "bulk": []
+}

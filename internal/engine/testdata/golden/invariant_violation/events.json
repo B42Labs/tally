@@ -1,0 +1,54 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-i-sound",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-violation",
+      "resource_type": "instance",
+      "resource_id": "i-sound",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "flavor": "m1.large"}
+      }
+    },
+    {
+      "event_id": "ev-create-i-broken",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-violation",
+      "resource_type": "instance",
+      "resource_id": "i-broken",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "flavor": "m1.large"}
+      }
+    },
+    {
+      "event_id": "ev-delete-i-broken",
+      "timestamp": "2026-03-05T00:00:00Z",
+      "event_type": "compute.instance.delete.end",
+      "platform": "openstack",
+      "cloud": "os-golden-violation",
+      "resource_type": "instance",
+      "resource_id": "i-broken",
+      "project_id": "proj-456"
+    },
+    {
+      "event_id": "ev-update-i-broken",
+      "timestamp": "2026-03-15T00:00:00Z",
+      "event_type": "compute.instance.update",
+      "platform": "openstack",
+      "cloud": "os-golden-violation",
+      "resource_type": "instance",
+      "resource_id": "i-broken",
+      "project_id": "proj-456",
+      "payload": {"state": "active"}
+    }
+  ],
+  "bulk": []
+}
