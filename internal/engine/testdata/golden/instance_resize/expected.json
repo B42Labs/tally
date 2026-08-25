@@ -1,0 +1,90 @@
+{
+  "clouds": ["os-golden-resize"],
+  "stats": {"candidates": 1, "usage_records": 2, "rated_records": 8, "statements": 1},
+  "usage": [
+    {
+      "cloud": "os-golden-resize",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "def-456",
+      "project_id": "proj-456",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-03-16T00:00:00Z",
+      "seconds": 1296000,
+      "usage": {
+        "minutes": "21600",
+        "count": "1",
+        "vcpus": "2",
+        "ram_gb": "4",
+        "disk_gb": "40",
+        "flavor": "m1.small",
+        "egress_gb": "12.3"
+      }
+    },
+    {
+      "cloud": "os-golden-resize",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "def-456",
+      "project_id": "proj-456",
+      "state": "active",
+      "from": "2026-03-16T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1382400,
+      "usage": {
+        "minutes": "23040",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large",
+        "egress_gb": "24.7"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "2", "amount": "14.40"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "4", "amount": "7.20"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "40", "amount": "14.40"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "12.3", "amount": "1.11"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-16T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "30.72"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-16T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "15.36"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-16T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "30.72"},
+    {"cloud": "os-golden-resize", "resource_id": "def-456", "from": "2026-03-16T00:00:00Z", "dimension": "egress_gb", "quantity": "24.7", "amount": "2.22"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-resize/proj-456",
+      "total": "116.13",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-456",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "def-456",
+          "total": "116.13",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "360.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "2", "ram_gb": "4", "disk_gb": "40", "egress_gb": "12.3"},
+              "cost": {"vcpus": "14.40", "ram_gb": "7.20", "disk_gb": "14.40", "egress_gb": "1.11", "total": "37.11"}
+            },
+            {
+              "state": "active",
+              "hours": "384.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "24.7"},
+              "cost": {"vcpus": "30.72", "ram_gb": "15.36", "disk_gb": "30.72", "egress_gb": "2.22", "total": "79.02"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": []
+}

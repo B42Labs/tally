@@ -1,0 +1,15 @@
+{
+  "projects": [
+    {"platform": "gardener", "cloud": "gd-golden-related", "external_id": "team-alpha"},
+    {"platform": "openstack", "cloud": "os-golden-related", "external_id": "shoot-abc-os-tenant"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "gd-golden-related", "external_id": "team-alpha"},
+      "target": {"cloud": "os-golden-related", "external_id": "shoot-abc-os-tenant"},
+      "relation_type": "infrastructure_tenant",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null
+    }
+  ]
+}

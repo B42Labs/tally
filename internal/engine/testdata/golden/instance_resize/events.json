@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-def-456",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-resize",
+      "resource_type": "instance",
+      "resource_id": "def-456",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 2, "ram_gb": 4, "disk_gb": 40, "flavor": "m1.small"}
+      }
+    },
+    {
+      "event_id": "ev-resize-def-456",
+      "timestamp": "2026-03-16T00:00:00Z",
+      "event_type": "compute.instance.finish_resize.end",
+      "platform": "openstack",
+      "cloud": "os-golden-resize",
+      "resource_type": "instance",
+      "resource_id": "def-456",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "flavor": "m1.large"}
+      }
+    }
+  ],
+  "bulk": []
+}

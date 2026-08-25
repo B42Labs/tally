@@ -1,0 +1,6 @@
+sources:
+  - platform: openstack
+    resource_type: instance
+    metric: egress_gb
+    kind: metricsql
+    query: 'egress_gb{cloud="{cloud}",resource_id="{resource_id}"}[{window}]'

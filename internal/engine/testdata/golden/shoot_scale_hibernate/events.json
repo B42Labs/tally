@@ -1,0 +1,55 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-shoot-abc",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "shoot.create.end",
+      "platform": "gardener",
+      "cloud": "gd-golden-shoot",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "payload": {
+        "state": "active",
+        "size": {"worker_count": 3, "machine_type": "m1.xlarge"}
+      }
+    },
+    {
+      "event_id": "ev-scale-shoot-abc",
+      "timestamp": "2026-03-12T00:00:00Z",
+      "event_type": "shoot.worker.scale",
+      "platform": "gardener",
+      "cloud": "gd-golden-shoot",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "payload": {
+        "state": "active",
+        "size": {"worker_count": 5, "machine_type": "m1.xlarge"}
+      }
+    },
+    {
+      "event_id": "ev-hibernate-start-shoot-abc",
+      "timestamp": "2026-03-25T00:00:00Z",
+      "event_type": "shoot.hibernate.start",
+      "platform": "gardener",
+      "cloud": "gd-golden-shoot",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "payload": {"state": "hibernated"}
+    },
+    {
+      "event_id": "ev-hibernate-end-shoot-abc",
+      "timestamp": "2026-03-28T00:00:00Z",
+      "event_type": "shoot.hibernate.end",
+      "platform": "gardener",
+      "cloud": "gd-golden-shoot",
+      "resource_type": "shoot",
+      "resource_id": "shoot-abc",
+      "project_id": "team-alpha",
+      "payload": {"state": "active"}
+    }
+  ],
+  "bulk": []
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "query": "egress_gb{cloud=\"hb-golden-harbor\",resource_id=\"team-alpha/app\"}[408h]",
+    "at": "2026-03-18T00:00:00Z",
+    "value": "38.5"
+  },
+  {
+    "query": "egress_gb{cloud=\"hb-golden-harbor\",resource_id=\"team-alpha/app\"}[336h]",
+    "at": "2026-04-01T00:00:00Z",
+    "value": "31.2"
+  }
+]

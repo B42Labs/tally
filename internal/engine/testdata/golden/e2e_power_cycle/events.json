@@ -1,0 +1,41 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-abc-123",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-e2e",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "flavor": "m1.large"}
+      }
+    },
+    {
+      "event_id": "ev-power-off-abc-123",
+      "timestamp": "2026-03-11T00:00:00Z",
+      "event_type": "compute.instance.power_off.end",
+      "platform": "openstack",
+      "cloud": "os-golden-e2e",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "payload": {"state": "shutoff"}
+    },
+    {
+      "event_id": "ev-power-on-abc-123",
+      "timestamp": "2026-03-21T00:00:00Z",
+      "event_type": "compute.instance.power_on.end",
+      "platform": "openstack",
+      "cloud": "os-golden-e2e",
+      "resource_type": "instance",
+      "resource_id": "abc-123",
+      "project_id": "proj-456",
+      "payload": {"state": "active"}
+    }
+  ],
+  "bulk": []
+}

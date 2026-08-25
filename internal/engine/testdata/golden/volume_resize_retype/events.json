@@ -1,0 +1,47 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-vol-789",
+      "timestamp": "2026-02-10T00:00:00Z",
+      "event_type": "volume.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-volume",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "in-use",
+        "size": {"size_gb": 100, "type": "ssd"}
+      }
+    },
+    {
+      "event_id": "ev-resize-vol-789",
+      "timestamp": "2026-03-10T00:00:00Z",
+      "event_type": "volume.resize.end",
+      "platform": "openstack",
+      "cloud": "os-golden-volume",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "in-use",
+        "size": {"size_gb": 200, "type": "ssd"}
+      }
+    },
+    {
+      "event_id": "ev-retype-vol-789",
+      "timestamp": "2026-03-20T00:00:00Z",
+      "event_type": "volume.retype",
+      "platform": "openstack",
+      "cloud": "os-golden-volume",
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "project_id": "proj-456",
+      "payload": {
+        "state": "in-use",
+        "size": {"size_gb": 200, "type": "hdd"}
+      }
+    }
+  ],
+  "bulk": []
+}
