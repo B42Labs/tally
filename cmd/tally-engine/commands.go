@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 
+	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/runs"
@@ -19,11 +22,6 @@ import (
 	"github.com/b42labs/tally/internal/engine/store"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
-
-// errNotImplemented is what a subcommand whose package has not arrived yet
-// returns once it has checked its flags. Which Phase 3 package is missing is
-// nothing an operator can act on, that the command is not usable yet is.
-var errNotImplemented = errors.New("not implemented: arrives with a later Phase 3 package")
 
 // newMigrateCmd builds the migrate subcommand.
 func newMigrateCmd() *cobra.Command {
@@ -459,6 +457,14 @@ func newPricingListCmd() *cobra.Command {
 	}
 }
 
+// The two formats the export writes. They name the exporter the command builds
+// and the lines it prints, so the two never disagree about which of them a
+// --format the validation let through belongs to.
+const (
+	formatJSON = "json"
+	formatCSV  = "csv"
+)
+
 // newExportCmd builds the export subcommand.
 func newExportCmd() *cobra.Command {
 	var runID, format, out string
@@ -467,17 +473,80 @@ func newExportCmd() *cobra.Command {
 		Use:   "export",
 		Short: "Export the project statements of a run",
 		Long: "Export the project statements of a run.\n\n" +
-			"The statements are written into the output directory, as json or as csv. Exporting a finalized " +
-			"run twice yields the same files, because a finalized run's records no longer change.",
+			"json writes run.json and one statement document per project, or one credit note per project " +
+			"for a correction run. csv writes the rated records into rated.csv, and the deltas of a " +
+			"correction into deltas.csv. --out has to be empty or absent, so what it holds afterwards is " +
+			"one run's artifacts and nothing an earlier export of another run left there. Exporting a " +
+			"finalized run twice into a clean directory yields the same files, because a finalized run's " +
+			"records no longer change.",
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if _, err := validateRunID(runID); err != nil {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			id, err := validateRunID(runID)
+			if err != nil {
 				return err
 			}
 			if err := validateFormat(format); err != nil {
 				return err
 			}
-			return errNotImplemented
+			if err := validateOut(out); err != nil {
+				return err
+			}
+
+			// Everything an export renders was written to the engine database by
+			// the run, so this reads that one database.
+			db, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			// The run is read before an exporter is built, and an exporter
+			// creates its directory only once it has rendered everything: a run
+			// id no row carries, and a run no export is produced from, leave the
+			// --out directory uncreated.
+			run, err := export.Load(cmd.Context(), db.Pool(), id)
+			if err != nil {
+				return err
+			}
+
+			// A completed run is not immutable: a run of the same period
+			// supersedes it, and an export of a superseded run hands an ERP
+			// numbers that no longer bill the month. The status is read again
+			// outside the snapshot Load read under, so a run that moved while its
+			// records were being read is refused rather than written out. What is
+			// left after this is the rendering and the writing, which the row
+			// lock the export deliberately does not take would not cover either.
+			current, err := sqlcgen.New(db.Pool()).GetRun(cmd.Context(), pgtype.UUID{Bytes: id, Valid: true})
+			if err != nil {
+				return fmt.Errorf("re-reading the run %s: %w", id, err)
+			}
+			if current.Status != run.Status {
+				return fmt.Errorf("run %s became %s while it was read, and was not exported", id, current.Status)
+			}
+
+			// The format names the implementation. Every consumer of billing
+			// artifacts sits behind BillingExporter, so an ERP adapter is chosen
+			// here rather than written into the command.
+			var exporter export.BillingExporter
+			switch format {
+			case formatJSON:
+				exporter = export.JSONFiles{Dir: out}
+			case formatCSV:
+				exporter = export.CSVFiles{Dir: out}
+			}
+
+			// --out is read again for the reason the status is: what the flag
+			// check looked at, it looked at before a month of rated records was
+			// read, and a directory that was empty then is not one that is still
+			// empty minutes later. What is left after this is the rendering and
+			// the writing, which is as narrow as this gets without a lock.
+			if err := validateOut(out); err != nil {
+				return err
+			}
+			if err := exporter.Export(cmd.Context(), run); err != nil {
+				return err
+			}
+			return write(cmd.OutOrStdout(), exportLines(period.Format(run.PeriodFrom), format, out, run)...)
 		},
 	}
 
@@ -553,6 +622,33 @@ func runLines(month string, result runs.Result) []string {
 
 	if line, ok := recordedWarningsLine(result.Stats); ok {
 		lines = append(lines, line)
+	}
+	return lines
+}
+
+// exportLines is what export prints for a finished export: the run it wrote,
+// the month that run bills, and one line per file the format left in the
+// directory. The counts say how much of the month is in those files, so a run
+// that billed nobody says so here rather than in a listing of the directory.
+func exportLines(month, format, out string, run export.Run) []string {
+	lines := []string{fmt.Sprintf("run %s exported for %s as %s into %s", run.ID, month, format, out)}
+	correction := run.Kind == runs.KindCorrection
+
+	switch format {
+	case formatJSON:
+		// What a regular run bills a project is a statement, and what a
+		// correction hands it is a credit note, which is what the files are
+		// named after too.
+		documents := "statements"
+		if correction {
+			documents = "credit notes"
+		}
+		lines = append(lines, fmt.Sprintf("wrote run.json and %d %s", len(run.Statements), documents))
+	case formatCSV:
+		lines = append(lines, fmt.Sprintf("wrote rated.csv with %d rated records", len(run.Rated)))
+		if correction {
+			lines = append(lines, fmt.Sprintf("wrote deltas.csv with %d deltas", len(run.Deltas)))
+		}
 	}
 	return lines
 }
@@ -705,8 +801,36 @@ func validateRunID(value string) (uuid.UUID, error) {
 // validateFormat checks a --format flag against the two formats the export
 // writes.
 func validateFormat(value string) error {
-	if value != "json" && value != "csv" {
-		return fmt.Errorf("--format: %q must be json or csv", value)
+	if value != formatJSON && value != formatCSV {
+		return fmt.Errorf("--format: %q must be %s or %s", value, formatJSON, formatCSV)
+	}
+	return nil
+}
+
+// validateOut checks a --out against what is already in it. The directory an
+// export writes into holds one run's files and only that run's: nothing
+// enumerates or removes what is there, so a correction exported over the
+// regular run's drop directory would leave that run's 500 statements beside the
+// credit notes, and an ERP that reads the directory bills every project of the
+// month a second time. An operator who means to replace an export empties the
+// directory, which is the one step that says so.
+//
+// The check is not a lock: two exports that name one directory both pass it,
+// and it is the writing that would have to be exclusive. It is read when the
+// flags are checked, so an operator hears about the directory before a month is
+// read, and again immediately before the export writes, where what is left of
+// the window between the two is the rendering rather than four queries over a
+// month of rated records.
+func validateOut(value string) error {
+	entries, err := os.ReadDir(value)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("--out: reading %s: %w", value, err)
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("--out: %s is not empty, and an export does not remove what an earlier one left there", value)
 	}
 	return nil
 }
