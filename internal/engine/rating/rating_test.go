@@ -416,6 +416,49 @@ func TestQuantityTypes(t *testing.T) {
 	}
 }
 
+// TestQuantityOf reads quantities straight out of a usage map, which is the
+// contract the export holds rather than the rated dimensions TestQuantityTypes
+// covers. A stored usage object is decoded with UseNumber, so a number out of
+// JSONB arrives as a json.Number and not as the float64 a plain decode leaves.
+// A metric the object does not hold is zero and readable, because nothing was
+// reported under it, while a value nothing reads a number from is zero and
+// unreadable, which is what rating billed it at.
+func TestQuantityOf(t *testing.T) {
+	usage := map[string]any{
+		"json_number":  json.Number("2.5"),
+		"float64":      float64(2.5),
+		"digit_string": "2.5",
+		"null":         nil,
+		"bool":         true,
+	}
+
+	cases := []struct {
+		name     string
+		metric   string
+		want     string
+		readable bool
+	}{
+		{"a json number, as UseNumber decodes a stored object", "json_number", "2.5", true},
+		{"a float64, as a plain decode leaves one", "float64", "2.5", true},
+		{"a string holding digits", "digit_string", "2.5", true},
+		{"a null", "null", "0", true},
+		{"a metric the object does not hold", "absent", "0", true},
+		{"a type nothing computes with", "bool", "0", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			quantity, readable := rating.QuantityOf(usage, tc.metric)
+
+			if got := quantity.String(); got != tc.want {
+				t.Errorf("QuantityOf(%q) = %s, want %s", tc.metric, got, tc.want)
+			}
+			if readable != tc.readable {
+				t.Errorf("QuantityOf(%q) readable = %t, want %t", tc.metric, readable, tc.readable)
+			}
+		})
+	}
+}
+
 // TestRateRoundsToTheRenderedScale rates a quantity and a state modifier that
 // carry more places than a statement renders them at. Both are rounded to four
 // places before anything is billed at them, because the document of WP 3.7
