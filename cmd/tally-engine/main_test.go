@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,26 +17,24 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/b42labs/tally/internal/engine/config"
+	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/runs"
 	"github.com/b42labs/tally/internal/engine/scheduler"
 	"github.com/b42labs/tally/internal/engine/source"
+	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 	reportingtest "github.com/b42labs/tally/internal/reporting/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
 )
 
 // runID stands in for a run wherever a subcommand takes one. Nothing has to
-// exist behind it: the cases that pass it stop at their flags or end in the
-// not-implemented report. The periods list test seeds the run it names itself,
-// because billing_periods.finalized_run_id points at runs.
+// exist behind it: the cases that pass it stop at their flags. The periods list
+// test seeds the run it names itself, because billing_periods.finalized_run_id
+// points at runs.
 const runID = "3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4"
-
-// notImplemented is what every subcommand a later Phase 3 package fills in
-// reports once its flags check out.
-const notImplemented = "not implemented: arrives with a later Phase 3 package"
 
 func TestHelpNeedsNoEnvironment(t *testing.T) {
 	blankEnvironment(t)
@@ -732,6 +734,296 @@ func TestDetectLateAndCorrectCLI(t *testing.T) {
 	})
 }
 
+// TestExportCLI writes a billed month out of the engine database in both
+// formats: the statements and the rated records of the regular run, and, once a
+// late event has been corrected and the correction closed, the credit notes and
+// the deltas of that correction. What the command prints names the files an
+// operator picks up, and each of them is read back by the type that rendered
+// it.
+func TestExportCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+
+	from, _ := billingMonth(-4)
+	month := period.Format(from)
+	const (
+		cloud      = "os-cli-export"
+		project    = "proj-cli-export"
+		resourceID = "i-cli-export"
+	)
+	f.seedProject(t, cloud, project)
+	f.seedInstance(t, cloud, resourceID, project, from)
+
+	if _, stderr, err := runCLI(t, "run", "--period", month, "--clouds", cloud); err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	id := f.completedRun(t, from)
+
+	documents := filepath.Join(t.TempDir(), "json")
+	stdout, stderr, err := runCLI(t, "export", "--run", id.String(), "--format", "json", "--out", documents)
+	if err != nil {
+		t.Fatalf("export as json error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 statements\n",
+		id, month, documents)
+	if stdout != want {
+		t.Errorf("stdout of export as json = %q, want %q", stdout, want)
+	}
+
+	// The index names the file the statement was written to and the total that
+	// statement carries. The total is compared against the digits the database
+	// holds: a value that lost a place on the way out is one nobody can tell
+	// from a correct one, and an ERP reconciles this file against the invoice.
+	var index runIndex
+	readJSONFile(t, filepath.Join(documents, "run.json"), &index)
+	// The run was restricted to one cloud, and run.json is where an ERP reads
+	// which part of the month the artifacts beside it cover. The column is a
+	// text[], and a decode that lost it, or a select whose column order moved,
+	// would leave every index naming no cloud at all.
+	if want := []string{cloud}; !slices.Equal(index.Clouds, want) {
+		t.Errorf("run.json names the clouds %v, want %v", index.Clouds, want)
+	}
+	if len(index.Statements) != 1 {
+		t.Fatalf("run.json names %d statements, want 1", len(index.Statements))
+	}
+	statementFile := "statement-" + url.PathEscape(statements.Key(cloud, project)) + ".json"
+	if index.Statements[0].File != statementFile {
+		t.Errorf("run.json names the file %q, want %q", index.Statements[0].File, statementFile)
+	}
+	if total := f.statementTotal(t, id); index.Statements[0].Total.String() != total {
+		t.Errorf("run.json holds the total %s, want the stored %s", index.Statements[0].Total, total)
+	}
+
+	// The document the index points at, read by the type that rendered it: a
+	// file the engine's own types no longer decode is one a reader of the export
+	// cannot read either.
+	var document statements.Document
+	readJSONFile(t, filepath.Join(documents, statementFile), &document)
+	if want := "EUR"; document.Currency != want {
+		t.Errorf("%s carries the currency %q, want %q", statementFile, document.Currency, want)
+	}
+
+	tables := filepath.Join(t.TempDir(), "csv")
+	stdout, stderr, err = runCLI(t, "export", "--run", id.String(), "--format", "csv", "--out", tables)
+	if err != nil {
+		t.Fatalf("export as csv error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s exported for %s as csv into %s\nwrote rated.csv with 1 rated records\n",
+		id, month, tables)
+	if stdout != want {
+		t.Errorf("stdout of export as csv = %q, want %q", stdout, want)
+	}
+
+	header, rows := readCSVFile(t, filepath.Join(tables, "rated.csv"))
+	if len(header) != 17 {
+		t.Fatalf("rated.csv holds %d columns, want 17", len(header))
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rated.csv holds %d rows under its header, want 1", len(rows))
+	}
+	// The instance lived 48 hours at 4 vcpus, rated at 0.02 per unit-hour.
+	for _, tc := range []struct{ column, want string }{
+		{"run_id", id.String()},
+		{"kind", runs.KindRegular},
+		{"corrects_run_id", ""},
+		{"dimension", "vcpus"},
+		{"quantity", "4.0000"},
+		{"amount", "3.84"},
+	} {
+		if got := rows[0][tc.column]; got != tc.want {
+			t.Errorf("rated.csv %s = %q, want %q", tc.column, got, tc.want)
+		}
+	}
+
+	if _, stderr, err := runCLI(t, "finalize", "--period", month, "--run", id.String()); err != nil {
+		t.Fatalf("finalize error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	// A resize halfway through the instance's life, which reached the reporting
+	// database after the finalized run had billed the month. Correcting it is
+	// what leaves the credit notes and the deltas the two exports below carry.
+	f.seedEvent(t, cloud, resourceID, project, "ev-resize-"+resourceID, "compute.instance.resize.end",
+		from.Add(48*time.Hour), `{"state":"active","size":{"vcpus":2,"ram_gb":8,"disk_gb":80,"flavor":"m1.large"}}`)
+
+	if _, stderr, err := runCLI(t, "correct", "--period", month); err != nil {
+		t.Fatalf("correct error = %v, want nil (stderr %q)", err, stderr)
+	}
+	correction := f.completedCorrection(t, from)
+	if _, stderr, err := runCLI(t, "finalize", "--period", month, "--run", correction.String()); err != nil {
+		t.Fatalf("finalizing the correction error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	notes := filepath.Join(t.TempDir(), "correction-json")
+	stdout, stderr, err = runCLI(t, "export", "--run", correction.String(), "--format", "json", "--out", notes)
+	if err != nil {
+		t.Fatalf("exporting the correction as json error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 credit notes\n",
+		correction, month, notes)
+	if stdout != want {
+		t.Errorf("stdout of the correction's json export = %q, want %q", stdout, want)
+	}
+
+	// A credit note lands under the key its project's statement did, under the
+	// prefix that says which of the two it is, and it names the run it corrects.
+	var note corrections.CreditNote
+	readJSONFile(t, filepath.Join(notes,
+		"credit-note-"+url.PathEscape(statements.Key(cloud, project))+".json"), &note)
+	if note.CorrectsRunID != id.String() {
+		t.Errorf("the credit note corrects run %q, want %q", note.CorrectsRunID, id)
+	}
+
+	correctionTables := filepath.Join(t.TempDir(), "correction-csv")
+	stdout, stderr, err = runCLI(t, "export",
+		"--run", correction.String(), "--format", "csv", "--out", correctionTables)
+	if err != nil {
+		t.Fatalf("exporting the correction as csv error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s exported for %s as csv into %s\n"+
+		"wrote rated.csv with 2 rated records\nwrote deltas.csv with 1 deltas\n",
+		correction, month, correctionTables)
+	if stdout != want {
+		t.Errorf("stdout of the correction's csv export = %q, want %q", stdout, want)
+	}
+
+	_, deltas := readCSVFile(t, filepath.Join(correctionTables, "deltas.csv"))
+	if len(deltas) != 1 {
+		t.Fatalf("deltas.csv holds %d rows under its header, want 1", len(deltas))
+	}
+	if got := deltas[0]["corrects_run_id"]; got != id.String() {
+		t.Errorf("deltas.csv corrects_run_id = %q, want the finalized run %s", got, id)
+	}
+
+	// An export reads the engine database and nothing else: the records it
+	// renders are already stored, so neither the reporting database nor the
+	// counter sources are needed to hand a finalized month to an ERP.
+	t.Run("works with the engine database alone", func(t *testing.T) {
+		useDatabase(t, f.engine.URL)
+		t.Setenv("TALLY_ENGINE_COUNTER_SOURCES", filepath.Join(t.TempDir(), "missing.yaml"))
+
+		out := filepath.Join(t.TempDir(), "engine-only")
+		stdout, stderr, err := runCLI(t, "export", "--run", id.String(), "--format", "json", "--out", out)
+		if err != nil {
+			t.Fatalf("export error = %v, want nil (stderr %q)", err, stderr)
+		}
+		want := fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 statements\n",
+			id, month, out)
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+		if _, err := os.Stat(filepath.Join(out, "run.json")); err != nil {
+			t.Errorf("os.Stat(run.json) error = %v, want the written index", err)
+		}
+	})
+
+	t.Run("refuses a run no row carries", func(t *testing.T) {
+		missing := uuid.New()
+		out := filepath.Join(t.TempDir(), "unknown-run")
+
+		stdout, _, err := runCLI(t, "export", "--run", missing.String(), "--format", "json", "--out", out)
+		if err == nil {
+			t.Fatal("export error = nil, want the unknown run reported")
+		}
+		if !strings.Contains(err.Error(), missing.String()) {
+			t.Errorf("export error = %q, want it to name the run %s", err, missing)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an export that wrote nothing", stdout)
+		}
+		// The run is read before the exporter is built, so a refused export
+		// leaves the operator's --out as it found it rather than with an empty
+		// directory that reads like an export of a month that billed nobody.
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("os.Stat(%s) error = %v, want it to report a directory that was never created", out, err)
+		}
+	})
+
+	t.Run("refuses a superseded run", func(t *testing.T) {
+		// A month metered twice leaves the first run behind in this status. Its
+		// records are still in the database and none of them bills anything, so
+		// no artifact is produced from them.
+		supersededFrom, supersededTo := billingMonth(-5)
+		var superseded uuid.UUID
+		if err := f.engine.Store.Pool().QueryRow(t.Context(),
+			`INSERT INTO runs (period_from, period_to, status)
+			 VALUES ($1, $2, 'superseded') RETURNING id`,
+			supersededFrom, supersededTo).Scan(&superseded); err != nil {
+			t.Fatalf("seeding the superseded run: %v", err)
+		}
+		out := filepath.Join(t.TempDir(), "superseded-run")
+
+		stdout, _, err := runCLI(t, "export", "--run", superseded.String(), "--format", "csv", "--out", out)
+		if err == nil {
+			t.Fatal("export error = nil, want the superseded run refused")
+		}
+		if want := "superseded"; !strings.Contains(err.Error(), want) {
+			t.Errorf("export error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an export that wrote nothing", stdout)
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("os.Stat(%s) error = %v, want it to report a directory that was never created", out, err)
+		}
+	})
+}
+
+// runIndex is the part of run.json the assertions above read: one entry per
+// document the export wrote. The file carries more, which the export package's
+// own tests pin. The total is a json.Number, so it is compared as the digits
+// the file holds rather than through a float.
+type runIndex struct {
+	Clouds     []string `json:"clouds"`
+	Statements []struct {
+		File  string      `json:"file"`
+		Total json.Number `json:"total"`
+	} `json:"statements"`
+}
+
+// readJSONFile decodes one exported artifact into v. A file the export did not
+// write, and one the type that rendered it no longer reads, both fail here
+// rather than at the assertion after it.
+func readJSONFile(t *testing.T, path string, v any) {
+	t.Helper()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+}
+
+// readCSVFile reads one exported table: its header, and one map per row under
+// it, keyed by column name so an assertion names the column it is about rather
+// than the position of it. Every row of a table holds as many fields as its
+// header, which the reader itself enforces.
+func readCSVFile(t *testing.T, path string) (header []string, rows []map[string]string) {
+	t.Helper()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	records, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	if len(records) == 0 {
+		t.Fatalf("%s holds no records, want at least its header", path)
+	}
+
+	header = records[0]
+	for _, record := range records[1:] {
+		row := make(map[string]string, len(header))
+		for i, column := range header {
+			row[column] = record[i]
+		}
+		rows = append(rows, row)
+	}
+	return header, rows
+}
+
 // TestTickCLI drives the scheduler entrypoint over both databases: what it
 // prints is the whole of what the CronJob's log holds.
 func TestTickCLI(t *testing.T) {
@@ -978,6 +1270,20 @@ func (f pipelineFixture) finalizedAt(t *testing.T, from time.Time) string {
 	return stamp.UTC().Format(time.RFC3339)
 }
 
+// statementTotal is what the database holds as the total of a run's one
+// statement, as the text the column renders. Money is compared as the digits it
+// was stored as rather than through a float.
+func (f pipelineFixture) statementTotal(t *testing.T, id uuid.UUID) string {
+	t.Helper()
+
+	var total string
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT total::text FROM project_statements WHERE run_id = $1`, id).Scan(&total); err != nil {
+		t.Fatalf("reading the statement total of the run %s: %v", id, err)
+	}
+	return total
+}
+
 // TestTickLinesReportsWhatTheWalkLeftBehind pins the two lines a tick prints
 // beside the steps a month took. Both stand for a month that is not fine while
 // the tick's exit status is zero, so nothing else would say they happened: the
@@ -1070,32 +1376,14 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("closed pipe") }
 
-// TestStubsValidateThenRefuse pins what the subcommands of the later Phase 3
-// packages already answer: the flags they take, what they refuse, and the one
-// error they end with. That contract is what those packages are written
-// against, so it is checked before any of them exists.
-func TestStubsValidateThenRefuse(t *testing.T) {
+// TestBadCommandLinesAreRefusedWithoutAConfiguration pins what the subcommands
+// answer to a command line they cannot work from: the flag a caller left out,
+// the format the export does not write, the directory an earlier export already
+// filled, and the file count the pricing import takes. All of it is answered on
+// a machine with no configuration, so an operator who mistyped a command line
+// never waits for a database to say so.
+func TestBadCommandLinesAreRefusedWithoutAConfiguration(t *testing.T) {
 	blankEnvironment(t)
-
-	t.Run("flags that check out end in the not-implemented report", func(t *testing.T) {
-		for _, args := range [][]string{
-			{"export", "--run", runID, "--format", "json", "--out", "./out"},
-			{"export", "--run", runID, "--format", "csv", "--out", "./out"},
-		} {
-			t.Run(strings.Join(args, " "), func(t *testing.T) {
-				stdout, _, err := runCLI(t, args...)
-				if err == nil {
-					t.Fatalf("error = nil, want %q", notImplemented)
-				}
-				if err.Error() != notImplemented {
-					t.Errorf("error = %q, want %q", err, notImplemented)
-				}
-				if stdout != "" {
-					t.Errorf("stdout = %q, want nothing printed by a command that did nothing", stdout)
-				}
-			})
-		}
-	})
 
 	t.Run("a missing required flag is reported", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -1135,6 +1423,46 @@ func TestStubsValidateThenRefuse(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("export error = %q, want it to name %q", err, want)
 			}
+		}
+	})
+
+	t.Run("export refuses an --out that is not empty", func(t *testing.T) {
+		// What an earlier export of another run left in the drop directory. The
+		// export writes only its own files and removes none, so the two runs
+		// would sit there together and an ERP reading the directory would bill
+		// the month from both.
+		out := t.TempDir()
+		if err := os.WriteFile(filepath.Join(out, "statement-os-prod%2Fproj-456.json"),
+			[]byte("{}\n"), 0o600); err != nil {
+			t.Fatalf("planting the earlier export: %v", err)
+		}
+
+		_, _, err := runCLI(t, "export", "--run", runID, "--format", "json", "--out", out)
+		if err == nil {
+			t.Fatal("export error = nil, want the non-empty directory reported")
+		}
+		if want := "--out: " + out + " is not empty"; !strings.Contains(err.Error(), want) {
+			t.Errorf("export error = %q, want it to contain %q", err, want)
+		}
+	})
+
+	t.Run("export takes an --out that is empty", func(t *testing.T) {
+		// An empty directory is one an operator prepared, and an absent one is
+		// created by the export. Neither is refused here: what stops both below
+		// is the configuration this machine does not have.
+		for _, tc := range []struct{ name, out string }{
+			{"an empty directory", t.TempDir()},
+			{"a directory that does not exist", filepath.Join(t.TempDir(), "out")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, _, err := runCLI(t, "export", "--run", runID, "--format", "json", "--out", tc.out)
+				if err == nil {
+					t.Fatal("export error = nil, want the missing configuration reported")
+				}
+				if strings.Contains(err.Error(), "--out") {
+					t.Errorf("export error = %q, want the directory taken rather than refused", err)
+				}
+			})
 		}
 	})
 
@@ -1203,6 +1531,16 @@ func TestFlagsAreCheckedBeforeTheConfiguration(t *testing.T) {
 		}
 		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
 			t.Errorf("correct error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("export refuses a run that is not a uuid", func(t *testing.T) {
+		_, _, err := runCLI(t, "export", "--run", "not-a-uuid", "--format", "json", "--out", "./out")
+		if err == nil {
+			t.Fatal("export error = nil, want the malformed run id reported")
+		}
+		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
+			t.Errorf("export error = %q, want it to contain %q", err, want)
 		}
 	})
 }
