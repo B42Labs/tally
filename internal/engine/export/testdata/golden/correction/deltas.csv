@@ -1,0 +1,4 @@
+run_id,corrects_run_id,period_from,period_to,cloud,platform,resource_type,resource_id,project_id,dimension,old_amount,new_amount,delta,currency
+4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9,3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,os-prod,openstack,instance,abc-123,proj-456,disk_gb,59.52,49.92,-9.60,EUR
+4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9,3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,os-prod,openstack,instance,abc-123,proj-456,ram_gb,29.76,24.96,-4.80,EUR
+4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9,3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,os-prod,openstack,instance,abc-123,proj-456,vcpus,59.52,49.92,-9.60,EUR

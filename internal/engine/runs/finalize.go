@@ -19,7 +19,9 @@ import (
 const statusCompleted = "completed"
 
 // ErrRunNotFound is what Finalize returns for a run id no row carries. Nothing
-// is written for such a call.
+// is written for such a call. export.Load wraps the same sentinel for a run id
+// it finds no row to export for, so one check tells a missing run from every
+// other refusal either of them makes.
 var ErrRunNotFound = errors.New("the run does not exist")
 
 // ErrRunNotCompleted is what Finalize returns for a run that did not get to the
