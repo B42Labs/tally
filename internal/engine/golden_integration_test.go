@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -28,7 +29,10 @@ import (
 
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/export"
+	"github.com/b42labs/tally/internal/engine/invariants"
+	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/runs"
+	"github.com/b42labs/tally/internal/engine/scheduler"
 	"github.com/b42labs/tally/internal/engine/source"
 )
 
@@ -203,6 +207,8 @@ func TestGolden(t *testing.T) {
 
 	t.Run("correction_credit", func(t *testing.T) { goldenCorrectionCredit(t, f) })
 	t.Run("reproducibility", func(t *testing.T) { goldenReproducibility(t, f) })
+	t.Run("invariant_violation", func(t *testing.T) { goldenInvariantViolation(t, f) })
+	t.Run("scheduler_drill", func(t *testing.T) { goldenSchedulerDrill(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -742,4 +748,399 @@ func readExported(t *testing.T, path string) []byte {
 		t.Fatalf("reading the exported %s: %v", path, err)
 	}
 	return data
+}
+
+// goldenInvariantViolation is the negative case of the suite: a period the
+// engine has to refuse. One instance of it carries an update after its delete,
+// which reopens its timeline and bills time no life of the resource covers, so
+// the coverage invariant is breached. The run must fail on that resource, name
+// it alone, and leave nothing behind that a later step could mistake for a
+// billed month: no records, no export, and a period still open.
+func goldenInvariantViolation(t *testing.T, f goldenFixture) {
+	const cloud = "os-golden-violation"
+
+	c := loadCase(t, "invariant_violation")
+	dbs := f.caseDatabases(t, "invariant_violation")
+	ctx := t.Context()
+
+	seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+
+	result, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, []string{cloud}))
+	if err == nil {
+		t.Fatal("runs.Execute error = nil, want the violating resource reported")
+	}
+	var violation *metering.ViolationError
+	if !errors.As(err, &violation) {
+		t.Fatalf("runs.Execute error = %v, want a *metering.ViolationError", err)
+	}
+	// The sound instance shares the period with the broken one, and this length
+	// is what says it was not swept up with it.
+	if len(violation.Resources) != 1 {
+		t.Fatalf("violating resources = %+v, want the one instance the update reopened",
+			violation.Resources)
+	}
+	reported := violation.Resources[0]
+	for _, field := range []struct{ name, got, want string }{
+		{"cloud", reported.Cloud, cloud},
+		{"resource_type", reported.ResourceType, "instance"},
+		{"resource_id", reported.ResourceID, "i-broken"},
+	} {
+		if field.got != field.want {
+			t.Errorf("the violating resource: %s = %q, want %q", field.name, field.got, field.want)
+		}
+	}
+	if !slices.ContainsFunc(reported.Violations, func(v invariants.Violation) bool {
+		return v.Invariant == invariants.InvariantCoverage
+	}) {
+		t.Errorf("the violations of i-broken = %+v, want one of %q",
+			reported.Violations, invariants.InvariantCoverage)
+	}
+
+	if result.RunID == uuid.Nil {
+		t.Fatal("runs.Execute reported no run id, want the run it opened and failed")
+	}
+	if got := runStatus(t, dbs, result.RunID); got != "failed" {
+		t.Errorf("status = %q, want failed", got)
+	}
+	// The stats are what an operator reads the period from, so they carry the
+	// same report the caller got.
+	if !reflect.DeepEqual(result.Stats.Violations, violation.Resources) {
+		t.Errorf("stats violations = %+v, want the reported %+v",
+			result.Stats.Violations, violation.Resources)
+	}
+	if result.Stats.Error != err.Error() {
+		t.Errorf("stats error = %q, want the failure %q", result.Stats.Error, err.Error())
+	}
+
+	for _, table := range []string{"usage_records", "rated_records", "project_statements"} {
+		if got := countRows(t, dbs, table, result.RunID); got != 0 {
+			t.Errorf("the failed run holds %d rows in %s, want none", got, table)
+		}
+	}
+
+	if _, err := export.Load(ctx, dbs.engine, result.RunID); !errors.Is(err, export.ErrRunNotExportable) {
+		t.Errorf("export.Load error = %v, want one matching export.ErrRunNotExportable", err)
+	}
+
+	if status, _ := periodRow(t, dbs); status != "open" {
+		t.Errorf("the billing period is %q, want open: a month nothing billed is still to be billed",
+			status)
+	}
+
+	// The whole period is refused, so the instance whose history does describe a
+	// life is not billed either, by this run or by any other.
+	var sound int
+	if err := dbs.engine.QueryRow(ctx,
+		`SELECT count(*) FROM usage_records WHERE resource_id = 'i-sound'`).Scan(&sound); err != nil {
+		t.Fatalf("counting the usage records of i-sound: %v", err)
+	}
+	if sound != 0 {
+		t.Errorf("i-sound holds %d usage records, want none", sound)
+	}
+}
+
+// goldenSchedulerDrill is the phase's fifth exit criterion: one month
+// carried through an operator's calendar by the tick. March is moved into grace
+// when it ends, left alone for the whole grace window, metered at the end of it
+// and not metered again, finalized by hand, credited over the power cycle that
+// arrives after the invoice, and then walked once more without being touched.
+// The clock is an argument of scheduler.Tick, so the days of April are stepped
+// through in one test.
+func goldenSchedulerDrill(t *testing.T, f goldenFixture) {
+	const (
+		cloud = "os-golden-drill"
+		key   = cloud + "/proj-456"
+	)
+
+	c := loadCase(t, "scheduler_drill")
+	dbs := f.caseDatabases(t, "scheduler_drill")
+	ctx := t.Context()
+
+	seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+
+	// The executor the CLI wires runs.Execute into. It counts its calls, because
+	// half of what the drill checks is the ticks that do not meter.
+	calls := 0
+	exec := func(ctx context.Context, from, to time.Time) (uuid.UUID, error) {
+		calls++
+		if !from.Equal(periodFrom) || !to.Equal(periodTo) {
+			t.Errorf("the tick metered [%s, %s), want the March of the case [%s, %s)",
+				instant(from), instant(to), instant(periodFrom), instant(periodTo))
+		}
+		opts := c.options(t, []string{cloud})
+		opts.PeriodFrom, opts.PeriodTo = from, to
+		r, err := runs.Execute(ctx, dbs.engine, dbs.source, opts)
+		return r.RunID, err
+	}
+	tick := func(now time.Time) scheduler.Report {
+		report, err := scheduler.Tick(ctx, dbs.engine, now, scheduler.Options{
+			GraceHours: 72, AutoFinalize: false, Execute: exec,
+		})
+		if err != nil {
+			t.Fatalf("scheduler.Tick at %s: %v", instant(now), err)
+		}
+		return report
+	}
+	// month is the single entry every tick past the end of March reports. A
+	// second month in the walk, a failure or a warning is a finding of its own,
+	// so they are checked here rather than at each of the steps below.
+	month := func(report scheduler.Report, now time.Time) scheduler.MonthReport {
+		if len(report) != 1 {
+			t.Fatalf("the tick at %s walked %d months, want the one of the case",
+				instant(now), len(report))
+		}
+		got := report[0]
+		if got.Month != "2026-03" {
+			t.Errorf("the tick at %s walked %q, want 2026-03", instant(now), got.Month)
+		}
+		if got.Err != nil {
+			t.Errorf("the tick at %s failed the month: %v", instant(now), got.Err)
+		}
+		if got.Warning != nil {
+			t.Errorf("the tick at %s warned: %v", instant(now), got.Warning)
+		}
+		return got
+	}
+
+	// The row tally-engine run --period writes. The walk starts at the earliest
+	// billing period the engine knows, so without it a tick would walk the month
+	// before its clock rather than the March of the case.
+	if _, err := dbs.engine.Exec(ctx,
+		`INSERT INTO billing_periods (period_from, period_to, status) VALUES ($1, $2, 'open')`,
+		periodFrom, periodTo); err != nil {
+		t.Fatalf("recording the billing period %s: %v", instant(periodFrom), err)
+	}
+
+	// The last second of March: the month has not ended, so nothing is due.
+	if report := tick(time.Date(2026, 3, 31, 23, 59, 59, 0, time.UTC)); len(report) != 0 {
+		t.Errorf("the tick inside March walked %+v, want nothing", report)
+	}
+	if status, _ := periodRow(t, dbs); status != "open" {
+		t.Errorf("the billing period is %q, want open", status)
+	}
+	if got := countRuns(t, dbs); got != 0 {
+		t.Errorf("the period holds %d runs, want none", got)
+	}
+	if calls != 0 {
+		t.Errorf("the executor was called %d times, want none inside March", calls)
+	}
+
+	// The first instant of April: March has ended, and its open phase with it.
+	now := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	ended := month(tick(now), now)
+	if want := "open -> grace"; ended.Transition != want {
+		t.Errorf("the tick at the end of March reported %q, want %q", ended.Transition, want)
+	}
+	if ended.RunID != uuid.Nil {
+		t.Errorf("the tick at the end of March metered run %s, want the grace window first", ended.RunID)
+	}
+	if status, _ := periodRow(t, dbs); status != "grace" {
+		t.Errorf("the billing period is %q, want grace", status)
+	}
+	if calls != 0 {
+		t.Errorf("the executor was called %d times, want none: the grace window has just opened", calls)
+	}
+
+	// The last second of the 72 hours late events are waited for.
+	now = time.Date(2026, 4, 3, 23, 59, 59, 0, time.UTC)
+	waiting := month(tick(now), now)
+	if waiting.Transition != "" {
+		t.Errorf("the tick inside the grace window reported the transition %q, want none",
+			waiting.Transition)
+	}
+	if waiting.RunID != uuid.Nil {
+		t.Errorf("the tick inside the grace window metered run %s, want nothing yet", waiting.RunID)
+	}
+	if calls != 0 {
+		t.Errorf("the executor was called %d times, want none inside the grace window", calls)
+	}
+	if got := countRuns(t, dbs); got != 0 {
+		t.Errorf("the period holds %d runs, want none inside the grace window", got)
+	}
+
+	// The grace window has passed: this is the tick that bills the month.
+	now = time.Date(2026, 4, 4, 0, 0, 0, 0, time.UTC)
+	billed := month(tick(now), now)
+	if billed.RunID == uuid.Nil {
+		t.Fatal("the tick at the end of the grace window metered no run, want the regular run of March")
+	}
+	regular := billed.RunID
+	if billed.Finalized {
+		t.Error("the tick closed March, want it left open: AutoFinalize is off")
+	}
+	if calls != 1 {
+		t.Errorf("the executor was called %d times, want once", calls)
+	}
+	if status, _ := periodRow(t, dbs); status != "grace" {
+		t.Errorf("the billing period is %q, want grace: an operator closes a metered month", status)
+	}
+	run, err := export.Load(ctx, dbs.engine, regular)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	if run.Status != "completed" {
+		t.Errorf("the metered run is %q, want completed", run.Status)
+	}
+	if len(run.Statements) != 1 {
+		t.Fatalf("statements = %d, want the one project of the case", len(run.Statements))
+	}
+	if got := run.Statements[0].Key; got != key {
+		t.Errorf("statement key = %q, want %q", got, key)
+	}
+	if want := decimal.RequireFromString("148.80"); !run.Statements[0].Total.Equal(want) {
+		t.Errorf("the total of %s = %s, want %s", key, run.Statements[0].Total, want)
+	}
+
+	// The next hourly pass finds a month that carries a completed run, and such
+	// a month is not metered a second time.
+	now = time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC)
+	if got := month(tick(now), now); got.RunID != uuid.Nil {
+		t.Errorf("the tick after the run metered %s, want nothing", got.RunID)
+	}
+	if calls != 1 {
+		t.Errorf("the executor was called %d times, want the one of the grace step", calls)
+	}
+	if got := countRuns(t, dbs); got != 1 {
+		t.Errorf("the period holds %d runs, want the one the tick metered", got)
+	}
+
+	kind, err := runs.Finalize(ctx, dbs.engine, periodFrom, regular)
+	if err != nil {
+		t.Fatalf("runs.Finalize: %v", err)
+	}
+	if kind != runs.KindRegular {
+		t.Errorf("runs.Finalize closed a %q, want a %q", kind, runs.KindRegular)
+	}
+	status, finalized := periodRow(t, dbs)
+	if status != "finalized" {
+		t.Errorf("the billing period is %q, want finalized", status)
+	}
+	if finalized != regular {
+		t.Errorf("the period was closed by %s, want the metered run %s", finalized, regular)
+	}
+
+	// The power cycle, arriving after the month was closed.
+	seedLate(t, dbs, c)
+
+	late, err := runs.DetectLate(ctx, dbs.engine, dbs.source, periodFrom, periodTo)
+	if err != nil {
+		t.Fatalf("runs.DetectLate: %v", err)
+	}
+	if late.RunID != regular {
+		t.Errorf("the late events are held against %s, want the finalized run %s", late.RunID, regular)
+	}
+	if late.Kind != runs.KindRegular {
+		t.Errorf("the run the late events are held against is a %q, want a %q", late.Kind, runs.KindRegular)
+	}
+	if late.Truncated != 0 {
+		t.Errorf("Truncated = %d, want none: the case has one resource", late.Truncated)
+	}
+	if len(late.Resources) != 1 {
+		t.Fatalf("late resources = %v, want the one instance the power cycle reached", late.Resources)
+	}
+	wantResource := source.Resource{
+		Cloud: cloud, Platform: "openstack", ResourceType: "instance", ResourceID: "abc-123",
+	}
+	if late.Resources[0].Resource != wantResource {
+		t.Errorf("the late resource = %+v, want %+v", late.Resources[0].Resource, wantResource)
+	}
+	if late.Resources[0].Events != 2 {
+		t.Errorf("the late resource carries %d events, want the two of the power cycle",
+			late.Resources[0].Events)
+	}
+
+	correction, err := runs.Correct(ctx, dbs.engine, dbs.source, c.correctOptions(t))
+	if err != nil {
+		t.Fatalf("runs.Correct: %v", err)
+	}
+	assertNoWarnings(t, correction.Stats.Stats)
+	if correction.CorrectsRunID != regular {
+		t.Errorf("CorrectsRunID = %s, want the finalized run %s", correction.CorrectsRunID, regular)
+	}
+	if correction.Stats.Deltas != 3 {
+		t.Errorf("Stats.Deltas = %d, want the three gauges the shutoff interval halved",
+			correction.Stats.Deltas)
+	}
+
+	credit, err := export.Load(ctx, dbs.engine, correction.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	// The three gauges of the instance, in the order the diff sorts its keys.
+	wantDeltas := []struct{ dimension, delta string }{
+		{"disk_gb", "-9.60"},
+		{"ram_gb", "-4.80"},
+		{"vcpus", "-9.60"},
+	}
+	if len(credit.Deltas) != len(wantDeltas) {
+		t.Fatalf("deltas = %d, want %d", len(credit.Deltas), len(wantDeltas))
+	}
+	for i, w := range wantDeltas {
+		got := credit.Deltas[i]
+		if got.Dimension != w.dimension {
+			t.Errorf("delta %d: dimension = %q, want %q", i, got.Dimension, w.dimension)
+		}
+		// The embedded corrections.Delta carries a field of its own name, so the
+		// difference is one level down from the export record.
+		if want := decimal.RequireFromString(w.delta); !got.Delta.Delta.Equal(want) {
+			t.Errorf("delta %d: the %s difference = %s, want %s",
+				i, w.dimension, got.Delta.Delta, want)
+		}
+	}
+	if len(credit.Statements) != 1 {
+		t.Fatalf("credit notes = %d, want the one project of the case", len(credit.Statements))
+	}
+	note := credit.Statements[0]
+	if note.Key != key {
+		t.Errorf("credit note key = %q, want %q", note.Key, key)
+	}
+	if want := decimal.RequireFromString("-24.00"); !note.Total.Equal(want) {
+		t.Errorf("the total of the credit note of %s = %s, want %s", key, note.Total, want)
+	}
+	// The month the note credits, written out rather than taken from the options
+	// the correction was called with: a correction derives its period from the
+	// run it corrects, and a note stamped with the month beside this one would
+	// carry every amount above it unchanged.
+	var document corrections.CreditNote
+	if err := json.Unmarshal(note.Document, &document); err != nil {
+		t.Fatalf("decoding the credit note of %s: %v", key, err)
+	}
+	assertBillingPeriod(t, "the credit note of "+key, document.BillingPeriod,
+		expectedBillingPeriod{From: "2026-03-01T00:00:00Z", To: "2026-04-01T00:00:00Z"})
+	for _, field := range []struct{ name, got, want string }{
+		{"project", document.ProjectID, "proj-456"},
+		{"platform", document.Platform, "openstack"},
+		{"corrects_run_id", document.CorrectsRunID, regular.String()},
+	} {
+		if field.got != field.want {
+			t.Errorf("the %s of the credit note of %s = %q, want %q",
+				field.name, key, field.got, field.want)
+		}
+	}
+
+	// A finalized month is walked and left alone. The correction an operator ran
+	// against it stands, and the tick meters nothing.
+	now = time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC)
+	closed := month(tick(now), now)
+	if closed.Transition != "" {
+		t.Errorf("the tick after the finalization reported the transition %q, want none",
+			closed.Transition)
+	}
+	if closed.RunID != uuid.Nil {
+		t.Errorf("the tick after the finalization named run %s, want none", closed.RunID)
+	}
+	if closed.Finalized {
+		t.Error("the tick closed March, want it already closed by the operator")
+	}
+	if calls != 1 {
+		t.Errorf("the executor was called %d times, want the one of the grace step", calls)
+	}
+	if got := runStatus(t, dbs, correction.RunID); got != "completed" {
+		t.Errorf("the correction is %q, want completed", got)
+	}
+	if status, _ := periodRow(t, dbs); status != "finalized" {
+		t.Errorf("the billing period is %q, want finalized", status)
+	}
 }
