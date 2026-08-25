@@ -10,11 +10,15 @@ import (
 )
 
 const (
-	// moneyPlaces is the scale every monetary value is rounded and rendered at.
-	moneyPlaces = 2
-	// quantityPlaces is the scale usage quantities, minutes and counters alike,
-	// are rounded and rendered at.
-	quantityPlaces = 4
+	// AmountPlaces is the scale every monetary value is rounded and rendered at.
+	// It is exported because a renderer outside this package writes the same
+	// numbers as text rather than through Amount, and a second copy of the scale
+	// would drift from this one without a test noticing.
+	AmountPlaces = 2
+	// QuantityPlaces is the scale usage quantities, minutes and counters alike,
+	// are rounded and rendered at. It is exported for the reason AmountPlaces
+	// is.
+	QuantityPlaces = 4
 	// divisionScale is the working precision every division runs at, set
 	// explicitly so no result depends on decimal.DivisionPrecision.
 	divisionScale = 28
@@ -25,21 +29,21 @@ const (
 // aggregate is a sum of already-rounded values, so a total always equals the sum
 // of its visible line items.
 func Round2(d decimal.Decimal) decimal.Decimal {
-	return d.Round(moneyPlaces)
+	return d.Round(AmountPlaces)
 }
 
 // Minutes converts a duration in whole seconds to minutes, rounded to four
 // decimal places. Interval arithmetic is done in integer seconds; this is where
 // it becomes a billable quantity.
 func Minutes(seconds int64) decimal.Decimal {
-	return Div(decimal.NewFromInt(seconds), decimal.NewFromInt(60)).Round(quantityPlaces)
+	return Div(decimal.NewFromInt(seconds), decimal.NewFromInt(60)).Round(QuantityPlaces)
 }
 
 // RoundQuantity rounds a usage quantity to four decimal places, half away from
 // zero, the way Round2 rounds money. It is the rounding a counter value read
 // from a metrics store goes through before it is carried as a Quantity.
 func RoundQuantity(d decimal.Decimal) decimal.Decimal {
-	return d.Round(quantityPlaces)
+	return d.Round(QuantityPlaces)
 }
 
 // Div divides at an explicit working precision. Dividing by zero panics, as it
@@ -64,7 +68,7 @@ func NewAmount(d decimal.Decimal) Amount {
 
 // MarshalJSON renders the amount as a JSON number with exactly two decimal places.
 func (a Amount) MarshalJSON() ([]byte, error) {
-	return []byte(a.StringFixed(moneyPlaces)), nil
+	return []byte(a.StringFixed(AmountPlaces)), nil
 }
 
 // Quantity is a usage quantity that serializes at the four-place scale Minutes
@@ -83,5 +87,5 @@ func NewQuantity(d decimal.Decimal) Quantity {
 
 // MarshalJSON renders the quantity as a JSON number with exactly four decimal places.
 func (q Quantity) MarshalJSON() ([]byte, error) {
-	return []byte(q.StringFixed(quantityPlaces)), nil
+	return []byte(q.StringFixed(QuantityPlaces)), nil
 }

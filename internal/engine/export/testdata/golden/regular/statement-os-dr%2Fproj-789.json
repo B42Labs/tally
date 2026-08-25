@@ -1,0 +1,34 @@
+{
+  "billing_period": {
+    "from": "2026-03-01T00:00:00Z",
+    "to": "2026-04-01T00:00:00Z"
+  },
+  "project_id": "proj-789",
+  "platform": "openstack",
+  "line_items": [
+    {
+      "resource_type": "volume",
+      "resource_id": "vol-789",
+      "platform": "openstack",
+      "description": "200 GB volume",
+      "periods": [
+        {
+          "state": "in-use",
+          "hours": 744.00,
+          "usage": {
+            "disk_gb": 200.0000
+          },
+          "cost": {
+            "disk_gb": 22.32,
+            "total": 22.32
+          },
+          "state_modifier": 1.0000
+        }
+      ],
+      "total": 22.32
+    }
+  ],
+  "related_costs": [],
+  "total": 22.32,
+  "currency": "EUR"
+}
