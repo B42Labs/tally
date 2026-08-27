@@ -179,6 +179,7 @@ func TestGolden(t *testing.T) {
 		"harbor_counters",
 		"e2e_power_cycle",
 		"related_costs",
+		"virtual_relations",
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := loadCase(t, name)

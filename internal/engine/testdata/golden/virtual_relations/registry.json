@@ -1,0 +1,38 @@
+{
+  "projects": [
+    {"platform": "gardener", "cloud": "gd-golden-virtual", "external_id": "team-alpha"},
+    {"platform": "openstack", "cloud": "os-golden-virtual", "external_id": "shoot-abc-os-tenant"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"},
+    {"platform": "meta", "cloud": "meta", "external_id": "customer-alpha"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "gd-golden-virtual", "external_id": "team-alpha"},
+      "target": {"cloud": "os-golden-virtual", "external_id": "shoot-abc-os-tenant"},
+      "relation_type": "infrastructure_tenant",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null
+    },
+    {
+      "source": {"cloud": "gd-golden-virtual", "external_id": "team-alpha"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null
+    },
+    {
+      "source": {"cloud": "gd-golden-virtual", "external_id": "team-alpha"},
+      "target": {"cloud": "meta", "external_id": "customer-alpha"},
+      "relation_type": "member_of",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null
+    },
+    {
+      "source": {"cloud": "os-golden-virtual", "external_id": "shoot-abc-os-tenant"},
+      "target": {"cloud": "meta", "external_id": "customer-alpha"},
+      "relation_type": "member_of",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null
+    }
+  ]
+}
