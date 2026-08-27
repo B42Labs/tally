@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/b42labs/tally/internal/core/event"
@@ -56,6 +57,15 @@ const emptySize = "{}"
 // bounds how long a transaction holds its locks, and a run that dies partway
 // leaves every batch before it rebuilt, so the run can simply be repeated.
 const rebuildBatchSize = 100
+
+// The check migration 0010 put on current_resources, as Postgres names it when
+// a fold breaks it. Matching the constraint and not the SQLSTATE alone is what
+// keeps another check violation from being taken for a poisoned history and
+// skipped.
+const (
+	checkViolation       = "23514"
+	virtualKeyConstraint = "current_resources_virtual_key"
+)
 
 // Key identifies the resource a projection row belongs to. It is the primary key
 // of current_resources and the string the advisory lock hashes.
@@ -217,6 +227,14 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key, m *metrics.Metrics) error {
 // transaction each. A run that fails partway returns the keys it got through
 // along with the error, and repeating it costs only the work it redoes.
 //
+// A key whose history was written under a virtual platform or cloud folds into a
+// row current_resources refuses. The run leaves that row as it stands, goes on
+// with the keys after it, and returns an error naming every key it skipped: the
+// history behind such a key can only be corrected by an operator who knows which
+// real cloud it belonged to, and until then it must not cost the rest of the
+// fleet its rebuild. The keys are listed in the error because nothing else
+// enumerates what a run left stale.
+//
 // m counts one replay per key the run reaches. A nil m records nothing.
 func Rebuild(ctx context.Context, s *store.Store, filter Filter, m *metrics.Metrics) (int, error) {
 	rows, err := sqlcgen.New(s.Pool()).ListResourceKeys(ctx, sqlcgen.ListResourceKeysParams{
@@ -238,20 +256,74 @@ func Rebuild(ctx context.Context, s *store.Store, filter Filter, m *metrics.Metr
 	slices.SortFunc(keys, CompareKey)
 
 	rebuilt := 0
+	var poisoned []Key
 	for batch := range slices.Chunk(keys, rebuildBatchSize) {
-		if err := s.WithTx(ctx, func(tx pgx.Tx) error {
-			for _, key := range batch {
-				if err := Replay(ctx, tx, key, m); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
+		replayed, skipped, err := replayBatch(ctx, s, batch, m)
+		if err != nil {
 			return rebuilt, fmt.Errorf("rebuilding the projections: %w", err)
 		}
-		rebuilt += len(batch)
+		rebuilt += replayed
+		poisoned = append(poisoned, skipped...)
+	}
+	if len(poisoned) > 0 {
+		ids := make([]string, len(poisoned))
+		for i, key := range poisoned {
+			ids[i] = key.id()
+		}
+		return rebuilt, fmt.Errorf("%d resource key(s) hold a history written under a virtual platform or cloud and keep the row they had: %s",
+			len(poisoned), strings.Join(ids, ", "))
 	}
 	return rebuilt, nil
+}
+
+// replayBatch replays one batch of keys in one transaction and reports how many
+// rows it wrote and which keys it left alone.
+//
+// A fold the projection's check refuses aborts the statement, and Postgres
+// leaves the transaction it ran in unusable, so every key is replayed inside a
+// savepoint of its own: the keys folded before the offending one keep what they
+// wrote, and the keys after it are still replayed. Every other failure is the
+// run's and takes the batch with it.
+func replayBatch(ctx context.Context, s *store.Store, batch []Key, m *metrics.Metrics) (int, []Key, error) {
+	replayed := 0
+	var poisoned []Key
+	if err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		for _, key := range batch {
+			savepoint, err := tx.Begin(ctx)
+			if err != nil {
+				return fmt.Errorf("opening the savepoint of %s: %w", key.id(), err)
+			}
+			if err := Replay(ctx, savepoint, key, m); err != nil {
+				if !isVirtualKeyViolation(err) {
+					return err
+				}
+				if rollback := savepoint.Rollback(ctx); rollback != nil {
+					return fmt.Errorf("rolling the savepoint of %s back: %w", key.id(), rollback)
+				}
+				poisoned = append(poisoned, key)
+				continue
+			}
+			if err := savepoint.Commit(ctx); err != nil {
+				return fmt.Errorf("releasing the savepoint of %s: %w", key.id(), err)
+			}
+			replayed++
+		}
+		return nil
+	}); err != nil {
+		// The transaction rolled back, so the batch wrote nothing and skipped
+		// nothing an operator has to hear about.
+		return 0, nil, err
+	}
+	return replayed, poisoned, nil
+}
+
+// isVirtualKeyViolation reports whether err is the projection refusing a row
+// under a virtual platform or cloud, which is a history to be corrected rather
+// than a run to be given up on.
+func isVirtualKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == checkViolation &&
+		pgErr.ConstraintName == virtualKeyConstraint
 }
 
 // CompareKey orders two resource keys byte-wise over their three fields. It is
