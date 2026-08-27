@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/b42labs/tally/internal/core/project"
 )
 
 // Source names the pipeline an event came from.
@@ -211,6 +213,23 @@ func (e *Event) Validate() error {
 		case n > identifierMaxLen:
 			errs = append(errs, fmt.Errorf("%s: must be at most %d characters, got %d",
 				field.name, identifierMaxLen, n))
+		}
+	}
+
+	// A meta-project and a partner own no resource, and the registry names them
+	// by a cloud that repeats their platform, so an event naming one of the two
+	// literals in either field comes from a misconfigured collector and is
+	// refused with the other wire rules. The cloud carries the rule as well
+	// because the owner of a resource is resolved by (cloud, project_id): an
+	// event under the cloud "meta" would bill a meta-project for a resource.
+	// An empty value is not virtual and reports only the emptiness above.
+	for _, field := range []struct{ name, value string }{
+		{"platform", e.Platform},
+		{"cloud", e.Cloud},
+	} {
+		if project.IsVirtualPlatform(field.value) {
+			errs = append(errs, fmt.Errorf("%s: %q is a virtual platform, which never carries resources",
+				field.name, field.value))
 		}
 	}
 
