@@ -85,6 +85,14 @@ var (
 // relation type the concept's related-costs example uses.
 var attributingRelationTypes = []string{"infrastructure_tenant"}
 
+// adjustmentRelationTypes and adjustmentDepth are what adjustment resolution
+// walks for every case, the defaults of the deployment. The managed_by and
+// member_of edges of virtual_relations carry no adjustments, so a run of the
+// suite proves that walking them leaves every statement at the Phase 3 bytes.
+var adjustmentRelationTypes = []string{"managed_by", "member_of"}
+
+const adjustmentDepth = 3
+
 // goldenFixture is the pair of containers the suite runs its cases in. The
 // cases share them and take a database of their own out of each.
 type goldenFixture struct {
@@ -734,6 +742,8 @@ func (c goldenCase) options(t *testing.T, clouds []string) runs.Options {
 		PeriodTo:                 periodTo,
 		Clouds:                   clouds,
 		AttributingRelationTypes: attributingRelationTypes,
+		AdjustmentRelationTypes:  adjustmentRelationTypes,
+		AdjustmentDepth:          adjustmentDepth,
 		Counters:                 c.Counters,
 		VM:                       c.querier(t),
 	}
@@ -749,6 +759,8 @@ func (c goldenCase) correctOptions(t *testing.T) runs.CorrectOptions {
 		PeriodFrom:               periodFrom,
 		PeriodTo:                 periodTo,
 		AttributingRelationTypes: attributingRelationTypes,
+		AdjustmentRelationTypes:  adjustmentRelationTypes,
+		AdjustmentDepth:          adjustmentDepth,
 		Counters:                 c.Counters,
 		VM:                       c.querier(t),
 	}
@@ -781,6 +793,7 @@ func assertNoWarnings(t *testing.T, stats runs.Stats) {
 		{"metering_warnings", stats.MeteringWarnings, len(stats.MeteringWarnings)},
 		{"counter_warnings", stats.CounterWarnings, len(stats.CounterWarnings)},
 		{"attribution_warnings", stats.AttributionWarnings, len(stats.AttributionWarnings)},
+		{"adjustment_warnings", stats.AdjustmentWarnings, len(stats.AdjustmentWarnings)},
 		{"unpriced", stats.Unpriced, len(stats.Unpriced)},
 		{"unreadable", stats.Unreadable, len(stats.Unreadable)},
 		{"unregistered_projects", stats.UnregisteredProjects, len(stats.UnregisteredProjects)},

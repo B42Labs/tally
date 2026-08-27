@@ -545,6 +545,57 @@ func TestRunAndFinalizeCLI(t *testing.T) {
 		}
 	})
 
+	// The cases above run with the adjustment relation types blanked, which is
+	// adjustments turned off, so the lines they pin are the lines of a run that
+	// resolves none. This one turns them on the way a deployment leaves them.
+	t.Run("prints the adjustments it applied", func(t *testing.T) {
+		t.Setenv("TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES", "managed_by,member_of")
+
+		adjusted, _ := billingMonth(-6)
+		adjustedMonth := period.Format(adjusted)
+		const (
+			adjustedCloud   = "os-cli-adjusted"
+			adjustedProject = "proj-cli-adjusted"
+		)
+		f.seedProject(t, adjustedCloud, adjustedProject)
+		f.seedInstance(t, adjustedCloud, "i-cli-adjusted", adjustedProject, adjusted)
+		// Valid from a month before the one that is metered, so the relation
+		// covers the whole of it.
+		f.seedRelation(t, f.projectIDOf(t, adjustedCloud, adjustedProject),
+			f.seedVirtualProject(t, "partner", "partner-corp"),
+			"managed_by", resellerAdjustments, adjusted.AddDate(0, -1, 0))
+
+		stdout, stderr, err := runCLI(t, "run", "--period", adjustedMonth, "--clouds", adjustedCloud)
+		if err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		want := fmt.Sprintf("run %s completed for %s with pricing model %s\n"+
+			"metered 1 candidates into 1 usage records, 1 rated records and 1 project statements\n"+
+			"applied 2 pricing adjustments\n",
+			f.completedRun(t, adjusted), adjustedMonth, modelVersion)
+		if stdout != want {
+			t.Errorf("stdout of run = %q, want %q", stdout, want)
+		}
+	})
+
+	// A depth of zero would resolve no relation at all, which is what turning
+	// the relation types off says. config.Load runs before either database is
+	// dialed, so this is refused without a connection.
+	t.Run("refuses an adjustment depth below one", func(t *testing.T) {
+		t.Setenv("TALLY_ENGINE_ADJUSTMENT_DEPTH", "0")
+
+		stdout, _, err := runCLI(t, "run", "--period", month)
+		if err == nil {
+			t.Fatal("run error = nil, want the adjustment depth reported")
+		}
+		if want := "TALLY_ENGINE_ADJUSTMENT_DEPTH: 0 must be at least 1"; !strings.Contains(err.Error(), want) {
+			t.Errorf("run error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a run that never loaded", stdout)
+		}
+	})
+
 	t.Run("refuses a configuration without a reporting database url", func(t *testing.T) {
 		useDatabase(t, f.engine.URL)
 
@@ -680,6 +731,65 @@ func TestDetectLateAndCorrectCLI(t *testing.T) {
 	if stdout != want {
 		t.Errorf("stdout of periods list = %q, want %q", stdout, want)
 	}
+
+	// A correction of a month a partner resells books what the resize changed
+	// about the three instances and what that changed about the discount and
+	// the kickback. Both counts belong on one line: an adjustment delta that the
+	// rated count does not carry is money a partner is owed.
+	t.Run("prints the adjustment deltas", func(t *testing.T) {
+		t.Setenv("TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES", "managed_by,member_of")
+
+		adjusted, _ := billingMonth(-7)
+		adjustedMonth := period.Format(adjusted)
+		const (
+			adjustedCloud   = "os-cli-adjusted-correct"
+			adjustedProject = "proj-cli-adjusted-correct"
+		)
+		instances := []string{"i-adjusted-1", "i-adjusted-2", "i-adjusted-3"}
+
+		f.seedProject(t, adjustedCloud, adjustedProject)
+		for _, instance := range instances {
+			f.seedInstance(t, adjustedCloud, instance, adjustedProject, adjusted)
+		}
+		f.seedRelation(t, f.projectIDOf(t, adjustedCloud, adjustedProject),
+			f.seedVirtualProject(t, "partner", "partner-corp-correct"),
+			"managed_by", resellerAdjustments, adjusted.AddDate(0, -1, 0))
+
+		stdout, stderr, err := runCLI(t, "run", "--period", adjustedMonth, "--clouds", adjustedCloud)
+		if err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		// The lines of a run are pinned by the run cases; what this one needs
+		// from it is that the month was billed with the two adjustments on it.
+		if want := "applied 2 pricing adjustments\n"; !strings.HasSuffix(stdout, want) {
+			t.Errorf("stdout of run = %q, want it to end with %q", stdout, want)
+		}
+		adjustedRun := f.completedRun(t, adjusted)
+		if _, stderr, err := runCLI(t, "finalize", "--period", adjustedMonth,
+			"--run", adjustedRun.String()); err != nil {
+			t.Fatalf("finalize error = %v, want nil (stderr %q)", err, stderr)
+		}
+
+		// One resize per instance, each halving its vcpus halfway through its
+		// life, all of them after the run read the month.
+		for _, instance := range instances {
+			f.seedEvent(t, adjustedCloud, instance, adjustedProject, "ev-resize-"+instance,
+				"compute.instance.resize.end", adjusted.Add(48*time.Hour),
+				`{"state":"active","size":{"vcpus":2,"ram_gb":8,"disk_gb":80,"flavor":"m1.large"}}`)
+		}
+
+		stdout, stderr, err = runCLI(t, "correct", "--period", adjustedMonth)
+		if err != nil {
+			t.Fatalf("correct error = %v, want nil (stderr %q)", err, stderr)
+		}
+		want := fmt.Sprintf("run %s completed as a correction of run %s for %s with pricing model %s\n"+
+			"metered 3 candidates into 6 usage records and 6 rated records\n"+
+			"3 deltas and 2 adjustment deltas in 1 credit notes\n",
+			f.completedCorrection(t, adjusted), adjustedRun, adjustedMonth, modelVersion)
+		if stdout != want {
+			t.Errorf("stdout of correct = %q, want %q", stdout, want)
+		}
+	})
 
 	t.Run("detect-late needs no counter sources", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "missing.yaml")
@@ -1079,6 +1189,14 @@ func TestTickCLI(t *testing.T) {
 // rated with, which they print beside the run.
 const modelVersion = "v1"
 
+// resellerAdjustments is the metadata of the relation between a project and the
+// partner that resells it: 15 percent off what the project is rated, and 10
+// percent of what is left owed to the partner beside the net. Two adjustments,
+// which is what the cases that read them see reported.
+const resellerAdjustments = `{"pricing_adjustments":[` +
+	`{"type":"discount","rate":"0.15","scope":"all"},` +
+	`{"type":"kickback","rate":"0.10","scope":"all"}]}`
+
 // pipelineFixture is the pair of databases a run works over: the engine
 // database it is written to, and the reporting database it reads its resources
 // and events from. The CLI is pointed at both through the environment, the way
@@ -1125,6 +1243,58 @@ func (f pipelineFixture) seedProject(t *testing.T, cloud, externalID string) {
 		`INSERT INTO projects (platform, cloud, external_id) VALUES ('openstack', $1, $2)`,
 		cloud, externalID); err != nil {
 		t.Fatalf("seeding the project %s: %v", externalID, err)
+	}
+}
+
+// seedVirtualProject registers a project that owns no resources: the partner a
+// reseller relation points at. Its cloud is its platform, which is what a
+// virtual project carries there, and it returns the registry id a relation
+// names it by.
+func (f pipelineFixture) seedVirtualProject(t *testing.T, platform, externalID string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`INSERT INTO projects (platform, cloud, external_id) VALUES ($1, $1, $2) RETURNING id`,
+		platform, externalID).Scan(&id); err != nil {
+		t.Fatalf("seeding the %s project %s: %v", platform, externalID, err)
+	}
+	return id
+}
+
+// projectIDOf is the registry id of one project, which a relation names and
+// seedProject does not report.
+func (f pipelineFixture) projectIDOf(t *testing.T, cloud, externalID string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`SELECT id FROM projects WHERE cloud = $1 AND external_id = $2`,
+		cloud, externalID).Scan(&id); err != nil {
+		t.Fatalf("reading the id of the project %s/%s: %v", cloud, externalID, err)
+	}
+	return id
+}
+
+// seedRelation writes one edge of the project graph. An empty metadata is the
+// empty document a relation created without one carries, and the relation is
+// left open, so it covers every month a case meters from validFrom on.
+func (f pipelineFixture) seedRelation(
+	t *testing.T,
+	sourceID, targetID uuid.UUID,
+	relationType, metadata string,
+	validFrom time.Time,
+) {
+	t.Helper()
+
+	if metadata == "" {
+		metadata = "{}"
+	}
+	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
+		`INSERT INTO project_relations (source_id, target_id, relation_type, metadata, valid_from)
+		 VALUES ($1, $2, $3, $4::jsonb, $5)`,
+		sourceID, targetID, relationType, metadata, validFrom); err != nil {
+		t.Fatalf("seeding the %s relation of %s: %v", relationType, sourceID, err)
 	}
 }
 
