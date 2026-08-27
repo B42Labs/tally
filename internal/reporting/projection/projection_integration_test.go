@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -460,6 +461,65 @@ func TestRebuild(t *testing.T) {
 			if got[key] != snapshot {
 				t.Errorf("row of %s = %s, want %s", key.ResourceID, got[key], snapshot)
 			}
+		}
+	})
+
+	t.Run("replays past a key whose history names a virtual platform", func(t *testing.T) {
+		// Both literals were free-form text in platform until migration 0010, so
+		// a deployment may hold events written under one. current_resources
+		// refuses the row such a history folds into, and the failed statement
+		// takes its transaction with it: without a savepoint per key the run
+		// would abandon every key sorted after this one and roll back every key
+		// of the batch it had already folded, leaving a fleet nothing enumerates
+		// as stale.
+		const poisonedCloud = "os-projection-poisoned"
+		var (
+			first    = projection.Key{Cloud: poisonedCloud, ResourceType: "volume", ResourceID: "vol-a-before"}
+			poisoned = projection.Key{Cloud: poisonedCloud, ResourceType: "volume", ResourceID: "vol-b-virtual"}
+			last     = projection.Key{Cloud: poisonedCloud, ResourceType: "volume", ResourceID: "vol-c-after"}
+		)
+		for _, key := range []projection.Key{first, last} {
+			ingest(t, db, key, resourceEvent(key, key.ResourceID+"-create", "volume.create",
+				createTime, payloadOf("available", sizeGB(10))))
+		}
+		// Recorded rather than ingested: the fold this event asks for is the one
+		// current_resources refuses, so the row it would write is what the
+		// rebuild has to run into.
+		virtual := resourceEvent(poisoned, "vol-b-virtual-create", "volume.create",
+			createTime, payloadOf("available", sizeGB(10)))
+		virtual.Platform = "meta"
+		record(t, db, virtual)
+
+		healthy := map[projection.Key]string{}
+		for key, snapshot := range snapshots(t, db) {
+			if key == first || key == last {
+				healthy[key] = snapshot
+			}
+		}
+		corrupt(t, db)
+
+		rebuilt, err := projection.Rebuild(t.Context(), db.Store,
+			projection.Filter{Cloud: poisonedCloud}, nil)
+		if err == nil {
+			t.Fatalf("Rebuild() error = nil, want the run to name %s", poisoned.ResourceID)
+		}
+		if !strings.Contains(err.Error(), poisoned.ResourceID) {
+			t.Errorf("Rebuild() error = %v, want it to name %s", err, poisoned.ResourceID)
+		}
+		if rebuilt != len(healthy) {
+			t.Errorf("Rebuild() = %d, want the %d keys the run could fold", rebuilt, len(healthy))
+		}
+
+		got := snapshots(t, db)
+		for key, snapshot := range healthy {
+			if got[key] != snapshot {
+				t.Errorf("row of %s = %s, want %s: the key was abandoned over another key's history",
+					key.ResourceID, got[key], snapshot)
+			}
+		}
+		if _, written := got[poisoned]; written {
+			t.Errorf("the history of %s folded into a row, so a resource under a virtual platform is projected",
+				poisoned.ResourceID)
 		}
 	})
 }

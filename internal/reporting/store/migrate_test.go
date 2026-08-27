@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/b42labs/tally/internal/reporting/store"
@@ -93,6 +95,15 @@ var wantResourceTypes = map[string]string{
 		"x-tally-seed": 6
 	}`,
 }
+
+// The SQLSTATEs and the constraint name the cases around migration 0010 read
+// their outcome off: a write the projection's rule refuses, and a lock the
+// bounded ALTER gave up on rather than queue for.
+const (
+	checkViolation       = "23514"
+	lockNotAvailable     = "55P03"
+	projectionVirtualKey = "current_resources_virtual_key"
+)
 
 func TestMigrate(t *testing.T) {
 	db := storetest.NewDB(t)
@@ -383,6 +394,243 @@ func TestMigrate(t *testing.T) {
 		}
 		if !indexExists(t, s, "idx_events_received") {
 			t.Error("the late-event index is missing after the repeated upgrade")
+		}
+	})
+
+	t.Run("the projection refuses a resource under a virtual literal", func(t *testing.T) {
+		// The count 0010 runs over current_resources guarantees nothing on its
+		// own: the old binary accepts a virtual cloud and keeps ingesting under it
+		// until the new image is rolled, and the rows an operator renames to get
+		// past the count come back with the first projection rebuild, which
+		// replays the events history rather than reading this table. The
+		// constraint is what holds afterwards, and it holds against both columns:
+		// the owner of a resource is resolved by (cloud, project_id), so a row
+		// under the cloud "meta" bills a meta-project for a resource.
+		for _, row := range []struct{ platform, cloud string }{
+			{"meta", "os-virtual-projection"},
+			{"openstack", "meta"},
+			{"partner", "partner"},
+		} {
+			_, err := db.Store.Pool().Exec(t.Context(),
+				`INSERT INTO current_resources
+				   (cloud, platform, resource_type, resource_id, project_id, state,
+				    last_event_type, last_event_at)
+				 VALUES ($1, $2, 'volume', 'vol-virtual-projection', 'p-virtual',
+				         'available', 'volume.create.end', now())`,
+				row.cloud, row.platform)
+			if err == nil {
+				t.Errorf("a resource under the platform %q and the cloud %q was stored, so its cost attributes to a project that owns none",
+					row.platform, row.cloud)
+				continue
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != checkViolation ||
+				pgErr.ConstraintName != projectionVirtualKey {
+				t.Errorf("writing a resource under (%s, %s) failed with %v, want %s on %s",
+					row.platform, row.cloud, err, checkViolation, projectionVirtualKey)
+			}
+		}
+	})
+
+	t.Run("a rollback repeats after one that dropped a constraint by hand", func(t *testing.T) {
+		// An operator drops a constraint to get an urgent write through and then
+		// rolls the release back. Without IF EXISTS the rollback dies on the
+		// constraint that is already gone, leaving version 10 recorded as applied
+		// and goose_db_version to be edited by hand — the case 0008 and 0009 guard
+		// against in the same place.
+		dropped := db.NewSiblingDB(t, "migrate_constraint_dropped")
+		if _, err := store.Migrate(t.Context(), dropped); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), dropped, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+		for table, constraint := range map[string]string{
+			"projects":          "projects_virtual_key",
+			"current_resources": projectionVirtualKey,
+		} {
+			if _, err := s.Pool().Exec(t.Context(),
+				"ALTER TABLE "+table+" DROP CONSTRAINT "+constraint); err != nil {
+				t.Fatalf("dropping %s the way an operator unblocking a write leaves it: %v", constraint, err)
+			}
+		}
+
+		rolledBack, err := store.MigrateDownTo(t.Context(), dropped, 9)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(9) error = %v, want the rollback to tolerate the constraints that are gone", err)
+		}
+		if want := []int64{10}; !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(9) = %v, want %v", rolledBack, want)
+		}
+	})
+
+	t.Run("the constraints give up rather than queue behind a reader", func(t *testing.T) {
+		// ALTER TABLE ADD CONSTRAINT needs ACCESS EXCLUSIVE, and a metering run
+		// holds ACCESS SHARE on projects for as long as its REPEATABLE READ
+		// transaction lasts, which is the whole run. Postgres queues every later
+		// lock request behind the waiting ACCESS EXCLUSIVE, so a migration that
+		// waits without a bound takes authorization for the whole project-scoped
+		// API down with it — ingest included — for as long as the run in front of
+		// it takes. The lock_timeout is what turns that into an error the operator
+		// reruns.
+		behind := db.NewSiblingDB(t, "migrate_behind_reader")
+		if _, err := store.Migrate(t.Context(), behind); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if _, err := store.MigrateDownTo(t.Context(), behind, 9); err != nil {
+			t.Fatalf("MigrateDownTo(9) error = %v, want nil", err)
+		}
+
+		reader, err := pgx.Connect(t.Context(), behind)
+		if err != nil {
+			t.Fatalf("connecting as the run that reads projects: %v", err)
+		}
+		defer func() { _ = reader.Close(t.Context()) }()
+		tx, err := reader.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatalf("opening the run's snapshot: %v", err)
+		}
+		if _, err := tx.Exec(t.Context(), "SELECT count(*) FROM projects"); err != nil {
+			t.Fatalf("reading projects inside the snapshot: %v", err)
+		}
+
+		// Well past the bound the migration carries, so an expiry here is the
+		// migration waiting rather than a slow container.
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		applied, err := store.Migrate(ctx, behind)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != lockNotAvailable {
+			t.Fatalf("Migrate() = %v, error = %v, want %s: the chain waited for the reader instead of giving the table back",
+				applied, err, lockNotAvailable)
+		}
+
+		// The reader is what it waited for, so the rerun the error asks for
+		// succeeds once that transaction is done.
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatalf("ending the run's snapshot: %v", err)
+		}
+		applied, err = store.Migrate(t.Context(), behind)
+		if err != nil {
+			t.Fatalf("Migrate() error = %v, want nil once the reader is gone", err)
+		}
+		if want := []int64{10}; !slices.Equal(applied, want) {
+			t.Errorf("Migrate() = %v, want %v", applied, want)
+		}
+	})
+
+	t.Run("the rollback gives up rather than queue behind a reader", func(t *testing.T) {
+		// SET LOCAL dies with the transaction it ran in, and goose runs each
+		// direction in one of its own, so the bound the Up direction carries says
+		// nothing about the Down one. DROP CONSTRAINT needs the ACCESS EXCLUSIVE
+		// that ADD CONSTRAINT needs, and a rollback runs at the moment an
+		// unbounded wait for it can least be afforded: the release it undoes is
+		// already failing.
+		rolling := db.NewSiblingDB(t, "migrate_rollback_behind_reader")
+		if _, err := store.Migrate(t.Context(), rolling); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+
+		reader, err := pgx.Connect(t.Context(), rolling)
+		if err != nil {
+			t.Fatalf("connecting as the run that reads projects: %v", err)
+		}
+		defer func() { _ = reader.Close(t.Context()) }()
+		tx, err := reader.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			t.Fatalf("opening the run's snapshot: %v", err)
+		}
+		if _, err := tx.Exec(t.Context(), "SELECT count(*) FROM projects"); err != nil {
+			t.Fatalf("reading projects inside the snapshot: %v", err)
+		}
+
+		// Well past the bound the rollback carries, so an expiry here is the
+		// rollback waiting rather than a slow container.
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		rolledBack, err := store.MigrateDownTo(ctx, rolling, 9)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != lockNotAvailable {
+			t.Fatalf("MigrateDownTo(9) = %v, error = %v, want %s: the rollback waited for the reader instead of giving the table back",
+				rolledBack, err, lockNotAvailable)
+		}
+
+		// The reader is what it waited for, so the rerun the error asks for
+		// succeeds once that transaction is done.
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatalf("ending the run's snapshot: %v", err)
+		}
+		rolledBack, err = store.MigrateDownTo(t.Context(), rolling, 9)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(9) error = %v, want nil once the reader is gone", err)
+		}
+		if want := []int64{10}; !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(9) = %v, want %v", rolledBack, want)
+		}
+	})
+
+	t.Run("the count is what refuses the rows the projection's constraint never scans for", func(t *testing.T) {
+		// A constraint added without NOT VALID holds ACCESS EXCLUSIVE for a full
+		// scan of current_resources, which is the outage the lock_timeout in
+		// front of it exists to avoid: the bound is on the wait, not on the hold.
+		// The count that runs before any lock stronger than ACCESS SHARE is taken
+		// is what refuses a database already breaking the rule, so the constraint
+		// is added NOT VALID and skips a scan for rows the count has already
+		// proved are not there.
+		guarded := db.NewSiblingDB(t, "migrate_virtual_guard")
+		if _, err := store.Migrate(t.Context(), guarded); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if _, err := store.MigrateDownTo(t.Context(), guarded, 9); err != nil {
+			t.Fatalf("MigrateDownTo(9) error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), guarded, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		// The row a deployment may hold from before this chain, when both
+		// literals were free-form text.
+		if _, err := s.Pool().Exec(t.Context(),
+			`INSERT INTO current_resources
+			   (cloud, platform, resource_type, resource_id, project_id, state,
+			    last_event_type, last_event_at)
+			 VALUES ('meta', 'meta', 'volume', 'vol-virtual-guard', 'p-virtual',
+			         'available', 'volume.create.end', now())`); err != nil {
+			t.Fatalf("writing the row an older deployment was allowed to write: %v", err)
+		}
+
+		if applied, err := store.Migrate(t.Context(), guarded); err == nil {
+			t.Fatalf("Migrate() = %v, error = nil, want the chain to refuse the row it will not scan for", applied)
+		} else if !strings.Contains(err.Error(), "current_resources") {
+			t.Errorf("Migrate() error = %v, want it to name the table holding the row", err)
+		}
+
+		if _, err := s.Pool().Exec(t.Context(),
+			`DELETE FROM current_resources WHERE resource_id = 'vol-virtual-guard'`); err != nil {
+			t.Fatalf("correcting the row the way the hint asks for: %v", err)
+		}
+		applied, err := store.Migrate(t.Context(), guarded)
+		if err != nil {
+			t.Fatalf("Migrate() error = %v, want nil once the row is gone", err)
+		}
+		if want := []int64{10}; !slices.Equal(applied, want) {
+			t.Errorf("Migrate() = %v, want %v", applied, want)
+		}
+
+		var validated bool
+		if err := s.Pool().QueryRow(t.Context(),
+			`SELECT convalidated FROM pg_constraint
+			  WHERE conname = $1 AND conrelid = 'current_resources'::regclass`,
+			projectionVirtualKey).Scan(&validated); err != nil {
+			t.Fatalf("reading how %s was added: %v", projectionVirtualKey, err)
+		}
+		if validated {
+			t.Errorf("%s was validated on the way in, so the ALTER scanned the whole table under ACCESS EXCLUSIVE",
+				projectionVirtualKey)
 		}
 	})
 
