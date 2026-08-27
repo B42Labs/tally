@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/counters"
@@ -20,6 +22,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/rating"
 	"github.com/b42labs/tally/internal/engine/source"
+	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
 
@@ -33,6 +36,14 @@ type CorrectOptions struct {
 	// AttributingRelationTypes are the relation types attribution walks. An
 	// empty list is attribution turned off.
 	AttributingRelationTypes []string
+	// AdjustmentRelationTypes are the relation types adjustment resolution
+	// walks from a statement's project. An empty list is adjustments turned
+	// off.
+	AdjustmentRelationTypes []string
+	// AdjustmentDepth bounds that walk: how many relation levels it follows
+	// from the statement's project, at least 1. The configuration checks it,
+	// and so does adjustments.New.
+	AdjustmentDepth int
 	// Counters is the counter sources file of the deployment, empty where it
 	// measures no counter metric.
 	Counters counters.Config
@@ -66,10 +77,12 @@ type CorrectionResult struct {
 // CorrectionStats is what a correction stores in runs.stats: everything a
 // regular run counts, under the same keys, and the deltas it wrote beside them.
 // Statements counts the credit notes, which are the documents a correction
-// renders.
+// renders. AdjustmentDeltas counts the adjustments the correction applies
+// differently than the run it corrects.
 type CorrectionStats struct {
 	Stats
-	Deltas int `json:"deltas"`
+	Deltas           int `json:"deltas"`
+	AdjustmentDeltas int `json:"adjustment_deltas"`
 }
 
 // Correct meters a finalized period again with the pricing version the latest
@@ -184,6 +197,10 @@ func correct(
 	if err != nil {
 		return result, err
 	}
+	oldAdjustments, err := baselineAdjustments(ctx, q, baselineID, model)
+	if err != nil {
+		return result, err
+	}
 
 	// A nil cloud list is bound as the empty array rather than passed on: pgx
 	// encodes nil as SQL NULL and runs.clouds is NOT NULL. Both spellings mean
@@ -214,12 +231,15 @@ func correct(
 		PeriodTo:                 opts.PeriodTo,
 		Clouds:                   clouds,
 		AttributingRelationTypes: opts.AttributingRelationTypes,
+		AdjustmentRelationTypes:  opts.AdjustmentRelationTypes,
+		AdjustmentDepth:          opts.AdjustmentDepth,
 		Counters:                 opts.Counters,
 		VM:                       opts.VM,
 	}
 
 	var stats CorrectionStats
-	superseded, err := produceCorrection(ctx, engine, reporting, pass, model, result.RunID, baselineID, old, &stats)
+	superseded, err := produceCorrection(
+		ctx, engine, reporting, pass, model, result.RunID, baselineID, old, oldAdjustments, &stats)
 	if err != nil {
 		stats.Error = err.Error()
 		result.Stats = stats
@@ -267,10 +287,56 @@ func baselineAmounts(ctx context.Context, q *sqlcgen.Queries, baselineID uuid.UU
 	return amounts, nil
 }
 
+// baselineAdjustments sums what the corrected run applied, per the key the
+// adjustments of the two passes are diffed by. A rate or an amount that is not
+// a number, and a row applied in another currency than the model prices in, are
+// refused by naming what carries them: a difference built from either would be
+// arithmetic over two different things, and a numeric with no coefficient is
+// not a decimal at all. A run with no adjustment records, one finalized before
+// the records existed included, yields an empty map, against which every
+// adjustment the correction applies is a delta of its own size.
+func baselineAdjustments(ctx context.Context, q *sqlcgen.Queries, baselineID uuid.UUID, model pricing.Model) (
+	map[corrections.AdjustmentKey]corrections.AdjustmentAmount, error,
+) {
+	rows, err := q.ListAdjustmentRecords(ctx, uuidValue(baselineID))
+	if err != nil {
+		return nil, fmt.Errorf("reading the adjustment records of run %s: %w", baselineID, err)
+	}
+
+	amounts := make(map[corrections.AdjustmentKey]corrections.AdjustmentAmount, len(rows))
+	for _, row := range rows {
+		relationID := uuid.UUID(row.RelationID.Bytes)
+		if !row.Amount.Valid || row.Amount.NaN || !row.Rate.Valid || row.Rate.NaN {
+			return nil, fmt.Errorf("the %s adjustment of relation %s on %s of run %s is not a number",
+				row.Type, relationID, row.ProjectID, baselineID)
+		}
+		if row.Currency != model.Currency {
+			return nil, fmt.Errorf("the finalized run %s carries an adjustment in %s and pricing model %s is in %s",
+				baselineID, row.Currency, model.Version, model.Currency)
+		}
+		rate := decimal.NewFromBigInt(row.Rate.Int, row.Rate.Exp)
+		key := corrections.AdjustmentKey{
+			StatementKey: row.ProjectID,
+			RelationID:   relationID.String(),
+			Type:         row.Type,
+			Scope:        row.Scope,
+			Rate:         rate.StringFixed(money.RatePlaces),
+		}
+		amounts[key] = corrections.AdjustmentAmount{
+			RelationType:   row.RelationType,
+			RelationTarget: row.RelationTarget,
+			RateValue:      rate,
+			Amount:         amounts[key].Amount.Add(decimal.NewFromBigInt(row.Amount.Int, row.Amount.Exp)),
+		}
+	}
+	return amounts, nil
+}
+
 // produceCorrection meters, rates, diffs, renders and writes one correction,
-// and returns the completed corrections it superseded. old is what the run
-// being corrected billed, and stats is filled as the passes report, so a
-// failure carries what the correction got to rather than an empty object.
+// and returns the completed corrections it superseded. old and oldAdjustments
+// are what the run being corrected billed and applied, and stats is filled as
+// the passes report, so a failure carries what the correction got to rather
+// than an empty object.
 func produceCorrection(
 	ctx context.Context,
 	engine *pgxpool.Pool,
@@ -279,9 +345,10 @@ func produceCorrection(
 	model pricing.Model,
 	runID, baselineID uuid.UUID,
 	old map[corrections.Key]decimal.Decimal,
+	oldAdjustments map[corrections.AdjustmentKey]corrections.AdjustmentAmount,
 	stats *CorrectionStats,
 ) ([]uuid.UUID, error) {
-	metered, projects, relations, err := meter(ctx, reporting, opts, &stats.Stats)
+	metered, g, err := meter(ctx, reporting, opts, &stats.Stats)
 	if err != nil {
 		return nil, err
 	}
@@ -293,8 +360,23 @@ func produceCorrection(
 	stats.Unpriced = rated.Unpriced
 	stats.Unreadable = rated.Unreadable
 
-	resolution := attribution.Resolve(projects, relations)
+	resolution := attribution.Resolve(g.projects, g.attributing)
 	stats.AttributionWarnings = resolution.Warnings
+
+	// No adjustment relation type is adjustments turned off, and a nil adjuster
+	// is what the statement build renders a period without them from. The error
+	// passes through as it is: it names the depth or the relation it could not
+	// be built from. A relation whose stored adjustments cannot be read fails
+	// the statement build below instead, and only where a walk reaches it.
+	var adjuster *adjustments.Adjuster
+	if len(opts.AdjustmentRelationTypes) > 0 {
+		var warnings []adjustments.Warning
+		adjuster, warnings, err = adjustments.New(g.adjusting, g.projects, opts.AdjustmentDepth)
+		if err != nil {
+			return nil, err
+		}
+		stats.AdjustmentWarnings = warnings
+	}
 
 	current, err := corrections.Amounts(metered.Resources, rated)
 	if err != nil {
@@ -302,8 +384,25 @@ func produceCorrection(
 	}
 	deltas := corrections.Diff(old, current)
 
+	// The full statements of the re-metered period. Their documents are
+	// discarded, because what a correction stores are its credit notes; what
+	// the build is run for are the adjustment lines, which become the
+	// correction's own adjustment records and the current side of the
+	// adjustment diff.
+	built, err := statements.Build(
+		opts.PeriodFrom, opts.PeriodTo, metered.Resources, rated, g.projects, resolution, adjuster)
+	if err != nil {
+		return nil, err
+	}
+	records, err := adjustmentRows(runID, built.Statements)
+	if err != nil {
+		return nil, err
+	}
+	adjustmentDeltas := corrections.DiffAdjustments(oldAdjustments, corrections.AdjustmentAmounts(built.Statements))
+
 	notes, err := corrections.BuildCreditNotes(
-		opts.PeriodFrom, opts.PeriodTo, baselineID, model.Currency, deltas, nil, projects, resolution)
+		opts.PeriodFrom, opts.PeriodTo, baselineID, model.Currency,
+		deltas, adjustmentDeltas, g.projects, resolution)
 	if err != nil {
 		return nil, err
 	}
@@ -327,11 +426,14 @@ func produceCorrection(
 	stats.UsageRecords = len(usage)
 	stats.RatedRecords = len(amounts)
 	stats.Statements = len(notes.Statements)
+	stats.AdjustmentRecords = len(records)
 	stats.Deltas = len(deltas)
+	stats.AdjustmentDeltas = len(adjustmentDeltas)
 
 	payload, err := json.Marshal(*stats)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling the stats of run %s: %w", runID, err)
 	}
-	return write(ctx, engine, opts.PeriodFrom, runID, KindCorrection, usage, amounts, differences, notes.Statements, payload)
+	return write(ctx, engine, opts.PeriodFrom, runID, KindCorrection,
+		usage, amounts, differences, records, notes.Statements, payload)
 }

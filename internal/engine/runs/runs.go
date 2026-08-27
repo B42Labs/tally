@@ -3,7 +3,10 @@
 // rendering over one reporting snapshot, and writes what came out under that
 // run. What a period is billed as is decided by the packages this one calls;
 // what belongs here is the order they run in, the run's bookkeeping, and the
-// stats an operator reads a finished run from.
+// stats an operator reads a finished run from. Adjustment resolution runs
+// between attribution and the statement build, and the adjustment records its
+// lines become are written in the run's one write transaction beside the rest
+// of the output.
 //
 // A run either writes its whole output or none of it. The records, the
 // supersede of the run it replaces, and the completion are one transaction, so
@@ -44,6 +47,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/metering"
@@ -115,6 +119,14 @@ type Options struct {
 	// AttributingRelationTypes are the relation types attribution walks. An
 	// empty list is attribution turned off.
 	AttributingRelationTypes []string
+	// AdjustmentRelationTypes are the relation types adjustment resolution
+	// walks from a statement's project. An empty list is adjustments turned
+	// off.
+	AdjustmentRelationTypes []string
+	// AdjustmentDepth bounds that walk: how many relation levels it follows
+	// from the statement's project, at least 1. The configuration checks it,
+	// and so does adjustments.New.
+	AdjustmentDepth int
 	// Counters is the counter sources file of the deployment, empty where it
 	// measures no counter metric.
 	Counters counters.Config
@@ -148,10 +160,12 @@ type Stats struct {
 	UsageRecords         int                              `json:"usage_records"`
 	RatedRecords         int                              `json:"rated_records"`
 	Statements           int                              `json:"statements"`
+	AdjustmentRecords    int                              `json:"adjustment_records,omitempty"`
 	Warnings             []Warning                        `json:"warnings,omitempty"`
 	MeteringWarnings     []metering.Warning               `json:"metering_warnings,omitempty"`
 	CounterWarnings      []counters.Warning               `json:"counter_warnings,omitempty"`
 	AttributionWarnings  []attribution.Warning            `json:"attribution_warnings,omitempty"`
+	AdjustmentWarnings   []adjustments.Warning            `json:"adjustment_warnings,omitempty"`
 	Unpriced             []rating.UnpricedResourceType    `json:"unpriced,omitempty"`
 	Unreadable           []rating.UnreadableQuantity      `json:"unreadable,omitempty"`
 	UnregisteredProjects []statements.UnregisteredProject `json:"unregistered_projects,omitempty"`
@@ -385,7 +399,7 @@ func produce(
 	runID uuid.UUID,
 	stats *Stats,
 ) ([]uuid.UUID, error) {
-	metered, projects, relations, err := meter(ctx, reporting, opts, stats)
+	metered, g, err := meter(ctx, reporting, opts, stats)
 	if err != nil {
 		return nil, err
 	}
@@ -397,10 +411,26 @@ func produce(
 	stats.Unpriced = rated.Unpriced
 	stats.Unreadable = rated.Unreadable
 
-	resolution := attribution.Resolve(projects, relations)
+	resolution := attribution.Resolve(g.projects, g.attributing)
 	stats.AttributionWarnings = resolution.Warnings
 
-	built, err := statements.Build(opts.PeriodFrom, opts.PeriodTo, metered.Resources, rated, projects, resolution, nil)
+	// No adjustment relation type is adjustments turned off, and a nil adjuster
+	// is what the statement build renders a period without them from. The error
+	// passes through as it is: it names the depth or the relation it could not
+	// be built from. A relation whose stored adjustments cannot be read fails
+	// the statement build below instead, and only where a walk reaches it.
+	var adjuster *adjustments.Adjuster
+	if len(opts.AdjustmentRelationTypes) > 0 {
+		var warnings []adjustments.Warning
+		adjuster, warnings, err = adjustments.New(g.adjusting, g.projects, opts.AdjustmentDepth)
+		if err != nil {
+			return nil, err
+		}
+		stats.AdjustmentWarnings = warnings
+	}
+
+	built, err := statements.Build(
+		opts.PeriodFrom, opts.PeriodTo, metered.Resources, rated, g.projects, resolution, adjuster)
 	if err != nil {
 		return nil, err
 	}
@@ -414,15 +444,20 @@ func produce(
 	if err != nil {
 		return nil, err
 	}
+	records, err := adjustmentRows(runID, built.Statements)
+	if err != nil {
+		return nil, err
+	}
 	stats.UsageRecords = len(usage)
 	stats.RatedRecords = len(amounts)
 	stats.Statements = len(built.Statements)
+	stats.AdjustmentRecords = len(records)
 
 	payload, err := json.Marshal(*stats)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling the stats of run %s: %w", runID, err)
 	}
-	return write(ctx, engine, opts.PeriodFrom, runID, KindRegular, usage, amounts, nil, built.Statements, payload)
+	return write(ctx, engine, opts.PeriodFrom, runID, KindRegular, usage, amounts, nil, records, built.Statements, payload)
 }
 
 // warnPeriodNotEnded warns about a month that has not ended, which is metered
@@ -441,6 +476,16 @@ func warnPeriodNotEnded(stats *Stats, periodTo time.Time) {
 	})
 }
 
+// graph is what one snapshot read of the registry hands the passes: the
+// projects of the period, the relations attribution walks, and the relations
+// adjustment resolution walks. The two relation lists are read separately
+// because each pass names its own types, and a type both lists name is read
+// twice.
+type graph struct {
+	projects               []source.Project
+	attributing, adjusting []source.Relation
+}
+
 // meter reads everything one run takes from the reporting database: the drafts
 // of the period, the counter metrics measured into them, and the project graph
 // they are attributed over.
@@ -450,11 +495,11 @@ func warnPeriodNotEnded(stats *Stats, periodTo time.Time) {
 // and the drafts it slices into see the same data, and the graph is read before
 // the connection is given back rather than while the period is being rated.
 func meter(ctx context.Context, reporting *source.DB, opts Options, stats *Stats) (
-	*metering.Result, []source.Project, []source.Relation, error,
+	*metering.Result, graph, error,
 ) {
 	snap, err := reporting.Snapshot(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, graph{}, err
 	}
 	// The snapshot is closed explicitly once the graph is read; this covers the
 	// paths that do not get there. Closing an already closed snapshot reports
@@ -479,33 +524,37 @@ func meter(ctx context.Context, reporting *source.DB, opts Options, stats *Stats
 		if errors.As(err, &violation) {
 			stats.Violations = violation.Resources
 		}
-		return nil, nil, nil, err
+		return nil, graph{}, err
 	}
 	stats.Candidates = metered.Candidates
 	stats.MeteringWarnings = metered.Warnings
 
 	measurer, err := counters.New(opts.Counters, snap, opts.VM)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("preparing the counter sources: %w", err)
+		return nil, graph{}, fmt.Errorf("preparing the counter sources: %w", err)
 	}
 	counterWarnings, err := measurer.Apply(ctx, metered.Resources)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, graph{}, err
 	}
 	stats.CounterWarnings = counterWarnings
 
 	projects, err := snap.Projects(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, graph{}, err
 	}
-	relations, err := snap.Relations(ctx, opts.AttributingRelationTypes, opts.PeriodFrom, opts.PeriodTo)
+	attributing, err := snap.Relations(ctx, opts.AttributingRelationTypes, opts.PeriodFrom, opts.PeriodTo)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, graph{}, err
+	}
+	adjusting, err := snap.Relations(ctx, opts.AdjustmentRelationTypes, opts.PeriodFrom, opts.PeriodTo)
+	if err != nil {
+		return nil, graph{}, err
 	}
 	if err := snap.Close(ctx); err != nil {
-		return nil, nil, nil, err
+		return nil, graph{}, err
 	}
-	return metered, projects, relations, nil
+	return metered, graph{projects: projects, attributing: attributing, adjusting: adjusting}, nil
 }
 
 // write stores one run's output and ends the run, in one transaction: the
@@ -531,6 +580,7 @@ func write(
 	usage []sqlcgen.CreateUsageRecordsParams,
 	amounts []sqlcgen.CreateRatedRecordsParams,
 	deltas []sqlcgen.CreateCorrectionDeltasParams,
+	adjustmentRecords []sqlcgen.CreateAdjustmentRecordsParams,
 	sts []statements.Statement,
 	payload []byte,
 ) ([]uuid.UUID, error) {
@@ -567,6 +617,11 @@ func write(
 	}
 	if err := statements.Persist(ctx, q, runID, sts); err != nil {
 		return nil, err
+	}
+	if len(adjustmentRecords) > 0 {
+		if _, err := q.CreateAdjustmentRecords(ctx, adjustmentRecords); err != nil {
+			return nil, fmt.Errorf("writing the adjustment records of run %s: %w", runID, err)
+		}
 	}
 	superseded, err := q.SupersedeCompletedRuns(ctx, sqlcgen.SupersedeCompletedRunsParams{
 		PeriodFrom: timestamptz(periodFrom),

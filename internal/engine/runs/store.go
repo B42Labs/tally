@@ -9,10 +9,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
+	"github.com/b42labs/tally/internal/core/money"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/rating"
 	"github.com/b42labs/tally/internal/engine/source"
+	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
 
@@ -175,6 +178,76 @@ func deltaRows(runID, correctsRunID uuid.UUID, deltas []corrections.Delta, curre
 			Delta:         amounts[2],
 			Currency:      currency,
 		})
+	}
+	return rows, nil
+}
+
+// adjustmentRows builds the adjustment records of one run: one row per
+// adjustment line of every statement, in statement and then application order,
+// each naming the relation the adjustment came from. Beneficiary carries the
+// relation's target on a kickback and nothing on the other types, because a
+// kickback is the one adjustment somebody is owed the amount of.
+//
+// The ids are generated here rather than left to the column default, because
+// COPY evaluates no defaults.
+//
+// A base or an amount past what the column holds is refused before the first
+// insert, named by its type, its relation and its statement, for the reason
+// ratedRows refuses one. So is a relation id that does not parse, which the
+// line carrying it as the text of a uuid.UUID leaves unreachable.
+func adjustmentRows(runID uuid.UUID, sts []statements.Statement) (
+	[]sqlcgen.CreateAdjustmentRecordsParams, error,
+) {
+	rows := make([]sqlcgen.CreateAdjustmentRecordsParams, 0, len(sts))
+	for _, st := range sts {
+		for _, line := range st.Adjustments {
+			relationID, err := uuid.Parse(line.RelationID)
+			if err != nil {
+				return nil, fmt.Errorf("reading the relation id %q of the %s adjustment on %s: %w",
+					line.RelationID, line.Type, st.Key, err)
+			}
+
+			// The three columns are NUMERIC, the rate at six places and the two
+			// amounts at two, and the decimals reach them as their own text
+			// rather than through a float.
+			var rate pgtype.Numeric
+			if err := rate.Scan(line.Rate.StringFixed(money.RatePlaces)); err != nil {
+				return nil, fmt.Errorf("reading the %s adjustment of relation %s on %s: %w",
+					line.Type, line.RelationID, st.Key, err)
+			}
+			var amounts [2]pgtype.Numeric
+			for i, value := range [2]decimal.Decimal{line.Base.Decimal, line.Amount.Decimal} {
+				if value.Abs().GreaterThan(maxRatedAmount) {
+					return nil, fmt.Errorf(
+						"the %s adjustment of relation %s on %s is %s, past the %s the column holds: "+
+							"a usage value it was rated from is out of range",
+						line.Type, line.RelationID, st.Key, value.StringFixed(2), maxRatedAmount)
+				}
+				if err := amounts[i].Scan(value.StringFixed(2)); err != nil {
+					return nil, fmt.Errorf("reading the %s adjustment of relation %s on %s: %w",
+						line.Type, line.RelationID, st.Key, err)
+				}
+			}
+
+			rows = append(rows, sqlcgen.CreateAdjustmentRecordsParams{
+				ID:             uuidValue(uuid.New()),
+				RunID:          uuidValue(runID),
+				ProjectID:      st.Key,
+				RelationID:     uuidValue(relationID),
+				RelationType:   line.RelationType,
+				RelationTarget: line.RelationTarget,
+				Beneficiary: pgtype.Text{
+					String: line.RelationTarget,
+					Valid:  line.Type == adjustment.TypeKickback,
+				},
+				Type:     line.Type,
+				Scope:    line.Scope,
+				Rate:     rate,
+				Base:     amounts[0],
+				Amount:   amounts[1],
+				Currency: st.Currency,
+			})
+		}
 	}
 	return rows, nil
 }
