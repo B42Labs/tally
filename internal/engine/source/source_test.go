@@ -3,6 +3,7 @@ package source_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"reflect"
@@ -15,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/engine/source"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
@@ -593,8 +596,18 @@ func TestProjectGraph(t *testing.T) {
 		ID: uuid.New(), SourceID: far.ID, TargetID: second.ID,
 		RelationType: relationType, ValidFrom: insidePeriod,
 	}
+	// The one relation carrying metadata, which adjustment resolution reads
+	// the pricing adjustments out of. The document carries a second member so
+	// that the read is seen to hand the whole metadata on rather than the
+	// adjustments alone.
+	adjusted := source.Relation{
+		ID: uuid.New(), SourceID: first.ID, TargetID: second.ID,
+		RelationType: relationType, ValidFrom: beforePeriod,
+		Metadata: json.RawMessage(
+			`{"owner":"team-a","pricing_adjustments":[{"type":"discount","rate":"0.15","scope":"all"}]}`),
+	}
 	for _, relation := range []source.Relation{
-		open, closedInside, startedInside,
+		open, closedInside, startedInside, adjusted,
 		// Closed at the first instant of the period, which no longer overlaps
 		// it: the predicate is valid_to > period_from.
 		{
@@ -626,11 +639,46 @@ func TestProjectGraph(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Relations() error = %v, want nil", err)
 		}
+		// JSONB stores a document by its members rather than by its text, so
+		// the metadata of the adjusted relation comes back in Postgres' order
+		// and is read through the parser below instead of compared as text.
+		var adjustedMetadata json.RawMessage
+		for i := range got {
+			if got[i].ID != adjusted.ID {
+				continue
+			}
+			adjustedMetadata = got[i].Metadata
+			got[i].Metadata = adjusted.Metadata
+		}
 		// Ordered by id, which Postgres compares byte-wise.
-		want := []source.Relation{open, closedInside, startedInside}
+		want := []source.Relation{open, closedInside, startedInside, adjusted}
+		for i := range want {
+			// A relation seeded without metadata carries the empty document,
+			// which JSONB renders as exactly {}.
+			if want[i].Metadata == nil {
+				want[i].Metadata = json.RawMessage("{}")
+			}
+		}
 		slices.SortFunc(want, func(a, b source.Relation) int { return bytes.Compare(a.ID[:], b.ID[:]) })
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Relations() = %+v, want %+v", got, want)
+		}
+
+		adjustments, found, err := adjustment.FromMetadata(adjustedMetadata)
+		if err != nil {
+			t.Fatalf("FromMetadata(%s) error = %v, want nil", adjustedMetadata, err)
+		}
+		if !found {
+			t.Fatalf("FromMetadata(%s) found = false, want true", adjustedMetadata)
+		}
+		if len(adjustments) != 1 {
+			t.Fatalf("FromMetadata(%s) = %+v, want one adjustment", adjustedMetadata, adjustments)
+		}
+		rate := decimal.RequireFromString("0.15")
+		if a := adjustments[0]; a.Type != adjustment.TypeDiscount ||
+			!a.Rate.Equal(rate) || a.Scope != adjustment.ScopeAll {
+			t.Errorf("FromMetadata(%s)[0] = %+v, want the %s of %s over %q",
+				adjustedMetadata, a, adjustment.TypeDiscount, rate, adjustment.ScopeAll)
 		}
 	})
 
@@ -727,7 +775,11 @@ func TestReaderRole(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Relations() error = %v, want nil", err)
 		}
-		if want := []source.Relation{relation}; !reflect.DeepEqual(relations, want) {
+		// The metadata column is covered by the same grant on the table, and a
+		// relation seeded without metadata carries the empty document.
+		wantRelation := relation
+		wantRelation.Metadata = json.RawMessage("{}")
+		if want := []source.Relation{wantRelation}; !reflect.DeepEqual(relations, want) {
 			t.Errorf("Relations() = %+v, want %+v", relations, want)
 		}
 
@@ -1029,14 +1081,20 @@ func seedProject(t *testing.T, pool *pgxpool.Pool, p source.Project) {
 	}
 }
 
-// seedRelation writes one edge of the project graph.
+// seedRelation writes one edge of the project graph. A relation without
+// metadata is written with the empty document, the same one the column
+// defaults to.
 func seedRelation(t *testing.T, pool *pgxpool.Pool, r source.Relation) {
 	t.Helper()
 
+	metadata := []byte(r.Metadata)
+	if metadata == nil {
+		metadata = []byte("{}")
+	}
 	if _, err := pool.Exec(t.Context(),
-		`INSERT INTO project_relations (id, source_id, target_id, relation_type, valid_from, valid_to)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		r.ID, r.SourceID, r.TargetID, r.RelationType, r.ValidFrom, r.ValidTo); err != nil {
+		`INSERT INTO project_relations (id, source_id, target_id, relation_type, valid_from, valid_to, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+		r.ID, r.SourceID, r.TargetID, r.RelationType, r.ValidFrom, r.ValidTo, metadata); err != nil {
 		t.Fatalf("seeding the relation %s: %v", r.ID, err)
 	}
 }

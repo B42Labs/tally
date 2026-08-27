@@ -292,7 +292,7 @@ func (q *Queries) ListProjects(ctx context.Context) ([]ListProjectsRow, error) {
 }
 
 const listRelationsOverlapping = `-- name: ListRelationsOverlapping :many
-SELECT id, source_id, target_id, relation_type, valid_from, valid_to
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to
 FROM project_relations
 WHERE relation_type = ANY($1::text[])
   AND valid_from < $2::timestamptz
@@ -311,6 +311,7 @@ type ListRelationsOverlappingRow struct {
 	SourceID     uuid.UUID
 	TargetID     uuid.UUID
 	RelationType string
+	Metadata     []byte
 	ValidFrom    pgtype.Timestamptz
 	ValidTo      pgtype.Timestamptz
 }
@@ -333,6 +334,7 @@ func (q *Queries) ListRelationsOverlapping(ctx context.Context, arg ListRelation
 			&i.SourceID,
 			&i.TargetID,
 			&i.RelationType,
+			&i.Metadata,
 			&i.ValidFrom,
 			&i.ValidTo,
 		); err != nil {
