@@ -112,6 +112,9 @@ const (
 	creditNoteFile = "credit-note-os-prod%2Fproj-456.json"
 	ratedFile      = "rated.csv"
 	deltasFile     = "deltas.csv"
+
+	kickbacksJSONFile = "kickbacks.json"
+	kickbacksCSVFile  = "kickbacks.csv"
 )
 
 // regularRun is the finalized run of the concept's power-cycle month: the
@@ -361,28 +364,28 @@ func TestExportGolden(t *testing.T) {
 			writer: jsonFiles,
 			run:    regularRun,
 			golden: "regular",
-			files:  []string{runFile, drStatementFile, statementFile},
+			files:  []string{runFile, drStatementFile, statementFile, kickbacksJSONFile},
 		},
 		{
 			name:   "the CSV writer over a regular run",
 			writer: csvFiles,
 			run:    regularRun,
 			golden: "regular",
-			files:  []string{ratedFile},
+			files:  []string{ratedFile, kickbacksCSVFile},
 		},
 		{
 			name:   "the JSON writer over a correction",
 			writer: jsonFiles,
 			run:    correctionRun,
 			golden: "correction",
-			files:  []string{runFile, creditNoteFile},
+			files:  []string{runFile, creditNoteFile, kickbacksJSONFile},
 		},
 		{
 			name:   "the CSV writer over a correction",
 			writer: csvFiles,
 			run:    correctionRun,
 			golden: "correction",
-			files:  []string{ratedFile, deltasFile},
+			files:  []string{ratedFile, deltasFile, kickbacksCSVFile},
 		},
 	}
 
@@ -410,9 +413,12 @@ func TestExportReplacesAnEarlierExport(t *testing.T) {
 	}{
 		{
 			name: "the JSON writer", writer: jsonFiles, stale: runFile,
-			files: []string{runFile, drStatementFile, statementFile},
+			files: []string{runFile, drStatementFile, statementFile, kickbacksJSONFile},
 		},
-		{name: "the CSV writer", writer: csvFiles, stale: ratedFile, files: []string{ratedFile}},
+		{
+			name: "the CSV writer", writer: csvFiles, stale: ratedFile,
+			files: []string{ratedFile, kickbacksCSVFile},
+		},
 	}
 
 	for _, c := range cases {
@@ -448,9 +454,9 @@ func TestExportReplacesAnEarlierExport(t *testing.T) {
 }
 
 // TestJSONFilesWithoutStatements pins what a run that billed nobody exports: a
-// run.json whose statement list is empty rather than null, and no document
-// beside it. An empty list is one an importer iterates over without a case for
-// the missing value.
+// run.json whose statement list is empty rather than null, with the settlement
+// beside it and no document. An empty list is one an importer iterates over
+// without a case for the missing value.
 func TestJSONFilesWithoutStatements(t *testing.T) {
 	dir := t.TempDir()
 	run := regularRun(t)
@@ -460,7 +466,7 @@ func TestJSONFilesWithoutStatements(t *testing.T) {
 		t.Fatalf("Export() error = %v, want nil", err)
 	}
 
-	assertNames(t, dir, []string{runFile})
+	assertNames(t, dir, []string{runFile, kickbacksJSONFile})
 	if body := string(read(t, filepath.Join(dir, runFile))); !strings.Contains(body, `"statements": []`) {
 		t.Errorf("%s =\n%s\nwant an empty statement list", runFile, body)
 	}
@@ -480,7 +486,7 @@ func TestCSVFilesWithoutRows(t *testing.T) {
 			t.Fatalf("Export() error = %v, want nil", err)
 		}
 
-		assertNames(t, dir, []string{ratedFile})
+		assertNames(t, dir, []string{ratedFile, kickbacksCSVFile})
 		if got, want := string(read(t, filepath.Join(dir, ratedFile))), ratedHeader+"\n"; got != want {
 			t.Errorf("%s = %q, want %q", ratedFile, got, want)
 		}
@@ -495,7 +501,7 @@ func TestCSVFilesWithoutRows(t *testing.T) {
 			t.Fatalf("Export() error = %v, want nil", err)
 		}
 
-		assertNames(t, dir, []string{deltasFile, ratedFile})
+		assertNames(t, dir, []string{deltasFile, kickbacksCSVFile, ratedFile})
 		if got, want := string(read(t, filepath.Join(dir, deltasFile))), deltasHeader+"\n"; got != want {
 			t.Errorf("%s = %q, want %q", deltasFile, got, want)
 		}
@@ -701,7 +707,7 @@ func TestJSONFilesNamesTwoStatementsOneFileSystemHoldsAsOneApart(t *testing.T) {
 	// Both documents are in the directory, and each of them is attributed by the
 	// index rather than by its name: a digest-named document bills the project
 	// run.json names beside it.
-	assertNames(t, dir, []string{runFile, first.File, second.File})
+	assertNames(t, dir, []string{runFile, kickbacksJSONFile, first.File, second.File})
 	for i, want := range []struct{ projectID, total string }{
 		{projectID: "Proj-A", total: "1.00"},
 		{projectID: "proj-a", total: "2.00"},
@@ -774,6 +780,20 @@ func TestExportRemovesWhatItWroteWhenAWriteFails(t *testing.T) {
 			run:     correctionRun,
 			blocked: deltasFile,
 			removed: ratedFile,
+		},
+		{
+			name:    "the JSON writer over a settlement that fails",
+			writer:  jsonFiles,
+			run:     regularRun,
+			blocked: kickbacksJSONFile,
+			removed: statementFile,
+		},
+		{
+			name:    "the CSV writer over a settlement that fails",
+			writer:  csvFiles,
+			run:     correctionRun,
+			blocked: kickbacksCSVFile,
+			removed: deltasFile,
 		},
 	}
 
@@ -941,8 +961,8 @@ func TestJSONFilesWritesAnIdentifierNoFileNameHolds(t *testing.T) {
 	}
 
 	files := names(t, dir)
-	if len(files) != 2 {
-		t.Fatalf("the directory holds %v, want run.json and the one document", files)
+	if len(files) != 3 {
+		t.Fatalf("the directory holds %v, want run.json, kickbacks.json and the one document", files)
 	}
 	var index struct {
 		Statements []struct {

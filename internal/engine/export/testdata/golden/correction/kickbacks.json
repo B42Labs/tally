@@ -1,0 +1,8 @@
+{
+  "run_id": "4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9",
+  "kind": "correction",
+  "corrects_run_id": "3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4",
+  "period_from": "2026-03-01T00:00:00Z",
+  "period_to": "2026-04-01T00:00:00Z",
+  "beneficiaries": []
+}

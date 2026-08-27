@@ -21,7 +21,9 @@
 // second export replaces the first one file by file.
 //
 // The normative specification is roadmap/03-phase-3-metering-rating.md, WP
-// 3.10.
+// 3.10, and, for the partner settlement the writers put beside the statements
+// as kickbacks.json or kickbacks.csv, roadmap/05-phase-5-commercial-pricing.md,
+// WP 5.4.
 package export
 
 import (
