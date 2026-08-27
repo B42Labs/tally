@@ -110,6 +110,13 @@ spec:
                   value: "false"
                 - name: TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES
                   value: infrastructure_tenant
+                # The relation types a statement's pricing adjustments are
+                # collected over; the empty list turns adjustments off.
+                - name: TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES
+                  value: managed_by,member_of
+                # How many relation levels that walk follows, at least 1.
+                - name: TALLY_ENGINE_ADJUSTMENT_DEPTH
+                  value: "3"
                 # Where the metricsql counter sources are queried. Nothing reads
                 # it while the sources below are empty, because the client is
                 # built only for a source that needs it.

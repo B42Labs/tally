@@ -68,6 +68,12 @@ func TestLoadDefaults(t *testing.T) {
 	if want := []string{"infrastructure_tenant"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
 		t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
 	}
+	if want := []string{"managed_by", "member_of"}; !slices.Equal(cfg.AdjustmentRelationTypes, want) {
+		t.Errorf("AdjustmentRelationTypes = %q, want %q", cfg.AdjustmentRelationTypes, want)
+	}
+	if cfg.AdjustmentDepth != 3 {
+		t.Errorf("AdjustmentDepth = %d, want 3", cfg.AdjustmentDepth)
+	}
 	if want := "/etc/tally/counter-sources.yaml"; cfg.CounterSourcesPath != want {
 		t.Errorf("CounterSourcesPath = %q, want %q", cfg.CounterSourcesPath, want)
 	}
@@ -224,6 +230,124 @@ func TestAttributingTypesExplicitEmpty(t *testing.T) {
 		}
 		if want := []string{"infrastructure_tenant"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
 			t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
+		}
+	})
+}
+
+func TestAdjustmentTypesExplicitEmpty(t *testing.T) {
+	t.Run("an explicitly empty value turns adjustments off", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_DB_URL":                    "postgres://tally@localhost/engine",
+			"TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES": "",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if len(cfg.AdjustmentRelationTypes) != 0 {
+			t.Errorf("AdjustmentRelationTypes = %q, want the empty list", cfg.AdjustmentRelationTypes)
+		}
+	})
+
+	t.Run("a named list replaces the default", func(t *testing.T) {
+		tests := []struct {
+			value string
+			want  []string
+		}{
+			{value: "managed_by", want: []string{"managed_by"}},
+			// The list is independent of the attributing one, so a type named in
+			// both is walked by attribution and by adjustment resolution.
+			{value: "infrastructure_tenant,member_of", want: []string{"infrastructure_tenant", "member_of"}},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.value, func(t *testing.T) {
+				setEnv(t, map[string]string{
+					"TALLY_ENGINE_DB_URL":                    "postgres://tally@localhost/engine",
+					"TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES": tc.value,
+				})
+
+				cfg, err := config.Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v, want nil", err)
+				}
+				if !slices.Equal(cfg.AdjustmentRelationTypes, tc.want) {
+					t.Errorf("AdjustmentRelationTypes = %q, want %q", cfg.AdjustmentRelationTypes, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("a stray comma is rejected", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_DB_URL":                    "postgres://tally@localhost/engine",
+			"TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES": "managed_by,,member_of",
+		})
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES") {
+			t.Errorf("Load() error = %q, want it to name TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES", err)
+		}
+		if want := "must not contain an empty relation type"; !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to contain %q", err, want)
+		}
+	})
+}
+
+func TestAdjustmentDepth(t *testing.T) {
+	t.Run("one level is the shallowest walk", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_DB_URL":           "postgres://tally@localhost/engine",
+			"TALLY_ENGINE_ADJUSTMENT_DEPTH": "1",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if cfg.AdjustmentDepth != 1 {
+			t.Errorf("AdjustmentDepth = %d, want 1", cfg.AdjustmentDepth)
+		}
+	})
+
+	t.Run("a depth below one is rejected", func(t *testing.T) {
+		for _, value := range []string{"0", "-1"} {
+			t.Run(value, func(t *testing.T) {
+				setEnv(t, map[string]string{
+					"TALLY_ENGINE_DB_URL":           "postgres://tally@localhost/engine",
+					"TALLY_ENGINE_ADJUSTMENT_DEPTH": value,
+				})
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatal("Load() error = nil, want an error")
+				}
+				if !strings.Contains(err.Error(), "TALLY_ENGINE_ADJUSTMENT_DEPTH") {
+					t.Errorf("Load() error = %q, want it to name TALLY_ENGINE_ADJUSTMENT_DEPTH", err)
+				}
+				if want := "must be at least 1"; !strings.Contains(err.Error(), want) {
+					t.Errorf("Load() error = %q, want it to contain %q", err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("a value that is not an integer is rejected", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_DB_URL":           "postgres://tally@localhost/engine",
+			"TALLY_ENGINE_ADJUSTMENT_DEPTH": "three",
+		})
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an error")
+		}
+		if want := "parsing the environment"; !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to contain %q", err, want)
 		}
 	})
 }
