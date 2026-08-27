@@ -454,6 +454,114 @@ func TestProjectsOverHTTP(t *testing.T) {
 		})
 	})
 
+	// The contract types metadata as a free object, so a member naming a number
+	// the float64 range does not hold is a document it accepts. Every renderer
+	// behind the contract reads the whole document, so a body the contract took
+	// has to come back as an answer rather than as this service's own failure —
+	// and it has to come back from every route that renders the row, because one
+	// poisoned row would otherwise answer the whole registry 500.
+	t.Run("keeps a metadata number no float64 holds", func(t *testing.T) {
+		const cloud = "os-reg-huge"
+
+		// The literal goes into the body as it stands, because no Go float64
+		// could carry it there. The column is jsonb, which holds a number as a
+		// numeric, so the answer spells the same value out rather than echoing
+		// the exponent the request sent.
+		const huge = "1e999"
+		spelled := "1" + strings.Repeat("0", 999)
+
+		// budgetOf is the number one answer carries under budget. The answer is
+		// read member by member rather than decoded whole, because a decode into
+		// map[string]any is the very thing that used to fail here.
+		budgetOf := func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			t.Helper()
+
+			var members map[string]json.RawMessage
+			raw := memberRaw(t, rec, "metadata")
+			if err := json.Unmarshal([]byte(raw), &members); err != nil {
+				t.Fatalf("decoding the metadata %s: %v", raw, err)
+			}
+			return string(members["budget"])
+		}
+
+		rec := a.call(t, http.MethodPost, projectsRoute, adminToken, projectDocument(t, map[string]any{
+			"platform": fixturePlatform, "cloud": cloud, "external_id": "reg-huge",
+			"metadata": map[string]any{"budget": json.RawMessage(huge)},
+		}))
+
+		if got := rec.Code; got != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusCreated, rec.Body)
+		}
+		if got := budgetOf(t, rec); got != spelled {
+			t.Errorf("budget = %s, want the sent %s spelled out", got, huge)
+		}
+		// Only the id is decoded off the answer: the model types metadata as a
+		// map[string]any, so decoding the project whole would fail on the very
+		// number this asserts about.
+		var created struct {
+			ID uuid.UUID `json:"id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decoding the body %q: %v", rec.Body, err)
+		}
+
+		read := a.call(t, http.MethodGet, projectPath(created.ID), adminToken, nil)
+		if got := read.Code; got != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusOK, read.Body)
+		}
+		if got := budgetOf(t, read); got != spelled {
+			t.Errorf("budget = %s, want the sent %s spelled out", got, huge)
+		}
+
+		// The list renders the same row, so a row it cannot render takes the
+		// default listing of every caller down with it.
+		list := a.call(t, http.MethodGet, projectsRoute+"?cloud="+cloud, adminToken, nil)
+		if got := list.Code; got != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusOK, list.Body)
+		}
+		if got := list.Body.String(); !strings.Contains(got, spelled) {
+			t.Errorf("the list answered %s, want it to carry the spelled out %s", got, huge)
+		}
+	})
+
+	// The request cap of the router bounds what a body spells, not what the
+	// column holds, and jsonb expands an exponent into every digit it names. A
+	// document past the cap is therefore refused rather than stored for every
+	// later read to answer.
+	t.Run("refuses metadata the column expands past the cap", func(t *testing.T) {
+		// Eighteen bytes in the body, 131072 digits in the column.
+		const expanding = "1e131071"
+		metadata := map[string]any{"budget": json.RawMessage(expanding)}
+
+		rec := a.call(t, http.MethodPost, projectsRoute, adminToken, projectDocument(t, map[string]any{
+			"platform": fixturePlatform, "cloud": "os-reg-cap", "external_id": "reg-cap",
+			"metadata": metadata,
+		}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got, want := fieldErrorLocations(t, rec), []string{"body.metadata"}; !slices.Equal(got, want) {
+			t.Errorf("field errors = %v, want %v", got, want)
+		}
+		// The refusal rolls the registration back, so the cloud lists nothing.
+		listed := projectListOf(t, a.call(t, http.MethodGet,
+			projectsRoute+"?cloud=os-reg-cap", adminToken, nil))
+		if len(listed.Items) != 0 {
+			t.Errorf("the registry lists %v, want a refused registration to write none", listed.Items)
+		}
+
+		// An update carrying such a document is refused the same way, and the
+		// project keeps what it had.
+		project := registerProject(t, a, adminToken, fixturePlatform, "os-reg-cap-update", "reg-cap-update")
+		rec = a.call(t, http.MethodPatch, projectPath(project.Id), adminToken,
+			projectDocument(t, map[string]any{"metadata": metadata}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		kept := projectFrom(t, a.call(t, http.MethodGet, projectPath(project.Id), adminToken, nil))
+		if len(kept.Metadata) != 0 {
+			t.Errorf("metadata = %v, want the empty object the registration wrote", kept.Metadata)
+		}
+	})
+
 	t.Run("puts every operation behind the role it needs", func(t *testing.T) {
 		existing := registerProject(t, a, adminToken, fixturePlatform, "os-reg-roles", "reg-roles")
 
