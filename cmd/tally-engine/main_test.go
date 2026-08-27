@@ -19,6 +19,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/counters"
+	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/runs"
@@ -58,6 +59,7 @@ func TestHelpNeedsNoEnvironment(t *testing.T) {
 		{"pricing import", []string{"pricing", "import"}},
 		{"pricing list", []string{"pricing", "list"}},
 		{"export", []string{"export"}},
+		{"kickbacks", []string{"kickbacks"}},
 		{"tick", []string{"tick"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -873,10 +875,19 @@ func TestExportCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export as json error = %v, want nil (stderr %q)", err, stderr)
 	}
-	want := fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 statements\n",
+	want := fmt.Sprintf("run %s exported for %s as json into %s\n"+
+		"wrote run.json and 1 statements\nwrote kickbacks.json with 0 kickbacks\n",
 		id, month, documents)
 	if stdout != want {
 		t.Errorf("stdout of export as json = %q, want %q", stdout, want)
+	}
+
+	// The month is billed over a project no partner resells, so the settlement
+	// is written and holds nobody. The file stands for every run all the same: a
+	// missing one reads as a report that was not produced rather than as a run
+	// that owes nothing.
+	if _, err := os.Stat(filepath.Join(documents, "kickbacks.json")); err != nil {
+		t.Errorf("os.Stat(kickbacks.json) error = %v, want the written settlement", err)
 	}
 
 	// The index names the file the statement was written to and the total that
@@ -917,10 +928,14 @@ func TestExportCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export as csv error = %v, want nil (stderr %q)", err, stderr)
 	}
-	want = fmt.Sprintf("run %s exported for %s as csv into %s\nwrote rated.csv with 1 rated records\n",
+	want = fmt.Sprintf("run %s exported for %s as csv into %s\n"+
+		"wrote rated.csv with 1 rated records\nwrote kickbacks.csv with 0 kickbacks\n",
 		id, month, tables)
 	if stdout != want {
 		t.Errorf("stdout of export as csv = %q, want %q", stdout, want)
+	}
+	if _, err := os.Stat(filepath.Join(tables, "kickbacks.csv")); err != nil {
+		t.Errorf("os.Stat(kickbacks.csv) error = %v, want the written settlement", err)
 	}
 
 	header, rows := readCSVFile(t, filepath.Join(tables, "rated.csv"))
@@ -967,10 +982,14 @@ func TestExportCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exporting the correction as json error = %v, want nil (stderr %q)", err, stderr)
 	}
-	want = fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 credit notes\n",
+	want = fmt.Sprintf("run %s exported for %s as json into %s\n"+
+		"wrote run.json and 1 credit notes\nwrote kickbacks.json with 0 kickback deltas\n",
 		correction, month, notes)
 	if stdout != want {
 		t.Errorf("stdout of the correction's json export = %q, want %q", stdout, want)
+	}
+	if _, err := os.Stat(filepath.Join(notes, "kickbacks.json")); err != nil {
+		t.Errorf("os.Stat(kickbacks.json) error = %v, want the written settlement", err)
 	}
 
 	// A credit note lands under the key its project's statement did, under the
@@ -989,10 +1008,14 @@ func TestExportCLI(t *testing.T) {
 		t.Fatalf("exporting the correction as csv error = %v, want nil (stderr %q)", err, stderr)
 	}
 	want = fmt.Sprintf("run %s exported for %s as csv into %s\n"+
-		"wrote rated.csv with 2 rated records\nwrote deltas.csv with 1 deltas\n",
+		"wrote rated.csv with 2 rated records\nwrote deltas.csv with 1 deltas\n"+
+		"wrote kickbacks.csv with 0 kickback deltas\n",
 		correction, month, correctionTables)
 	if stdout != want {
 		t.Errorf("stdout of the correction's csv export = %q, want %q", stdout, want)
+	}
+	if _, err := os.Stat(filepath.Join(correctionTables, "kickbacks.csv")); err != nil {
+		t.Errorf("os.Stat(kickbacks.csv) error = %v, want the written settlement", err)
 	}
 
 	_, deltas := readCSVFile(t, filepath.Join(correctionTables, "deltas.csv"))
@@ -1015,13 +1038,17 @@ func TestExportCLI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("export error = %v, want nil (stderr %q)", err, stderr)
 		}
-		want := fmt.Sprintf("run %s exported for %s as json into %s\nwrote run.json and 1 statements\n",
+		want := fmt.Sprintf("run %s exported for %s as json into %s\n"+
+			"wrote run.json and 1 statements\nwrote kickbacks.json with 0 kickbacks\n",
 			id, month, out)
 		if stdout != want {
 			t.Errorf("stdout = %q, want %q", stdout, want)
 		}
 		if _, err := os.Stat(filepath.Join(out, "run.json")); err != nil {
 			t.Errorf("os.Stat(run.json) error = %v, want the written index", err)
+		}
+		if _, err := os.Stat(filepath.Join(out, "kickbacks.json")); err != nil {
+			t.Errorf("os.Stat(kickbacks.json) error = %v, want the written settlement", err)
 		}
 	})
 
@@ -1077,6 +1104,396 @@ func TestExportCLI(t *testing.T) {
 	})
 }
 
+// TestKickbacksCLI reports what a run owes its partners: the month's regular
+// run, the same run named with --run, and the correction that booked a resize
+// afterwards. The correction settles negative numbers because the resize halved
+// the instance's vcpus for the second half of its life, so the finalized run
+// billed the month too high and the partner's share of that difference is taken
+// back rather than paid again.
+func TestKickbacksCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+	// The fixture blanks the environment, so the relation types the adjustments
+	// are resolved through are set after it rather than before it.
+	t.Setenv("TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES", "managed_by,member_of")
+
+	from, to := billingMonth(-9)
+	month := period.Format(from)
+	const (
+		cloud       = "os-cli-kickbacks"
+		project     = "proj-cli-kickbacks"
+		resourceID  = "i-cli-kickbacks"
+		beneficiary = "partner-corp-kickbacks"
+	)
+	f.seedProject(t, cloud, project)
+	f.seedInstance(t, cloud, resourceID, project, from)
+	// Valid from a month before the one that is billed, so the relation covers
+	// the whole of it.
+	f.seedRelation(t, f.projectIDOf(t, cloud, project), f.seedVirtualProject(t, "partner", beneficiary),
+		"managed_by", resellerAdjustments, from.AddDate(0, -1, 0))
+
+	if _, stderr, err := runCLI(t, "run", "--period", month, "--clouds", cloud); err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	id := f.completedRun(t, from)
+
+	document, stderr, err := runCLI(t, "kickbacks", "--period", month)
+	if err != nil {
+		t.Fatalf("kickbacks error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want the document on stdout and nothing beside it", stderr)
+	}
+
+	report := decodeKickbacks(t, "kickbacks --period", document)
+	if report.RunID != id.String() {
+		t.Errorf("the document reports run %q, want the regular run %s", report.RunID, id)
+	}
+	if report.Kind != runs.KindRegular {
+		t.Errorf("the document reports the kind %q, want %q", report.Kind, runs.KindRegular)
+	}
+	if report.CorrectsRunID != nil {
+		t.Errorf("the document corrects run %q, want none for a regular run", *report.CorrectsRunID)
+	}
+	if want := from.Format(time.RFC3339); report.PeriodFrom != want {
+		t.Errorf("the document reports period_from %q, want %q", report.PeriodFrom, want)
+	}
+	if want := to.Format(time.RFC3339); report.PeriodTo != want {
+		t.Errorf("the document reports period_to %q, want %q", report.PeriodTo, want)
+	}
+	if len(report.Beneficiaries) != 1 {
+		t.Fatalf("the document settles %d beneficiaries, want 1", len(report.Beneficiaries))
+	}
+
+	// The instance lived 48 hours at 4 vcpus at 0.02 per unit-hour, which is
+	// 3.84. The 15 percent discount takes 0.58 off it, and the partner is owed
+	// 10 percent of the 3.26 that is left.
+	settled := report.Beneficiaries[0]
+	if settled.Beneficiary != beneficiary {
+		t.Errorf("the document settles %q, want %q", settled.Beneficiary, beneficiary)
+	}
+	if want := "EUR"; settled.Currency != want {
+		t.Errorf("the document settles in %q, want %q", settled.Currency, want)
+	}
+	if want := "0.33"; settled.KickbackTotal.String() != want {
+		t.Errorf("the kickback total = %s, want %s", settled.KickbackTotal, want)
+	}
+	if settled.Projects != 1 {
+		t.Errorf("the total came off %d projects, want 1", settled.Projects)
+	}
+	if len(settled.Breakdown) != 1 {
+		t.Fatalf("the breakdown holds %d entries, want 1", len(settled.Breakdown))
+	}
+
+	kickback := settled.Breakdown[0]
+	// The relation is what the auditability drill walks back to the registry, so
+	// what stands there has to be a run's relation id rather than a name.
+	if _, err := uuid.Parse(kickback.RelationID); err != nil {
+		t.Errorf("uuid.Parse(%q) error = %v, want the relation the kickback came from",
+			kickback.RelationID, err)
+	}
+	for _, tc := range []struct{ field, got, want string }{
+		{"cloud", kickback.Cloud, cloud},
+		{"project_id", kickback.ProjectID, project},
+		{"scope", kickback.Scope, "all"},
+		{"rate", kickback.Rate.String(), "0.100000"},
+		{"base", kickback.Base.String(), "3.26"},
+		{"amount", kickback.Amount.String(), "0.33"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("the kickback %s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+
+	stdout, stderr, err := runCLI(t, "kickbacks", "--period", month, "--format", "csv")
+	if err != nil {
+		t.Fatalf("kickbacks as csv error = %v, want nil (stderr %q)", err, stderr)
+	}
+	header, rows := parseCSV(t, "the kickbacks table", []byte(stdout))
+	if len(header) != 14 {
+		t.Fatalf("the table holds %d columns, want 14", len(header))
+	}
+	if len(rows) != 1 {
+		t.Fatalf("the table holds %d rows under its header, want 1", len(rows))
+	}
+	for _, tc := range []struct{ column, want string }{
+		{"run_id", id.String()},
+		{"kind", runs.KindRegular},
+		{"corrects_run_id", ""},
+		{"beneficiary", beneficiary},
+		{"cloud", cloud},
+		{"project_id", project},
+		{"scope", "all"},
+		{"rate", "0.100000"},
+		{"base", "3.26"},
+		{"amount", "0.33"},
+		{"currency", "EUR"},
+	} {
+		if got := rows[0][tc.column]; got != tc.want {
+			t.Errorf("the table %s = %q, want %q", tc.column, got, tc.want)
+		}
+	}
+
+	// The month alone and the run that bills it report the same settlement,
+	// which is what makes --run the way to a correction rather than a second way
+	// to a month.
+	named, stderr, err := runCLI(t, "kickbacks", "--period", month, "--run", id.String())
+	if err != nil {
+		t.Fatalf("kickbacks --run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if named != document {
+		t.Errorf("stdout of --run = %q, want the document of the month %q", named, document)
+	}
+
+	if _, stderr, err := runCLI(t, "finalize", "--period", month, "--run", id.String()); err != nil {
+		t.Fatalf("finalize error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	// A resize halfway through the instance's life, which halves its vcpus for
+	// the second half of it and reached the reporting database after the
+	// finalized run had billed the month.
+	f.seedEvent(t, cloud, resourceID, project, "ev-resize-"+resourceID, "compute.instance.resize.end",
+		from.Add(48*time.Hour), `{"state":"active","size":{"vcpus":2,"ram_gb":8,"disk_gb":80,"flavor":"m1.large"}}`)
+
+	if _, stderr, err := runCLI(t, "correct", "--period", month); err != nil {
+		t.Fatalf("correct error = %v, want nil (stderr %q)", err, stderr)
+	}
+	correction := f.completedCorrection(t, from)
+
+	stdout, stderr, err = runCLI(t, "kickbacks", "--period", month, "--run", correction.String())
+	if err != nil {
+		t.Fatalf("the correction's kickbacks error = %v, want nil (stderr %q)", err, stderr)
+	}
+	report = decodeKickbacks(t, "kickbacks of the correction", stdout)
+	if report.Kind != runs.KindCorrection {
+		t.Errorf("the document reports the kind %q, want %q", report.Kind, runs.KindCorrection)
+	}
+	if report.CorrectsRunID == nil {
+		t.Fatalf("the document corrects no run, want the finalized run %s", id)
+	}
+	if *report.CorrectsRunID != id.String() {
+		t.Errorf("the document corrects run %q, want the finalized run %s", *report.CorrectsRunID, id)
+	}
+	if len(report.Beneficiaries) != 1 {
+		t.Fatalf("the document settles %d beneficiaries, want 1", len(report.Beneficiaries))
+	}
+
+	// The correction rates 2.88, the discount takes 0.43 off it, and the partner
+	// is owed 0.25 of the 2.45 that is left. What the document carries is the
+	// difference to the 0.33 the finalized run settled.
+	settled = report.Beneficiaries[0]
+	if want := "-0.08"; settled.KickbackTotal.String() != want {
+		t.Errorf("the kickback total of the correction = %s, want %s", settled.KickbackTotal, want)
+	}
+	if settled.Projects != 1 {
+		t.Errorf("the total came off %d projects, want 1", settled.Projects)
+	}
+	if len(settled.Breakdown) != 1 {
+		t.Fatalf("the breakdown holds %d entries, want 1", len(settled.Breakdown))
+	}
+	kickback = settled.Breakdown[0]
+	if want := "-0.81"; kickback.Base.String() != want {
+		t.Errorf("the base of the difference = %s, want %s", kickback.Base, want)
+	}
+	if want := "-0.08"; kickback.Amount.String() != want {
+		t.Errorf("the amount of the difference = %s, want %s", kickback.Amount, want)
+	}
+
+	if _, stderr, err := runCLI(t, "finalize", "--period", month, "--run", correction.String()); err != nil {
+		t.Fatalf("finalizing the correction error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	// A finalized correction is never what the month alone reports: what a
+	// partner is settled for a month is what the regular run of it settled, and
+	// the differences on top of that are reached by naming the correction.
+	stdout, stderr, err = runCLI(t, "kickbacks", "--period", month)
+	if err != nil {
+		t.Fatalf("kickbacks after the correction error = %v, want nil (stderr %q)", err, stderr)
+	}
+	report = decodeKickbacks(t, "kickbacks after the correction", stdout)
+	if report.Kind != runs.KindRegular || report.RunID != id.String() {
+		t.Errorf("the document reports the %s run %q, want the regular run %s", report.Kind, report.RunID, id)
+	}
+	if len(report.Beneficiaries) != 1 {
+		t.Fatalf("the document settles %d beneficiaries, want 1", len(report.Beneficiaries))
+	}
+	if want := "0.33"; report.Beneficiaries[0].KickbackTotal.String() != want {
+		t.Errorf("the kickback total = %s, want the %s the regular run settled",
+			report.Beneficiaries[0].KickbackTotal, want)
+	}
+
+	t.Run("reports one partner alone", func(t *testing.T) {
+		// What one partner receives holds their own kickbacks and nothing else:
+		// the document of a month names every partner the run owes and, through
+		// the base of every breakdown entry, what each customer project was
+		// billed after its discounts. The month metered above owes one partner,
+		// so a copy of that document filtered to that partner is the document
+		// again and pins nothing; this month owes two.
+		shared, _ := billingMonth(-8)
+		sharedMonth := period.Format(shared)
+		const (
+			sharedResourceID = "i-cli-kickbacks-shared"
+			otherProject     = "proj-cli-kickbacks-other"
+			otherResourceID  = "i-cli-kickbacks-other"
+			otherBeneficiary = "partner-other-kickbacks"
+		)
+		f.seedInstance(t, cloud, sharedResourceID, project, shared)
+		f.seedProject(t, cloud, otherProject)
+		f.seedInstance(t, cloud, otherResourceID, otherProject, shared)
+		f.seedRelation(t, f.projectIDOf(t, cloud, otherProject),
+			f.seedVirtualProject(t, "partner", otherBeneficiary),
+			"managed_by", resellerAdjustments, shared.AddDate(0, -1, 0))
+
+		if _, stderr, err := runCLI(t, "run", "--period", sharedMonth, "--clouds", cloud); err != nil {
+			t.Fatalf("the run of the month owing two partners error = %v, want nil (stderr %q)", err, stderr)
+		}
+
+		whole, stderr, err := runCLI(t, "kickbacks", "--period", sharedMonth)
+		if err != nil {
+			t.Fatalf("kickbacks error = %v, want nil (stderr %q)", err, stderr)
+		}
+		settles := decodeKickbacks(t, "kickbacks of the month owing two partners", whole).Beneficiaries
+		if len(settles) != 2 {
+			t.Fatalf("the document settles %d partners, want the two the month owes", len(settles))
+		}
+
+		named, stderr, err := runCLI(t, "kickbacks", "--period", sharedMonth, "--beneficiary", beneficiary)
+		if err != nil {
+			t.Fatalf("kickbacks --beneficiary error = %v, want nil (stderr %q)", err, stderr)
+		}
+		one := decodeKickbacks(t, "kickbacks --beneficiary", named).Beneficiaries
+		if len(one) != 1 || one[0].Beneficiary != beneficiary {
+			t.Fatalf("the copy settles %v, want %s alone", one, beneficiary)
+		}
+		// Neither the other partner nor the project they resell is named: the
+		// base of a breakdown entry is what that project was billed.
+		for _, want := range []string{otherBeneficiary, otherProject} {
+			if strings.Contains(named, want) {
+				t.Errorf("the copy of %s names %q, want nothing of another partner in it", beneficiary, want)
+			}
+		}
+	})
+
+	t.Run("refuses a partner the run settles nothing for", func(t *testing.T) {
+		// The filter compares the partner's name exactly, so a mistyped one
+		// matches nothing. Reported, it is a well-formed settlement document
+		// naming the run and the month with no partner under it, which a
+		// mailer or an importer reads as a month the partner is owed nothing
+		// for, so it is refused instead.
+		stdout, _, err := runCLI(t, "kickbacks", "--period", month, "--beneficiary", "partner-other")
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the partner the run settles nothing for refused")
+		}
+		for _, want := range []string{id.String(), "partner-other"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("kickbacks error = %q, want it to name %q", err, want)
+			}
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a report that was refused", stdout)
+		}
+	})
+
+	t.Run("refuses a run of another month", func(t *testing.T) {
+		other, _ := billingMonth(-10)
+		otherMonth := period.Format(other)
+		// Nothing lived in that month, so the run bills nobody. What it is here
+		// for is being a run of a month the report was not asked about.
+		if _, stderr, err := runCLI(t, "run", "--period", otherMonth, "--clouds", cloud); err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+
+		stdout, _, err := runCLI(t, "kickbacks", "--period", month, "--run", f.completedRun(t, other).String())
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the run of another month refused")
+		}
+		if !errors.Is(err, runs.ErrPeriodMismatch) {
+			t.Errorf("kickbacks error = %v, want one matching ErrPeriodMismatch", err)
+		}
+		for _, want := range []string{month, otherMonth} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("kickbacks error = %q, want it to name %q", err, want)
+			}
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a report that was refused", stdout)
+		}
+	})
+
+	// A month the engine never worked on, first without a row of its own and
+	// then with an open one. Both are answered with the run that produces the
+	// settlement, so the two cases run in this order.
+	bare, bareTo := billingMonth(-11)
+
+	t.Run("refuses a month without a billing period", func(t *testing.T) {
+		_, _, err := runCLI(t, "kickbacks", "--period", period.Format(bare))
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the month without a run refused")
+		}
+		if !errors.Is(err, export.ErrNoRunForPeriod) {
+			t.Errorf("kickbacks error = %v, want one matching ErrNoRunForPeriod", err)
+		}
+		if want := "has no billing period"; !strings.Contains(err.Error(), want) {
+			t.Errorf("kickbacks error = %q, want it to contain %q", err, want)
+		}
+	})
+
+	t.Run("refuses a month with a period row and no completed run", func(t *testing.T) {
+		f.seedPeriod(t, bare, bareTo, "open")
+
+		_, _, err := runCLI(t, "kickbacks", "--period", period.Format(bare))
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the month without a run refused")
+		}
+		if !errors.Is(err, export.ErrNoRunForPeriod) {
+			t.Errorf("kickbacks error = %v, want one matching ErrNoRunForPeriod", err)
+		}
+		for _, want := range []string{"has no completed run", "tally-engine run --period"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("kickbacks error = %q, want it to contain %q", err, want)
+			}
+		}
+	})
+
+	t.Run("refuses a superseded run", func(t *testing.T) {
+		// A month metered twice leaves the first run behind in this status. Its
+		// records bill nothing, so no partner is settled out of them.
+		var superseded uuid.UUID
+		if err := f.engine.Store.Pool().QueryRow(t.Context(),
+			`INSERT INTO runs (period_from, period_to, status)
+			 VALUES ($1, $2, 'superseded') RETURNING id`,
+			from, to).Scan(&superseded); err != nil {
+			t.Fatalf("seeding the superseded run: %v", err)
+		}
+
+		stdout, _, err := runCLI(t, "kickbacks", "--period", month, "--run", superseded.String())
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the superseded run refused")
+		}
+		if want := "superseded"; !strings.Contains(err.Error(), want) {
+			t.Errorf("kickbacks error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by a report that was refused", stdout)
+		}
+	})
+
+	// A report reads the engine database and nothing else: what it renders was
+	// written there by the run, so a partner is settled from a machine that
+	// reaches neither the reporting database nor the counter sources.
+	t.Run("works with the engine database alone", func(t *testing.T) {
+		useDatabase(t, f.engine.URL)
+		t.Setenv("TALLY_ENGINE_COUNTER_SOURCES", filepath.Join(t.TempDir(), "missing.yaml"))
+
+		stdout, stderr, err := runCLI(t, "kickbacks", "--period", month)
+		if err != nil {
+			t.Fatalf("kickbacks error = %v, want nil (stderr %q)", err, stderr)
+		}
+		if got := decodeKickbacks(t, "kickbacks over the engine database", stdout).RunID; got != id.String() {
+			t.Errorf("the document reports run %q, want the regular run %s", got, id)
+		}
+	})
+}
+
 // runIndex is the part of run.json the assertions above read: one entry per
 // document the export wrote. The file carries more, which the export package's
 // own tests pin. The total is a json.Number, so it is compared as the digits
@@ -1087,6 +1504,35 @@ type runIndex struct {
 		File  string      `json:"file"`
 		Total json.Number `json:"total"`
 	} `json:"statements"`
+}
+
+// kickbacksReport is the settlement document the kickbacks subcommand prints,
+// as much of it as the assertions above read. The export package's own tests
+// pin the rest. The amounts are json.Number, so they are compared as the digits
+// the document holds rather than through a float.
+type kickbacksReport struct {
+	RunID string `json:"run_id"`
+	Kind  string `json:"kind"`
+	// A pointer, so a regular run's null is told apart from the run a
+	// correction names.
+	CorrectsRunID *string `json:"corrects_run_id"`
+	PeriodFrom    string  `json:"period_from"`
+	PeriodTo      string  `json:"period_to"`
+	Beneficiaries []struct {
+		Beneficiary   string      `json:"beneficiary"`
+		Currency      string      `json:"currency"`
+		KickbackTotal json.Number `json:"kickback_total"`
+		Projects      int         `json:"projects"`
+		Breakdown     []struct {
+			Cloud      string      `json:"cloud"`
+			ProjectID  string      `json:"project_id"`
+			RelationID string      `json:"relation_id"`
+			Scope      string      `json:"scope"`
+			Rate       json.Number `json:"rate"`
+			Base       json.Number `json:"base"`
+			Amount     json.Number `json:"amount"`
+		} `json:"breakdown"`
+	} `json:"beneficiaries"`
 }
 
 // readJSONFile decodes one exported artifact into v. A file the export did not
@@ -1104,10 +1550,20 @@ func readJSONFile(t *testing.T, path string, v any) {
 	}
 }
 
-// readCSVFile reads one exported table: its header, and one map per row under
-// it, keyed by column name so an assertion names the column it is about rather
-// than the position of it. Every row of a table holds as many fields as its
-// header, which the reader itself enforces.
+// decodeKickbacks reads the settlement document one kickbacks call printed.
+// name is what a failure calls that call. A document the type no longer decodes
+// fails here rather than at the assertion after it.
+func decodeKickbacks(t *testing.T, name, body string) kickbacksReport {
+	t.Helper()
+
+	var report kickbacksReport
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		t.Fatalf("decoding the document of %s: %v", name, err)
+	}
+	return report
+}
+
+// readCSVFile reads one exported table off the disk and parses it.
 func readCSVFile(t *testing.T, path string) (header []string, rows []map[string]string) {
 	t.Helper()
 
@@ -1115,12 +1571,23 @@ func readCSVFile(t *testing.T, path string) (header []string, rows []map[string]
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
+	return parseCSV(t, path, body)
+}
+
+// parseCSV reads one table: its header, and one map per row under it, keyed by
+// column name so an assertion names the column it is about rather than the
+// position of it. Every row of a table holds as many fields as its header,
+// which the reader itself enforces. name is what a failure calls the table,
+// the file it was read from or the command that printed it.
+func parseCSV(t *testing.T, name string, body []byte) (header []string, rows []map[string]string) {
+	t.Helper()
+
 	records, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
 	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
+		t.Fatalf("parsing %s: %v", name, err)
 	}
 	if len(records) == 0 {
-		t.Fatalf("%s holds no records, want at least its header", path)
+		t.Fatalf("%s holds no records, want at least its header", name)
 	}
 
 	header = records[0]
@@ -1569,6 +2036,7 @@ func TestBadCommandLinesAreRefusedWithoutAConfiguration(t *testing.T) {
 			{"export without a run", []string{"export", "--format", "json", "--out", "./out"}, "run"},
 			{"export without a format", []string{"export", "--run", runID, "--out", "./out"}, "format"},
 			{"export without an out", []string{"export", "--run", runID, "--format", "json"}, "out"},
+			{"kickbacks without a period", []string{"kickbacks"}, "period"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				_, _, err := runCLI(t, tc.args...)
@@ -1592,6 +2060,18 @@ func TestBadCommandLinesAreRefusedWithoutAConfiguration(t *testing.T) {
 		for _, want := range []string{"json", "csv"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("export error = %q, want it to name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("kickbacks refuses a format it does not write", func(t *testing.T) {
+		_, _, err := runCLI(t, "kickbacks", "--period", "2026-03", "--format", "xml")
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the unknown format reported")
+		}
+		for _, want := range []string{"json", "csv"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("kickbacks error = %q, want it to name %q", err, want)
 			}
 		}
 	})
@@ -1711,6 +2191,26 @@ func TestFlagsAreCheckedBeforeTheConfiguration(t *testing.T) {
 		}
 		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
 			t.Errorf("export error = %q, want it to contain %q", err, want)
+		}
+	})
+
+	t.Run("kickbacks refuses a period that is not a month", func(t *testing.T) {
+		_, _, err := runCLI(t, "kickbacks", "--period", "2026-3")
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the malformed period reported")
+		}
+		if want := `--period: "2026-3" is not a YYYY-MM month`; err.Error() != want {
+			t.Errorf("kickbacks error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("kickbacks refuses a run that is not a uuid", func(t *testing.T) {
+		_, _, err := runCLI(t, "kickbacks", "--period", "2026-03", "--run", "not-a-uuid")
+		if err == nil {
+			t.Fatal("kickbacks error = nil, want the malformed run id reported")
+		}
+		if want := `--run: "not-a-uuid" is not a uuid`; !strings.Contains(err.Error(), want) {
+			t.Errorf("kickbacks error = %q, want it to contain %q", err, want)
 		}
 	})
 }

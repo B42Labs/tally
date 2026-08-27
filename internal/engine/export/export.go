@@ -5,6 +5,8 @@
 // the kickback differences to the run it corrects, all out of one snapshot. The
 // JSON and the CSV file writers are the first implementations of the interface,
 // and an ERP adapter is another one rather than a change to the loader.
+// LoadKickbacks is that read narrowed to the partner settlement, for the report
+// that renders nothing else.
 //
 // The package writes nothing to the database, and only a completed or a
 // finalized run is loaded at all: the superseded, failed and running rows a
@@ -153,6 +155,25 @@ type BillingExporter interface {
 // naming the row that carries them: an export short of a value, or holding a
 // zero where a number was meant, is one nobody can tell from a correct one.
 func Load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error) {
+	return load(ctx, pool, runID, true)
+}
+
+// LoadKickbacks reads one run and what it settles for its partners, under the
+// snapshot and with the refusals Load applies, and without the statements, the
+// rated records and a correction's deltas only a full export renders: two
+// queries for a regular run and three for a correction. The settlement report
+// renders none of the three, and a month of rated records is tens of thousands
+// of rows, each with a usage object to decode, so reading them would hold the
+// snapshot and its pooled connection for a decode nothing is rendered from.
+func LoadKickbacks(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error) {
+	return load(ctx, pool, runID, false)
+}
+
+// load is the read the two share. artifacts says whether the statements, the
+// rated records and a correction's deltas are read on top of the run row and
+// the kickbacks, which is what separates a full export from the settlement
+// report.
+func load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID, artifacts bool) (Run, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Run{}, fmt.Errorf("reading the run %s: %w", runID, err)
@@ -205,15 +226,17 @@ func Load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error)
 		run.Clouds = []string{}
 	}
 
-	if run.Statements, err = loadStatements(ctx, q, id, runID); err != nil {
-		return Run{}, err
-	}
-	if run.Rated, err = loadRated(ctx, q, id, runID); err != nil {
-		return Run{}, err
-	}
-	if run.Kind == runs.KindCorrection {
-		if run.Deltas, err = loadDeltas(ctx, q, id, runID); err != nil {
+	if artifacts {
+		if run.Statements, err = loadStatements(ctx, q, id, runID); err != nil {
 			return Run{}, err
+		}
+		if run.Rated, err = loadRated(ctx, q, id, runID); err != nil {
+			return Run{}, err
+		}
+		if run.Kind == runs.KindCorrection {
+			if run.Deltas, err = loadDeltas(ctx, q, id, runID); err != nil {
+				return Run{}, err
+			}
 		}
 	}
 	if run.Kickbacks, err = loadKickbacks(ctx, q, run); err != nil {
