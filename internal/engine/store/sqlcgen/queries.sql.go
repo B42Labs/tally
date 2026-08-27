@@ -72,6 +72,22 @@ func (q *Queries) ConsecutiveFailedRuns(ctx context.Context, periodFrom pgtype.T
 	return i, err
 }
 
+type CreateAdjustmentRecordsParams struct {
+	ID             pgtype.UUID
+	RunID          pgtype.UUID
+	ProjectID      string
+	RelationID     pgtype.UUID
+	RelationType   string
+	RelationTarget string
+	Beneficiary    pgtype.Text
+	Type           string
+	Scope          string
+	Rate           pgtype.Numeric
+	Base           pgtype.Numeric
+	Amount         pgtype.Numeric
+	Currency       string
+}
+
 type CreateCorrectionDeltasParams struct {
 	ID            pgtype.UUID
 	RunID         pgtype.UUID
@@ -427,6 +443,52 @@ func (q *Queries) LatestFinalizedRun(ctx context.Context, periodFrom pgtype.Time
 		&i.StartedAt,
 	)
 	return i, err
+}
+
+const listAdjustmentRecords = `-- name: ListAdjustmentRecords :many
+SELECT id, run_id, project_id, relation_id, relation_type, relation_target,
+       beneficiary, type, scope, rate, base, amount, currency
+FROM adjustment_records
+WHERE run_id = $1
+ORDER BY project_id, relation_id, type, scope, rate, amount
+`
+
+// The adjustments a run applied, in a total order over the rows one run writes:
+// a project's adjustments come from distinct relations, and one relation
+// contributes at most one line per type and scope. A correction diffs these
+// rows against its own, which is what the order is for.
+func (q *Queries) ListAdjustmentRecords(ctx context.Context, runID pgtype.UUID) ([]AdjustmentRecord, error) {
+	rows, err := q.db.Query(ctx, listAdjustmentRecords, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AdjustmentRecord
+	for rows.Next() {
+		var i AdjustmentRecord
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunID,
+			&i.ProjectID,
+			&i.RelationID,
+			&i.RelationType,
+			&i.RelationTarget,
+			&i.Beneficiary,
+			&i.Type,
+			&i.Scope,
+			&i.Rate,
+			&i.Base,
+			&i.Amount,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listBillingPeriods = `-- name: ListBillingPeriods :many

@@ -8,7 +8,9 @@
 // current numbers.
 //
 // The queries a correction is built from are held here too: which run it takes
-// as its baseline, the key it diffs by, and the delta rows it writes.
+// as its baseline, the key it diffs by, the delta rows it writes, and the
+// adjustment records a run writes its applied adjustments into, which a
+// correction diffs against its own.
 //
 // The reads an export loads a run through are held here as well: the run row
 // itself, taken without a lock, and the two listings whose ordering is what
@@ -24,11 +26,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 )
+
+// checkViolation is the SQLSTATE a refused CHECK comes back as.
+const checkViolation = "23514"
 
 // TestRunEndsRequireARunningRun holds CompleteRun and FailRun to the status they
 // move from. A run whose process is still metering can be failed underneath it
@@ -589,6 +595,200 @@ func TestListCorrectionDeltas(t *testing.T) {
 	})
 }
 
+// TestCreateAdjustmentRecords holds the copy of the adjustments a run applied.
+// A kickback row is what a partner is paid from, so the rate, the base it was
+// taken on and the beneficiary have to come back exactly as they went in.
+func TestCreateAdjustmentRecords(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	run := openRun(t, db, "running")
+	// The relation lives in the reporting database, so the column is provenance
+	// rather than a foreign key and the id is made up here.
+	relation := pgtype.UUID{Bytes: uuid.New(), Valid: true}
+
+	type stored struct {
+		typ, rate, base, amount, currency string
+		beneficiary                       pgtype.Text
+		relationID                        pgtype.UUID
+	}
+
+	t.Run("copies the adjustments of a run", func(t *testing.T) {
+		partner := pgtype.Text{String: "partner-corp", Valid: true}
+		records := []sqlcgen.CreateAdjustmentRecordsParams{
+			adjustmentRecord(t, run, relation, "tenant-a", "discount", "0.150000",
+				"100.00", "-15.00", pgtype.Text{}),
+			adjustmentRecord(t, run, relation, "tenant-a", "kickback", "0.100000",
+				"85.00", "8.50", partner),
+		}
+
+		copied, err := q.CreateAdjustmentRecords(t.Context(), records)
+		if err != nil {
+			t.Fatalf("CreateAdjustmentRecords() error = %v, want nil", err)
+		}
+		if copied != 2 {
+			t.Fatalf("CreateAdjustmentRecords() copied %d rows, want 2", copied)
+		}
+
+		rows, err := db.Store.Pool().Query(t.Context(),
+			`SELECT type, rate::text, base::text, amount::text, currency, beneficiary, relation_id
+			 FROM adjustment_records WHERE run_id = $1 ORDER BY type`, run)
+		if err != nil {
+			t.Fatalf("reading the adjustments back: %v", err)
+		}
+		defer rows.Close()
+
+		var got []stored
+		for rows.Next() {
+			var row stored
+			if err := rows.Scan(&row.typ, &row.rate, &row.base, &row.amount,
+				&row.currency, &row.beneficiary, &row.relationID); err != nil {
+				t.Fatalf("reading an adjustment back: %v", err)
+			}
+			got = append(got, row)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("reading the adjustments back: %v", err)
+		}
+		// The discount carries no beneficiary: only a kickback is owed to someone
+		// other than the project the statement belongs to.
+		want := []stored{
+			{"discount", "0.150000", "100.00", "-15.00", "EUR", pgtype.Text{}, relation},
+			{"kickback", "0.100000", "85.00", "8.50", "EUR", partner, relation},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("the stored adjustments are %v, want %v", got, want)
+		}
+	})
+
+	t.Run("copies nothing for an empty batch", func(t *testing.T) {
+		copied, err := q.CreateAdjustmentRecords(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("CreateAdjustmentRecords() error = %v, want nil", err)
+		}
+		if copied != 0 {
+			t.Errorf("CreateAdjustmentRecords() copied %d rows, want 0", copied)
+		}
+	})
+}
+
+// TestAdjustmentBeneficiaryIsKickbacksOnly holds the invariant the migration
+// header states against the database rather than against the one writer that
+// keeps it. What a partner is paid is the sum of the amounts under a
+// beneficiary, so a beneficiary on a discount row is a payout of the customer's
+// own rebate, and a kickback without one is a payout that reaches nobody.
+// Neither can be corrected in place: a finalized run's rows are immutable.
+func TestAdjustmentBeneficiaryIsKickbacksOnly(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	run := openRun(t, db, "running")
+	relation := pgtype.UUID{Bytes: uuid.New(), Valid: true}
+	partner := pgtype.Text{String: "partner-corp", Valid: true}
+
+	cases := []struct {
+		name   string
+		record sqlcgen.CreateAdjustmentRecordsParams
+	}{
+		{
+			name: "a discount that names a beneficiary",
+			record: adjustmentRecord(t, run, relation, "tenant-a", "discount", "0.150000",
+				"100.00", "-15.00", partner),
+		},
+		{
+			name: "a kickback that names none",
+			record: adjustmentRecord(t, run, relation, "tenant-a", "kickback", "0.100000",
+				"85.00", "8.50", pgtype.Text{}),
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := q.CreateAdjustmentRecords(t.Context(),
+				[]sqlcgen.CreateAdjustmentRecordsParams{testCase.record})
+
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) {
+				t.Fatalf("CreateAdjustmentRecords() error = %v, want a Postgres error", err)
+			}
+			if pgErr.Code != checkViolation {
+				t.Errorf("CreateAdjustmentRecords() error code = %s, want %s", pgErr.Code, checkViolation)
+			}
+		})
+	}
+}
+
+// TestListAdjustmentRecords pins the total order the adjustments of a run come
+// back in. The rows land through a copy, which keeps no order of its own, so a
+// correction diffing its adjustments against the corrected run's needs the
+// order to come from the statement.
+func TestListAdjustmentRecords(t *testing.T) {
+	db := storetest.NewDB(t)
+	q := sqlcgen.New(db.Store.Pool())
+
+	run := openRun(t, db, "completed")
+	// Two relation ids that sort the way their names read, so the case can assert
+	// the position relation_id holds in the order.
+	first := pgtype.UUID{Bytes: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Valid: true}
+	second := pgtype.UUID{Bytes: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Valid: true}
+
+	// Written in none of the orders the case asserts. Every pair of neighbours in
+	// the wanted order below differs in one key column, so each of the six is read.
+	seedAdjustmentRecord(t, db, run, first, "tenant-b", "discount", "all", "0.100000", "-10.00")
+	seedAdjustmentRecord(t, db, run, second, "tenant-a", "discount", "all", "0.100000", "-5.00")
+	seedAdjustmentRecord(t, db, run, first, "tenant-a", "kickback", "all", "0.100000", "5.00")
+	seedAdjustmentRecord(t, db, run, first, "tenant-a", "discount", "openstack", "0.100000", "-3.00")
+	seedAdjustmentRecord(t, db, run, first, "tenant-a", "discount", "all", "0.200000", "-8.00")
+	seedAdjustmentRecord(t, db, run, first, "tenant-a", "discount", "all", "0.100000", "-1.00")
+	seedAdjustmentRecord(t, db, run, first, "tenant-a", "discount", "all", "0.100000", "-2.00")
+
+	// A second run of the next month, so the filter has something to leave out.
+	other := openRun(t, db, "completed")
+	seedAdjustmentRecord(t, db, other, first, "tenant-a", "discount", "all", "0.100000", "-99.00")
+
+	type record struct {
+		projectID, typ, scope, rate, amount string
+		relationID                          pgtype.UUID
+	}
+
+	t.Run("reads the adjustments of one run in the stored order", func(t *testing.T) {
+		rows, err := q.ListAdjustmentRecords(t.Context(), run)
+		if err != nil {
+			t.Fatalf("ListAdjustmentRecords() error = %v, want nil", err)
+		}
+		got := make([]record, 0, len(rows))
+		for _, row := range rows {
+			got = append(got, record{
+				row.ProjectID, row.Type, row.Scope,
+				amountText(t, row.Rate), amountText(t, row.Amount), row.RelationID,
+			})
+		}
+		want := []record{
+			{"tenant-a", "discount", "all", "0.100000", "-2.00", first},
+			{"tenant-a", "discount", "all", "0.100000", "-1.00", first},
+			{"tenant-a", "discount", "all", "0.200000", "-8.00", first},
+			{"tenant-a", "discount", "openstack", "0.100000", "-3.00", first},
+			{"tenant-a", "kickback", "all", "0.100000", "5.00", first},
+			{"tenant-a", "discount", "all", "0.100000", "-5.00", second},
+			{"tenant-b", "discount", "all", "0.100000", "-10.00", first},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ListAdjustmentRecords() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("reports nothing for a run that adjusted nothing", func(t *testing.T) {
+		empty := openRun(t, db, "completed")
+
+		rows, err := q.ListAdjustmentRecords(t.Context(), empty)
+		if err != nil {
+			t.Fatalf("ListAdjustmentRecords() error = %v, want nil", err)
+		}
+		if len(rows) != 0 {
+			t.Errorf("ListAdjustmentRecords() = %v, want no rows", rows)
+		}
+	})
+}
+
 // runSeed is the run a case starts from: its kind, the status it carries, the
 // run it corrects where it is a correction, and the time it started. An
 // invalid correctsRunID is the NULL a run that corrects nothing stores, and a
@@ -708,6 +908,31 @@ func seedCorrectionDelta(
 	}
 }
 
+// seedAdjustmentRecord writes one applied adjustment under a run. The columns
+// the listing orders by are what a case passes; base is one fixed amount,
+// because nothing here reads it. The beneficiary follows the type rather than
+// the caller, because the table admits one on a kickback row alone.
+func seedAdjustmentRecord(
+	t *testing.T,
+	db storetest.DB,
+	runID, relationID pgtype.UUID,
+	projectID, typ, scope, rate, amount string,
+) {
+	t.Helper()
+
+	if _, err := db.Store.Pool().Exec(t.Context(),
+		`INSERT INTO adjustment_records (run_id, project_id, relation_id, relation_type,
+		                                 relation_target, beneficiary, type, scope, rate, base,
+		                                 amount, currency)
+		 VALUES ($1, $2, $3, 'managed_by', 'partner-corp',
+		         CASE WHEN $4::text = 'kickback' THEN 'partner-corp' END,
+		         $4, $5, $6, 100.00, $7, 'EUR')`,
+		runID, projectID, relationID, typ, scope,
+		numeric(t, rate), numeric(t, amount)); err != nil {
+		t.Fatalf("seeding the %s adjustment of %s: %v", typ, projectID, err)
+	}
+}
+
 // correctionDelta is one delta row as a case hands it to the copy.
 func correctionDelta(
 	t *testing.T,
@@ -733,8 +958,35 @@ func correctionDelta(
 	}
 }
 
-// numeric is an amount on its way into a NUMERIC(14,2) column. It reaches the
-// column as text rather than through a float (roadmap/00-conventions.md
+// adjustmentRecord is one applied adjustment as a case hands it to the copy.
+// beneficiary is the caller's, because it is set on kickback rows alone.
+func adjustmentRecord(
+	t *testing.T,
+	runID, relationID pgtype.UUID,
+	projectID, typ, rate, base, amount string,
+	beneficiary pgtype.Text,
+) sqlcgen.CreateAdjustmentRecordsParams {
+	t.Helper()
+
+	return sqlcgen.CreateAdjustmentRecordsParams{
+		ID:             pgtype.UUID{Bytes: uuid.New(), Valid: true},
+		RunID:          runID,
+		ProjectID:      projectID,
+		RelationID:     relationID,
+		RelationType:   "managed_by",
+		RelationTarget: "partner-corp",
+		Beneficiary:    beneficiary,
+		Type:           typ,
+		Scope:          "all",
+		Rate:           numeric(t, rate),
+		Base:           numeric(t, base),
+		Amount:         numeric(t, amount),
+		Currency:       "EUR",
+	}
+}
+
+// numeric is an amount or a rate on its way into a NUMERIC column. It reaches
+// the column as text rather than through a float (roadmap/00-conventions.md
 // section 6).
 func numeric(t *testing.T, amount string) pgtype.Numeric {
 	t.Helper()

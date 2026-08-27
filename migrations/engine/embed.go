@@ -16,4 +16,4 @@ var FS embed.FS
 // binary built from this tree expects.
 //
 // Adding a migration means raising this; a test fails otherwise.
-const Version int64 = 1
+const Version int64 = 2
