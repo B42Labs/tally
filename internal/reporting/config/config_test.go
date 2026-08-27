@@ -320,6 +320,42 @@ func TestLoadReadsAttributingRelationTypes(t *testing.T) {
 			t.Errorf("Load() error = %q, want it to name TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES", err)
 		}
 	})
+
+	t.Run("a virtual relation type is rejected", func(t *testing.T) {
+		values := []string{"member_of", "managed_by", "infrastructure_tenant,managed_by"}
+
+		for _, value := range values {
+			t.Run(value, func(t *testing.T) {
+				setEnv(t, map[string]string{
+					"TALLY_REPORTING_DB_URL":                     "postgres://tally@localhost/tally",
+					"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": value,
+				})
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatal("Load() error = nil, want an error")
+				}
+				if !strings.Contains(err.Error(), "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES") {
+					t.Errorf("Load() error = %q, want it to name TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES", err)
+				}
+				if want := "reaches a virtual project and attributes no cost"; !strings.Contains(err.Error(), want) {
+					t.Errorf("Load() error = %q, want it to contain %q", err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("the default is kept when the variable is unset", func(t *testing.T) {
+		setEnv(t, map[string]string{"TALLY_REPORTING_DB_URL": "postgres://tally@localhost/tally"})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if want := []string{"infrastructure_tenant"}; !slices.Equal(cfg.AttributingRelationTypes, want) {
+			t.Errorf("AttributingRelationTypes = %q, want %q", cfg.AttributingRelationTypes, want)
+		}
+	})
 }
 
 // TestEnvNamesCoversEveryField keeps the exported list and the struct tags from

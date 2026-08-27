@@ -19,6 +19,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/b42labs/tally/internal/core/envsecret"
+	"github.com/b42labs/tally/internal/core/project"
 )
 
 // The variables this package reads. They are named here because the errors
@@ -90,6 +91,8 @@ type Config struct {
 	// AttributingRelationTypes are the relation types attribution walks when it
 	// bills a project under its attributor; an empty list bills every project on
 	// its own. Setting the variable to the empty string yields that empty list.
+	// "member_of" and "managed_by" reach a virtual project and attribute no cost,
+	// so a list naming either is refused.
 	AttributingRelationTypes []string `env:"TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES" envDefault:"infrastructure_tenant"`
 	// CounterSourcesPath is the path to the counter sources YAML, the file that
 	// declares which counters exist and how each one is measured;
@@ -139,6 +142,14 @@ func Load() (Config, error) {
 	}
 	if slices.Contains(cfg.AttributingRelationTypes, "") {
 		return Config{}, fmt.Errorf("%s: %q must not contain an empty relation type", envAttributingTypes, raw)
+	}
+	// "member_of" and "managed_by" carry structure rather than money: a reseller
+	// is never billed its customer's usage, a meta-project never absorbs its
+	// members' costs. A list naming either is refused, not defaulted away.
+	for _, relationType := range cfg.AttributingRelationTypes {
+		if project.IsVirtualRelationType(relationType) {
+			return Config{}, fmt.Errorf("%s: %q reaches a virtual project and attributes no cost", envAttributingTypes, relationType)
+		}
 	}
 	// The counter sources path is read the same way: only the explicit empty
 	// value means no counter sources, which counters.Load honors by reading
