@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/runs"
 	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
@@ -408,4 +413,67 @@ func KickbacksCSV(run Run) ([]byte, error) {
 		})
 	}
 	return table(run, kickbacksCSVFileName, rows)
+}
+
+// ErrNoRunForPeriod is what PeriodRun returns for a billing period no
+// completed or finalized regular run bills.
+var ErrNoRunForPeriod = errors.New("the billing period has no run to report")
+
+// PeriodRun is the run a period's kickbacks are reported from when the caller
+// names the month alone: the regular run that closed it, or the completed
+// regular run of a month that is still open.
+//
+// A finalized correction of the month is never what the month alone resolves
+// to. What a partner is settled for a month is what the regular run of that
+// month settled, and a correction carries the differences on top of that
+// settlement, which are reported by naming the correction with --run.
+//
+// The period and the run are read under one REPEATABLE READ snapshot, because
+// closing a month moves its regular run out of the status the second read
+// filters on: finalize commits FinalizeRun and FinalizeBillingPeriod together,
+// so a month closed between two separate reads would be read as still open and
+// then leave no completed regular run to find. The month that was just closed
+// would be refused as one that was never billed, and the operator would be sent
+// to start a regular run over a period the engine refuses one for. The
+// transaction is read-only and ended by the rollback below: resolving a run
+// writes nothing.
+func PeriodRun(ctx context.Context, pool *pgxpool.Pool, periodFrom time.Time) (uuid.UUID, error) {
+	month := period.Format(periodFrom)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("reading the run of %s: %w", month, err)
+	}
+	// The rollback that ends the snapshot, on a context no cancellation reaches,
+	// the way Load ends its own.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	q := sqlcgen.New(tx)
+	from := pgtype.Timestamptz{Time: periodFrom, Valid: true}
+
+	row, err := q.GetBillingPeriod(ctx, from)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf(
+				"%w: %s has no billing period, and tally-engine run --period %s produces one",
+				ErrNoRunForPeriod, month, month)
+		}
+		return uuid.Nil, fmt.Errorf("reading the billing period %s: %w", month, err)
+	}
+	// The CHECK of migration 0001 ties the name to the status, so a finalized
+	// period names a run. That run is the regular one that closed the month:
+	// finalizing a correction of it leaves the name where it is.
+	if row.Status == statusFinalized {
+		return uuid.UUID(row.FinalizedRunID.Bytes), nil
+	}
+
+	id, err := q.LatestCompletedRegularRun(ctx, from)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf(
+				"%w: %s has no completed run, and tally-engine run --period %s produces one",
+				ErrNoRunForPeriod, month, month)
+		}
+		return uuid.Nil, fmt.Errorf("reading the completed run of %s: %w", month, err)
+	}
+	return uuid.UUID(id.Bytes), nil
 }

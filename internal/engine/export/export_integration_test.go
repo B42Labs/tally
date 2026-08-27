@@ -23,6 +23,7 @@ import (
 
 	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/runs"
+	"github.com/b42labs/tally/internal/engine/store"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 )
 
@@ -239,6 +240,47 @@ func seedAdjustmentRecord(t *testing.T, db storetest.DB, runID, relationID uuid.
 		numeric(t, rate), numeric(t, base), numeric(t, amount), currency); err != nil {
 		t.Fatalf("seeding the %s adjustment of %s: %v", typ, projectKey, err)
 	}
+}
+
+// seedBillingPeriod writes the March 2026 period a run is resolved through. A
+// finalized period names the run that closed it and when that happened, and a
+// period of every other status names neither, which is the pairing the CHECK of
+// migration 0001 admits.
+func seedBillingPeriod(t *testing.T, db storetest.DB, status string, finalizedRunID uuid.UUID) {
+	t.Helper()
+
+	var closedBy *uuid.UUID
+	var finalizedAt *time.Time
+	if status == "finalized" {
+		closedBy, finalizedAt = &finalizedRunID, &runCompletedAt
+	}
+
+	if _, err := db.Store.Pool().Exec(t.Context(),
+		`INSERT INTO billing_periods (period_from, period_to, status, finalized_run_id, finalized_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		periodFrom, periodTo, status, closedBy, finalizedAt); err != nil {
+		t.Fatalf("seeding the %s billing period: %v", status, err)
+	}
+}
+
+// siblingDB is a migrated database of its own beside the test's, on the same
+// container. period_from is the primary key of billing_periods, and the query
+// behind a resolution reads every completed run of the month, so two cases over
+// one database would resolve against each other's seeds: every subtest of
+// TestPeriodRun owns a March of its own.
+func siblingDB(t *testing.T, db storetest.DB, name string) storetest.DB {
+	t.Helper()
+
+	url := db.NewSiblingDB(t, name)
+	if _, err := store.Migrate(t.Context(), url); err != nil {
+		t.Fatalf("migrating the database %s: %v", name, err)
+	}
+	s, err := store.New(t.Context(), url)
+	if err != nil {
+		t.Fatalf("opening the pool on the database %s: %v", name, err)
+	}
+	t.Cleanup(s.Close)
+	return storetest.DB{Store: s, URL: url, Container: db.Container}
 }
 
 // numeric is an amount on its way into a NUMERIC(14,2) column. It reaches the
@@ -950,5 +992,99 @@ func TestLoadRefusals(t *testing.T) {
 			t.Fatalf("Load() error = nil, want the unreachable database reported")
 		}
 		assertMessage(t, err, "reading the run "+runID.String()+":")
+	})
+}
+
+// TestPeriodRun pins which run a month alone reports from. What a partner is
+// settled for a month is what the regular run of that month settled: the run
+// that closed the month once it is finalized, and the completed regular run
+// while the month is still open. A finalized correction beside that run is
+// never what the month resolves to, because a correction settles the
+// differences on top of the payout the partner already received, and a caller
+// after those differences names the correction with --run.
+func TestPeriodRun(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	t.Run("a finalized month resolves to the run that closed it", func(t *testing.T) {
+		sibling := siblingDB(t, db, "finalized_month")
+		regular := seedRun(t, sibling, runSeed{
+			kind:           runs.KindRegular,
+			status:         "finalized",
+			pricingVersion: pricingVersion,
+			completedAt:    runCompletedAt,
+		})
+		// The correction is finalized too, and the period keeps naming the regular
+		// run: a resolution that took the latest finalized run of the month would
+		// report the differences as the month's settlement.
+		seedRun(t, sibling, runSeed{
+			kind:           runs.KindCorrection,
+			status:         "finalized",
+			correctsRunID:  regular,
+			pricingVersion: pricingVersion,
+			completedAt:    runCompletedAt,
+		})
+		seedBillingPeriod(t, sibling, "finalized", regular)
+
+		got, err := export.PeriodRun(t.Context(), sibling.Store.Pool(), periodFrom)
+		if err != nil {
+			t.Fatalf("PeriodRun() error = %v, want nil", err)
+		}
+		if got != regular {
+			t.Errorf("the month resolves to %s, want the regular run %s that closed it", got, regular)
+		}
+	})
+
+	t.Run("an open month resolves to its completed regular run", func(t *testing.T) {
+		sibling := siblingDB(t, db, "open_month")
+		regular := seedCompletedRun(t, sibling)
+		seedCorrectionRun(t, sibling, regular)
+		seedBillingPeriod(t, sibling, "grace", uuid.Nil)
+
+		got, err := export.PeriodRun(t.Context(), sibling.Store.Pool(), periodFrom)
+		if err != nil {
+			t.Fatalf("PeriodRun() error = %v, want nil", err)
+		}
+		if got != regular {
+			t.Errorf("the month resolves to %s, want the regular run %s", got, regular)
+		}
+	})
+
+	t.Run("a month whose runs all failed or were superseded", func(t *testing.T) {
+		sibling := siblingDB(t, db, "no_completed_run")
+		seedRun(t, sibling, runSeed{kind: runs.KindRegular, status: "superseded"})
+		seedRun(t, sibling, runSeed{kind: runs.KindRegular, status: "failed"})
+		seedBillingPeriod(t, sibling, "grace", uuid.Nil)
+
+		_, err := export.PeriodRun(t.Context(), sibling.Store.Pool(), periodFrom)
+		if !errors.Is(err, export.ErrNoRunForPeriod) {
+			t.Fatalf("PeriodRun() error = %v, want one matching ErrNoRunForPeriod", err)
+		}
+		assertMessage(t, err, "has no completed run", "tally-engine run --period 2026-03")
+	})
+
+	t.Run("a month without a billing period", func(t *testing.T) {
+		sibling := siblingDB(t, db, "no_billing_period")
+
+		_, err := export.PeriodRun(t.Context(), sibling.Store.Pool(), periodFrom)
+		if !errors.Is(err, export.ErrNoRunForPeriod) {
+			t.Fatalf("PeriodRun() error = %v, want one matching ErrNoRunForPeriod", err)
+		}
+		assertMessage(t, err, "has no billing period", "tally-engine run --period 2026-03")
+	})
+
+	t.Run("a database that cannot be reached", func(t *testing.T) {
+		// The pool opens no connection until one is asked for, so the address
+		// nothing listens on is reported by the snapshot the two reads share
+		// rather than here, and the case needs no database of its own.
+		unreachable, err := pgxpool.New(t.Context(), "postgres://nobody@127.0.0.1:1/none")
+		if err != nil {
+			t.Fatalf("opening the pool on an unreachable database: %v", err)
+		}
+		defer unreachable.Close()
+
+		if _, err = export.PeriodRun(t.Context(), unreachable, periodFrom); err == nil {
+			t.Fatalf("PeriodRun() error = nil, want the unreachable database reported")
+		}
+		assertMessage(t, err, "reading the run of 2026-03:")
 	})
 }
