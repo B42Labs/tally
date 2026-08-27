@@ -13,7 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/counters"
@@ -28,6 +30,10 @@ import (
 var metered = source.Resource{
 	Cloud: "os-prod-eu1", Platform: "openstack", ResourceType: "instance", ResourceID: "def-456",
 }
+
+// adjustedRelation is the relation the adjustments of the pure cases below came
+// from, as the text a line carries it in.
+const adjustedRelation = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 
 // instantOf is one instant of the fixtures below.
 func instantOf(t *testing.T, text string) time.Time {
@@ -69,11 +75,12 @@ func TestStatsJSONShape(t *testing.T) {
 	project := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 	stats := Stats{
-		SnapshotAt:   &snapshotAt,
-		Candidates:   3,
-		UsageRecords: 4,
-		RatedRecords: 5,
-		Statements:   2,
+		SnapshotAt:        &snapshotAt,
+		Candidates:        3,
+		UsageRecords:      4,
+		RatedRecords:      5,
+		Statements:        2,
+		AdjustmentRecords: 6,
 		Warnings: []Warning{{
 			Code:   WarningPeriodNotEnded,
 			Detail: "period_to 2026-04-01T00:00:00Z has not passed yet",
@@ -89,6 +96,10 @@ func TestStatsJSONShape(t *testing.T) {
 		}},
 		AttributionWarnings: []attribution.Warning{{
 			Code: attribution.WarningCycle, ProjectID: project,
+		}},
+		AdjustmentWarnings: []adjustments.Warning{{
+			Code: adjustments.WarningKickbackTargetNotPartner, RelationID: adjustedRelation,
+			TargetPlatform: "meta", TargetID: "customer-alpha",
 		}},
 		Unpriced: []rating.UnpricedResourceType{{
 			Platform: metered.Platform, ResourceType: "volume", Count: 1,
@@ -114,7 +125,7 @@ func TestStatsJSONShape(t *testing.T) {
 	}
 
 	want := `{"snapshot_at":"2026-03-01T00:00:00Z",` +
-		`"candidates":3,"usage_records":4,"rated_records":5,"statements":2,` +
+		`"candidates":3,"usage_records":4,"rated_records":5,"statements":2,"adjustment_records":6,` +
 		`"warnings":[{"code":"period_not_ended",` +
 		`"detail":"period_to 2026-04-01T00:00:00Z has not passed yet"}],` +
 		`"metering_warnings":[{"cloud":"os-prod-eu1","resource_type":"instance","resource_id":"def-456",` +
@@ -124,6 +135,9 @@ func TestStatsJSONShape(t *testing.T) {
 		`"code":"counter_source_failed","detail":"the store did not answer"}],` +
 		`"attribution_warnings":[{"code":"attribution_cycle",` +
 		`"project_id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8"}],` +
+		`"adjustment_warnings":[{"code":"adjustment_kickback_target_not_partner",` +
+		`"relation_id":"` + adjustedRelation + `",` +
+		`"target_platform":"meta","target_id":"customer-alpha"}],` +
 		`"unpriced":[{"platform":"openstack","resource_type":"volume","count":1}],` +
 		`"unreadable":[{"platform":"openstack","resource_type":"instance","field":"vcpus","count":2}],` +
 		`"unregistered_projects":[{"cloud":"os-prod-eu1","project_id":"proj-456","resources":1}],` +
@@ -152,9 +166,9 @@ func TestStatsJSONOmitsEmptyLists(t *testing.T) {
 }
 
 // TestCorrectionStatsJSONShape pins the object a correction stores in
-// runs.stats: the keys of a regular run, flattened, with the delta count beside
-// them. An operator reads a correction the way they read a run, and the one key
-// that is new is the one that says how much it found.
+// runs.stats: the keys of a regular run, flattened, with the delta counts
+// beside them. An operator reads a correction the way they read a run, and the
+// keys that are new are the two that say how much it found.
 func TestCorrectionStatsJSONShape(t *testing.T) {
 	snapshotAt := instantOf(t, "2026-03-01T00:00:00Z")
 
@@ -163,7 +177,8 @@ func TestCorrectionStatsJSONShape(t *testing.T) {
 			SnapshotAt: &snapshotAt, Candidates: 3, UsageRecords: 4, RatedRecords: 5,
 			Statements: 2, Error: "x",
 		},
-		Deltas: 7,
+		Deltas:           7,
+		AdjustmentDeltas: 2,
 	})
 	if err != nil {
 		t.Fatalf("Marshal error = %v, want nil", err)
@@ -171,20 +186,21 @@ func TestCorrectionStatsJSONShape(t *testing.T) {
 
 	want := `{"snapshot_at":"2026-03-01T00:00:00Z",` +
 		`"candidates":3,"usage_records":4,"rated_records":5,"statements":2,` +
-		`"error":"x","deltas":7}`
+		`"error":"x","deltas":7,"adjustment_deltas":2}`
 	if string(got) != want {
 		t.Errorf("Marshal =\n%s\nwant\n%s", got, want)
 	}
 
-	// A correction that found nothing reports its counts and a delta count of
-	// zero: the key stays, because no deltas is what such a correction says.
+	// A correction that found nothing reports its counts and delta counts of
+	// zero: the keys stay, because no deltas is what such a correction says.
 	got, err = json.Marshal(CorrectionStats{
 		Stats: Stats{Candidates: 1, UsageRecords: 2, RatedRecords: 4, Statements: 1},
 	})
 	if err != nil {
 		t.Fatalf("Marshal error = %v, want nil", err)
 	}
-	want = `{"candidates":1,"usage_records":2,"rated_records":4,"statements":1,"deltas":0}`
+	want = `{"candidates":1,"usage_records":2,"rated_records":4,"statements":1,` +
+		`"deltas":0,"adjustment_deltas":0}`
 	if string(got) != want {
 		t.Errorf("Marshal = %s, want %s", got, want)
 	}
@@ -352,6 +368,199 @@ func TestDeltaRowsShape(t *testing.T) {
 		if row.ID == (pgtype.UUID{}) {
 			t.Errorf("row %d carries no id, want the one it is written under", i)
 		}
+	}
+}
+
+// lineOf is one applied adjustment of the statements the cases below build
+// their rows from, at the rate and the two amounts the case passes as text.
+func lineOf(t *testing.T, adjustmentType, target, rate, adjustedBase, adjusted string) adjustments.Line {
+	t.Helper()
+
+	return adjustments.Line{
+		Type:           adjustmentType,
+		RelationType:   "managed_by",
+		RelationTarget: target,
+		RelationID:     adjustedRelation,
+		Scope:          "all",
+		Rate:           money.NewRate(decimal.RequireFromString(rate)),
+		Base:           money.NewAmount(decimal.RequireFromString(adjustedBase)),
+		Amount:         money.NewAmount(decimal.RequireFromString(adjusted)),
+	}
+}
+
+// adjustedStatements are the two statements of the shape case: one that two
+// adjustments reached and one that none did.
+func adjustedStatements(t *testing.T) []statements.Statement {
+	t.Helper()
+
+	return []statements.Statement{
+		{
+			Key:      "os-prod-eu1/customer-proj-1",
+			Currency: "EUR",
+			Adjustments: []adjustments.Line{
+				lineOf(t, adjustment.TypeDiscount, "partner-corp", "0.15", "1200.00", "-180.00"),
+				lineOf(t, adjustment.TypeKickback, "partner-corp", "0.10", "1020.00", "102.00"),
+			},
+		},
+		{Key: "os-prod-eu1/customer-proj-2", Currency: "EUR"},
+	}
+}
+
+// TestAdjustmentRowsShape is what one adjustment line reaches the columns as:
+// the statement it was applied to, the relation it came from, and the rate at
+// six places beside the base and the amount at two, each as the text of the
+// decimal rather than as a float. The beneficiary is the relation's target on a
+// kickback and nothing on the other types, because a kickback is the one
+// adjustment somebody is owed the amount of. A statement no adjustment reached
+// writes no row.
+func TestAdjustmentRowsShape(t *testing.T) {
+	runID := uuid.New()
+
+	rows, err := adjustmentRows(runID, adjustedStatements(t))
+	if err != nil {
+		t.Fatalf("adjustmentRows() error = %v, want nil", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("adjustmentRows() = %d rows, want one per adjustment line", len(rows))
+	}
+
+	for i, row := range rows {
+		if row.RunID != uuidValue(runID) {
+			t.Errorf("row %d run = %v, want %v", i, row.RunID, uuidValue(runID))
+		}
+		if row.ProjectID != "os-prod-eu1/customer-proj-1" {
+			t.Errorf("row %d statement = %q, want the one its line was applied to", i, row.ProjectID)
+		}
+		if want := uuidValue(uuid.MustParse(adjustedRelation)); row.RelationID != want {
+			t.Errorf("row %d relation = %v, want %v", i, row.RelationID, want)
+		}
+		if row.RelationType != "managed_by" || row.RelationTarget != "partner-corp" {
+			t.Errorf("row %d relation = (%s, %s), want (managed_by, partner-corp)",
+				i, row.RelationType, row.RelationTarget)
+		}
+		if row.Scope != "all" || row.Currency != "EUR" {
+			t.Errorf("row %d = (%s, %s), want (all, EUR)", i, row.Scope, row.Currency)
+		}
+	}
+
+	for _, tc := range []struct {
+		index                        int
+		adjustmentType               string
+		rate, adjustedBase, adjusted string
+		beneficiary                  string
+	}{
+		{
+			index: 0, adjustmentType: adjustment.TypeDiscount,
+			rate: "0.150000", adjustedBase: "1200.00", adjusted: "-180.00",
+		},
+		{
+			index: 1, adjustmentType: adjustment.TypeKickback,
+			rate: "0.100000", adjustedBase: "1020.00", adjusted: "102.00",
+			beneficiary: "partner-corp",
+		},
+	} {
+		row := rows[tc.index]
+		if row.Type != tc.adjustmentType {
+			t.Errorf("row %d type = %q, want %q", tc.index, row.Type, tc.adjustmentType)
+		}
+		for _, field := range []struct {
+			name  string
+			value pgtype.Numeric
+			want  string
+		}{
+			{name: "rate", value: row.Rate, want: tc.rate},
+			{name: "base", value: row.Base, want: tc.adjustedBase},
+			{name: "amount", value: row.Amount, want: tc.adjusted},
+		} {
+			if got := numericText(t, field.value); got != field.want {
+				t.Errorf("row %d %s = %s, want %s", tc.index, field.name, got, field.want)
+			}
+		}
+		switch {
+		case tc.beneficiary == "" && row.Beneficiary.Valid:
+			t.Errorf("row %d beneficiary = %q, want none: a %s is owed to nobody",
+				tc.index, row.Beneficiary.String, tc.adjustmentType)
+		case tc.beneficiary != "" && (!row.Beneficiary.Valid || row.Beneficiary.String != tc.beneficiary):
+			t.Errorf("row %d beneficiary = %+v, want %q", tc.index, row.Beneficiary, tc.beneficiary)
+		}
+	}
+
+	// The ids are generated here rather than left to the column default,
+	// because COPY evaluates no defaults.
+	if rows[0].ID == rows[1].ID {
+		t.Error("both rows carry one id, want an id per row")
+	}
+}
+
+// TestAdjustmentRowsOversized refuses an adjustment whose base or amount is
+// past what NUMERIC(14,2) holds. The database would report it as a numeric
+// field overflow naming the column alone, which says nothing about the
+// statement it was applied to or the relation it came from.
+func TestAdjustmentRowsOversized(t *testing.T) {
+	adjusted := func(line adjustments.Line) []statements.Statement {
+		return []statements.Statement{{
+			Key: "os-prod-eu1/customer-proj-1", Currency: "EUR",
+			Adjustments: []adjustments.Line{line},
+		}}
+	}
+
+	t.Run("the largest base the column holds is written", func(t *testing.T) {
+		rows, err := adjustmentRows(uuid.New(), adjusted(
+			lineOf(t, adjustment.TypeDiscount, "partner-corp", "0.15", "999999999999.99", "-180.00")))
+		if err != nil {
+			t.Fatalf("adjustmentRows() error = %v, want nil", err)
+		}
+		if len(rows) != 1 {
+			t.Errorf("adjustmentRows() = %d rows, want the base at the bound written", len(rows))
+		}
+	})
+
+	t.Run("an amount past the bound", func(t *testing.T) {
+		rows, err := adjustmentRows(uuid.New(), adjusted(
+			lineOf(t, adjustment.TypeKickback, "partner-corp", "0.10", "1200.00", "1000000000000.00")))
+		if err == nil {
+			t.Fatal("adjustmentRows() error = nil, want the oversized amount refused")
+		}
+		if rows != nil {
+			t.Errorf("adjustmentRows() = %v, want no rows: a refused adjustment leaves nothing to write", rows)
+		}
+		for _, want := range []string{
+			adjustment.TypeKickback, adjustedRelation, "os-prod-eu1/customer-proj-1",
+			"past the 999999999999.99 the column holds",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("adjustmentRows() error = %q, want it to name %q", err, want)
+			}
+		}
+	})
+}
+
+// TestAdjustmentRowsEmpty is a run that adjusted nothing: no rows, and the
+// empty slice rather than a nil one, because the write skips an adjustment list
+// of no length rather than passing a nil through the COPY.
+func TestAdjustmentRowsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sts  []statements.Statement
+	}{
+		{name: "no statements at all"},
+		{name: "statements no adjustment reached", sts: []statements.Statement{
+			{Key: "os-prod-eu1/customer-proj-1", Currency: "EUR"},
+			{Key: "os-prod-eu1/customer-proj-2", Currency: "EUR"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := adjustmentRows(uuid.New(), tc.sts)
+			if err != nil {
+				t.Fatalf("adjustmentRows() error = %v, want nil", err)
+			}
+			if rows == nil {
+				t.Fatal("adjustmentRows() = nil, want an empty slice")
+			}
+			if len(rows) != 0 {
+				t.Errorf("adjustmentRows() = %d rows, want none", len(rows))
+			}
+		})
 	}
 }
 
