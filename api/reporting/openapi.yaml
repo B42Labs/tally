@@ -980,6 +980,11 @@ paths:
         (`urn:tally:error:relation_cycle`) without being written. A type
         outside that list is created without the walk.
 
+        A `metadata.pricing_adjustments` array the adjustments schema refuses
+        is answered 422 (`urn:tally:error:validation`) with one field error
+        per violation, located as
+        `body.metadata.pricing_adjustments.<index>.<member>`.
+
         A relation to or from a virtual project is created, listed, updated
         and closed like any other.
       security:
@@ -1104,6 +1109,10 @@ paths:
 
         A relation the path does not name, and a relation that does not leave
         the project of the path, are both answered 404.
+
+        A `metadata.pricing_adjustments` array the adjustments schema refuses
+        is answered 422, and a document whose `pricing_adjustments` differs
+        from the stored one is answered 409 (`urn:tally:error:conflict`).
       security:
         - apiToken: []
       requestBody:
@@ -1129,6 +1138,8 @@ paths:
         "403":
           $ref: "#/components/responses/Problem"
         "404":
+          $ref: "#/components/responses/Problem"
+        "409":
           $ref: "#/components/responses/Problem"
         "422":
           $ref: "#/components/responses/Problem"
@@ -2207,6 +2218,11 @@ components:
             Whatever else is worth keeping about the project. A registration
             that leaves it out stores the empty object.
 
+            The stored document is bounded at 65536 bytes as the database
+            normalizes it: a number a body spells as an exponent is stored, and
+            answered, spelled out. A write whose document is past the bound is
+            answered 422 and stores nothing.
+
     UpdateProject:
       type: object
       description: >-
@@ -2224,6 +2240,11 @@ components:
             The metadata the project carries from now on. It replaces the
             stored object wholesale rather than being merged into it, so a
             request carrying it carries every member the project keeps.
+
+            The stored document is bounded at 65536 bytes as the database
+            normalizes it: a number a body spells as an exponent is stored, and
+            answered, spelled out. A write whose document is past the bound is
+            answered 422 and stores nothing.
 
     Relation:
       type: object
@@ -2262,6 +2283,17 @@ components:
           description: >-
             Whatever else was stored about the relation. It is the empty object
             for a relation created without any.
+
+            The member `pricing_adjustments`, when present, holds a non-empty
+            array of at most 64 objects with `type` (one of `discount`,
+            `kickback`, `surcharge`, `project_discount`), `rate` (a decimal
+            string from `0` to `1` with at most six fractional digits, never a
+            number), `scope` (`all`, a platform, or `platform.resource_type`,
+            in lower-case letters, digits and underscores) and an optional
+            `description` of at most 500 characters, and no other members. The
+            schema `internal/core/adjustment/adjustments_schema.json` decided
+            the array at the write, and the rating engine reads it by that
+            same schema.
         valid_from:
           type: string
           format: date-time
@@ -2319,6 +2351,24 @@ components:
           description: >-
             Whatever else is worth keeping about the relation. A creation that
             leaves it out stores the empty object.
+
+            The member `pricing_adjustments` is accepted as a non-empty array
+            of at most 64 objects with `type` (one of `discount`, `kickback`,
+            `surcharge`, `project_discount`), `rate` (a decimal string from
+            `0` to `1` with at most six fractional digits, never a number),
+            `scope` (`all`, a platform, or `platform.resource_type`, in
+            lower-case letters, digits and underscores) and an optional
+            `description` of at most 500 characters, and no other members. The
+            rule enforced is the schema
+            `internal/core/adjustment/adjustments_schema.json`, which the
+            rating engine reads the array by. An array the schema refuses is
+            answered 422 with one field error per violation, located as
+            `body.metadata.pricing_adjustments.<index>.<member>`.
+
+            The stored document is bounded at 65536 bytes as the database
+            normalizes it: a number a body spells as an exponent is stored, and
+            answered, spelled out. A write whose document is past the bound is
+            answered 422 and stores nothing.
         valid_from:
           type: string
           format: date-time
@@ -2339,6 +2389,18 @@ components:
             The metadata the relation carries from now on. It replaces the
             stored object wholesale rather than being merged into it, so a
             request carrying it carries every member the relation keeps.
+
+            The `pricing_adjustments` of a relation are fixed for its
+            lifetime. A document whose member differs from the stored one, by
+            being added, dropped, reordered or changed in any value, is
+            answered 409. To change the other members, send the member back
+            exactly as the relation answers it; to change the adjustments,
+            close the relation and create a successor.
+
+            The stored document is bounded at 65536 bytes as the database
+            normalizes it: a number a body spells as an exponent is stored, and
+            answered, spelled out. A write whose document is past the bound is
+            answered 422 and stores nothing.
         valid_to:
           type: string
           format: date-time
