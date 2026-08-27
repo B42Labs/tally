@@ -7,7 +7,8 @@
 // It is the one place the Reporting API reads pricing_adjustments from, so the
 // API spells neither the member name nor the schema out again. The API holds a
 // written relation to the schema and answers 422 for a document it refuses
-// (decision D2).
+// (decision D2). The engine in internal/engine/adjustments is the second reader
+// of the member, and it takes the adjustments as the values Parse returns.
 //
 // The package does no I/O.
 //
@@ -25,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/shopspring/decimal"
 )
 
 // MetadataKey is the member of a relation's metadata that carries the
@@ -39,6 +41,31 @@ const MetadataKey = "pricing_adjustments"
 // because both keywords are evaluated: the walk would report every element of
 // an array past the cap before the length was ever named.
 const MaxAdjustments = 64
+
+// The adjustment types, in the order decision D3 applies them.
+const (
+	TypeSurcharge       = "surcharge"
+	TypeDiscount        = "discount"
+	TypeProjectDiscount = "project_discount"
+	TypeKickback        = "kickback"
+)
+
+// TypeOrder lists the four types in application order. The index of a type in
+// it is what the engine sorts by, so the order of the elements inside one
+// relation's array does not decide what a rated amount passes through first.
+var TypeOrder = []string{TypeSurcharge, TypeDiscount, TypeProjectDiscount, TypeKickback}
+
+// ScopeAll is the scope that matches every rated amount (decision D5).
+const ScopeAll = "all"
+
+// Adjustment is one element of the array. The rate is the decimal the text
+// spells, so nothing between the request body and the statement rounds it.
+type Adjustment struct {
+	Type        string          // one of the types TypeOrder names
+	Rate        decimal.Decimal // between 0 and 1, as the schema's pattern admits
+	Scope       string          // ScopeAll, a platform, or a platform and a resource type
+	Description string          // empty when the element carries none
+}
 
 // Violation is one place the schema refused, located inside the array.
 type Violation struct {
@@ -131,26 +158,91 @@ func Validate(doc []byte) error {
 	return nil
 }
 
+// Parse holds the JSON text of the adjustments array to the schema and returns
+// the adjustments it spells, in the order the array lists them. Everything the
+// schema refuses comes back as Validate's error, so a caller reads the types,
+// rates and scopes of the result without checking them again.
+func Parse(doc []byte) ([]Adjustment, error) {
+	if err := Validate(doc); err != nil {
+		return nil, err
+	}
+
+	var elements []struct {
+		Type        string `json:"type"`
+		Rate        string `json:"rate"`
+		Scope       string `json:"scope"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(doc, &elements); err != nil {
+		return nil, fmt.Errorf("reading the pricing adjustments: %w", err)
+	}
+
+	adjustments := make([]Adjustment, 0, len(elements))
+	for i, element := range elements {
+		// The schema's pattern admits nothing the decimal package rejects, so
+		// this error is the package's own bug rather than a caller's document.
+		rate, err := decimal.NewFromString(element.Rate)
+		if err != nil {
+			return nil, fmt.Errorf("reading the rate of adjustment %d: %w", i, err)
+		}
+		adjustments = append(adjustments, Adjustment{
+			Type:        element.Type,
+			Rate:        rate,
+			Scope:       element.Scope,
+			Description: element.Description,
+		})
+	}
+	return adjustments, nil
+}
+
 // ValidateMetadata holds the adjustments of a whole relation metadata document
 // to the schema. Metadata without the member is not an error: the relation
 // adjusts nothing, and the caller writes it as it stands. A member that is
 // there is validated, so a caller that has to refuse a malformed one gets the
 // *InvalidError.
 func ValidateMetadata(metadata []byte) error {
+	_, _, err := FromMetadata(metadata)
+	return err
+}
+
+// FromMetadata reads the adjustments out of a whole relation metadata
+// document. The second result says whether the metadata carries the member at
+// all, which is what separates a relation that adjusts nothing from one whose
+// member is there and refused: a member the schema refuses comes back as true
+// beside the *InvalidError.
+func FromMetadata(metadata []byte) ([]Adjustment, bool, error) {
 	if len(metadata) == 0 {
-		return nil
+		return nil, false, nil
 	}
 
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(metadata, &members); err != nil {
-		return fmt.Errorf("decoding the relation metadata: %w", err)
+		return nil, false, fmt.Errorf("decoding the relation metadata: %w", err)
 	}
 
 	member, ok := members[MetadataKey]
 	if !ok {
-		return nil
+		return nil, false, nil
 	}
-	return Validate(member)
+	adjustments, err := Parse(member)
+	return adjustments, true, err
+}
+
+// ScopeMatches reports whether a scope covers the rated amounts of one platform
+// and resource type (decision D5). ScopeAll covers every amount, a scope of one
+// part covers a whole platform, and a scope of two parts covers one resource
+// type of one platform. The comparison is exact and case sensitive, the way the
+// schema admits the scope and the platforms name themselves.
+func ScopeMatches(scope, platform, resourceType string) bool {
+	if scope == ScopeAll {
+		return true
+	}
+
+	scopePlatform, scopeResourceType, hasResourceType := strings.Cut(scope, ".")
+	if scopePlatform != platform {
+		return false
+	}
+	return !hasResourceType || scopeResourceType == resourceType
 }
 
 // invalidFrom turns the validator's error into the violations a caller reports.
