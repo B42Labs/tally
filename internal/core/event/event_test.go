@@ -261,6 +261,68 @@ func TestValidateSource(t *testing.T) {
 	}
 }
 
+func TestValidateVirtualPlatform(t *testing.T) {
+	// Both fields are named by every case, because the rule reads both and a
+	// case that left one to the fixture would not say which one it exercises.
+	tests := []struct {
+		name            string
+		platform, cloud string
+		wantErr         string
+		wantNotErr      string
+	}{
+		{
+			name:     "meta project",
+			platform: "meta", cloud: "os-prod-eu1",
+			wantErr: `platform: "meta" is a virtual platform, which never carries resources`,
+		},
+		{
+			name:     "partner",
+			platform: "partner", cloud: "os-prod-eu1",
+			wantErr: `platform: "partner" is a virtual platform, which never carries resources`,
+		},
+		{
+			// The owner of a resource is resolved by (cloud, project_id), so a real
+			// platform under the cloud "meta" would reach a meta-project.
+			name:     "meta cloud under a real platform",
+			platform: "openstack", cloud: "meta",
+			wantErr: `cloud: "meta" is a virtual platform, which never carries resources`,
+		},
+		{
+			name:     "partner cloud under a real platform",
+			platform: "openstack", cloud: "partner",
+			wantErr: `cloud: "partner" is a virtual platform, which never carries resources`,
+		},
+		{
+			name:     "empty is empty, not virtual",
+			platform: "", cloud: "",
+			wantErr:    "platform: must not be empty",
+			wantNotErr: "virtual platform",
+		},
+		{name: "real platform", platform: "openstack", cloud: "os-prod-eu1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEvent()
+			e.Platform, e.Cloud = tc.platform, tc.cloud
+
+			err := e.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Validate() error does not mention %q: %v", tc.wantErr, err)
+			}
+			if tc.wantNotErr != "" && err != nil && strings.Contains(err.Error(), tc.wantNotErr) {
+				t.Fatalf("Validate() error mentions %q for (%q, %q): %v",
+					tc.wantNotErr, tc.platform, tc.cloud, err)
+			}
+		})
+	}
+}
+
 func TestPayloadEnvelopePreservesUnknownFields(t *testing.T) {
 	const raw = `{"state":"active","note":"x","size":{"vcpus":4}}`
 

@@ -1,7 +1,9 @@
 package testkit
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,6 +39,27 @@ func TestAssertValidEventRejectsEnvelopeViolation(t *testing.T) {
 
 	if len(rec.failures) == 0 {
 		t.Fatal("a create event without a size was accepted")
+	}
+}
+
+func TestAssertValidEventRejectsVirtualPlatform(t *testing.T) {
+	// A meta-project owns no resource, so a collector that puts one on the wire
+	// as the platform of a resource event is misconfigured.
+	e := NewEventBuilder().Build()
+	e.Platform = "meta"
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("encoding fixture event: %v", err)
+	}
+
+	var rec recorder
+	assertValidEvent(&rec, raw)
+
+	if len(rec.failures) != 1 {
+		t.Fatalf("failures = %v, want exactly one", rec.failures)
+	}
+	if !strings.Contains(rec.failures[0], "virtual platform") {
+		t.Errorf("failure does not mention the virtual platform: %s", rec.failures[0])
 	}
 }
 

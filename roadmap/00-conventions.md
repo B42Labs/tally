@@ -180,6 +180,11 @@ Rules:
 - Duplicate = same `(event_id, timestamp)`. Ingestion is idempotent; replaying a batch is safe.
 - Reusing an `event_id` with a *different* timestamp is a provider bug; the API cannot detect it
   cheaply (PK includes the hypertable partition column) and providers must not do it.
+- `platform` and `cloud` must be neither `meta` nor `partner`. The two literals name the virtual
+  projects of decision D1 in
+  [05-phase-5-commercial-pricing.md](05-phase-5-commercial-pricing.md), which own no resources
+  and carry their platform as their cloud; an item carrying either literal in either field is
+  rejected at ingest.
 
 ### 4.1 Normalized payload envelope (refinement over the concept)
 
