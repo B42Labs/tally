@@ -303,7 +303,7 @@ func produceCorrection(
 	deltas := corrections.Diff(old, current)
 
 	notes, err := corrections.BuildCreditNotes(
-		opts.PeriodFrom, opts.PeriodTo, baselineID, model.Currency, deltas, projects, resolution)
+		opts.PeriodFrom, opts.PeriodTo, baselineID, model.Currency, deltas, nil, projects, resolution)
 	if err != nil {
 		return nil, err
 	}

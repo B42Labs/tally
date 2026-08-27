@@ -14,7 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/metering"
@@ -75,8 +77,11 @@ const (
 )
 
 // infrastructureTenant is the attributing relation type of the concept's
-// example.
-const infrastructureTenant = "infrastructure_tenant"
+// example, managedBy the one its pricing adjustments hang on.
+const (
+	infrastructureTenant = "infrastructure_tenant"
+	managedBy            = "managed_by"
+)
 
 // The period the cases correct: March 2026, the one the concept works through.
 var (
@@ -199,8 +204,57 @@ func delta(k corrections.Key, old, current string) corrections.Delta {
 	return corrections.Delta{Key: k, Old: before, New: after, Delta: after.Sub(before)}
 }
 
+// adjustmentLine is one applied adjustment of a statement, spelled the way the
+// resolution renders one. Every case hangs its adjustments on a managed_by
+// relation, which is where a partner's discounts and kickbacks sit.
+func adjustmentLine(typ string, relation uuid.UUID, target, scope, rate, base, amount string) adjustments.Line {
+	return adjustments.Line{
+		Type:           typ,
+		RelationType:   managedBy,
+		RelationTarget: target,
+		RelationID:     relation.String(),
+		Scope:          scope,
+		Rate:           money.NewRate(decimal.RequireFromString(rate)),
+		Base:           money.NewAmount(decimal.RequireFromString(base)),
+		Amount:         money.NewAmount(decimal.RequireFromString(amount)),
+	}
+}
+
+// adjustmentKey is one key of the adjustment diff, its rate the six-place text
+// money.Rate renders.
+func adjustmentKey(statementKey string, relation uuid.UUID, typ, scope, rate string) corrections.AdjustmentKey {
+	return corrections.AdjustmentKey{
+		StatementKey: statementKey,
+		RelationID:   relation.String(),
+		Type:         typ,
+		Scope:        scope,
+		Rate:         rate,
+	}
+}
+
+// adjustmentDelta is one difference of the adjustment diff, built from the two
+// amounts as text so a case reads the numbers it credits.
+func adjustmentDelta(
+	k corrections.AdjustmentKey,
+	relationType, target, old, current string,
+) corrections.AdjustmentDelta {
+	before := decimal.RequireFromString(old)
+	after := decimal.RequireFromString(current)
+
+	return corrections.AdjustmentDelta{
+		AdjustmentKey:  k,
+		RelationType:   relationType,
+		RelationTarget: target,
+		RateValue:      decimal.RequireFromString(k.Rate),
+		Old:            before,
+		New:            after,
+		Delta:          after.Sub(before),
+	}
+}
+
 // notes renders one correction the way a run does: the deltas are handed to
-// BuildCreditNotes with the registry they were diffed against.
+// BuildCreditNotes with the registry they were diffed against. A case that
+// corrects no adjustment goes through here, which is every case of Phase 3.
 func notes(
 	t *testing.T,
 	deltas []corrections.Delta,
@@ -209,7 +263,21 @@ func notes(
 ) corrections.BuildResult {
 	t.Helper()
 
-	result, err := corrections.BuildCreditNotes(periodFrom, periodTo, correctsRunID, "EUR", deltas, projects, res)
+	return adjustedNotes(t, deltas, nil, projects, res)
+}
+
+// adjustedNotes renders one correction that also corrects adjustments.
+func adjustedNotes(
+	t *testing.T,
+	deltas []corrections.Delta,
+	changes []corrections.AdjustmentDelta,
+	projects []source.Project,
+	res attribution.Resolution,
+) corrections.BuildResult {
+	t.Helper()
+
+	result, err := corrections.BuildCreditNotes(
+		periodFrom, periodTo, correctsRunID, "EUR", deltas, changes, projects, res)
 	if err != nil {
 		t.Fatalf("BuildCreditNotes() error = %v, want nil", err)
 	}
@@ -259,6 +327,52 @@ func assertAmount(t *testing.T, amounts map[corrections.Key]decimal.Decimal, k c
 		return
 	}
 	assertDecimal(t, k.Dimension, amount, want)
+}
+
+// assertAdjustmentAmount holds one key of an adjustment amount map against the
+// text it is expected to spell. A key the map does not hold fails the case.
+func assertAdjustmentAmount(
+	t *testing.T,
+	amounts map[corrections.AdjustmentKey]corrections.AdjustmentAmount,
+	k corrections.AdjustmentKey,
+	want string,
+) {
+	t.Helper()
+
+	amount, held := amounts[k]
+	if !held {
+		t.Errorf("the %s of relation %s on %s is missing, want %s", k.Type, k.RelationID, k.StatementKey, want)
+		return
+	}
+	assertDecimal(t, k.Type, amount.Amount, want)
+}
+
+// assertOptionalAmount holds one of the four adjustment members of a credit
+// note against the text it is expected to spell. A member the note does not
+// carry fails the case.
+func assertOptionalAmount(t *testing.T, name string, got *money.Amount, want string) {
+	t.Helper()
+
+	if got == nil {
+		t.Fatalf("%s = null, want %s", name, want)
+	}
+	assertDecimal(t, name, got.Decimal, want)
+}
+
+// assertMemberOrder holds the raw document against the order it declares its
+// members in. Each name is searched for behind the one before it, so a member
+// out of place, or one the document does not hold at all, fails the case.
+func assertMemberOrder(t *testing.T, name string, document []byte, members []string) {
+	t.Helper()
+
+	rest := document
+	for _, member := range members {
+		at := bytes.Index(rest, []byte(`"`+member+`":`))
+		if at < 0 {
+			t.Fatalf("%s = %s, want %q behind the members before it", name, document, member)
+		}
+		rest = rest[at+len(member):]
+	}
 }
 
 // assertChange holds one dimension of a line item against the three amounts the
@@ -417,6 +531,71 @@ func TestAmountsMisaligned(t *testing.T) {
 	})
 }
 
+// TestAdjustmentAmounts sums the adjustments of one pass. Two elements of one
+// relation that agree on type, scope and rate reach one key, because nothing
+// else on the line tells them apart, and the relation they came from travels
+// with the sum.
+func TestAdjustmentAmounts(t *testing.T) {
+	partner := statements.Key(openstackCloud, "proj-456")
+	reseller := statements.Key(gardenerCloud, "team-alpha")
+	sts := []statements.Statement{
+		{
+			Key: partner,
+			Adjustments: []adjustments.Line{
+				adjustmentLine(adjustment.TypeDiscount, relationID(1), "partner-corp",
+					adjustment.ScopeAll, "0.15", "148.80", "-22.32"),
+				adjustmentLine(adjustment.TypeKickback, relationID(1), "partner-corp",
+					adjustment.ScopeAll, "0.10", "126.48", "12.65"),
+			},
+		},
+		{
+			Key: reseller,
+			// Two elements of one relation that differ in nothing the diff is
+			// keyed by: the statement is adjusted twice and the key is summed.
+			Adjustments: []adjustments.Line{
+				adjustmentLine(adjustment.TypeDiscount, relationID(2), "reseller-gmbh",
+					adjustment.ScopeAll, "0.10", "10.00", "-1.00"),
+				adjustmentLine(adjustment.TypeDiscount, relationID(2), "reseller-gmbh",
+					adjustment.ScopeAll, "0.10", "9.00", "-0.90"),
+			},
+		},
+	}
+
+	amounts := corrections.AdjustmentAmounts(sts)
+
+	if len(amounts) != 3 {
+		t.Fatalf("AdjustmentAmounts() = %d keys, want 3: the two of the partner and the summed one", len(amounts))
+	}
+	assertAdjustmentAmount(t, amounts,
+		adjustmentKey(partner, relationID(1), adjustment.TypeDiscount, adjustment.ScopeAll, "0.150000"), "-22.32")
+	assertAdjustmentAmount(t, amounts,
+		adjustmentKey(partner, relationID(1), adjustment.TypeKickback, adjustment.ScopeAll, "0.100000"), "12.65")
+
+	summed := adjustmentKey(reseller, relationID(2), adjustment.TypeDiscount, adjustment.ScopeAll, "0.100000")
+	assertAdjustmentAmount(t, amounts, summed, "-1.90")
+	if got := amounts[summed]; got.RelationType != managedBy || got.RelationTarget != "reseller-gmbh" {
+		t.Errorf("the relation of the summed key = %s/%s, want %s/reseller-gmbh",
+			got.RelationType, got.RelationTarget, managedBy)
+	}
+
+	t.Run("no statements", func(t *testing.T) {
+		got := corrections.AdjustmentAmounts(nil)
+		if got == nil {
+			t.Fatalf("AdjustmentAmounts() = nil, want an empty map")
+		}
+		if len(got) != 0 {
+			t.Errorf("AdjustmentAmounts() = %d keys, want none", len(got))
+		}
+	})
+
+	t.Run("statements no adjustment reached", func(t *testing.T) {
+		got := corrections.AdjustmentAmounts([]statements.Statement{{Key: partner}, {Key: reseller}})
+		if len(got) != 0 {
+			t.Errorf("AdjustmentAmounts() = %d keys, want none", len(got))
+		}
+	})
+}
+
 // TestDiff diffs two passes that disagree on some keys and agree on others. A
 // key one side does not hold counts as zero there, a key both sides rated the
 // same is left out, and the deltas come back in the order D6 lists the key in.
@@ -500,6 +679,100 @@ func TestDiffNothing(t *testing.T) {
 	})
 }
 
+// TestDiffAdjustments diffs the adjustments of two passes. The re-metered
+// amounts of the concept's correction carry a smaller discount and a smaller
+// kickback than the finalized run applied, and the correction applies a
+// discount of a second relation the finalized run did not apply at all.
+func TestDiffAdjustments(t *testing.T) {
+	partner := statements.Key(openstackCloud, "proj-456")
+	discount := adjustmentKey(partner, relationID(1), adjustment.TypeDiscount, adjustment.ScopeAll, "0.150000")
+	kickback := adjustmentKey(partner, relationID(1), adjustment.TypeKickback, adjustment.ScopeAll, "0.100000")
+	added := adjustmentKey(partner, relationID(2), adjustment.TypeDiscount, adjustment.ScopeAll, "0.100000")
+
+	amount := func(target, value string) corrections.AdjustmentAmount {
+		return corrections.AdjustmentAmount{
+			RelationType:   managedBy,
+			RelationTarget: target,
+			Amount:         decimal.RequireFromString(value),
+		}
+	}
+	// The keys go in unordered on both sides, so the order the deltas come back
+	// in is the one DiffAdjustments applies rather than the one they were
+	// written in.
+	old := map[corrections.AdjustmentKey]corrections.AdjustmentAmount{
+		kickback: amount("partner-corp", "12.65"),
+		discount: amount("partner-corp", "-22.32"),
+	}
+	current := map[corrections.AdjustmentKey]corrections.AdjustmentAmount{
+		added:    amount("reseller-gmbh", "-1.00"),
+		kickback: amount("partner-corp", "10.61"),
+		discount: amount("partner-corp", "-18.72"),
+	}
+
+	got := corrections.DiffAdjustments(old, current)
+
+	order := make([]corrections.AdjustmentKey, 0, len(got))
+	for _, difference := range got {
+		order = append(order, difference.AdjustmentKey)
+	}
+	// The discount and the kickback of one relation are ordered by the
+	// application order of their types, the second relation by its id.
+	if want := []corrections.AdjustmentKey{discount, kickback, added}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("DiffAdjustments() keys = %v, want %v", order, want)
+	}
+
+	cases := []struct {
+		name                     string
+		delta                    corrections.AdjustmentDelta
+		target                   string
+		old, current, difference string
+	}{
+		{"a discount the correction applies less of", got[0], "partner-corp", "-22.32", "-18.72", "3.60"},
+		{"a kickback the correction applies less of", got[1], "partner-corp", "12.65", "10.61", "-2.04"},
+		{"an adjustment only the correction applies", got[2], "reseller-gmbh", "0.00", "-1.00", "-1.00"},
+	}
+	for _, want := range cases {
+		t.Run(want.name, func(t *testing.T) {
+			assertDecimal(t, "Old", want.delta.Old, want.old)
+			assertDecimal(t, "New", want.delta.New, want.current)
+			assertDecimal(t, "Delta", want.delta.Delta, want.difference)
+			if want.delta.RelationType != managedBy || want.delta.RelationTarget != want.target {
+				t.Errorf("the relation = %s/%s, want %s/%s",
+					want.delta.RelationType, want.delta.RelationTarget, managedBy, want.target)
+			}
+		})
+	}
+
+	t.Run("an adjustment only the finalized run applied", func(t *testing.T) {
+		deltas := corrections.DiffAdjustments(old, nil)
+
+		if len(deltas) != 2 {
+			t.Fatalf("DiffAdjustments() = %d deltas, want 2: both are reversed whole", len(deltas))
+		}
+		assertDecimal(t, "Old", deltas[0].Old, "-22.32")
+		assertDecimal(t, "New", deltas[0].New, "0.00")
+		assertDecimal(t, "Delta", deltas[0].Delta, "22.32")
+		// The current side does not hold the key, so the relation is read off
+		// the old one rather than left empty.
+		if deltas[0].RelationTarget != "partner-corp" {
+			t.Errorf("RelationTarget = %q, want partner-corp", deltas[0].RelationTarget)
+		}
+	})
+
+	t.Run("two passes that adjusted nothing", func(t *testing.T) {
+		empty := map[corrections.AdjustmentKey]corrections.AdjustmentAmount{}
+		if deltas := corrections.DiffAdjustments(empty, empty); deltas != nil {
+			t.Errorf("DiffAdjustments() = %v, want nil", deltas)
+		}
+	})
+
+	t.Run("two passes that adjusted the same", func(t *testing.T) {
+		if deltas := corrections.DiffAdjustments(current, current); deltas != nil {
+			t.Errorf("DiffAdjustments() = %v, want nil", deltas)
+		}
+	})
+}
+
 // TestBuildCreditNotesPowerCycle renders the concept's correction: the instance
 // finalized as active all March, re-metered with the shutoff the late events
 // revealed. The note is held against the fixture byte for byte, and its numbers
@@ -560,6 +833,158 @@ func TestBuildCreditNotesPowerCycle(t *testing.T) {
 	if !bytes.Equal(statement.Document, want) {
 		t.Errorf("Document =\n%s\nwant\n%s", statement.Document, want)
 	}
+}
+
+// TestBuildCreditNotesAdjustments renders the concept's correction with the
+// adjustments it re-applied: the discount and the kickback of the partner
+// relation come out smaller on the re-metered amounts, so the note credits the
+// rated deltas and charges back what the smaller discount no longer discounts.
+func TestBuildCreditNotesAdjustments(t *testing.T) {
+	projects := []source.Project{project(1, openstackCloud, "openstack", "proj-456")}
+	instance := func(dimension string) corrections.Key {
+		return key(openstackCloud, "openstack", "instance", "abc-123", "proj-456", dimension)
+	}
+	deltas := []corrections.Delta{
+		delta(instance("vcpus"), "59.52", "49.92"),
+		delta(instance("ram_gb"), "29.76", "24.96"),
+		delta(instance("disk_gb"), "59.52", "49.92"),
+	}
+	statementKey := statements.Key(openstackCloud, "proj-456")
+	changes := []corrections.AdjustmentDelta{
+		adjustmentDelta(
+			adjustmentKey(statementKey, relationID(1), adjustment.TypeDiscount, adjustment.ScopeAll, "0.150000"),
+			managedBy, "partner-corp", "-22.32", "-18.72"),
+		adjustmentDelta(
+			adjustmentKey(statementKey, relationID(1), adjustment.TypeKickback, adjustment.ScopeAll, "0.100000"),
+			managedBy, "partner-corp", "12.65", "10.61"),
+	}
+
+	result := adjustedNotes(t, deltas, changes, projects, attribution.Resolve(projects, nil))
+
+	if got := keys(result); !reflect.DeepEqual(got, []string{statementKey}) {
+		t.Fatalf("credit note keys = %v, want only %s", got, statementKey)
+	}
+	statement := result.Statements[0]
+	// The statement's total is the net delta, which is what the correction
+	// settles: the kickback is owed to the partner rather than by the customer.
+	assertDecimal(t, "Total", statement.Total, "-20.40")
+
+	assertMemberOrder(t, "the note", statement.Document, []string{
+		"billing_period", "project_id", "platform", "corrects_run_id", "line_items", "related_costs",
+		"base_delta", "adjustments", "net_delta", "kickback_delta", "total", "currency",
+	})
+	at := bytes.Index(statement.Document, []byte(`"adjustments":`))
+	if at < 0 {
+		t.Fatalf("Document = %s, want an adjustments member", statement.Document)
+	}
+	assertMemberOrder(t, "the first change", statement.Document[at:], []string{
+		"type", "relation_type", "relation_target", "relation_id", "scope", "rate", "old", "new", "delta",
+	})
+	// A rate is written at the six places the adjustments schema admits, the
+	// way an amount is written at two.
+	if !bytes.Contains(statement.Document, []byte(`"rate":0.150000`)) {
+		t.Errorf("Document = %s, want the discount rate at six places", statement.Document)
+	}
+
+	note := noteOf(t, statement)
+	assertOptionalAmount(t, "BaseDelta", note.BaseDelta, "-24.00")
+	assertOptionalAmount(t, "NetDelta", note.NetDelta, "-20.40")
+	assertOptionalAmount(t, "KickbackDelta", note.KickbackDelta, "-2.04")
+	assertDecimal(t, "note total", note.Total.Decimal, "-20.40")
+
+	if len(note.Adjustments) != 2 {
+		t.Fatalf("Adjustments = %d, want 2, the discount and the kickback", len(note.Adjustments))
+	}
+	for i, want := range []struct {
+		typ                            string
+		rate, old, current, difference string
+	}{
+		{adjustment.TypeDiscount, "0.15", "-22.32", "-18.72", "3.60"},
+		{adjustment.TypeKickback, "0.10", "12.65", "10.61", "-2.04"},
+	} {
+		t.Run(want.typ, func(t *testing.T) {
+			got := note.Adjustments[i]
+			if got.Type != want.typ {
+				t.Errorf("Type = %q, want %q", got.Type, want.typ)
+			}
+			if got.RelationType != managedBy || got.RelationTarget != "partner-corp" {
+				t.Errorf("the relation = %s/%s, want %s/partner-corp", got.RelationType, got.RelationTarget, managedBy)
+			}
+			if got.RelationID != relationID(1).String() {
+				t.Errorf("RelationID = %q, want %q", got.RelationID, relationID(1))
+			}
+			if got.Scope != adjustment.ScopeAll {
+				t.Errorf("Scope = %q, want %q", got.Scope, adjustment.ScopeAll)
+			}
+			assertDecimal(t, "rate", got.Rate.Decimal, want.rate)
+			assertDecimal(t, "old", got.Old.Decimal, want.old)
+			assertDecimal(t, "new", got.New.Decimal, want.current)
+			assertDecimal(t, "delta", got.Delta.Decimal, want.difference)
+		})
+	}
+}
+
+// TestBuildCreditNotesAdjustmentsOnly renders a correction whose rated amounts
+// came out the same and whose adjustments did not: the relations of the period
+// changed, so there is money to settle without a single resource being rated
+// differently.
+func TestBuildCreditNotesAdjustmentsOnly(t *testing.T) {
+	projects := []source.Project{project(1, openstackCloud, "openstack", "proj-456")}
+	statementKey := statements.Key(openstackCloud, "proj-456")
+	change := func(key string) corrections.AdjustmentDelta {
+		return adjustmentDelta(
+			adjustmentKey(key, relationID(1), adjustment.TypeDiscount, adjustment.ScopeAll, "0.100000"),
+			managedBy, "partner-corp", "0.00", "-1.00")
+	}
+
+	t.Run("a note the adjustment deltas alone create", func(t *testing.T) {
+		result := adjustedNotes(t, nil, []corrections.AdjustmentDelta{change(statementKey)}, projects,
+			attribution.Resolve(projects, nil))
+
+		if got := keys(result); !reflect.DeepEqual(got, []string{statementKey}) {
+			t.Fatalf("credit note keys = %v, want only %s", got, statementKey)
+		}
+		statement := result.Statements[0]
+		assertDecimal(t, "Total", statement.Total, "-1.00")
+		// Nothing was rated differently, and the two lists are rendered as empty
+		// arrays rather than as null, the way a note built from rated deltas
+		// renders them.
+		for _, member := range []string{`"line_items":[],`, `"related_costs":[],`} {
+			if !bytes.Contains(statement.Document, []byte(member)) {
+				t.Errorf("Document = %s, want %s", statement.Document, member)
+			}
+		}
+
+		note := noteOf(t, statement)
+		if note.ProjectID != "proj-456" || note.Platform != "openstack" {
+			t.Errorf("the note names %s/%s, want proj-456/openstack", note.ProjectID, note.Platform)
+		}
+		assertOptionalAmount(t, "BaseDelta", note.BaseDelta, "0.00")
+		assertOptionalAmount(t, "NetDelta", note.NetDelta, "-1.00")
+		assertOptionalAmount(t, "KickbackDelta", note.KickbackDelta, "0.00")
+		assertDecimal(t, "note total", note.Total.Decimal, "-1.00")
+		if len(note.Adjustments) != 1 {
+			t.Fatalf("Adjustments = %d, want 1, the discount", len(note.Adjustments))
+		}
+		assertDecimal(t, "delta", note.Adjustments[0].Delta.Decimal, "-1.00")
+	})
+
+	// An adjustment reaches a statement over a relation of a registered
+	// project, so a key no registry row matches is a delta of a pass this
+	// registry was never diffed against rather than money owed to somebody.
+	t.Run("a statement key the registry does not hold", func(t *testing.T) {
+		ghost := statements.Key(openstackCloud, "proj-ghost")
+		got, err := corrections.BuildCreditNotes(periodFrom, periodTo, correctsRunID, "EUR", nil,
+			[]corrections.AdjustmentDelta{change(ghost)}, projects, attribution.Resolve(projects, nil))
+
+		if !reflect.DeepEqual(got, corrections.BuildResult{}) {
+			t.Errorf("BuildCreditNotes() = %v, want no notes beside the error", got)
+		}
+		want := "the adjustment deltas of " + ghost + " name a project the registry does not hold"
+		if err == nil || err.Error() != want {
+			t.Fatalf("BuildCreditNotes() error = %v, want %q", err, want)
+		}
+	})
 }
 
 // TestBuildCreditNotesAttributed credits the concept's related-costs example: a
@@ -710,7 +1135,7 @@ func TestBuildCreditNotesNoDeltas(t *testing.T) {
 	projects := []source.Project{project(1, openstackCloud, "openstack", "proj-456")}
 
 	got, err := corrections.BuildCreditNotes(
-		periodFrom, periodTo, correctsRunID, "EUR", nil, projects, attribution.Resolve(projects, nil))
+		periodFrom, periodTo, correctsRunID, "EUR", nil, nil, projects, attribution.Resolve(projects, nil))
 	if err != nil {
 		t.Fatalf("BuildCreditNotes() error = %v, want nil", err)
 	}
