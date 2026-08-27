@@ -261,6 +261,17 @@ FROM correction_deltas
 WHERE run_id = $1
 ORDER BY cloud, platform, resource_type, resource_id, project_id, dimension;
 
+-- The adjustments a run applied, in a total order over the rows one run writes:
+-- a project's adjustments come from distinct relations, and one relation
+-- contributes at most one line per type and scope. A correction diffs these
+-- rows against its own, which is what the order is for.
+-- name: ListAdjustmentRecords :many
+SELECT id, run_id, project_id, relation_id, relation_type, relation_target,
+       beneficiary, type, scope, rate, base, amount, currency
+FROM adjustment_records
+WHERE run_id = $1
+ORDER BY project_id, relation_id, type, scope, rate, amount;
+
 -- The record writes of a run, over the COPY protocol: a month of metering is
 -- tens of thousands of rows, and one round trip per row is what that costs.
 -- All three name id rather than leaving it to the column default, because COPY
@@ -279,4 +290,11 @@ VALUES ($1, $2, $3, $4, $5, $6);
 -- name: CreateCorrectionDeltas :copyfrom
 INSERT INTO correction_deltas (id, run_id, corrects_run_id, cloud, platform, resource_type, resource_id,
                                project_id, dimension, old_amount, new_amount, delta, currency)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+
+-- The adjustment rows of a run, over the same protocol and naming id for the
+-- same reason: COPY evaluates no defaults.
+-- name: CreateAdjustmentRecords :copyfrom
+INSERT INTO adjustment_records (id, run_id, project_id, relation_id, relation_type, relation_target,
+                                beneficiary, type, scope, rate, base, amount, currency)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);

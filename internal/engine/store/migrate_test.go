@@ -23,9 +23,10 @@ var chainVersions = func() []int64 {
 	return versions
 }()
 
-// wantTables is every table migration 0001 creates, sorted. Goose's own
+// wantTables is every table the embedded chain creates, sorted. Goose's own
 // bookkeeping table is not part of the schema and the queries below exclude it.
 var wantTables = []string{
+	"adjustment_records",
 	"billing_periods",
 	"correction_deltas",
 	"pricing_models",
@@ -63,7 +64,7 @@ func TestMigrate(t *testing.T) {
 		defer s.Close()
 
 		if tables := publicTables(t, s); !slices.Equal(tables, wantTables) {
-			t.Errorf("tables = %v, want the seven of the schema %v", tables, wantTables)
+			t.Errorf("tables = %v, want the eight of the schema %v", tables, wantTables)
 		}
 	})
 
@@ -82,8 +83,11 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MigrateDownTo(0) error = %v, want nil", err)
 		}
-		if !slices.Equal(rolledBack, chainVersions) {
-			t.Errorf("MigrateDownTo(0) = %v, want %v", rolledBack, chainVersions)
+		// Newest first, the order a rollback has to run in.
+		want := slices.Clone(chainVersions)
+		slices.Reverse(want)
+		if !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(0) = %v, want %v", rolledBack, want)
 		}
 		if tables := publicTables(t, db.Store); len(tables) != 0 {
 			t.Errorf("tables after the rollback = %v, want an empty schema", tables)
@@ -387,13 +391,14 @@ func seedRun(t *testing.T, s *store.Store) string {
 
 // records holds one seeded row per table the record trigger guards.
 type records struct {
-	usage     string
-	rated     string
-	statement string
-	delta     string
+	usage      string
+	rated      string
+	statement  string
+	delta      string
+	adjustment string
 }
 
-// seedRecords writes one row into each of the four tables the record trigger
+// seedRecords writes one row into each of the five tables the record trigger
 // guards, all of them belonging to runID. The tag keeps two sets of the same run
 // apart: project_statements holds at most one row per (run_id, project_id), so a
 // second set needs a project of its own.
@@ -445,6 +450,18 @@ func seedRecords(t *testing.T, s *store.Store, runID, tag string) records {
 		 RETURNING id`, runID, resource, project).Scan(&seeded.delta); err != nil {
 		t.Fatalf("seeding the %s correction delta: %v", tag, err)
 	}
+
+	// The relation an adjustment came from lives in the reporting database, so
+	// relation_id is provenance rather than a foreign key and any id serves here.
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO adjustment_records (run_id, project_id, relation_id, relation_type,
+		                                 relation_target, type, scope, rate, base,
+		                                 amount, currency)
+		 VALUES ($1, $2, gen_random_uuid(), 'managed_by', $3, 'discount', 'all',
+		         0.150000, 12.00, -1.80, 'EUR')
+		 RETURNING id`, runID, project, "partner-"+tag).Scan(&seeded.adjustment); err != nil {
+		t.Fatalf("seeding the %s adjustment record: %v", tag, err)
+	}
 	return seeded
 }
 
@@ -464,7 +481,7 @@ func (g guardedRow) deleteRow() string {
 	return "DELETE FROM " + g.table + " WHERE id = $1"
 }
 
-// guarded is the seeded set as the four rows the tests work through.
+// guarded is the seeded set as the five rows the tests work through.
 // rated_records comes first because its foreign key points at usage_records:
 // deleting the set in this order is the only order that works.
 func (r records) guarded() []guardedRow {
@@ -498,6 +515,15 @@ func (r records) guarded() []guardedRow {
 			                                       dimension, old_amount, new_amount, delta, currency)
 			         VALUES ($1, $1, 'os-prod-eu1', 'openstack', 'instance', 'instance-added',
 			                 'project-added', 'minutes', 10.00, 4210.00, 4200.00, 'EUR')`,
+		},
+		{
+			table: "adjustment_records", id: r.adjustment,
+			update: `UPDATE adjustment_records SET amount = amount + 1 WHERE id = $1`,
+			insert: `INSERT INTO adjustment_records (run_id, project_id, relation_id, relation_type,
+			                                        relation_target, type, scope, rate, base,
+			                                        amount, currency)
+			         VALUES ($1, 'project-added', gen_random_uuid(), 'managed_by', 'partner-added',
+			                 'discount', 'all', 0.150000, 4200.00, -630.00, 'EUR')`,
 		},
 	}
 }

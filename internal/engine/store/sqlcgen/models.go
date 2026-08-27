@@ -8,6 +8,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AdjustmentRecord struct {
+	ID             pgtype.UUID
+	RunID          pgtype.UUID
+	ProjectID      string
+	RelationID     pgtype.UUID
+	RelationType   string
+	RelationTarget string
+	Beneficiary    pgtype.Text
+	Type           string
+	Scope          string
+	Rate           pgtype.Numeric
+	Base           pgtype.Numeric
+	Amount         pgtype.Numeric
+	Currency       string
+}
+
 type BillingPeriod struct {
 	PeriodFrom     pgtype.Timestamptz
 	PeriodTo       pgtype.Timestamptz

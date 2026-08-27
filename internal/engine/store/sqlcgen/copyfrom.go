@@ -9,6 +9,52 @@ import (
 	"context"
 )
 
+// iteratorForCreateAdjustmentRecords implements pgx.CopyFromSource.
+type iteratorForCreateAdjustmentRecords struct {
+	rows                 []CreateAdjustmentRecordsParams
+	skippedFirstNextCall bool
+}
+
+func (r *iteratorForCreateAdjustmentRecords) Next() bool {
+	if len(r.rows) == 0 {
+		return false
+	}
+	if !r.skippedFirstNextCall {
+		r.skippedFirstNextCall = true
+		return true
+	}
+	r.rows = r.rows[1:]
+	return len(r.rows) > 0
+}
+
+func (r iteratorForCreateAdjustmentRecords) Values() ([]interface{}, error) {
+	return []interface{}{
+		r.rows[0].ID,
+		r.rows[0].RunID,
+		r.rows[0].ProjectID,
+		r.rows[0].RelationID,
+		r.rows[0].RelationType,
+		r.rows[0].RelationTarget,
+		r.rows[0].Beneficiary,
+		r.rows[0].Type,
+		r.rows[0].Scope,
+		r.rows[0].Rate,
+		r.rows[0].Base,
+		r.rows[0].Amount,
+		r.rows[0].Currency,
+	}, nil
+}
+
+func (r iteratorForCreateAdjustmentRecords) Err() error {
+	return nil
+}
+
+// The adjustment rows of a run, over the same protocol and naming id for the
+// same reason: COPY evaluates no defaults.
+func (q *Queries) CreateAdjustmentRecords(ctx context.Context, arg []CreateAdjustmentRecordsParams) (int64, error) {
+	return q.db.CopyFrom(ctx, []string{"adjustment_records"}, []string{"id", "run_id", "project_id", "relation_id", "relation_type", "relation_target", "beneficiary", "type", "scope", "rate", "base", "amount", "currency"}, &iteratorForCreateAdjustmentRecords{rows: arg})
+}
+
 // iteratorForCreateCorrectionDeltas implements pgx.CopyFromSource.
 type iteratorForCreateCorrectionDeltas struct {
 	rows                 []CreateCorrectionDeltasParams
