@@ -81,6 +81,47 @@ func (f fixture) closedMonth(t *testing.T, from, to time.Time, cloud string) uui
 	return result.RunID
 }
 
+// closedAdjustedMonth closes one period the way closedMonth does, with the
+// adjustment options the adjusted cases run with. It is the state a correction
+// of a month billed at a reseller's rates starts from.
+func (f fixture) closedAdjustedMonth(t *testing.T, from, to time.Time, cloud string) uuid.UUID {
+	t.Helper()
+
+	result, err := f.execute(t, runs.Options{
+		PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+		AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want nil", err)
+	}
+	if _, err := f.finalize(t, from, result.RunID); err != nil {
+		t.Fatalf("Finalize() error = %v, want nil", err)
+	}
+	return result.RunID
+}
+
+// appliedAdjustment is one adjustment record as the cases below state it: what
+// it is, what it was rated on and what it came to. The relation and the
+// beneficiary the row carries beside them are stated by the cases of
+// TestExecute.
+type appliedAdjustment struct{ typ, base, amount string }
+
+// assertAdjustments fails when a run's adjustment records are not these, in the
+// order readAdjustments returns them. It is what the adjusted side of a month
+// is stated with, the way assertWholeMonth states the rated one.
+func (f fixture) assertAdjustments(t *testing.T, runID uuid.UUID, want ...appliedAdjustment) {
+	t.Helper()
+
+	records := f.readAdjustments(t, runID)
+	got := make([]appliedAdjustment, 0, len(records))
+	for _, record := range records {
+		got = append(got, appliedAdjustment{typ: record.typ, base: record.base, amount: record.amount})
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the adjustment records of run %s are %+v, want %+v", runID, got, want)
+	}
+}
+
 // assertWholeMonth fails when the run did not bill its one resource for the 744
 // hours of a 31-day month. It is what the deltas of the cases below are
 // differences against, so it is stated before they are read.
@@ -115,6 +156,7 @@ func (f fixture) assertEmptyRun(t *testing.T, runID uuid.UUID) {
 		{records: "rated records", count: len(f.readRated(t, runID))},
 		{records: "correction deltas", count: len(f.readDeltas(t, runID))},
 		{records: "statements", count: len(f.readStatements(t, runID))},
+		{records: "adjustment records", count: len(f.readAdjustments(t, runID))},
 	} {
 		if tc.count != 0 {
 			t.Errorf("the failed correction holds %d %s, want the transaction rolled back", tc.count, tc.records)
@@ -122,10 +164,32 @@ func (f fixture) assertEmptyRun(t *testing.T, runID uuid.UUID) {
 	}
 }
 
+// assertNothingCorrected fails when a correction found anything to settle:
+// neither a rated delta nor an adjustment one, and so no credit note.
+func (f fixture) assertNothingCorrected(t *testing.T, result runs.CorrectionResult) {
+	t.Helper()
+
+	if result.Stats.Deltas != 0 {
+		t.Errorf("Stats.Deltas = %d, want none", result.Stats.Deltas)
+	}
+	if result.Stats.AdjustmentDeltas != 0 {
+		t.Errorf("Stats.AdjustmentDeltas = %d, want none", result.Stats.AdjustmentDeltas)
+	}
+	stats := f.readStats(t, result.RunID)
+	for _, key := range []string{"deltas", "adjustment_deltas"} {
+		if got := number(t, stats, key); got != "0" {
+			t.Errorf("stats %s = %s, want 0", key, got)
+		}
+	}
+	if got := f.readStatementTotals(t, result.RunID); len(got) != 0 {
+		t.Errorf("statement totals = %v, want none: there is nothing to credit", got)
+	}
+}
+
 // TestCorrect runs against the pricing model of the concept's example. Every
 // case keeps to its own month and its own cloud: a correction of a month
 // supersedes the other corrections of that month whatever cloud they metered,
-// and a month is finalized once. The three cases that bill a whole month take
+// and a month is finalized once. The five cases that bill a whole month take
 // the 31-day months thirtyOneDayMonth walks back to, and the others take
 // offsets past the deepest of those.
 func TestCorrect(t *testing.T) {
@@ -457,7 +521,7 @@ func TestCorrect(t *testing.T) {
 			seed     func(t *testing.T, from, to time.Time)
 		}{
 			{
-				name: "open with a completed run", offset: -8, status: "open", runCount: 1,
+				name: "open with a completed run", offset: -25, status: "open", runCount: 1,
 				seed: func(t *testing.T, from, to time.Time) {
 					const cloud = "os-correct-open-run"
 					f.seedProject(t, cloud, "proj-456")
@@ -470,11 +534,11 @@ func TestCorrect(t *testing.T) {
 				},
 			},
 			{
-				name: "grace without a run", offset: -9, status: "grace", runCount: 0,
+				name: "grace without a run", offset: -26, status: "grace", runCount: 0,
 				seed: func(t *testing.T, from, to time.Time) { f.seedPeriod(t, from, to, "grace") },
 			},
 			{
-				name: "open without a run", offset: -10, status: "open", runCount: 0,
+				name: "open without a run", offset: -27, status: "open", runCount: 0,
 				seed: func(t *testing.T, from, to time.Time) { f.seedPeriod(t, from, to, "open") },
 			},
 		} {
@@ -500,7 +564,7 @@ func TestCorrect(t *testing.T) {
 	})
 
 	t.Run("refuses a month it does not know", func(t *testing.T) {
-		from, to := month(-11)
+		from, to := month(-21)
 
 		_, err := f.correct(t, runs.CorrectOptions{PeriodFrom: from, PeriodTo: to})
 		if !errors.Is(err, runs.ErrPeriodNotFinalized) {
@@ -791,6 +855,303 @@ func TestCorrect(t *testing.T) {
 		}
 		f.assertEmptyRun(t, result.RunID)
 	})
+
+	// A month billed at a reseller's rates and corrected: the late power cycle
+	// changes what the resource cost, and the discount and the kickback that
+	// were computed off it change with it.
+	t.Run("credits the adjustment and kickback effects of a late power cycle", func(t *testing.T) {
+		from, to := thirtyOneDayMonth(4)
+		const cloud = "os-correct-adjusted"
+		const key = cloud + "/proj-456"
+		f.seedProject(t, cloud, "proj-456")
+		vm := wholeMonth(cloud, "abc-adjusted", "proj-456", from, to, standardSize)
+		f.seedResource(t, vm)
+		relation := f.seedRelation(t, f.projectIDOf(t, cloud, "proj-456"),
+			f.seedVirtualProject(t, "partner", "partner-adjusted"),
+			"managed_by", resellerAdjustments, from.AddDate(0, -1, 0), nil)
+
+		finalized := f.closedAdjustedMonth(t, from, to, cloud)
+		f.assertWholeMonth(t, finalized)
+		if got := f.readStatementTotals(t, finalized)[key]; got != "126.48" {
+			t.Errorf("the finalized statement totals %s, want the 148.80 of the month less 15 percent", got)
+		}
+		f.assertAdjustments(t, finalized,
+			appliedAdjustment{typ: "discount", base: "148.80", amount: "-22.32"},
+			appliedAdjustment{typ: "kickback", base: "126.48", amount: "12.65"})
+
+		// The concept's power cycle, arriving after the month was billed.
+		received := f.snapshotTime(t)
+		f.seedEventReceived(t, vm, "ev-off-abc-adjusted", "compute.instance.power_off.end",
+			from.Add(10*24*time.Hour), received, `{"state":"shutoff"}`)
+		f.seedEventReceived(t, vm, "ev-on-abc-adjusted", "compute.instance.power_on.end",
+			from.Add(20*24*time.Hour), received, `{"state":"active"}`)
+
+		result, err := f.correct(t, runs.CorrectOptions{
+			PeriodFrom: from, PeriodTo: to,
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err != nil {
+			t.Fatalf("Correct() error = %v, want nil", err)
+		}
+
+		wantDeltas := []deltaRow{
+			{
+				correctsRunID: finalized, projectID: "proj-456", dimension: "disk_gb",
+				oldAmount: "59.52", newAmount: "49.92", delta: "-9.60", currency: "EUR",
+			},
+			{
+				correctsRunID: finalized, projectID: "proj-456", dimension: "ram_gb",
+				oldAmount: "29.76", newAmount: "24.96", delta: "-4.80", currency: "EUR",
+			},
+			{
+				correctsRunID: finalized, projectID: "proj-456", dimension: "vcpus",
+				oldAmount: "59.52", newAmount: "49.92", delta: "-9.60", currency: "EUR",
+			},
+		}
+		if got := f.readDeltas(t, result.RunID); !slices.Equal(got, wantDeltas) {
+			t.Errorf("deltas = %+v, want %+v, the ten days the resource was off", got, wantDeltas)
+		}
+		// The correction applies the relation again, over the 124.80 the month
+		// now rates at, and stores what that came to under itself.
+		f.assertAdjustments(t, result.RunID,
+			appliedAdjustment{typ: "discount", base: "124.80", amount: "-18.72"},
+			appliedAdjustment{typ: "kickback", base: "106.08", amount: "10.61"})
+		if result.Stats.AdjustmentRecords != 2 {
+			t.Errorf("Stats.AdjustmentRecords = %d, want the two the correction applied",
+				result.Stats.AdjustmentRecords)
+		}
+		if result.Stats.AdjustmentDeltas != 2 {
+			t.Errorf("Stats.AdjustmentDeltas = %d, want the two adjustments that came out differently",
+				result.Stats.AdjustmentDeltas)
+		}
+		if got := number(t, f.readStats(t, result.RunID), "adjustment_deltas"); got != "2" {
+			t.Errorf("stats adjustment_deltas = %s, want 2", got)
+		}
+
+		// What the customer is credited is the usage that fell away less the
+		// discount that fell away with it, and the partner is owed 2.04 less.
+		note := f.readStatementDocument(t, result.RunID, key)
+		for _, tc := range []struct{ field, want string }{
+			{"base_delta", "-24.00"},
+			{"net_delta", "-20.40"},
+			{"kickback_delta", "-2.04"},
+			{"total", "-20.40"},
+		} {
+			if got := number(t, note, tc.field); got != tc.want {
+				t.Errorf("the credit note's %s = %s, want %s", tc.field, got, tc.want)
+			}
+		}
+		changes := list(t, note, "adjustments")
+		if len(changes) != 2 {
+			t.Fatalf("the credit note holds %d adjustment changes, want the discount and the kickback",
+				len(changes))
+		}
+		for i, tc := range []struct{ typ, old, updated, delta string }{
+			{typ: "discount", old: "-22.32", updated: "-18.72", delta: "3.60"},
+			{typ: "kickback", old: "12.65", updated: "10.61", delta: "-2.04"},
+		} {
+			if got := text(t, changes[i], "type"); got != tc.typ {
+				t.Errorf("adjustment change %d is a %s, want a %s", i, got, tc.typ)
+			}
+			if got := text(t, changes[i], "relation_id"); got != relation.String() {
+				t.Errorf("the %s change names relation %s, want %s", tc.typ, got, relation)
+			}
+			for _, amount := range []struct{ field, want string }{
+				{"old", tc.old}, {"new", tc.updated}, {"delta", tc.delta},
+			} {
+				if got := number(t, changes[i], amount.field); got != amount.want {
+					t.Errorf("the %s change's %s = %s, want %s", tc.typ, amount.field, got, amount.want)
+				}
+			}
+		}
+		if got := f.readStatementTotals(t, result.RunID); !maps.Equal(got, map[string]string{key: "-20.40"}) {
+			t.Errorf("statement totals = %v, want the credit note of %s at -20.40", got, key)
+		}
+	})
+
+	// A relation that reached the registry after the month was closed: the
+	// correction applies its discount for the first time, and the whole of it is
+	// what the credit note settles, over a month whose usage did not change.
+	t.Run("credits an adjustment a correction applies for the first time", func(t *testing.T) {
+		from, to := thirtyOneDayMonth(5)
+		const cloud = "os-correct-adjusted-late"
+		const key = cloud + "/proj-456"
+		f.seedProject(t, cloud, "proj-456")
+		f.seedResource(t, wholeMonth(cloud, "abc-late-discount", "proj-456", from, to, standardSize))
+
+		finalized := f.closedMonth(t, from, to, cloud)
+		f.assertWholeMonth(t, finalized)
+		f.assertAdjustments(t, finalized)
+
+		relation := f.seedRelation(t, f.projectIDOf(t, cloud, "proj-456"),
+			f.seedVirtualProject(t, "partner", "partner-late"),
+			"managed_by", discountAdjustments, from.AddDate(0, -1, 0), nil)
+
+		result, err := f.correct(t, runs.CorrectOptions{
+			PeriodFrom: from, PeriodTo: to,
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err != nil {
+			t.Fatalf("Correct() error = %v, want nil", err)
+		}
+		if result.Stats.Deltas != 0 {
+			t.Errorf("Stats.Deltas = %d, want none: no event of the month arrived late", result.Stats.Deltas)
+		}
+		if got := f.readDeltas(t, result.RunID); len(got) != 0 {
+			t.Errorf("deltas = %+v, want none", got)
+		}
+		if result.Stats.AdjustmentDeltas != 1 {
+			t.Errorf("Stats.AdjustmentDeltas = %d, want the one discount the month was billed without",
+				result.Stats.AdjustmentDeltas)
+		}
+
+		note := f.readStatementDocument(t, result.RunID, key)
+		if got := list(t, note, "line_items"); len(got) != 0 {
+			t.Errorf("the credit note holds %d line items, want none: what changed is the adjustment", len(got))
+		}
+		for _, tc := range []struct{ field, want string }{
+			{"base_delta", "0.00"},
+			{"net_delta", "-14.88"},
+			{"total", "-14.88"},
+		} {
+			if got := number(t, note, tc.field); got != tc.want {
+				t.Errorf("the credit note's %s = %s, want %s", tc.field, got, tc.want)
+			}
+		}
+		changes := list(t, note, "adjustments")
+		if len(changes) != 1 {
+			t.Fatalf("the credit note holds %d adjustment changes, want the one discount", len(changes))
+		}
+		if got := text(t, changes[0], "relation_id"); got != relation.String() {
+			t.Errorf("the change names relation %s, want %s", got, relation)
+		}
+		for _, tc := range []struct{ field, want string }{
+			{"old", "0.00"},
+			{"new", "-14.88"},
+			{"delta", "-14.88"},
+		} {
+			if got := number(t, changes[0], tc.field); got != tc.want {
+				t.Errorf("the change's %s = %s, want %s", tc.field, got, tc.want)
+			}
+		}
+		if got := f.readStatementTotals(t, result.RunID); !maps.Equal(got, map[string]string{key: "-14.88"}) {
+			t.Errorf("statement totals = %v, want the credit note of %s at -14.88", got, key)
+		}
+	})
+
+	// A correction of an adjusted month that finds nothing: the adjustments come
+	// to what the month was billed at, so there is no delta and no credit note,
+	// and the correction stores its own records all the same.
+	t.Run("finds nothing to correct twice", func(t *testing.T) {
+		from, to := month(-22)
+		const cloud = "os-correct-adjusted-twice"
+		f.seedProject(t, cloud, "proj-456")
+		f.seedResource(t, instance(cloud, "i-twice", "proj-456", from, standardSize))
+		f.seedRelation(t, f.projectIDOf(t, cloud, "proj-456"),
+			f.seedVirtualProject(t, "partner", "partner-twice"),
+			"managed_by", resellerAdjustments, from.AddDate(0, -1, 0), nil)
+
+		finalized := f.closedAdjustedMonth(t, from, to, cloud)
+		applied := []appliedAdjustment{
+			{typ: "discount", base: "9.60", amount: "-1.44"},
+			{typ: "kickback", base: "8.16", amount: "0.82"},
+		}
+		f.assertAdjustments(t, finalized, applied...)
+
+		opts := runs.CorrectOptions{
+			PeriodFrom: from, PeriodTo: to,
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		}
+		first, err := f.correct(t, opts)
+		if err != nil {
+			t.Fatalf("Correct() error = %v, want nil", err)
+		}
+		if first.CorrectsRunID != finalized {
+			t.Errorf("CorrectsRunID = %s, want the finalized run %s", first.CorrectsRunID, finalized)
+		}
+		f.assertNothingCorrected(t, first)
+		f.assertAdjustments(t, first.RunID, applied...)
+
+		if _, err := f.finalize(t, from, first.RunID); err != nil {
+			t.Fatalf("Finalize() error = %v, want nil", err)
+		}
+
+		// The finalized correction is the period's truth now, and its own
+		// adjustment records are what the next correction is diffed against.
+		second, err := f.correct(t, opts)
+		if err != nil {
+			t.Fatalf("Correct() error = %v, want nil", err)
+		}
+		if second.CorrectsRunID != first.RunID {
+			t.Errorf("CorrectsRunID = %s, want the finalized correction %s", second.CorrectsRunID, first.RunID)
+		}
+		f.assertNothingCorrected(t, second)
+		f.assertAdjustments(t, second.RunID, applied...)
+	})
+
+	// Two baselines nothing can be a difference against. Both are broken while
+	// the run is still completed, because the trigger of migration 0002 holds
+	// the records of a finalized run against every update (D8).
+	for _, tc := range []struct {
+		name     string
+		offset   int
+		cloud    string
+		resource string
+		partner  string
+		update   string
+		want     string
+	}{
+		{
+			name: "refuses a baseline adjustment that is not a number", offset: -23,
+			cloud: "os-correct-baseline-nan", resource: "i-baseline-nan", partner: "partner-nan",
+			update: `UPDATE adjustment_records SET amount = 'NaN' WHERE run_id = $1`,
+			want:   "is not a number",
+		},
+		{
+			name: "refuses a baseline adjustment in another currency", offset: -24,
+			cloud: "os-correct-baseline-currency", resource: "i-baseline-currency", partner: "partner-usd",
+			update: `UPDATE adjustment_records SET currency = 'USD' WHERE run_id = $1`,
+			want:   "carries an adjustment in USD",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			from, to := month(tc.offset)
+			f.seedProject(t, tc.cloud, "proj-456")
+			f.seedResource(t, instance(tc.cloud, tc.resource, "proj-456", from, standardSize))
+			f.seedRelation(t, f.projectIDOf(t, tc.cloud, "proj-456"),
+				f.seedVirtualProject(t, "partner", tc.partner),
+				"managed_by", discountAdjustments, from.AddDate(0, -1, 0), nil)
+
+			baseline, err := f.execute(t, runs.Options{
+				PeriodFrom: from, PeriodTo: to, Clouds: []string{tc.cloud},
+				AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v, want nil", err)
+			}
+			if _, err := f.engine.Store.Pool().Exec(t.Context(), tc.update, baseline.RunID); err != nil {
+				t.Fatalf("breaking the adjustment record of run %s: %v", baseline.RunID, err)
+			}
+			if _, err := f.finalize(t, from, baseline.RunID); err != nil {
+				t.Fatalf("Finalize() error = %v, want nil", err)
+			}
+
+			_, err = f.correct(t, runs.CorrectOptions{
+				PeriodFrom: from, PeriodTo: to,
+				AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+			})
+			if err == nil {
+				t.Fatal("Correct() error = nil, want the baseline refused")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Correct() error = %q, want it to say %q", err, tc.want)
+			}
+			if got := f.countRuns(t, from); got != 1 {
+				t.Errorf("the period holds %d runs, want only the finalized one: "+
+					"the baseline is read before the run row", got)
+			}
+		})
+	}
 }
 
 // TestCorrectReportsAnUpstreamFailure breaks the reporting database under a
