@@ -212,6 +212,8 @@ func newRunCmd() *cobra.Command {
 				PeriodTo:                 to,
 				Clouds:                   clouds,
 				AttributingRelationTypes: p.cfg.AttributingRelationTypes,
+				AdjustmentRelationTypes:  p.cfg.AdjustmentRelationTypes,
+				AdjustmentDepth:          p.cfg.AdjustmentDepth,
 				Counters:                 p.counterSources,
 				VM:                       p.vm,
 			})
@@ -357,6 +359,8 @@ func newCorrectCmd() *cobra.Command {
 				PeriodFrom:               from,
 				PeriodTo:                 to,
 				AttributingRelationTypes: p.cfg.AttributingRelationTypes,
+				AdjustmentRelationTypes:  p.cfg.AdjustmentRelationTypes,
+				AdjustmentDepth:          p.cfg.AdjustmentDepth,
 				Counters:                 p.counterSources,
 				VM:                       p.vm,
 			})
@@ -585,6 +589,8 @@ func newTickCmd() *cobra.Command {
 						PeriodFrom:               from,
 						PeriodTo:                 to,
 						AttributingRelationTypes: p.cfg.AttributingRelationTypes,
+						AdjustmentRelationTypes:  p.cfg.AdjustmentRelationTypes,
+						AdjustmentDepth:          p.cfg.AdjustmentDepth,
 						Counters:                 p.counterSources,
 						VM:                       p.vm,
 					})
@@ -613,6 +619,12 @@ func runLines(month string, result runs.Result) []string {
 		fmt.Sprintf("run %s completed for %s with pricing model %s", result.RunID, month, result.PricingVersion),
 		fmt.Sprintf("metered %d candidates into %d usage records, %d rated records and %d project statements",
 			result.Stats.Candidates, result.Stats.UsageRecords, result.Stats.RatedRecords, result.Stats.Statements))
+	// A deployment whose project graph carries no adjustments gets no line at
+	// all: a run that applied none is the ordinary case, and a zero printed
+	// beside every run reads as a setting that was turned off by mistake.
+	if result.Stats.AdjustmentRecords > 0 {
+		lines = append(lines, fmt.Sprintf("applied %d pricing adjustments", result.Stats.AdjustmentRecords))
+	}
 	for _, id := range result.Superseded {
 		lines = append(lines, fmt.Sprintf("superseded run %s", id))
 	}
@@ -692,10 +704,18 @@ func correctLines(month string, result runs.CorrectionResult) []string {
 			result.RunID, result.CorrectsRunID, month, result.PricingVersion),
 		fmt.Sprintf("metered %d candidates into %d usage records and %d rated records",
 			result.Stats.Candidates, result.Stats.UsageRecords, result.Stats.RatedRecords))
-	if result.Stats.Deltas > 0 {
+	// What a correction changed about a discount or a kickback is booked as an
+	// adjustment delta, which the rated count does not carry: a correction that
+	// re-rated nothing and moved a partner's kickback all the same would read as
+	// a month that stands.
+	switch {
+	case result.Stats.AdjustmentDeltas > 0:
+		lines = append(lines, fmt.Sprintf("%d deltas and %d adjustment deltas in %d credit notes",
+			result.Stats.Deltas, result.Stats.AdjustmentDeltas, result.Stats.Statements))
+	case result.Stats.Deltas > 0:
 		lines = append(lines, fmt.Sprintf("%d deltas in %d credit notes",
 			result.Stats.Deltas, result.Stats.Statements))
-	} else {
+	default:
 		lines = append(lines, fmt.Sprintf("no deltas: the finalized numbers of %s stand", month))
 	}
 	for _, id := range result.Superseded {
@@ -717,15 +737,17 @@ func correctLines(month string, result runs.CorrectionResult) []string {
 // nothing gets no line.
 func recordedWarningsLine(stats runs.Stats) (string, bool) {
 	recorded := len(stats.MeteringWarnings) + len(stats.CounterWarnings) + len(stats.AttributionWarnings) +
-		len(stats.Unpriced) + len(stats.Unreadable) + len(stats.UnregisteredProjects)
+		len(stats.AdjustmentWarnings) + len(stats.Unpriced) + len(stats.Unreadable) +
+		len(stats.UnregisteredProjects)
 	if recorded == 0 {
 		return "", false
 	}
 	return fmt.Sprintf(
-		"warnings recorded in runs.stats: %d metering, %d counter, %d attribution, "+
+		"warnings recorded in runs.stats: %d metering, %d counter, %d attribution, %d adjustment, "+
 			"%d unpriced resource types, %d unreadable fields, %d unregistered projects",
 		len(stats.MeteringWarnings), len(stats.CounterWarnings), len(stats.AttributionWarnings),
-		len(stats.Unpriced), len(stats.Unreadable), len(stats.UnregisteredProjects)), true
+		len(stats.AdjustmentWarnings), len(stats.Unpriced), len(stats.Unreadable),
+		len(stats.UnregisteredProjects)), true
 }
 
 // tickLines is what tick prints: one line per step a month took, in the order
