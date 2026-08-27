@@ -167,6 +167,97 @@ func TestIngest(t *testing.T) {
 		}
 	})
 
+	t.Run("dead-letters an event naming a virtual platform and keeps its siblings", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-virtual", resourceType: "volume", id: "vol-virtual"}
+		// A meta-project and a partner own no resource, so an item naming one of
+		// their platforms is refused by the schema check like any other item the
+		// wire rules turn down.
+		meta := item(t, res.virtualEvent("vol-virtual-meta", "meta"))
+		partner := item(t, res.virtualEvent("vol-virtual-partner", "partner"))
+		items := []json.RawMessage{
+			item(t, res.event("vol-virtual-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+			meta,
+			partner,
+		}
+
+		out := batch(t, db, lax, items, event.SourceCollector, nil)
+
+		if out.Accepted != 1 {
+			t.Errorf("Ingest() accepted %d, want the 1 sibling naming a real platform", out.Accepted)
+		}
+		if len(out.Rejected) != 2 {
+			t.Fatalf("Ingest() rejected %v, want both items naming a virtual platform", out.Rejected)
+		}
+		assertRejected(t, out.Rejected[0], 1, "vol-virtual-meta",
+			`schema: platform: "meta" is a virtual platform`)
+		assertRejected(t, out.Rejected[1], 2, "vol-virtual-partner",
+			`schema: platform: "partner" is a virtual platform`)
+
+		assertDeadLettered(t, db, out.Rejected[0].Reason, meta)
+		assertDeadLettered(t, db, out.Rejected[1].Reason, partner)
+		if got := storedEvents(t, db, res.cloud); got != 1 {
+			t.Errorf("events rows = %d, want the 1 the sibling stored", got)
+		}
+	})
+
+	t.Run("refuses a batch of nothing but virtual-platform items", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-virtual-only", resourceType: "volume", id: "vol-virtual-only"}
+		meta := item(t, res.virtualEvent("vol-virtual-only-meta", "meta"))
+		partner := item(t, res.virtualEvent("vol-virtual-only-partner", "partner"))
+
+		out := batch(t, db, lax, []json.RawMessage{meta, partner}, event.SourceCollector, nil)
+
+		if out.Accepted != 0 || out.Duplicates != 0 {
+			t.Errorf("Ingest() accepted %d and %d duplicates, want 0 and 0",
+				out.Accepted, out.Duplicates)
+		}
+		if len(out.Rejected) != 2 {
+			t.Fatalf("Ingest() rejected %v, want one refusal per item", out.Rejected)
+		}
+		// A batch of nothing but refused items still commits, so both dead letters
+		// survive it.
+		assertDeadLettered(t, db, out.Rejected[0].Reason, meta)
+		assertDeadLettered(t, db, out.Rejected[1].Reason, partner)
+	})
+
+	t.Run("fails the batch when a refused item cannot be dead-lettered", func(t *testing.T) {
+		ctx := t.Context()
+		res := resource{cloud: "os-ingest-virtual-failed", resourceType: "volume", id: "vol-virtual-failed"}
+
+		tx, err := db.Store.Pool().Begin(ctx)
+		if err != nil {
+			t.Fatalf("beginning the transaction: %v", err)
+		}
+		// DDL is transactional, so the rollback below hands rejected_events back
+		// to the subtests that follow.
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, "DROP TABLE rejected_events"); err != nil {
+			t.Fatalf("dropping rejected_events: %v", err)
+		}
+
+		// The dead letter is what keeps a refused item from failing its batch, so
+		// a dead letter the database refuses fails it after all.
+		_, err = lax.Ingest(ctx, tx, []json.RawMessage{
+			item(t, res.event("vol-virtual-failed-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+			item(t, res.virtualEvent("vol-virtual-failed-meta", "meta")),
+		}, event.SourceCollector, nil)
+
+		if err == nil {
+			t.Fatal("Ingest() error = nil, want the failed dead-letter insert")
+		}
+		if want := "dead-lettering a refused item:"; !strings.Contains(err.Error(), want) {
+			t.Errorf("Ingest() error = %v, want it naming the failed dead letter, %q", err, want)
+		}
+		if err := tx.Rollback(ctx); err != nil {
+			t.Fatalf("rolling the transaction back: %v", err)
+		}
+		if got := storedEvents(t, db, res.cloud); got != 0 {
+			t.Errorf("events rows = %d, want the batch rolled back, 0", got)
+		}
+	})
+
 	t.Run("refuses an item carrying a NUL and keeps its siblings", func(t *testing.T) {
 		res := resource{cloud: "os-ingest-nul", resourceType: "volume", id: "vol-nul"}
 		// PostgreSQL holds a NUL in neither a text column nor a jsonb document,
@@ -302,6 +393,35 @@ func TestIngest(t *testing.T) {
 		}
 		if got := deadLetters(t, db, credentialCloud); got != 0 {
 			t.Errorf("dead-letter rows = %d, want none for a scope violation", got)
+		}
+	})
+
+	t.Run("refuses a virtual platform under a scope as a schema failure, not a scope violation", func(t *testing.T) {
+		const credentialCloud = "os-ingest-virtual-scope"
+		res := resource{cloud: credentialCloud, resourceType: "volume", id: "vol-virtual-scoped"}
+		// The item names a platform and a cloud the credential is not issued for.
+		// The schema check runs first, so what the refusal leaves behind is a dead
+		// letter rather than the audit row of a scope violation.
+		meta := item(t, res.virtualEvent("vol-virtual-scoped-meta", "meta"))
+		items := []json.RawMessage{
+			meta,
+			item(t, res.event("vol-virtual-scoped-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+		}
+
+		out := batch(t, db, lax, items, event.SourceCollector,
+			&ingest.Scope{Platform: platform, Cloud: credentialCloud})
+
+		if out.Accepted != 1 {
+			t.Errorf("Ingest() accepted %d, want the 1 event inside the scope", out.Accepted)
+		}
+		if len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() rejected %v, want the item naming a virtual platform", out.Rejected)
+		}
+		assertRejected(t, out.Rejected[0], 0, "vol-virtual-scoped-meta", "schema:")
+		assertDeadLettered(t, db, out.Rejected[0].Reason, meta)
+		if rows := auditRows(t, db, "vol-virtual-scoped-meta"); len(rows) != 0 {
+			t.Errorf("audit rows of vol-virtual-scoped-meta = %v, want none", rows)
 		}
 	})
 
@@ -640,6 +760,45 @@ func TestIngestCounts(t *testing.T) {
 		})
 	})
 
+	t.Run("counts a virtual-platform refusal under schema", func(t *testing.T) {
+		res := resource{cloud: "os-ingest-count-virtual", resourceType: "volume", id: "vol-count-virtual"}
+		pipeline, reg := metered(t, false, nil)
+
+		// A caller without a credential leaves the cloud label empty rather than
+		// taking the "meta" the refused item claims.
+		out := batch(t, db, pipeline, []json.RawMessage{
+			item(t, res.virtualEvent("vol-count-virtual-meta", "meta")),
+		}, event.SourceCollector, nil)
+
+		if out.Accepted != 0 || len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() = %+v, want the event refused", out)
+		}
+		assertSamples(t, reg, rejectedSeries, map[string]float64{
+			`cloud="",reason="schema"`: 1,
+		})
+		assertSamples(t, reg, ingestedSeries, map[string]float64{})
+
+		// The schema refused the item before the scope check saw it, so the
+		// refusal is counted as a schema failure under the credential's cloud.
+		scoped, scopedReg := metered(t, false, nil)
+
+		out = batch(t, db, scoped, []json.RawMessage{
+			item(t, res.virtualEvent("vol-count-virtual-scoped-meta", "meta")),
+			item(t, res.event("vol-count-virtual-create", "volume.create", createTime,
+				payloadOf("available", volumeSize(10)))),
+		}, event.SourceCollector, &ingest.Scope{Platform: platform, Cloud: res.cloud})
+
+		if out.Accepted != 1 || len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() = %+v, want the virtual item refused and its sibling stored", out)
+		}
+		assertSamples(t, scopedReg, rejectedSeries, map[string]float64{
+			`cloud="os-ingest-count-virtual",reason="schema"`: 1,
+		})
+		assertSamples(t, scopedReg, ingestedSeries, map[string]float64{
+			ingestedLabels(res, "volume.create"): 1,
+		})
+	})
+
 	t.Run("counts an unregistered size as a refusal in strict mode", func(t *testing.T) {
 		res := resource{cloud: "os-ingest-count-strict", resourceType: "black_hole", id: "bh-count-strict"}
 		pipeline, reg := metered(t, true, nil)
@@ -790,6 +949,16 @@ func (r resource) event(eventID, eventType string, ts time.Time, payload event.P
 		Source:       event.SourceCollector,
 		Payload:      payload,
 	}
+}
+
+// virtualEvent is a volume create of the resource naming a virtual platform as
+// both its platform and its cloud, which is how the project registry names a
+// meta-project and a partner. The event is valid in every other respect, so the
+// virtual platform is the only rule it breaks.
+func (r resource) virtualEvent(eventID, virtualPlatform string) event.Event {
+	e := r.event(eventID, "volume.create", createTime, payloadOf("available", volumeSize(10)))
+	e.Platform, e.Cloud = virtualPlatform, virtualPlatform
+	return e
 }
 
 // key is the projection key of the resource.
