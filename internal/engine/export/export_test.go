@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -32,6 +33,18 @@ import (
 var (
 	regularRunID    = uuid.MustParse("3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4")
 	correctionRunID = uuid.MustParse("4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9")
+)
+
+// The relations the kickback cases settle under. A kickback is keyed by the
+// relation it came from, so the ids are written out rather than generated: a
+// case names which relation a difference belongs to, and the diff orders them
+// by their bytes.
+var (
+	relation1 = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	relation2 = uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	relation3 = uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	relation4 = uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	relation5 = uuid.MustParse("55555555-5555-5555-5555-555555555555")
 )
 
 // The month both runs bill, and the two instants the instance was powered off
@@ -227,6 +240,54 @@ func delta(dimension, old, current, difference string) export.Delta {
 		},
 		Currency: currency,
 	}
+}
+
+// kickback is one settled kickback, as the cases hand them around. The
+// statement key is rendered from the pair rather than passed beside it, which
+// is what the diff groups by.
+func kickback(beneficiary, cloud, projectID string, relationID uuid.UUID,
+	scope, rate, base, amount string,
+) export.Kickback {
+	return export.Kickback{
+		Beneficiary:  beneficiary,
+		Currency:     currency,
+		StatementKey: statements.Key(cloud, projectID),
+		Cloud:        cloud,
+		ProjectID:    projectID,
+		RelationID:   relationID,
+		Scope:        scope,
+		Rate:         decimal.RequireFromString(rate),
+		Base:         decimal.RequireFromString(base),
+		Amount:       decimal.RequireFromString(amount),
+	}
+}
+
+// kickbackRow is one kickback as a case compares it: every column, at the scale
+// it is stored at. Two decimals that are the same number are not the same
+// decimal.Decimal, so the comparison is over what they render as.
+type kickbackRow struct {
+	beneficiary, cloud, projectID, relation, scope string
+	rate, base, amount, currency                   string
+}
+
+// kickbackRows renders what a load or a diff returned, in the order it came
+// back in.
+func kickbackRows(kickbacks []export.Kickback) []kickbackRow {
+	rows := make([]kickbackRow, 0, len(kickbacks))
+	for _, entry := range kickbacks {
+		rows = append(rows, kickbackRow{
+			beneficiary: entry.Beneficiary,
+			cloud:       entry.Cloud,
+			projectID:   entry.ProjectID,
+			relation:    entry.RelationID.String(),
+			scope:       entry.Scope,
+			rate:        entry.Rate.StringFixed(6),
+			base:        entry.Base.StringFixed(2),
+			amount:      entry.Amount.StringFixed(2),
+			currency:    entry.Currency,
+		})
+	}
+	return rows
 }
 
 // fixture reads a document another package's golden holds, so the bytes an
@@ -995,6 +1056,131 @@ func TestExportModes(t *testing.T) {
 			}
 			for _, file := range files {
 				assertMode(t, filepath.Join(dir, file), 0o600)
+			}
+		})
+	}
+}
+
+// TestDiffKickbacks pins what a correction settles for a partner. A partner is
+// paid on the finalized month and again on its correction, so what the
+// correction owes is the difference to what the corrected run already settled,
+// under the key the credit note is diffed by: a kickback the correction dropped
+// takes the whole payout back, one it settles for the first time is owed whole,
+// and one it re-stated unchanged is owed nothing.
+func TestDiffKickbacks(t *testing.T) {
+	cases := []struct {
+		name         string
+		old, current []export.Kickback
+		want         []export.Kickback
+	}{
+		{
+			name: "a kickback that changed, one that is gone and one that is new",
+			old: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "126.48", "12.65"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "50.00", "5.00"),
+			},
+			current: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "106.08", "10.61"),
+				kickback("partner-corp", "os-prod", projectID, relation3, "all", "0.100000", "30.00", "3.00"),
+			},
+			want: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "-20.40", "-2.04"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "-50.00", "-5.00"),
+				kickback("partner-corp", "os-prod", projectID, relation3, "all", "0.100000", "30.00", "3.00"),
+			},
+		},
+		{
+			name: "two elements under one key are summed before the difference",
+			old: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "126.48", "12.65"),
+			},
+			current: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "60.00", "6.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "46.08", "4.61"),
+			},
+			want: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "-20.40", "-2.04"),
+			},
+		},
+		{
+			name: "a base that moved under an amount that did not",
+			old: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "100.00", "10.00"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "50.00", "5.00"),
+			},
+			current: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "100.04", "10.00"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "60.00", "6.00"),
+			},
+			want: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "10.00", "1.00"),
+			},
+		},
+		{
+			name: "the partner and the project come from the side the key was read off",
+			old: []export.Kickback{
+				kickback("partner-old", "os-prod", projectID, relation1, "all", "0.100000", "100.00", "10.00"),
+				kickback("partner-gone", "os-dr", "proj-789", relation2, "all", "0.050000", "20.00", "1.00"),
+			},
+			current: []export.Kickback{
+				kickback("partner-new", "os-prod", projectID, relation1, "all", "0.100000", "150.00", "15.00"),
+			},
+			want: []export.Kickback{
+				kickback("partner-gone", "os-dr", "proj-789", relation2, "all", "0.050000", "-20.00", "-1.00"),
+				kickback("partner-new", "os-prod", projectID, relation1, "all", "0.100000", "50.00", "5.00"),
+			},
+		},
+		{
+			name: "two sides that settle the same",
+			old: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "126.48", "12.65"),
+			},
+			current: []export.Kickback{
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "126.48", "12.65"),
+			},
+		},
+		{name: "two sides that settle nothing"},
+		{
+			// Fed in the reverse of the order they come back in, over every column
+			// the order reads: the partner, the statement, the relation, the scope
+			// and the rate. No two of them agree on the amount either, so a column
+			// the order dropped hands them back in another order rather than in
+			// this one by luck.
+			name: "a settlement over two partners and six keys",
+			current: []export.Kickback{
+				kickback("partner-two", "os-prod", projectID, relation1, "all", "0.020000", "500.00", "10.00"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "50.00", "5.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "openstack.instance",
+					"0.200000", "10.00", "2.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "openstack.instance",
+					"0.100000", "50.00", "5.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "100.00", "10.00"),
+				kickback("partner-corp", "os-dr", projectID, relation1, "all", "0.100000", "300.00", "30.00"),
+			},
+			want: []export.Kickback{
+				kickback("partner-corp", "os-dr", projectID, relation1, "all", "0.100000", "300.00", "30.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "100.00", "10.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "openstack.instance",
+					"0.100000", "50.00", "5.00"),
+				kickback("partner-corp", "os-prod", projectID, relation1, "openstack.instance",
+					"0.200000", "10.00", "2.00"),
+				kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "50.00", "5.00"),
+				kickback("partner-two", "os-prod", projectID, relation1, "all", "0.020000", "500.00", "10.00"),
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := export.DiffKickbacks(c.old, c.current)
+			// Two sides that agree yield nil rather than an empty slice, which is
+			// what a report iterates over without a case for the missing value.
+			if len(c.want) == 0 && got != nil {
+				t.Fatalf("DiffKickbacks() = %v, want nil", got)
+			}
+			rows, want := kickbackRows(got), kickbackRows(c.want)
+			if !reflect.DeepEqual(rows, want) {
+				t.Errorf("DiffKickbacks() = %v, want %v", rows, want)
 			}
 		})
 	}
