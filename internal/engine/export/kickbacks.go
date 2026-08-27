@@ -18,6 +18,28 @@ import (
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
 
+// The two files the settlement is written to: the document by the JSON writer
+// and the table by the CSV writer.
+const (
+	kickbacksJSONFileName = "kickbacks.json"
+	kickbacksCSVFileName  = "kickbacks.csv"
+)
+
+// kickbacksHeader is the column order of kickbacks.csv. The fourteen columns
+// are aligned with ratedHeader and deltasHeader rather than the ten the
+// roadmap's WP 5.4 lists (author's decision of 2026-08-27, named here per
+// guardrail 10 of roadmap/00-conventions.md): adjustment_records.project_id
+// holds the statement key cloud/project, and every other artifact renders that
+// pair as two members, because external project ids are unique per cloud only.
+// kind and corrects_run_id say whether a row is a difference a correction owes
+// rather than a payout of the month, and relation_id is what the auditability
+// drill walks back to the registry.
+var kickbacksHeader = []string{
+	"run_id", "kind", "corrects_run_id", "period_from", "period_to",
+	"beneficiary", "cloud", "project_id", "relation_id", "scope",
+	"rate", "base", "amount", "currency",
+}
+
 // Kickback is one kickback a run settles for a partner. For a regular run it
 // is one adjustment_records row of type kickback. For a correction it is one
 // non-zero difference between the correction's kickback records and those of
@@ -243,4 +265,147 @@ func sortKickbacks(kickbacks []Kickback) {
 			a.Base.Cmp(b.Base),
 		)
 	})
+}
+
+// kickbacksDocument is kickbacks.json: the run the settlement belongs to and
+// one entry per partner it owes. The field order is the order it is marshalled
+// in, and nothing here records when the report ran, for the reason runDocument
+// gives.
+//
+// A correction's entries carry the differences to the run it corrects under the
+// same shape a regular run's payouts take. Kind and CorrectsRunID are what say
+// which of the two a document holds, so a partner reads a month and the
+// correction of it with one reader rather than with two.
+type kickbacksDocument struct {
+	RunID string `json:"run_id"`
+	Kind  string `json:"kind"`
+	// A pointer, so a regular run renders null the way runDocument renders the
+	// run it corrects.
+	CorrectsRunID *string `json:"corrects_run_id"`
+	PeriodFrom    string  `json:"period_from"`
+	PeriodTo      string  `json:"period_to"`
+	// Never nil, so a run that owes nobody renders an empty list rather than a
+	// null: it settles nothing, and a null would read as a report that does not
+	// say.
+	Beneficiaries []beneficiaryEntry `json:"beneficiaries"`
+}
+
+// beneficiaryEntry is what one partner is settled with in one currency: the
+// total it is paid, the number of projects that total came off, and the rows it
+// was summed from. Two currencies under one partner are two entries, because a
+// sum over two of them is not a payout anybody can make.
+type beneficiaryEntry struct {
+	Beneficiary   string          `json:"beneficiary"`
+	Currency      string          `json:"currency"`
+	KickbackTotal money.Amount    `json:"kickback_total"`
+	Projects      int             `json:"projects"`
+	Breakdown     []kickbackEntry `json:"breakdown"`
+}
+
+// kickbackEntry is one settled kickback under a partner: the statement it came
+// off, the relation and the element it was computed from, and the three numbers
+// the partner reconciles the payout against.
+type kickbackEntry struct {
+	Cloud string `json:"cloud"`
+	// Two members for the reason json.go gives for the index entries: external
+	// project ids are unique per cloud only.
+	ProjectID  string       `json:"project_id"`
+	RelationID string       `json:"relation_id"`
+	Scope      string       `json:"scope"`
+	Rate       money.Rate   `json:"rate"`
+	Base       money.Amount `json:"base"`
+	Amount     money.Amount `json:"amount"`
+}
+
+// KickbacksJSON renders the partner-facing settlement document of a run: per
+// beneficiary and currency what the partner is owed, over how many projects,
+// and the kickbacks that total was summed from.
+func KickbacksJSON(run Run) ([]byte, error) {
+	// Sorted here rather than taken as it comes: the bytes are a function of the
+	// set the run settles rather than of the order it was handed over in. The
+	// copy leaves the caller's slice as it is.
+	kickbacks := slices.Clone(run.Kickbacks)
+	sortKickbacks(kickbacks)
+
+	document := kickbacksDocument{
+		RunID:         run.ID.String(),
+		Kind:          run.Kind,
+		PeriodFrom:    instant(run.PeriodFrom),
+		PeriodTo:      instant(run.PeriodTo),
+		Beneficiaries: []beneficiaryEntry{},
+	}
+	if run.CorrectsRunID != uuid.Nil {
+		corrects := run.CorrectsRunID.String()
+		document.CorrectsRunID = &corrects
+	}
+
+	for i, kickback := range kickbacks {
+		// The order sorts by the partner and the currency first, so a group ends
+		// where either of them changes.
+		opened := i == 0 || kickback.Beneficiary != kickbacks[i-1].Beneficiary ||
+			kickback.Currency != kickbacks[i-1].Currency
+		if opened {
+			document.Beneficiaries = append(document.Beneficiaries, beneficiaryEntry{
+				Beneficiary: kickback.Beneficiary,
+				Currency:    kickback.Currency,
+			})
+		}
+
+		entry := &document.Beneficiaries[len(document.Beneficiaries)-1]
+		// The statement key orders inside a group, so a project is a further one
+		// where it differs from the kickback before it.
+		if opened || kickback.StatementKey != kickbacks[i-1].StatementKey {
+			entry.Projects++
+		}
+		// The total is the sum of what the rows below it carry, which are amounts
+		// the rating rounded already: summing them is what keeps the payout equal
+		// to the lines the partner reconciles it against.
+		entry.KickbackTotal = money.NewAmount(entry.KickbackTotal.Add(kickback.Amount))
+		entry.Breakdown = append(entry.Breakdown, kickbackEntry{
+			Cloud:      kickback.Cloud,
+			ProjectID:  kickback.ProjectID,
+			RelationID: kickback.RelationID.String(),
+			Scope:      kickback.Scope,
+			Rate:       money.NewRate(kickback.Rate),
+			Base:       money.NewAmount(kickback.Base),
+			Amount:     money.NewAmount(kickback.Amount),
+		})
+	}
+
+	body, err := marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("rendering %s of run %s: %w", kickbacksJSONFileName, run.ID, err)
+	}
+	return body, nil
+}
+
+// KickbacksCSV renders kickbacks.csv: the header and one row per kickback, in
+// the order the settlement is read in. Every row carries the run, its kind and
+// its period, the way a row of rated.csv does, so a row says which run and
+// which month it belongs to on its own.
+//
+// A run that settles nothing renders the header alone: an empty table says the
+// run owes no partner, and a missing file says nothing at all.
+func KickbacksCSV(run Run) ([]byte, error) {
+	kickbacks := slices.Clone(run.Kickbacks)
+	sortKickbacks(kickbacks)
+
+	corrects := correctsOf(run)
+	from, to := instant(run.PeriodFrom), instant(run.PeriodTo)
+
+	rows := [][]string{kickbacksHeader}
+	for _, kickback := range kickbacks {
+		rows = append(rows, []string{
+			run.ID.String(), run.Kind, corrects, from, to,
+			cell(kickback.Beneficiary), cell(kickback.Cloud), cell(kickback.ProjectID),
+			kickback.RelationID.String(), cell(kickback.Scope),
+			// The three numbers do not go through cell: a leading minus is the sign
+			// of what a correction takes back rather than a formula.
+			kickback.Rate.StringFixed(money.RatePlaces),
+			kickback.Base.StringFixed(money.AmountPlaces),
+			kickback.Amount.StringFixed(money.AmountPlaces),
+			kickback.Currency,
+		})
+	}
+	return table(run, kickbacksCSVFileName, rows)
 }
