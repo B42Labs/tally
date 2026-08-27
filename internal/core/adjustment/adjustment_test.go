@@ -3,8 +3,11 @@ package adjustment_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/adjustment"
 )
@@ -400,6 +403,145 @@ func TestInvalidErrorNamesEveryViolation(t *testing.T) {
 	})
 }
 
+func TestParseAcceptsTheConceptExample(t *testing.T) {
+	adjustments, err := adjustment.Parse([]byte(conceptExample))
+	if err != nil {
+		t.Fatalf("Parse() error = %v, want nil", err)
+	}
+
+	assertAdjustments(t, adjustments, []adjustment.Adjustment{
+		{
+			Type:        adjustment.TypeDiscount,
+			Rate:        decimal.RequireFromString("0.15"),
+			Scope:       adjustment.ScopeAll,
+			Description: "Reseller end-customer discount",
+		},
+		{
+			Type:        adjustment.TypeKickback,
+			Rate:        decimal.RequireFromString("0.10"),
+			Scope:       adjustment.ScopeAll,
+			Description: "Reseller commission on net revenue",
+		},
+	})
+}
+
+func TestParseReturnsWhatTheTextSpells(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []adjustment.Adjustment
+	}{
+		{
+			name: "an element without a description",
+			doc:  `[{"type":"surcharge","rate":"0.123456","scope":"openstack.instance"}]`,
+			want: []adjustment.Adjustment{{
+				Type:  adjustment.TypeSurcharge,
+				Rate:  decimal.RequireFromString("0.123456"),
+				Scope: "openstack.instance",
+			}},
+		},
+		{
+			// The rate is read off its text, so the places it was written with
+			// say nothing about the number it stands for.
+			name: "a rate written out to six decimal places",
+			doc:  `[{"type":"project_discount","rate":"1.000000","scope":"openstack"}]`,
+			want: []adjustment.Adjustment{{
+				Type:  adjustment.TypeProjectDiscount,
+				Rate:  decimal.RequireFromString("1"),
+				Scope: "openstack",
+			}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adjustments, err := adjustment.Parse([]byte(tc.doc))
+			if err != nil {
+				t.Fatalf("Parse() error = %v, want nil", err)
+			}
+			assertAdjustments(t, adjustments, tc.want)
+		})
+	}
+}
+
+func TestParseRefuses(t *testing.T) {
+	// What the schema refuses, Parse refuses in the same words, so a caller
+	// answering 422 reads the place off the violation.
+	t.Run("a rate written as a number", func(t *testing.T) {
+		adjustments, err := adjustment.Parse([]byte(`[{"type":"discount","rate":0.15,"scope":"all"}]`))
+		if adjustments != nil {
+			t.Errorf("Parse() = %v, want no adjustments", adjustments)
+		}
+
+		var invalid *adjustment.InvalidError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("Parse() error = %v, want *adjustment.InvalidError", err)
+		}
+		if len(invalid.Violations) != 1 {
+			t.Fatalf("Parse() reported %d violations, want 1: %v", len(invalid.Violations), invalid)
+		}
+		if location := invalid.Violations[0].Location; location != "/0/rate" {
+			t.Errorf("violation location = %q, want %q", location, "/0/rate")
+		}
+	})
+
+	tests := []struct {
+		name string
+		doc  []byte
+	}{
+		{name: "a truncated array", doc: []byte("[")},
+		{name: "no document at all", doc: nil},
+		{name: "an empty document", doc: []byte{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adjustments, err := adjustment.Parse(tc.doc)
+			if adjustments != nil {
+				t.Errorf("Parse() = %v, want no adjustments", adjustments)
+			}
+			if err == nil {
+				t.Fatal("Parse() error = nil, want a decoding error")
+			}
+			if !strings.Contains(err.Error(), "decoding the pricing adjustments") {
+				t.Errorf("Parse() error = %q, want it to contain %q", err, "decoding the pricing adjustments")
+			}
+
+			// Text that is not JSON never reached the schema, so it must not
+			// look to a caller like a document the schema refused.
+			var invalid *adjustment.InvalidError
+			if errors.As(err, &invalid) {
+				t.Errorf("Parse() error = %v, want no *adjustment.InvalidError", err)
+			}
+		})
+	}
+}
+
+// assertAdjustments compares the adjustments a call returned with the ones the
+// text spells. The rates are compared with Equal, because a decimal keeps the
+// places its text was written with.
+func assertAdjustments(t *testing.T, got, want []adjustment.Adjustment) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("got %d adjustments, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Type != want[i].Type {
+			t.Errorf("adjustment %d type = %q, want %q", i, got[i].Type, want[i].Type)
+		}
+		if !got[i].Rate.Equal(want[i].Rate) {
+			t.Errorf("adjustment %d rate = %v, want %v", i, got[i].Rate, want[i].Rate)
+		}
+		if got[i].Scope != want[i].Scope {
+			t.Errorf("adjustment %d scope = %q, want %q", i, got[i].Scope, want[i].Scope)
+		}
+		if got[i].Description != want[i].Description {
+			t.Errorf("adjustment %d description = %q, want %q", i, got[i].Description, want[i].Description)
+		}
+	}
+}
+
 func TestValidateMetadata(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -478,6 +620,198 @@ func TestValidateMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFromMetadata(t *testing.T) {
+	tests := []struct {
+		name          string
+		metadata      []byte
+		wantFound     bool
+		want          []adjustment.Adjustment
+		wantViolation string
+		wantErr       string
+	}{
+		{name: "no metadata at all", metadata: nil},
+		{name: "an empty document", metadata: []byte{}},
+		{name: "the null document", metadata: []byte(`null`)},
+		{name: "an empty object", metadata: []byte(`{}`)},
+		{name: "metadata without the member", metadata: []byte(`{"owner":"team-a"}`)},
+		{
+			// The member is there, so the relation is one that adjusts, and
+			// the caller hears that beside the refusal.
+			name:          "the member set to null",
+			metadata:      []byte(`{"pricing_adjustments":null}`),
+			wantFound:     true,
+			wantViolation: "got null, want array",
+		},
+		{
+			name:          "the member set to an empty array",
+			metadata:      []byte(`{"pricing_adjustments":[]}`),
+			wantFound:     true,
+			wantViolation: "minItems: got 0, want 1",
+		},
+		{
+			name: "the member beside other metadata",
+			metadata: []byte(
+				`{"owner":"team-a","pricing_adjustments":[{"type":"discount","rate":"0.15","scope":"all"}]}`),
+			wantFound: true,
+			want: []adjustment.Adjustment{{
+				Type:  adjustment.TypeDiscount,
+				Rate:  decimal.RequireFromString("0.15"),
+				Scope: adjustment.ScopeAll,
+			}},
+		},
+		{
+			name:     "an array instead of an object",
+			metadata: []byte(`[]`),
+			wantErr:  "decoding the relation metadata",
+		},
+		{
+			name:     "a number instead of an object",
+			metadata: []byte(`1`),
+			wantErr:  "decoding the relation metadata",
+		},
+		{
+			name:     "a truncated document",
+			metadata: []byte(`{"pricing_adjustments":`),
+			wantErr:  "decoding the relation metadata",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adjustments, found, err := adjustment.FromMetadata(tc.metadata)
+
+			if found != tc.wantFound {
+				t.Errorf("FromMetadata() found = %v, want %v", found, tc.wantFound)
+			}
+
+			switch {
+			case tc.wantViolation != "":
+				var invalid *adjustment.InvalidError
+				if !errors.As(err, &invalid) {
+					t.Fatalf("FromMetadata() error = %v, want *adjustment.InvalidError", err)
+				}
+				if len(invalid.Violations) != 1 {
+					t.Fatalf("FromMetadata() reported %d violations, want 1: %v", len(invalid.Violations), invalid)
+				}
+				if message := invalid.Violations[0].Message; !strings.Contains(message, tc.wantViolation) {
+					t.Errorf("violation message = %q, want it to contain %q", message, tc.wantViolation)
+				}
+			case tc.wantErr != "":
+				if err == nil {
+					t.Fatalf("FromMetadata() error = nil, want one containing %q", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("FromMetadata() error = %q, want it to contain %q", err, tc.wantErr)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("FromMetadata() error = %v, want nil", err)
+				}
+				assertAdjustments(t, adjustments, tc.want)
+			}
+		})
+	}
+}
+
+func TestScopeMatches(t *testing.T) {
+	tests := []struct {
+		name         string
+		scope        string
+		platform     string
+		resourceType string
+		want         bool
+	}{
+		{
+			name: "the scope all", scope: adjustment.ScopeAll,
+			platform: "openstack", resourceType: "instance", want: true,
+		},
+		{
+			name: "a platform scope on its platform", scope: "openstack",
+			platform: "openstack", resourceType: "instance", want: true,
+		},
+		{
+			name: "a resource type scope on its resource type", scope: "openstack.instance",
+			platform: "openstack", resourceType: "instance", want: true,
+		},
+		{
+			name: "a scope with underscores on both sides", scope: "gardener_dev.shoot_node",
+			platform: "gardener_dev", resourceType: "shoot_node", want: true,
+		},
+		{
+			name: "a platform scope on another platform", scope: "openstack",
+			platform: "gardener", resourceType: "shoot",
+		},
+		{
+			name: "a resource type scope on another resource type", scope: "openstack.instance",
+			platform: "openstack", resourceType: "volume",
+		},
+		{
+			name: "a resource type scope on another platform", scope: "openstack.instance",
+			platform: "gardener", resourceType: "instance",
+		},
+		{
+			// The scopes are compared as they are stored, so a scope that only
+			// differs in case matches nothing.
+			name: "a platform scope in the wrong case", scope: "Openstack",
+			platform: "openstack", resourceType: "instance",
+		},
+		{
+			name: "an empty scope", scope: "",
+			platform: "openstack", resourceType: "instance",
+		},
+		{
+			name: "a platform scope on no platform at all", scope: "openstack",
+			platform: "", resourceType: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := adjustment.ScopeMatches(tc.scope, tc.platform, tc.resourceType)
+			if got != tc.want {
+				t.Errorf("ScopeMatches(%q, %q, %q) = %v, want %v",
+					tc.scope, tc.platform, tc.resourceType, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTypeOrderMatchesTheSchema(t *testing.T) {
+	t.Run("the order the adjustments are applied in", func(t *testing.T) {
+		want := []string{"surcharge", "discount", "project_discount", "kickback"}
+		if !slices.Equal(adjustment.TypeOrder, want) {
+			t.Errorf("TypeOrder = %v, want %v", adjustment.TypeOrder, want)
+		}
+	})
+
+	// Every type the order names is a type the schema admits, so nothing the
+	// engine sorts by is a document the API would have refused.
+	for _, adjustmentType := range adjustment.TypeOrder {
+		t.Run("the type "+adjustmentType, func(t *testing.T) {
+			doc := fmt.Sprintf(`[{"type":%q,"rate":"0.15","scope":%q}]`, adjustmentType, adjustment.ScopeAll)
+
+			adjustments, err := adjustment.Parse([]byte(doc))
+			if err != nil {
+				t.Fatalf("Parse() error = %v, want nil", err)
+			}
+			assertAdjustments(t, adjustments, []adjustment.Adjustment{{
+				Type:  adjustmentType,
+				Rate:  decimal.RequireFromString("0.15"),
+				Scope: adjustment.ScopeAll,
+			}})
+		})
+	}
+
+	t.Run("a type in the wrong case", func(t *testing.T) {
+		_, err := adjustment.Parse([]byte(`[{"type":"Discount","rate":"0.15","scope":"all"}]`))
+
+		var invalid *adjustment.InvalidError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("Parse() error = %v, want *adjustment.InvalidError", err)
+		}
+	})
 }
 
 func TestConstantsMatchTheSchema(t *testing.T) {
