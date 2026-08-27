@@ -12,8 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 
+	"github.com/b42labs/tally/internal/core/project"
 	"github.com/b42labs/tally/internal/reporting/audit"
 	"github.com/b42labs/tally/internal/reporting/auth"
+	"github.com/b42labs/tally/internal/reporting/projects"
 	"github.com/b42labs/tally/internal/reporting/store"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
@@ -307,6 +309,101 @@ func parseScope(role string, projectIDs []string) ([]uuid.UUID, error) {
 		scope = append(scope, id)
 	}
 	return scope, nil
+}
+
+// virtualProject is what the two virtual project subcommands differ in: the
+// row they register and the word their messages call it by.
+type virtualProject struct {
+	// use is the command's name.
+	use string
+	// short is the one-line description.
+	short string
+	// noun is what the messages call the row.
+	noun string
+	// platform is the platform and, per decision D1, the cloud of the row.
+	platform string
+}
+
+// newCreateMetaProjectCmd builds the create-meta-project subcommand.
+func newCreateMetaProjectCmd() *cobra.Command {
+	return newCreateVirtualProjectCmd(virtualProject{
+		use:      "create-meta-project",
+		short:    "Register a meta-project that groups real projects under a customer",
+		noun:     "meta-project",
+		platform: project.PlatformMeta,
+	})
+}
+
+// newCreatePartnerCmd builds the create-partner subcommand.
+func newCreatePartnerCmd() *cobra.Command {
+	return newCreateVirtualProjectCmd(virtualProject{
+		use:      "create-partner",
+		short:    "Register a partner entity that manages real projects",
+		noun:     "partner",
+		platform: project.PlatformPartner,
+	})
+}
+
+// newCreateVirtualProjectCmd builds one subcommand that registers a virtual
+// project. The row goes through projects.Register, which is the function the
+// API's registration goes through as well, so the audit row and the cloud rule
+// of decision D1 are the API's.
+//
+// The new id is printed alone on stdout, which is what lets a command
+// substitution capture it and pass it as the target_id of a relation.
+func newCreateVirtualProjectCmd(v virtualProject) *cobra.Command {
+	var externalID, name string
+
+	cmd := &cobra.Command{
+		Use:   v.use,
+		Short: v.short,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Cobra checks that the required flag was passed, not that it
+			// carries a value. A row under the empty external id names nothing
+			// an operator could relate a project to.
+			if externalID == "" {
+				return errors.New("--external-id: must not be empty")
+			}
+
+			db, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			var id uuid.UUID
+			if err := db.WithTx(cmd.Context(), func(tx pgx.Tx) error {
+				stored, err := projects.Register(cmd.Context(), sqlcgen.New(tx), actor, projects.Registration{
+					Platform:   v.platform,
+					Cloud:      v.platform,
+					ExternalID: externalID,
+					Name:       optionalText(name),
+				})
+				if err != nil {
+					if errors.Is(err, projects.ErrAlreadyRegistered) {
+						return fmt.Errorf("%s %s: already registered", v.noun, externalID)
+					}
+					return err
+				}
+				id = stored.ID
+				return nil
+			}); err != nil {
+				return err
+			}
+
+			if err := write(cmd.OutOrStdout(), id.String()); err != nil {
+				return err
+			}
+			return write(cmd.ErrOrStderr(), fmt.Sprintf("registered %s %s", v.noun, externalID))
+		},
+	}
+
+	cmd.Flags().StringVar(&externalID, "external-id", "",
+		fmt.Sprintf("id of the %s as the registry names it", v.noun))
+	cmd.Flags().StringVar(&name, "name", "", "human-readable name kept with the row")
+	_ = cmd.MarkFlagRequired("external-id")
+	return cmd
 }
 
 // revocation is what the two revoke subcommands differ in: the table they work

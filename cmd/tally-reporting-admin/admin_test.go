@@ -125,6 +125,109 @@ func TestAdminCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("create-meta-project registers the meta row and prints its id", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "create-meta-project",
+			"--external-id", "customer-alpha", "--name", "Customer Alpha")
+		if err != nil {
+			t.Fatalf("create-meta-project error = %v, want nil (stderr %q)", err, stderr)
+		}
+
+		id, err := uuid.Parse(onlyLine(t, stdout))
+		if err != nil {
+			t.Fatalf("stdout = %q, want the id of the new row alone: %v", stdout, err)
+		}
+		if want := "registered meta-project customer-alpha"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+
+		want := registryRow{
+			platform:   "meta",
+			cloud:      "meta",
+			externalID: "customer-alpha",
+			name:       pgtype.Text{String: "Customer Alpha", Valid: true},
+			metadata:   "{}",
+		}
+		if got := projectRow(t, db, id); got != want {
+			t.Errorf("projects row %s = %+v, want %+v", id, got, want)
+		}
+		if got := auditRows(t, db, "projects.create", id); got != 1 {
+			t.Errorf("audit rows for projects.create on %s = %d, want 1", id, got)
+		}
+	})
+
+	t.Run("create-partner registers the partner row without a name", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "create-partner", "--external-id", "partner-corp")
+		if err != nil {
+			t.Fatalf("create-partner error = %v, want nil (stderr %q)", err, stderr)
+		}
+
+		id, err := uuid.Parse(onlyLine(t, stdout))
+		if err != nil {
+			t.Fatalf("stdout = %q, want the id of the new row alone: %v", stdout, err)
+		}
+		if want := "registered partner partner-corp"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+
+		// A --name nobody passed leaves the column NULL rather than empty.
+		want := registryRow{platform: "partner", cloud: "partner", externalID: "partner-corp", metadata: "{}"}
+		if got := projectRow(t, db, id); got != want {
+			t.Errorf("projects row %s = %+v, want %+v", id, got, want)
+		}
+		if got := auditRows(t, db, "projects.create", id); got != 1 {
+			t.Errorf("audit rows for projects.create on %s = %d, want 1", id, got)
+		}
+	})
+
+	t.Run("create-partner refuses a missing or empty external id", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			args []string
+			want string
+		}{
+			"the flag left out":   {nil, `"external-id" not set`},
+			"the flag left empty": {[]string{"--external-id", ""}, "--external-id: must not be empty"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				before := countRows(t, db, "projects")
+
+				stdout, _, err := runCLI(t, append([]string{"create-partner"}, tc.args...)...)
+				if err == nil {
+					t.Fatalf("create-partner error = nil, want one containing %q", tc.want)
+				}
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("create-partner error = %q, want it to contain %q", err, tc.want)
+				}
+				if stdout != "" {
+					t.Errorf("stdout = %q, want nothing printed for a project that was not registered", stdout)
+				}
+				if after := countRows(t, db, "projects"); after != before {
+					t.Errorf("projects rows = %d, want %d unchanged", after, before)
+				}
+			})
+		}
+	})
+
+	t.Run("create-partner refuses a second registration of one external id", func(t *testing.T) {
+		if _, stderr, err := runCLI(t, "create-partner", "--external-id", "partner-twice"); err != nil {
+			t.Fatalf("create-partner error = %v, want nil (stderr %q)", err, stderr)
+		}
+		before := countRows(t, db, "projects")
+
+		stdout, _, err := runCLI(t, "create-partner", "--external-id", "partner-twice")
+		if err == nil {
+			t.Fatal("the second create-partner error = nil, want the held external id reported")
+		}
+		if want := "partner partner-twice: already registered"; !strings.Contains(err.Error(), want) {
+			t.Errorf("the second create-partner error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed for a project that was not registered", stdout)
+		}
+		if after := countRows(t, db, "projects"); after != before {
+			t.Errorf("projects rows = %d, want %d unchanged", after, before)
+		}
+	})
+
 	t.Run("revoking an ingest credential takes it out of use", func(t *testing.T) {
 		id, token := createIngestCredential(t, db, "os-revoke")
 		middleware := auth.Ingest(q, auth.ModeEnforced, nil)
@@ -319,6 +422,36 @@ func TestAdminCLI(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("create-meta-project reports a database it cannot reach", func(t *testing.T) {
+		// The variable goes back to the shared database when the subtest ends,
+		// so the ones after it still reach their rows.
+		useDatabase(t, "postgres://nobody@127.0.0.1:1/none")
+
+		stdout, _, err := runCLI(t, "create-meta-project", "--external-id", "unreachable")
+		if err == nil {
+			t.Fatal("create-meta-project error = nil, want the connection failure")
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed for a project that was not registered", stdout)
+		}
+	})
+
+	t.Run("--help lists the two commands", func(t *testing.T) {
+		// Building the tree reads no configuration, so the help text comes out
+		// of a shell that has none set.
+		useDatabase(t, "")
+
+		stdout, stderr, err := runCLI(t, "--help")
+		if err != nil {
+			t.Fatalf("--help error = %v, want nil (stderr %q)", err, stderr)
+		}
+		for _, command := range []string{"create-meta-project", "create-partner"} {
+			if !strings.Contains(stdout, command) {
+				t.Errorf("stdout = %q, want it to list %s", stdout, command)
+			}
+		}
+	})
 }
 
 // TestCreateRollsBackWhenTheAuditInsertFails runs against a container of its
@@ -344,6 +477,20 @@ func TestCreateRollsBackWhenTheAuditInsertFails(t *testing.T) {
 	}
 	if got := countRows(t, db, "ingest_credentials"); got != 0 {
 		t.Errorf("ingest_credentials rows = %d, want 0: the credential outlived its audit row", got)
+	}
+
+	stdout, _, err = runCLI(t, "create-partner", "--external-id", "rollback")
+	if err == nil {
+		t.Fatal("create-partner error = nil, want the failed audit insert")
+	}
+	if want := "audit log row"; !strings.Contains(err.Error(), want) {
+		t.Errorf("create-partner error = %q, want the one from the audit insert, mentioning %q", err, want)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want no id printed for a project that was rolled back", stdout)
+	}
+	if got := countRows(t, db, "projects"); got != 0 {
+		t.Errorf("projects rows = %d, want 0: the project outlived its audit row", got)
 	}
 }
 
@@ -475,6 +622,28 @@ func assertTokenIsNotStored(t *testing.T, db storetest.DB, token string) {
 			t.Errorf("%s holds %d row(s) carrying the raw token", table, rows)
 		}
 	}
+}
+
+// registryRow is the part of a projects row the registration subtests check.
+type registryRow struct {
+	platform, cloud, externalID string
+	name                        pgtype.Text
+	metadata                    string
+}
+
+// projectRow reads the registry row a create subcommand wrote. The metadata
+// comes back as text, so a row that carries the empty document compares equal
+// to one written from any other spelling of it.
+func projectRow(t *testing.T, db storetest.DB, id uuid.UUID) registryRow {
+	t.Helper()
+
+	var row registryRow
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		"SELECT platform, cloud, external_id, name, metadata::text FROM projects WHERE id = $1", id).
+		Scan(&row.platform, &row.cloud, &row.externalID, &row.name, &row.metadata); err != nil {
+		t.Fatalf("reading the projects row %s: %v", id, err)
+	}
+	return row
 }
 
 // auditRows counts the rows the CLI's audit entries left for one change.
