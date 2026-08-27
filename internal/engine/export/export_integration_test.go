@@ -770,6 +770,77 @@ func TestLoadDiffsTheKickbacksOfACorrection(t *testing.T) {
 	})
 }
 
+// TestLoadKickbacksReadsTheSettlementAlone pins what the settlement report
+// reads out of a run: its row and the kickbacks it settles, and none of the
+// statements, rated records and deltas a full export renders. The same run is
+// read both ways, so the three empty lists are an omission rather than an empty
+// database: a month of rated records is tens of thousands of rows with a usage
+// object each, and the report renders none of them.
+func TestLoadKickbacksReadsTheSettlementAlone(t *testing.T) {
+	db := storetest.NewDB(t)
+	pool := db.Store.Pool()
+
+	corrected := seedCompletedRun(t, db)
+	seedAdjustmentRecord(t, db, corrected, relation1, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "126.48", "12.65")
+	// The month is closed after its rows are written: the records of a finalized
+	// run are immutable, and the trigger refuses an insert under one.
+	finalizeRun(t, db, corrected)
+
+	correction := seedCorrectionRun(t, db, corrected)
+	seedStatement(t, db, correction, statementKey, []byte(`{"project_id": "proj-456"}`), "106.08")
+	usageID := seedUsage(t, db, correction, usageSeed{
+		cloud: instance.Cloud, resourceID: instance.ResourceID, projectID: projectID,
+		state: "active", from: periodFrom, to: periodTo, usage: `{"vcpus": 4}`,
+	})
+	seedRated(t, db, correction, usageID, "vcpus", "106.08")
+	seedDelta(t, db, correction, corrected, deltaSeed{
+		cloud: instance.Cloud, resourceID: instance.ResourceID, projectID: projectID,
+		dimension: "vcpus", old: "126.48", current: "106.08", difference: "-20.40",
+	})
+	seedAdjustmentRecord(t, db, correction, relation1, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "106.08", "10.61")
+
+	full := load(t, db, correction)
+	if len(full.Statements) != 1 || len(full.Rated) != 1 || len(full.Deltas) != 1 {
+		t.Fatalf("Load() read %d statements, %d rated records and %d deltas, want one of each",
+			len(full.Statements), len(full.Rated), len(full.Deltas))
+	}
+
+	run, err := export.LoadKickbacks(t.Context(), pool, correction)
+	if err != nil {
+		t.Fatalf("LoadKickbacks() error = %v, want nil", err)
+	}
+	if run.ID != correction || run.Kind != runs.KindCorrection || run.CorrectsRunID != corrected {
+		t.Errorf("the run is %s, a %s correcting %s, want the correction %s of %s",
+			run.ID, run.Kind, run.CorrectsRunID, correction, corrected)
+	}
+	if len(run.Statements) != 0 || len(run.Rated) != 0 || len(run.Deltas) != 0 {
+		t.Errorf("the settlement read %d statements, %d rated records and %d deltas, want none of them",
+			len(run.Statements), len(run.Rated), len(run.Deltas))
+	}
+
+	got := kickbackRows(run.Kickbacks)
+	want := kickbackRows([]export.Kickback{
+		kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "-20.40", "-2.04"),
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the kickbacks are %v, want %v", got, want)
+	}
+
+	t.Run("a run that is not exportable", func(t *testing.T) {
+		// The narrowed read refuses what the full one refuses: a superseded run
+		// bills nobody, and a settlement rendered from one names a payout no
+		// partner is owed.
+		runID := seedRun(t, db, runSeed{kind: runs.KindRegular, status: "superseded"})
+
+		_, err := export.LoadKickbacks(t.Context(), pool, runID)
+		if !errors.Is(err, export.ErrRunNotExportable) {
+			t.Fatalf("LoadKickbacks() error = %v, want one matching ErrRunNotExportable", err)
+		}
+	})
+}
+
 // TestLoadCarriesAStoredDocumentThroughJSONB pins the round trip a statement
 // takes. It is stored in a jsonb column, which parses the document and hands it
 // back in its own key order and spacing, and what an ERP receives has to be the

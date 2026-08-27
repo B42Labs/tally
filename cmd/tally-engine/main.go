@@ -1,8 +1,9 @@
 // Command tally-engine is the metering engine's operator tool and its
 // scheduler entrypoint. An operator drives a billing period through it: run
 // meters and rates a period, finalize closes it, detect-late and correct deal
-// with what arrived afterwards, and export writes the result out. The tick
-// subcommand is the same tree run unattended by an hourly CronJob.
+// with what arrived afterwards, export writes the result out, and kickbacks
+// reports what a run owes its partners. The tick subcommand is the same tree
+// run unattended by an hourly CronJob.
 //
 // It is also the only thing that runs DDL on the engine database. Its migrate
 // subcommand applies the embedded goose chain, migrate-status reports which of
@@ -85,6 +86,7 @@ func newRootCmd() *cobra.Command {
 		newCorrectCmd(),
 		pricing,
 		newExportCmd(),
+		newKickbacksCmd(),
 		newTickCmd(),
 	)
 	return root

@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -479,10 +480,11 @@ func newExportCmd() *cobra.Command {
 		Long: "Export the project statements of a run.\n\n" +
 			"json writes run.json and one statement document per project, or one credit note per project " +
 			"for a correction run. csv writes the rated records into rated.csv, and the deltas of a " +
-			"correction into deltas.csv. --out has to be empty or absent, so what it holds afterwards is " +
-			"one run's artifacts and nothing an earlier export of another run left there. Exporting a " +
-			"finalized run twice into a clean directory yields the same files, because a finalized run's " +
-			"records no longer change.",
+			"correction into deltas.csv. Both formats write the run's partner settlement beside them, " +
+			"kickbacks.json or kickbacks.csv, empty when the run owes nobody. --out has to be empty or " +
+			"absent, so what it holds afterwards is one run's artifacts and nothing an earlier export of " +
+			"another run left there. Exporting a finalized run twice into a clean directory yields the " +
+			"same files, because a finalized run's records no longer change.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			id, err := validateRunID(runID)
@@ -560,6 +562,140 @@ func newExportCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("run")
 	_ = cmd.MarkFlagRequired("format")
 	_ = cmd.MarkFlagRequired("out")
+	return cmd
+}
+
+// newKickbacksCmd builds the kickbacks subcommand.
+func newKickbacksCmd() *cobra.Command {
+	var month, runID, format, beneficiary string
+
+	cmd := &cobra.Command{
+		Use:   "kickbacks",
+		Short: "Report the kickbacks a run owes its partners",
+		Long: "Report the kickbacks a run owes its partners.\n\n" +
+			"The document lists, per partner and currency, the kickback total, the number of projects it came " +
+			"from and one entry per kickback record. json prints the settlement document, csv one row per " +
+			"record. A month alone reports the regular run that bills it; a correction named with --run " +
+			"reports the differences to the run it corrects, negative where usage was corrected down. Only a " +
+			"completed or finalized run is reported. A partner named with --beneficiary is reported alone, " +
+			"which is what that partner receives, and a partner the run settles nothing for is refused; " +
+			"without it the document holds every partner the run owes.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// The flags are checked before a configuration is read, so an
+			// operator who mistyped one hears about that flag rather than about
+			// the environment of the machine the command ran on.
+			from, _, err := validatePeriod(month)
+			if err != nil {
+				return err
+			}
+			var id uuid.UUID
+			if runID != "" {
+				if id, err = validateRunID(runID); err != nil {
+					return err
+				}
+			}
+			if err := validateFormat(format); err != nil {
+				return err
+			}
+
+			// Everything a report renders was written to the engine database by
+			// the run, so this reads that one database.
+			db, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			// A month named without a run is the regular run that bills it: what
+			// a partner is settled for a month is what that run settled, and the
+			// differences a correction booked on top are reached with --run.
+			if runID == "" {
+				if id, err = export.PeriodRun(cmd.Context(), db.Pool(), from); err != nil {
+					return err
+				}
+			}
+
+			// The settlement alone: this report renders none of the statements
+			// and none of the rated records a full export does, and a month of
+			// them is tens of thousands of rows to read and decode.
+			run, err := export.LoadKickbacks(cmd.Context(), db.Pool(), id)
+			if err != nil {
+				return err
+			}
+			// A run of another month settles what that month owed, so it is
+			// refused rather than reported under the month the operator named:
+			// this document is what a partner is paid from.
+			if !run.PeriodFrom.Equal(from) {
+				return fmt.Errorf("%w: run %s bills %s, not %s",
+					runs.ErrPeriodMismatch, id, period.Format(run.PeriodFrom), month)
+			}
+
+			// The status is read again outside the snapshot Load read under, the
+			// way the export reads it: a completed run is superseded by a second
+			// run of its period, and a superseded run bills nobody, so a
+			// settlement rendered from one names a payout no partner is owed.
+			current, err := sqlcgen.New(db.Pool()).GetRun(cmd.Context(), pgtype.UUID{Bytes: id, Valid: true})
+			if err != nil {
+				return fmt.Errorf("re-reading the run %s: %w", id, err)
+			}
+			if current.Status != run.Status {
+				return fmt.Errorf("run %s became %s while it was read, and was not reported", id, current.Status)
+			}
+
+			// A partner named with --beneficiary is settled from their own
+			// kickbacks alone. The document holds every partner the run owes,
+			// which is what finance reconciles a month with, and a copy of that
+			// document handed to one partner names what the others are paid and,
+			// through the base of every breakdown entry, what each customer
+			// project was billed.
+			//
+			// A name the run settles nothing under is refused rather than
+			// reported: the filter compares adjustment_records.beneficiary
+			// exactly, so a mistyped name leaves a well-formed document naming
+			// the run, the kind and the month with an empty list of partners
+			// under it, and nothing in that document, and no exit status beside
+			// it, tells a partner mailer or an ERP importer a typo apart from a
+			// month the partner is genuinely owed nothing for.
+			if beneficiary != "" {
+				if !slices.ContainsFunc(run.Kickbacks, func(k export.Kickback) bool {
+					return k.Beneficiary == beneficiary
+				}) {
+					return fmt.Errorf("run %s settles no kickbacks for %s, so there is no settlement to report",
+						id, beneficiary)
+				}
+				run.Kickbacks = slices.DeleteFunc(run.Kickbacks, func(k export.Kickback) bool {
+					return k.Beneficiary != beneficiary
+				})
+			}
+
+			var body []byte
+			switch format {
+			case formatJSON:
+				body, err = export.KickbacksJSON(run)
+			case formatCSV:
+				body, err = export.KickbacksCSV(run)
+			}
+			if err != nil {
+				return err
+			}
+
+			// One write, and nothing else goes to stdout: the report pipes into
+			// a file or a partner mailer as it is. Every refusal reaches stderr
+			// through cobra.
+			if _, err := cmd.OutOrStdout().Write(body); err != nil {
+				return fmt.Errorf("writing the output: %w", err)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&month, "period", "", "billing month to report, YYYY-MM")
+	cmd.Flags().StringVar(&runID, "run", "", "id of the run to report; the month's regular run when absent")
+	cmd.Flags().StringVar(&format, "format", formatJSON, "output format: json or csv")
+	cmd.Flags().StringVar(&beneficiary, "beneficiary", "",
+		"report only this partner's kickbacks; every partner the run owes when absent")
+	_ = cmd.MarkFlagRequired("period")
 	return cmd
 }
 
@@ -642,9 +778,17 @@ func runLines(month string, result runs.Result) []string {
 // the month that run bills, and one line per file the format left in the
 // directory. The counts say how much of the month is in those files, so a run
 // that billed nobody says so here rather than in a listing of the directory.
+// The partner settlement, kickbacks.json or kickbacks.csv, is written by both
+// formats, so its line stands under either of them.
 func exportLines(month, format, out string, run export.Run) []string {
 	lines := []string{fmt.Sprintf("run %s exported for %s as %s into %s", run.ID, month, format, out)}
 	correction := run.Kind == runs.KindCorrection
+	// What a regular run settles for a partner is a kickback, and what a
+	// correction settles is the difference to the run it corrects.
+	kickbacks := "kickbacks"
+	if correction {
+		kickbacks = "kickback deltas"
+	}
 
 	switch format {
 	case formatJSON:
@@ -655,12 +799,15 @@ func exportLines(month, format, out string, run export.Run) []string {
 		if correction {
 			documents = "credit notes"
 		}
-		lines = append(lines, fmt.Sprintf("wrote run.json and %d %s", len(run.Statements), documents))
+		lines = append(lines,
+			fmt.Sprintf("wrote run.json and %d %s", len(run.Statements), documents),
+			fmt.Sprintf("wrote kickbacks.json with %d %s", len(run.Kickbacks), kickbacks))
 	case formatCSV:
 		lines = append(lines, fmt.Sprintf("wrote rated.csv with %d rated records", len(run.Rated)))
 		if correction {
 			lines = append(lines, fmt.Sprintf("wrote deltas.csv with %d deltas", len(run.Deltas)))
 		}
+		lines = append(lines, fmt.Sprintf("wrote kickbacks.csv with %d %s", len(run.Kickbacks), kickbacks))
 	}
 	return lines
 }
