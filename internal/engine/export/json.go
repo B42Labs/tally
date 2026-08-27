@@ -42,9 +42,11 @@ const (
 const nameMaxLen = 200
 
 // JSONFiles writes a run as JSON files into a directory: one document per
-// statement, and run.json, which names the run, the pricing version it rated
-// with, its stats, and one entry per document beside the file it was written
-// to. It is the file implementation of BillingExporter.
+// statement, run.json, which names the run, the pricing version it rated with,
+// its stats, and one entry per document beside the file it was written to, and
+// kickbacks.json, what the run settles for its partners. The settlement is
+// written for every run and carries an empty beneficiary list where the run
+// owes nobody. It is the file implementation of BillingExporter.
 type JSONFiles struct {
 	// Dir is where the files are written. It is created, with every parent it
 	// needs, when the export has rendered everything.
@@ -130,15 +132,17 @@ type statementEntry struct {
 	Currency  string       `json:"currency"`
 }
 
-// Export writes the run's documents and its index into Dir. Everything is
-// rendered before the directory is touched, so a statement whose key or whose
-// stored document is refused leaves no directory and no file behind, and a
-// write that fails takes the documents before it with it: an export that
-// reports an error wrote nothing, rather than every document up to the bad one.
+// Export writes the run's documents, its settlement and its index into Dir.
+// Everything is rendered before the directory is touched, so a statement whose
+// key or whose stored document is refused leaves no directory and no file
+// behind, and a write that fails takes the documents before it with it: an
+// export that reports an error wrote nothing, rather than every document up to
+// the bad one.
 //
-// run.json is written last, after every document it names is on stable storage,
-// so a reader that picks the index up finds every file it points at, on a node
-// that came back from a power loss as well as on one that did not.
+// run.json is written last, after every document it names and the settlement
+// beside them are on stable storage, so a reader that picks the index up finds
+// every file it points at and kickbacks.json next to them, on a node that came
+// back from a power loss as well as on one that did not.
 //
 // The context is not read. What is left is writing a few files, which is not
 // cancelable, and stopping halfway through would leave the directory holding
@@ -206,6 +210,11 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 		})
 	}
 
+	kickbacks, err := KickbacksJSON(run)
+	if err != nil {
+		return err
+	}
+
 	body, err := marshal(index)
 	if err != nil {
 		return fmt.Errorf("rendering %s of run %s: %w", runFileName, run.ID, err)
@@ -214,10 +223,15 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 	if err := prepareDir(j.Dir); err != nil {
 		return err
 	}
-	files := make([]artifact, 0, len(index.Statements))
+	files := make([]artifact, 0, len(index.Statements)+1)
 	for _, entry := range index.Statements {
 		files = append(files, artifact{name: entry.File, body: documents[entry.File]})
 	}
+	// The settlement goes in with the documents rather than after the index, so
+	// it is on stable storage before run.json names the month. No document takes
+	// its name away from it: DocumentFileName prefixes every one of them with
+	// statement- or credit-note-.
+	files = append(files, artifact{name: kickbacksJSONFileName, body: kickbacks})
 	return writeIndexedFiles(j.Dir, files, artifact{name: runFileName, body: body})
 }
 
