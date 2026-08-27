@@ -1,9 +1,10 @@
 // Package export reads one run back out of the engine database and hands it to
 // a BillingExporter, which is the seam every consumer of billing artifacts sits
-// behind. Load is the read: one run row, its statements, its rated records and,
-// for a correction, its deltas, all out of one snapshot. The JSON and the CSV
-// file writers are the first implementations of the interface, and an ERP
-// adapter is another one rather than a change to the loader.
+// behind. Load is the read: one run row, its statements, its rated records, the
+// kickbacks it settles for its partners and, for a correction, its deltas and
+// the kickback differences to the run it corrects, all out of one snapshot. The
+// JSON and the CSV file writers are the first implementations of the interface,
+// and an ERP adapter is another one rather than a change to the loader.
 //
 // The package writes nothing to the database, and only a completed or a
 // finalized run is loaded at all: the superseded, failed and running rows a
@@ -56,8 +57,9 @@ const (
 )
 
 // Run is one run as an exporter receives it: its row, its statements, its rated
-// records, and, for a correction, its deltas. It is everything the file writers
-// below need, so an exporter runs with no database handle of its own.
+// records, the kickbacks it settles, and, for a correction, its deltas. It is
+// everything the file writers below need, so an exporter runs with no database
+// handle of its own.
 type Run struct {
 	ID uuid.UUID
 	// Kind is runs.KindRegular or runs.KindCorrection.
@@ -90,6 +92,11 @@ type Run struct {
 	// Deltas holds one entry per correction delta, in the order corrections.Diff
 	// sorted them. It is empty for a regular run, which has none.
 	Deltas []Delta
+	// Kickbacks holds what the run settles for its partners, in the order
+	// sortKickbacks defines: beneficiary, currency, statement key, relation,
+	// scope, rate, amount, base. A correction's are the differences to the run
+	// it corrects, and a run that owes nobody carries none.
+	Kickbacks []Kickback
 }
 
 // RatedRecord is one rated_records row with the usage record it rates: what was
@@ -127,12 +134,16 @@ type BillingExporter interface {
 	Export(ctx context.Context, run Run) error
 }
 
-// Load reads one run and everything an exporter renders from it. The four
-// queries run in one REPEATABLE READ transaction, so the statements, the rated
-// records and the deltas an exporter receives are the ones that belonged to the
-// run at one instant rather than four. The transaction is read-only as defense
-// in depth, and it is ended by the rollback below: an export writes nothing
-// there is anything to commit.
+// Load reads one run and everything an exporter renders from it. Four queries
+// run for a regular run (the run row, its statements, its rated records and its
+// adjustment records) and six for a correction (its deltas and the adjustment
+// records of the run it corrects on top), all in one REPEATABLE READ
+// transaction, so what an exporter receives is what belonged to the run at one
+// instant rather than at four or six. A correction's kickbacks are diffed
+// against the corrected run's inside that same snapshot, so the two sides of a
+// difference come from one state of the database. The transaction is read-only
+// as defense in depth, and it is ended by the rollback below: an export writes
+// nothing there is anything to commit.
 //
 // A run id no row carries is refused with runs.ErrRunNotFound, and a run that
 // is neither completed nor finalized with ErrRunNotExportable. A stored amount
@@ -202,6 +213,9 @@ func Load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error)
 		if run.Deltas, err = loadDeltas(ctx, q, id, runID); err != nil {
 			return Run{}, err
 		}
+	}
+	if run.Kickbacks, err = loadKickbacks(ctx, q, run); err != nil {
+		return Run{}, err
 	}
 	return run, nil
 }

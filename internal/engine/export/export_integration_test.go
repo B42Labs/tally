@@ -104,6 +104,20 @@ func seedCompletedRun(t *testing.T, db storetest.DB) uuid.UUID {
 	})
 }
 
+// seedCorrectionRun writes a completed correction of one run, which is the
+// second half of every pair a kickback difference is read from.
+func seedCorrectionRun(t *testing.T, db storetest.DB, corrected uuid.UUID) uuid.UUID {
+	t.Helper()
+
+	return seedRun(t, db, runSeed{
+		kind:           runs.KindCorrection,
+		status:         "completed",
+		correctsRunID:  corrected,
+		pricingVersion: pricingVersion,
+		completedAt:    runCompletedAt,
+	})
+}
+
 // finalizeRun closes a seeded run. The records of a finalized run cannot be
 // written, so a case that needs one seeds its rows under the completed run and
 // moves the status afterwards, which is the transition trg_runs_immutable
@@ -202,6 +216,28 @@ func seedDelta(t *testing.T, db storetest.DB, runID, correctsRunID uuid.UUID, se
 		numeric(t, seed.old), numeric(t, seed.current), numeric(t, seed.difference),
 		currency); err != nil {
 		t.Fatalf("seeding the %s delta of %s: %v", seed.dimension, seed.resourceID, err)
+	}
+}
+
+// seedAdjustmentRecord writes one applied adjustment under a run. The insert is
+// plain SQL for the reason seedDelta's is: what a case asserts is the read, so
+// it is not also what sets it up. An empty beneficiary reaches the column as the
+// NULL every type but kickback carries, which is the pairing the CHECK of
+// migration 0002 admits.
+func seedAdjustmentRecord(t *testing.T, db storetest.DB, runID, relationID uuid.UUID,
+	projectKey, beneficiary, typ, scope, rate, base, amount string,
+) {
+	t.Helper()
+
+	if _, err := db.Store.Pool().Exec(t.Context(),
+		`INSERT INTO adjustment_records (run_id, project_id, relation_id, relation_type,
+		                                 relation_target, beneficiary, type, scope,
+		                                 rate, base, amount, currency)
+		 VALUES ($1, $2, $3, 'managed_by', 'partner-corp', NULLIF($4::text, ''),
+		         $5, $6, $7, $8, $9, $10)`,
+		runID, projectKey, relationID, beneficiary, typ, scope,
+		numeric(t, rate), numeric(t, base), numeric(t, amount), currency); err != nil {
+		t.Fatalf("seeding the %s adjustment of %s: %v", typ, projectKey, err)
 	}
 }
 
@@ -377,6 +413,12 @@ func TestLoadReadsARunWhole(t *testing.T) {
 			t.Errorf("the run carries the deltas %v, want none: a regular run corrects nothing", run.Deltas)
 		}
 	})
+
+	t.Run("reads no kickbacks for a run that applied no adjustments", func(t *testing.T) {
+		if len(run.Kickbacks) != 0 {
+			t.Errorf("the run carries the kickbacks %v, want none: it settles nobody", run.Kickbacks)
+		}
+	})
 }
 
 // TestLoadReadsARunThatCarriesNothing pins the two runs an export is short of a
@@ -397,6 +439,9 @@ func TestLoadReadsARunThatCarriesNothing(t *testing.T) {
 		}
 		if len(run.Deltas) != 0 {
 			t.Errorf("the run carries the deltas %v, want none", run.Deltas)
+		}
+		if len(run.Kickbacks) != 0 {
+			t.Errorf("the run carries the kickbacks %v, want none", run.Kickbacks)
 		}
 	})
 
@@ -523,6 +568,9 @@ func TestLoadReadsTheDeltasOfACorrection(t *testing.T) {
 	if run.CorrectsRunID != corrected {
 		t.Errorf("the run corrects %s, want %s", run.CorrectsRunID, corrected)
 	}
+	if len(run.Kickbacks) != 0 {
+		t.Errorf("the run carries the kickbacks %v, want none: neither pass settled a partner", run.Kickbacks)
+	}
 
 	type row struct {
 		cloud, platform, resourceType, resourceID, projectID, dimension string
@@ -559,6 +607,125 @@ func TestLoadReadsTheDeltasOfACorrection(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the deltas are %v, want %v", got, want)
 	}
+}
+
+// TestLoadReadsTheKickbacksOfARun pins what a run hands a settlement: its
+// kickback records, and nothing else it adjusted. The rows are written in none
+// of the order the case asserts, and a discount sits among them: a discount is
+// what a project was billed rather than what a partner is paid, and a payout it
+// leaked into is money nobody owes.
+func TestLoadReadsTheKickbacksOfARun(t *testing.T) {
+	db := storetest.NewDB(t)
+	runID := seedCompletedRun(t, db)
+
+	seedAdjustmentRecord(t, db, runID, relation5, statementKey, "",
+		"discount", "all", "0.150000", "600.00", "-90.00")
+	seedAdjustmentRecord(t, db, runID, relation4, statementKey, "partner-two",
+		"kickback", "all", "0.020000", "500.00", "10.00")
+	seedAdjustmentRecord(t, db, runID, relation2, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "500.00", "50.00")
+	seedAdjustmentRecord(t, db, runID, relation3, "os-dr/proj-456", "partner-corp",
+		"kickback", "openstack.instance", "0.050000", "200.00", "10.00")
+	seedAdjustmentRecord(t, db, runID, relation1, "os-prod/proj-123", "partner-corp",
+		"kickback", "all", "0.100000", "1020.00", "102.00")
+
+	got := kickbackRows(load(t, db, runID).Kickbacks)
+	want := kickbackRows([]export.Kickback{
+		kickback("partner-corp", "os-dr", projectID, relation3, "openstack.instance",
+			"0.050000", "200.00", "10.00"),
+		kickback("partner-corp", "os-prod", "proj-123", relation1, "all", "0.100000", "1020.00", "102.00"),
+		kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "500.00", "50.00"),
+		kickback("partner-two", "os-prod", projectID, relation4, "all", "0.020000", "500.00", "10.00"),
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the kickbacks are %v, want %v", got, want)
+	}
+
+	t.Run("a run without kickbacks", func(t *testing.T) {
+		discounted := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, discounted, relation5, statementKey, "",
+			"discount", "all", "0.150000", "600.00", "-90.00")
+
+		for _, id := range []uuid.UUID{discounted, seedCompletedRun(t, db)} {
+			if got := load(t, db, id).Kickbacks; len(got) != 0 {
+				t.Errorf("the run %s carries the kickbacks %v, want none", id, got)
+			}
+		}
+	})
+}
+
+// TestLoadDiffsTheKickbacksOfACorrection pins what a correction settles for a
+// partner. The partner was paid on the finalized month already, so what the
+// correction owes is the difference to what that run settled: a kickback the
+// correction re-rated smaller is money owed back, one it dropped is taken back
+// whole, and one it settles for the first time is owed whole.
+func TestLoadDiffsTheKickbacksOfACorrection(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	corrected := seedCompletedRun(t, db)
+	seedAdjustmentRecord(t, db, corrected, relation1, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "126.48", "12.65")
+	seedAdjustmentRecord(t, db, corrected, relation2, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "50.00", "5.00")
+	// The month is closed after its rows are written: the records of a finalized
+	// run are immutable, and the trigger refuses an insert under one.
+	finalizeRun(t, db, corrected)
+
+	correction := seedCorrectionRun(t, db, corrected)
+	seedAdjustmentRecord(t, db, correction, relation1, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "106.08", "10.61")
+	seedAdjustmentRecord(t, db, correction, relation3, statementKey, "partner-corp",
+		"kickback", "all", "0.100000", "30.00", "3.00")
+
+	got := kickbackRows(load(t, db, correction).Kickbacks)
+	want := kickbackRows([]export.Kickback{
+		kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "-20.40", "-2.04"),
+		kickback("partner-corp", "os-prod", projectID, relation2, "all", "0.100000", "-50.00", "-5.00"),
+		kickback("partner-corp", "os-prod", projectID, relation3, "all", "0.100000", "30.00", "3.00"),
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the kickbacks are %v, want %v", got, want)
+	}
+
+	t.Run("a corrected run that settled nobody", func(t *testing.T) {
+		correction := seedCorrectionRun(t, db, seedCompletedRun(t, db))
+		seedAdjustmentRecord(t, db, correction, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "106.08", "10.61")
+
+		got := kickbackRows(load(t, db, correction).Kickbacks)
+		want := kickbackRows([]export.Kickback{
+			kickback("partner-corp", "os-prod", projectID, relation1, "all", "0.100000", "106.08", "10.61"),
+		})
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("the kickbacks are %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a correction that settles what the corrected run settled", func(t *testing.T) {
+		corrected := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, corrected, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "126.48", "12.65")
+		correction := seedCorrectionRun(t, db, corrected)
+		seedAdjustmentRecord(t, db, correction, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "126.48", "12.65")
+
+		if got := load(t, db, correction).Kickbacks; len(got) != 0 {
+			t.Errorf("the correction carries the kickbacks %v, want none: the partner was paid already", got)
+		}
+	})
+
+	t.Run("a base that moved under an amount that did not", func(t *testing.T) {
+		corrected := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, corrected, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "100.00", "10.00")
+		correction := seedCorrectionRun(t, db, corrected)
+		seedAdjustmentRecord(t, db, correction, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "100.04", "10.00")
+
+		if got := load(t, db, correction).Kickbacks; len(got) != 0 {
+			t.Errorf("the correction carries the kickbacks %v, want none: the credit note drops it too", got)
+		}
+	})
 }
 
 // TestLoadCarriesAStoredDocumentThroughJSONB pins the round trip a statement
@@ -666,6 +833,69 @@ func TestLoadRefusals(t *testing.T) {
 			t.Fatalf("Load() error = nil, want the stored non-number refused")
 		}
 		assertMessage(t, err, instance.ResourceID, projectID, "vcpus")
+	})
+
+	t.Run("a kickback amount that is not a number", func(t *testing.T) {
+		runID := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, runID, relation1, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "500.00", "NaN")
+
+		_, err := export.Load(t.Context(), pool, runID)
+		if err == nil {
+			t.Fatalf("Load() error = nil, want the stored non-number refused")
+		}
+		assertMessage(t, err, "the kickback of relation", relation1.String(), statementKey, "is not a number")
+	})
+
+	t.Run("a kickback base that is not a number", func(t *testing.T) {
+		runID := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, runID, relation2, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "NaN", "50.00")
+
+		_, err := export.Load(t.Context(), pool, runID)
+		if err == nil {
+			t.Fatalf("Load() error = nil, want the stored non-number refused")
+		}
+		assertMessage(t, err, "the kickback of relation", relation2.String(), statementKey, "is not a number")
+	})
+
+	t.Run("a corrected run whose kickback is not a number", func(t *testing.T) {
+		corrected := seedCompletedRun(t, db)
+		seedAdjustmentRecord(t, db, corrected, relation3, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "500.00", "NaN")
+		correction := seedCorrectionRun(t, db, corrected)
+		seedAdjustmentRecord(t, db, correction, relation3, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "400.00", "40.00")
+
+		// The difference is taken between two runs, so the side that carries the
+		// stored non-number is the one the refusal names.
+		_, err := export.Load(t.Context(), pool, correction)
+		if err == nil {
+			t.Fatalf("Load() error = nil, want the stored non-number refused")
+		}
+		assertMessage(t, err, "the kickback of relation", corrected.String(), "is not a number")
+	})
+
+	t.Run("a correction that names no corrected run", func(t *testing.T) {
+		// runs.corrects_run_id carries no CHECK tying it to the correction kind,
+		// so this row is one the schema admits. Its kickbacks are the differences
+		// to a run, and the empty baseline the nil uuid reads back would report
+		// the correction's whole month as differences the partner is owed a
+		// second time, under a document that says nothing is missing.
+		correction := seedRun(t, db, runSeed{
+			kind:           runs.KindCorrection,
+			status:         "completed",
+			pricingVersion: pricingVersion,
+			completedAt:    runCompletedAt,
+		})
+		seedAdjustmentRecord(t, db, correction, relation4, statementKey, "partner-corp",
+			"kickback", "all", "0.100000", "500.00", "50.00")
+
+		_, err := export.Load(t.Context(), pool, correction)
+		if err == nil {
+			t.Fatalf("Load() error = nil, want the correction without a corrected run refused")
+		}
+		assertMessage(t, err, correction.String(), "names no corrected run")
 	})
 
 	t.Run("a statement total that is not a number", func(t *testing.T) {
