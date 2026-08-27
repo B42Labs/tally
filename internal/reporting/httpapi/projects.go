@@ -13,13 +13,14 @@ import (
 
 	"github.com/b42labs/tally/internal/reporting/audit"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
+	"github.com/b42labs/tally/internal/reporting/projects"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 )
 
-// The audit trail the two writes of the registry leave.
+// The audit trail the update of the registry leaves. The registration writes
+// its own row from projects.Register.
 const (
-	auditObjectProjects = "projects"
-	actionCreateProject = auditObjectProjects + ".create"
+	auditObjectProjects = projects.AuditObject
 	actionUpdateProject = auditObjectProjects + ".update"
 )
 
@@ -36,13 +37,14 @@ const unknownProjectDetail = "this project is not registered"
 // what the caller has to change to get through.
 const duplicateProjectDetail = "a project with this cloud and external id is already registered"
 
-// The unique key of the registry, as Postgres reports it when a write collides
-// with it. Matching the name and not the code alone is what keeps another
-// unique violation from being answered as a duplicate registration.
-const (
-	uniqueViolation      = "23505"
-	projectKeyConstraint = "projects_cloud_external_id_key"
-)
+// virtualKeyDetail answers a registration that breaks decision D1. It names the
+// rule the caller has to satisfy, because either member of the pair may be the
+// one to change.
+const virtualKeyDetail = "a meta or partner project carries its platform as its cloud, and no other project carries meta or partner as its cloud"
+
+// The code Postgres reports a unique violation under. violatesUnique matches it
+// together with the name of the constraint that was violated.
+const uniqueViolation = "23505"
 
 // The details that answer a failure of one of these routes a caller can do
 // nothing about. Which operation failed is what they tell apart, so each is
@@ -58,11 +60,12 @@ const (
 // operations address it by.
 //
 // The row and the audit row naming it share one transaction, so a registration
-// the log does not account for never reaches the database. The unique key over
-// (cloud, external_id) is what decides a duplicate, and it decides it in the
-// database rather than in a read before the insert: two racing registrations of
-// one pair would both pass such a read, and one of them would still have to be
-// refused here.
+// the log does not account for never reaches the database. What a virtual
+// project carries as its cloud and whether the pair is a duplicate are both
+// decided by projects.Register, the second over the unique key on
+// (cloud, external_id) in the database rather than in a read before the insert:
+// two racing registrations of one pair would both pass such a read, and one of
+// them would still have to be refused here.
 func (s *server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -83,39 +86,34 @@ func (s *server) CreateProject(w http.ResponseWriter, r *http.Request) {
 			createProjectDetail)
 		return
 	}
-	metadata := body.Metadata
-	if len(metadata) == 0 {
-		// The column is NOT NULL and the contract answers metadata as an object,
-		// so a registration that carries none registers the empty one.
-		metadata = []byte("{}")
-	}
 
 	var stored sqlcgen.Project
 	if err := s.store.WithTx(ctx, func(tx pgx.Tx) error {
-		q := sqlcgen.New(tx)
 		var err error
-		if stored, err = q.InsertProject(ctx, sqlcgen.InsertProjectParams{
-			Platform:   body.Platform,
-			Cloud:      body.Cloud,
-			ExternalID: body.ExternalID,
-			Name:       filterText(body.Name),
-			Metadata:   metadata,
-		}); err != nil {
-			return fmt.Errorf("registering (%s, %s): %w", body.Cloud, body.ExternalID, err)
-		}
-		return audit.Log(ctx, q, audit.Entry{
-			Actor:      queryActor(ctx),
-			Action:     actionCreateProject,
-			ObjectType: auditObjectProjects,
-			ObjectID:   stored.ID.String(),
-		})
+		stored, err = projects.Register(ctx, sqlcgen.New(tx), queryActor(ctx),
+			projects.Registration{
+				Platform:   body.Platform,
+				Cloud:      body.Cloud,
+				ExternalID: body.ExternalID,
+				Name:       filterText(body.Name),
+				Metadata:   body.Metadata,
+			})
+		return err
 	}); err != nil {
-		if violatesUnique(err, projectKeyConstraint) {
+		switch {
+		case errors.Is(err, projects.ErrVirtualKey):
+			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+				"Validation failed", virtualKeyDetail,
+				problem.FieldError{
+					Loc: "body.cloud",
+					Msg: "has to equal the platform of a virtual project",
+				})
+		case errors.Is(err, projects.ErrAlreadyRegistered):
 			problem.Write(w, http.StatusConflict, problem.TypeConflict,
 				"Conflict", duplicateProjectDetail)
-			return
+		default:
+			writeInternal(ctx, w, "registering a project", err, createProjectDetail)
 		}
-		writeInternal(ctx, w, "registering a project", err, createProjectDetail)
 		return
 	}
 

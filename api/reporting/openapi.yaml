@@ -772,6 +772,11 @@ paths:
         a pair it already holds is answered 409 rather than replaced, so a
         repeated registration never overwrites what an operator entered before.
 
+        A registration whose `platform` is `meta` or `partner` has to carry
+        that same literal as its `cloud`, and no other platform may carry
+        `meta` or `partner` as its `cloud`. A registration breaking that rule
+        is answered 422 without being written.
+
         The `id` the answer carries is how the other operations address the
         project. An external id alone does not, because two clouds may name
         different projects the same way.
@@ -804,6 +809,8 @@ paths:
         "403":
           $ref: "#/components/responses/Problem"
         "409":
+          $ref: "#/components/responses/Problem"
+        "422":
           $ref: "#/components/responses/Problem"
         "500":
           $ref: "#/components/responses/Problem"
@@ -972,6 +979,9 @@ paths:
         source again is answered 422
         (`urn:tally:error:relation_cycle`) without being written. A type
         outside that list is created without the walk.
+
+        A relation to or from a virtual project is created, listed, updated
+        and closed like any other.
       security:
         - apiToken: []
       requestBody:
@@ -1583,9 +1593,15 @@ components:
             What happened, written resource.action with an optional phase, for
             example compute.instance.create.end.
         platform:
-          description: The platform the resource lives on, openstack for example.
+          description: >-
+            The platform the resource lives on, openstack for example. `meta`
+            and `partner` name the two kinds of virtual project, which own no
+            resources; an item carrying either refuses the item.
         cloud:
-          description: The installation the resource lives in, os-prod-eu1 for example.
+          description: >-
+            The installation the resource lives in, os-prod-eu1 for example.
+            `meta` and `partner` are the clouds of the virtual projects, so an
+            item carrying either refuses the item as well.
         resource_type:
           description: The kind of resource, instance or volume for example.
         resource_id:
@@ -1639,7 +1655,9 @@ components:
           type: string
           description: >-
             Why the item was refused, for example
-            "size_schema: 'vcpus' is a required property".
+            "size_schema: 'vcpus' is a required property" or
+            'schema: platform: "meta" is a virtual platform, which never
+            carries resources'.
 
     StoredEvent:
       type: object
@@ -2035,11 +2053,16 @@ components:
           description: The project, as this API names it.
         platform:
           type: string
-          description: The platform the project lives on, openstack for example.
+          description: >-
+            The platform the project lives on, openstack for example. `meta`
+            and `partner` are reserved for the two kinds of virtual project
+            that own no resources: the meta-project and the partner.
         cloud:
           type: string
           description: >-
-            The installation the project lives in, os-prod-eu1 for example.
+            The installation the project lives in, os-prod-eu1 for example. A
+            virtual project carries its platform here, and no real project
+            carries `meta` or `partner`.
         external_id:
           type: string
           description: >-
@@ -2159,12 +2182,17 @@ components:
         platform:
           type: string
           minLength: 1
-          description: The platform the project lives on, openstack for example.
+          description: >-
+            The platform the project lives on, openstack for example. `meta`
+            and `partner` are reserved for the two kinds of virtual project
+            that own no resources: the meta-project and the partner.
         cloud:
           type: string
           minLength: 1
           description: >-
-            The installation the project lives in, os-prod-eu1 for example.
+            The installation the project lives in, os-prod-eu1 for example. A
+            virtual project carries its platform here, and no real project
+            carries `meta` or `partner`.
         external_id:
           type: string
           minLength: 1
@@ -2223,7 +2251,12 @@ components:
         relation_type:
           type: string
           description: >-
-            What the relation means, infrastructure_tenant for example.
+            What the relation means. `infrastructure_tenant` attributes the
+            cost of the target to the source and is the default attributing
+            type. `member_of` groups the source under a meta-project (platform
+            `meta`), and `managed_by` places the source under a partner
+            (platform `partner`); neither of the two ever attributes cost. The
+            field is a free string, so any other type is stored as it arrives.
         metadata:
           type: object
           description: >-
@@ -2275,7 +2308,12 @@ components:
           type: string
           minLength: 1
           description: >-
-            What the relation means, infrastructure_tenant for example.
+            What the relation means. `infrastructure_tenant` attributes the
+            cost of the target to the source and is the default attributing
+            type. `member_of` groups the source under a meta-project (platform
+            `meta`), and `managed_by` places the source under a partner
+            (platform `partner`); neither of the two ever attributes cost. The
+            field is a free string, so any other type is stored as it arrives.
         metadata:
           type: object
           description: >-
