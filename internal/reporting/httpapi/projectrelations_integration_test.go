@@ -126,6 +126,85 @@ func TestProjectRelationsOverHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("relates real projects to virtual ones like any other", func(t *testing.T) {
+		real := registerProjects(t, a, adminToken, "os-rel-virtual", 1)[0]
+		partner := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "partner", "cloud": "partner", "external_id": "partner-corp-rel",
+			})))
+		meta := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "meta", "cloud": "meta", "external_id": "customer-alpha-rel",
+			})))
+
+		// The relation to the partner names a start of its own, so the temporal
+		// read further down has a span to ask about.
+		managed := createdRelation(t, a.call(t, http.MethodPost, relationsPath(real.Id),
+			adminToken, projectDocument(t, map[string]any{
+				"target_id": partner.Id, "relation_type": "managed_by",
+				"valid_from": relationOpened,
+			})))
+		member := relate(t, a, adminToken, real.Id, meta.Id, "member_of")
+
+		listed := relationListOf(t, a.call(t, http.MethodGet,
+			relationsPath(real.Id)+"?direction=outgoing", adminToken, nil))
+		if got, want := relationIDs(listed.Items),
+			[]uuid.UUID{managed.Id, member.Id}; !slices.Equal(got, want) {
+			t.Errorf("served relations = %v, want %v", got, want)
+		}
+
+		walk := relatedListOf(t, a.call(t, http.MethodGet,
+			relatedPath(real.Id)+"?depth=1", adminToken, nil))
+		reached := make(map[uuid.UUID]string, len(walk.Items))
+		for _, item := range walk.Items {
+			reached[item.Project.Id] = item.RelationType
+		}
+		wantReached := map[uuid.UUID]string{partner.Id: "managed_by", meta.Id: "member_of"}
+		if !reflect.DeepEqual(reached, wantReached) {
+			t.Errorf("walked projects = %v, want %v", reached, wantReached)
+		}
+
+		// Neither type attributes cost, so no cycle walk runs and the relation
+		// back out of the meta-project is created like any other.
+		relate(t, a, adminToken, meta.Id, real.Id, "member_of")
+
+		relationFrom(t, a.call(t, http.MethodPatch, relationTarget(real.Id, managed.Id),
+			adminToken, projectDocument(t, map[string]any{"valid_to": relationClosed})))
+
+		// The relation to the partner ran from relationOpened to relationClosed,
+		// which an instant inside the span finds and one after it does not.
+		inside := relationListOf(t, a.call(t, http.MethodGet,
+			relationsPath(real.Id)+"?relation_type=managed_by&at="+
+				instant(time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)), adminToken, nil))
+		if got, want := relationIDs(inside.Items),
+			[]uuid.UUID{managed.Id}; !slices.Equal(got, want) {
+			t.Errorf("relations inside the span = %v, want %v", got, want)
+		}
+		after := relationListOf(t, a.call(t, http.MethodGet,
+			relationsPath(real.Id)+"?relation_type=managed_by&at="+
+				instant(time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)), adminToken, nil))
+		if got := relationIDs(after.Items); len(got) != 0 {
+			t.Errorf("relations after the span = %v, want none", got)
+		}
+
+		closeRelation(t, a, adminToken, real.Id, member.Id)
+		remaining := relationListOf(t, a.call(t, http.MethodGet,
+			relationsPath(real.Id)+"?direction=outgoing", adminToken, nil))
+		if got := relationIDs(remaining.Items); slices.Contains(got, member.Id) {
+			t.Errorf("served relations = %v, want the closed %s gone", got, member.Id)
+		}
+
+		// A relation reaching a virtual project is refused like any other one
+		// whose target the registry does not hold.
+		rec := a.call(t, http.MethodPost, relationsPath(real.Id), adminToken,
+			relationDocument(t, uuid.New(), "member_of"))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got, want := problemDetail(t, rec), "this project is not registered"; got != want {
+			t.Errorf("detail = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("closes a relation and answers a repeated close the same way", func(t *testing.T) {
 		pair := registerProjects(t, a, adminToken, "os-rel-close", 2)
 		relation := relate(t, a, adminToken, pair[0].Id, pair[1].Id, plainType)
@@ -929,6 +1008,15 @@ func relationEdges(items []Relation, named map[uuid.UUID]string) []string {
 		edges[i] = named[item.SourceId] + "->" + named[item.TargetId]
 	}
 	return edges
+}
+
+// relationIDs names the relations of an answer in the order they were served.
+func relationIDs(items []Relation) []uuid.UUID {
+	ids := make([]uuid.UUID, len(items))
+	for i, item := range items {
+		ids[i] = item.Id
+	}
+	return ids
 }
 
 // walkSteps names what a traversal answered: the project it reached, the depth
