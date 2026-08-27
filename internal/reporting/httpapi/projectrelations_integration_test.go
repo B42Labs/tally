@@ -205,6 +205,223 @@ func TestProjectRelationsOverHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("stores the pricing adjustments of a relation", func(t *testing.T) {
+		pair := registerProjects(t, a, adminToken, "os-rel-adjust", 2)
+		partner := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "partner", "cloud": "partner",
+				"external_id": "partner-corp-adjust",
+			})))
+		meta := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "meta", "cloud": "meta",
+				"external_id": "customer-alpha-adjust",
+			})))
+
+		// A rate is text on the wire and text in the row, so the answer carries
+		// the "0.15" the request sent rather than a number a parse turned it
+		// into.
+		metadata := map[string]any{"pricing_adjustments": []any{
+			map[string]any{
+				"type": "discount", "rate": "0.15", "scope": "all",
+				"description": "Reseller end-customer discount",
+			},
+			map[string]any{"type": "kickback", "rate": "0.10", "scope": "all"},
+		}}
+		created := createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id),
+			adminToken, projectDocument(t, map[string]any{
+				"target_id": partner.Id, "relation_type": "managed_by",
+				"metadata": metadata,
+			})))
+
+		if sent := asDocument(t, metadata); !reflect.DeepEqual(created.Metadata, sent) {
+			t.Errorf("metadata = %v, want the sent %v", created.Metadata, sent)
+		}
+		if got, want := storedRelationIDs(t, a, pair[0].Id, partner.Id),
+			[]uuid.UUID{created.Id}; !slices.Equal(got, want) {
+			t.Errorf("stored relations = %v, want the answered %v", got, want)
+		}
+		if rows := projectAudits(t, a, adminID.String(), actionCreateRelation, created.Id); len(rows) != 1 {
+			t.Errorf("creation audit rows = %v, want exactly one", rows)
+		}
+
+		// The array is read out of the metadata of every relation, so what a
+		// relation means decides nothing about whether its adjustments are
+		// checked.
+		createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": meta.Id, "relation_type": "member_of",
+				"metadata": map[string]any{"pricing_adjustments": []any{
+					map[string]any{
+						"type": "project_discount", "rate": "0.05",
+						"scope": "openstack.instance",
+					},
+				}},
+			})))
+		createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": plainType,
+				"metadata": map[string]any{"pricing_adjustments": []any{
+					map[string]any{"type": "surcharge", "rate": "0.1", "scope": "openstack"},
+				}},
+			})))
+	})
+
+	t.Run("refuses pricing adjustments the schema does not accept", func(t *testing.T) {
+		pair := registerProjects(t, a, adminToken, "os-rel-adjust-refuse", 2)
+
+		// Where the answer puts a violation, spelled the way the contract
+		// validator spells a body location.
+		const at = "body.metadata.pricing_adjustments"
+
+		for _, tc := range []struct {
+			name        string
+			adjustments any
+			// locations names where the answer puts each violation and
+			// messages what it says about it, both in the order the field
+			// errors come back.
+			locations []string
+			messages  []string
+		}{
+			{
+				name: "a rate written as a number",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": float64(0.15), "scope": "all",
+				}},
+				locations: []string{at + ".0.rate"},
+				messages:  []string{"got number, want string"},
+			},
+			{
+				name: "a rate with seven decimal places",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "0.1234567", "scope": "all",
+				}},
+				locations: []string{at + ".0.rate"},
+				messages:  []string{"does not match pattern"},
+			},
+			{
+				name: "a rate above one",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "1.5", "scope": "all",
+				}},
+				locations: []string{at + ".0.rate"},
+				messages:  []string{"does not match pattern"},
+			},
+			{
+				name: "a type the enum does not name",
+				adjustments: []any{map[string]any{
+					"type": "rebate", "rate": "0.15", "scope": "all",
+				}},
+				locations: []string{at + ".0.type"},
+				messages:  []string{"value must be one of"},
+			},
+			{
+				name: "a scope in the wrong case",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "0.15", "scope": "Openstack.Instance",
+				}},
+				locations: []string{at + ".0.scope"},
+				messages:  []string{"does not match pattern"},
+			},
+			{
+				name: "a scope of three parts",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "0.15", "scope": "openstack.instance.extra",
+				}},
+				locations: []string{at + ".0.scope"},
+				messages:  []string{"does not match pattern"},
+			},
+			{
+				name:        "an element without a rate",
+				adjustments: []any{map[string]any{"type": "discount", "scope": "all"}},
+				locations:   []string{at + ".0"},
+				messages:    []string{"missing property 'rate'"},
+			},
+			{
+				name: "an element with a member the schema does not know",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "0.15", "scope": "all", "note": "x",
+				}},
+				locations: []string{at + ".0"},
+				messages:  []string{"additional properties 'note' not allowed"},
+			},
+			{
+				name: "a description one character too long",
+				adjustments: []any{map[string]any{
+					"type": "discount", "rate": "0.15", "scope": "all",
+					"description": strings.Repeat("x", 501),
+				}},
+				locations: []string{at + ".0.description"},
+				messages:  []string{"maxLength: got 501, want 500"},
+			},
+			{
+				name:        "an array without an adjustment in it",
+				adjustments: []any{},
+				locations:   []string{at},
+				messages:    []string{"minItems: got 0, want 1"},
+			},
+			{
+				name:        "the null document",
+				adjustments: nil,
+				locations:   []string{at},
+				messages:    []string{"got null, want array"},
+			},
+			{
+				name:        "an object instead of an array",
+				adjustments: map[string]any{},
+				locations:   []string{at},
+				messages:    []string{"got object, want array"},
+			},
+			{
+				// Every violation is named at once, so a caller corrects the
+				// whole array in one go rather than one element per request.
+				name: "two elements the schema refuses",
+				adjustments: []any{
+					map[string]any{"type": "rebate", "rate": "0.15", "scope": "all"},
+					map[string]any{"type": "discount", "rate": float64(0.15), "scope": "all"},
+				},
+				locations: []string{at + ".0.type", at + ".1.rate"},
+				messages:  []string{"value must be one of", "got number, want string"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				before := len(auditRows(t, a, adminID.String(), actionCreateRelation))
+
+				rec := a.call(t, http.MethodPost, relationsPath(pair[0].Id), adminToken,
+					projectDocument(t, map[string]any{
+						"target_id": pair[1].Id, "relation_type": plainType,
+						"metadata": map[string]any{"pricing_adjustments": tc.adjustments},
+					}))
+
+				assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+				if got := problemDetail(t, rec); got != invalidAdjustmentsDetail {
+					t.Errorf("detail = %q, want %q", got, invalidAdjustmentsDetail)
+				}
+				if got := fieldErrorLocations(t, rec); !slices.Equal(got, tc.locations) {
+					t.Errorf("field errors = %v, want %v", got, tc.locations)
+				}
+				messages := fieldErrorMessages(t, rec)
+				if len(messages) != len(tc.messages) {
+					t.Fatalf("field errors = %v, want one per violation %v", messages, tc.messages)
+				}
+				// The pattern itself is left out of what a message has to
+				// name: the validator renders it with the backslashes doubled.
+				for i, message := range messages {
+					if !strings.Contains(message, tc.messages[i]) {
+						t.Errorf("field error %d = %q, want it to name %q", i, message, tc.messages[i])
+					}
+				}
+
+				if got := storedRelationIDs(t, a, pair[0].Id, pair[1].Id); len(got) != 0 {
+					t.Errorf("stored relations = %v, want a refused creation to write none", got)
+				}
+				if got := len(auditRows(t, a, adminID.String(), actionCreateRelation)); got != before {
+					t.Errorf("creation audit rows = %d, want the %d of before the refusal", got, before)
+				}
+			})
+		}
+	})
+
 	t.Run("closes a relation and answers a repeated close the same way", func(t *testing.T) {
 		pair := registerProjects(t, a, adminToken, "os-rel-close", 2)
 		relation := relate(t, a, adminToken, pair[0].Id, pair[1].Id, plainType)
@@ -762,6 +979,12 @@ func TestProjectRelationsReportAFailedQuery(t *testing.T) {
 	// nothing but the request itself runs after it is gone.
 	project, relation := uuid.New(), uuid.New()
 	creation := relationDocument(t, uuid.New(), plainType)
+	adjusted := projectDocument(t, map[string]any{
+		"target_id": uuid.New(), "relation_type": plainType,
+		"metadata": map[string]any{"pricing_adjustments": []any{
+			map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+		}},
+	})
 	update := projectDocument(t, map[string]any{"metadata": map[string]any{"owner": "team-a"}})
 
 	// How long the database gets to shut down cleanly.
@@ -790,6 +1013,14 @@ func TestProjectRelationsReportAFailedQuery(t *testing.T) {
 		{
 			name: "the creation", method: http.MethodPost, target: relationsPath(project),
 			body: creation, detail: "the relation could not be created",
+		},
+		{
+			// The adjustments match the schema, which is decided without the
+			// database, so what is left to fail is the transaction behind the
+			// creation.
+			name: "the creation of an adjusted relation", method: http.MethodPost,
+			target: relationsPath(project), body: adjusted,
+			detail: "the relation could not be created",
 		},
 		{
 			name: "the update", method: http.MethodPatch,
@@ -1043,6 +1274,26 @@ func memberRaw(t *testing.T, rec *httptest.ResponseRecorder, name string) string
 		t.Fatalf("the body %q carries no %s", rec.Body.String(), name)
 	}
 	return string(raw)
+}
+
+// fieldErrorMessages says what a rejected request was told about each place it
+// went wrong, in the order the answer names them. It is what tells two
+// refusals of the same location apart.
+func fieldErrorMessages(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+
+	var body struct {
+		Errors []problem.FieldError `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the body %q: %v", rec.Body.String(), err)
+	}
+
+	messages := make([]string, len(body.Errors))
+	for i, entry := range body.Errors {
+		messages[i] = entry.Msg
+	}
+	return messages
 }
 
 // storedValidTo is the end the relation row carries, nil while it is open.
