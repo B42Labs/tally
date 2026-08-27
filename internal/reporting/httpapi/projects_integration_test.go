@@ -16,6 +16,7 @@ import (
 
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
+	"github.com/b42labs/tally/internal/reporting/projects"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
 )
 
@@ -72,7 +73,7 @@ func TestProjectsOverHTTP(t *testing.T) {
 			t.Errorf("the read answered %s, want the registration's %s", got, want)
 		}
 
-		rows := projectAudits(t, a, adminID.String(), actionCreateProject, created.Id)
+		rows := projectAudits(t, a, adminID.String(), projects.ActionCreate, created.Id)
 		if len(rows) != 1 {
 			t.Fatalf("registration audit rows = %v, want exactly one", rows)
 		}
@@ -110,6 +111,94 @@ func TestProjectsOverHTTP(t *testing.T) {
 		second := registerProject(t, a, adminToken, fixturePlatform, cloud+"-b", externalID)
 		if second.Id == first.Id {
 			t.Errorf("the second cloud reused the row %s, want a project of its own", first.Id)
+		}
+	})
+
+	t.Run("holds a virtual platform to its own cloud", func(t *testing.T) {
+		// The refusals run before the two registrations that get through, so a
+		// cloud that lists nothing afterwards is the refusal having written
+		// nothing rather than a project nobody has registered yet.
+		audits := len(auditRows(t, a, adminID.String(), projects.ActionCreate))
+
+		for _, tc := range []struct {
+			name       string
+			platform   string
+			cloud      string
+			externalID string
+		}{
+			{
+				name:     "a meta project under a cloud of its own",
+				platform: "meta", cloud: "os-virtual", externalID: "virtual-key-1",
+			},
+			{
+				name:     "a real platform under a virtual cloud",
+				platform: fixturePlatform, cloud: "meta", externalID: "virtual-key-2",
+			},
+			{
+				name:     "one virtual platform under the other",
+				platform: "meta", cloud: "partner", externalID: "virtual-key-3",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := a.call(t, http.MethodPost, projectsRoute, adminToken, projectDocument(t,
+					map[string]any{
+						"platform": tc.platform, "cloud": tc.cloud, "external_id": tc.externalID,
+					}))
+
+				assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+				if got := problemDetail(t, rec); got != virtualKeyDetail {
+					t.Errorf("detail = %q, want %q", got, virtualKeyDetail)
+				}
+				// The cloud is what the caller has to change, whichever end of the
+				// pair names the virtual platform.
+				if got, want := fieldErrorLocations(t, rec), []string{"body.cloud"}; !slices.Equal(got, want) {
+					t.Errorf("field errors = %v, want %v", got, want)
+				}
+
+				list := projectListOf(t, a.call(t, http.MethodGet,
+					projectsRoute+"?cloud="+tc.cloud, adminToken, nil))
+				if len(list.Items) != 0 {
+					t.Errorf("the cloud %s holds %v, want the refusal to have written nothing",
+						tc.cloud, projectKeys(list.Items))
+				}
+			})
+		}
+
+		if got := len(auditRows(t, a, adminID.String(), projects.ActionCreate)); got != audits {
+			t.Errorf("registration audit rows = %d, want the %d the refusals started with",
+				got, audits)
+		}
+
+		meta := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "meta", "cloud": "meta", "external_id": "customer-alpha",
+				"name": "Customer Alpha",
+			})))
+		if meta.Platform != "meta" || meta.Cloud != "meta" {
+			t.Errorf("the meta-project = (%q, %q), want it carrying its platform as its cloud",
+				meta.Platform, meta.Cloud)
+		}
+
+		partner := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "partner", "cloud": "partner", "external_id": "partner-corp",
+			})))
+		if partner.Platform != "partner" || partner.Cloud != "partner" {
+			t.Errorf("the partner = (%q, %q), want it carrying its platform as its cloud",
+				partner.Platform, partner.Cloud)
+		}
+
+		// A virtual project is keyed like every other one, so the pair it
+		// registered under registers once.
+		rec := a.call(t, http.MethodPost, projectsRoute, adminToken, projectDocument(t,
+			map[string]any{
+				"platform": "meta", "cloud": "meta", "external_id": "customer-alpha",
+			}))
+
+		assertProblem(t, rec, http.StatusConflict, problem.TypeConflict)
+		if got, want := problemDetail(t, rec),
+			"a project with this cloud and external id is already registered"; got != want {
+			t.Errorf("detail = %q, want %q", got, want)
 		}
 	})
 
