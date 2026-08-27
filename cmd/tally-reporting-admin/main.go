@@ -1,5 +1,5 @@
 // Command tally-reporting-admin provisions and revokes the Reporting API's
-// credentials.
+// credentials and registers its virtual projects.
 //
 // The HTTP contract has no credential endpoints: a credential is issued by an
 // operator who already holds database access, not over the API that credential
@@ -16,6 +16,13 @@
 // A new token is printed once, alone on stdout, so it can be redirected into a
 // file or a secret. The database receives its sha256 digest and never the
 // token itself.
+//
+// create-meta-project and create-partner register the virtual projects of
+// decision D1 (roadmap/05-phase-5-commercial-pricing.md): the (meta, meta, id)
+// and the (partner, partner, id) row. Both go through the same
+// projects.Register the API's registration goes through and are audited as
+// admin-cli. The new id is printed alone on stdout, so a command substitution
+// passes it as the target_id of a relation.
 //
 // The normative specification is roadmap/01-phase-1-core-platform-openstack.md,
 // WP 1.4.
@@ -51,7 +58,7 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "tally-reporting-admin",
-		Short: "Provision and revoke the Reporting API's credentials",
+		Short: "Provision the Reporting API's credentials and virtual projects",
 		// A database that is down is not a usage mistake, and dumping the help
 		// text after one buries the line that says what went wrong.
 		SilenceUsage: true,
@@ -62,6 +69,8 @@ func newRootCmd() *cobra.Command {
 		newMigrateDownToCmd(),
 		newCreateIngestCredentialCmd(),
 		newCreateAPITokenCmd(),
+		newCreateMetaProjectCmd(),
+		newCreatePartnerCmd(),
 		newRevokeIngestCredentialCmd(),
 		newRevokeAPITokenCmd(),
 	)
