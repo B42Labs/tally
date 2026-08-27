@@ -204,3 +204,57 @@ func TestQuantityMarshalsInsideAStruct(t *testing.T) {
 		t.Errorf("Marshal() = %s, want %s", got, want)
 	}
 }
+
+func TestRateMarshalsWithSixDecimals(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "0.15", want: "0.150000"},
+		{in: "0.1", want: "0.100000"},
+		{in: "1", want: "1.000000"},
+		{in: "0.123456", want: "0.123456"},
+		{in: "0", want: "0.000000"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := json.Marshal(money.NewRate(dec(t, tc.in)))
+			if err != nil {
+				t.Fatalf("Marshal() = %v, want nil", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("Marshal(%s) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRateMarshalsInsideAStruct(t *testing.T) {
+	// A rate is written onto a statement document nested in an adjustment
+	// record, so the six places must survive the enclosing struct rather than
+	// collapsing to 0.15.
+	body := struct {
+		Rate money.Rate `json:"rate"`
+	}{Rate: money.NewRate(dec(t, "0.15"))}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Marshal() = %v, want nil", err)
+	}
+	if want := `{"rate":0.150000}`; string(got) != want {
+		t.Errorf("Marshal() = %s, want %s", got, want)
+	}
+}
+
+func TestRateDecodesFromAJSONNumber(t *testing.T) {
+	// Decoding comes from the embedded decimal, so the trailing zeros the
+	// marshaller writes read back as the rate they were derived from.
+	var got money.Rate
+	if err := json.Unmarshal([]byte("0.150000"), &got); err != nil {
+		t.Fatalf("Unmarshal() = %v, want nil", err)
+	}
+	if want := dec(t, "0.15"); !got.Equal(want) {
+		t.Errorf("Unmarshal(0.150000) = %s, want %s", got, want)
+	}
+}

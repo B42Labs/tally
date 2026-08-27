@@ -19,6 +19,10 @@ const (
 	// are rounded and rendered at. It is exported for the reason AmountPlaces
 	// is.
 	QuantityPlaces = 4
+	// RatePlaces is the scale the rate of a pricing adjustment is rendered at.
+	// Six fractional digits is what the adjustments schema admits, and the
+	// constant is exported for the reason AmountPlaces is.
+	RatePlaces = 6
 	// divisionScale is the working precision every division runs at, set
 	// explicitly so no result depends on decimal.DivisionPrecision.
 	divisionScale = 28
@@ -88,4 +92,23 @@ func NewQuantity(d decimal.Decimal) Quantity {
 // MarshalJSON renders the quantity as a JSON number with exactly four decimal places.
 func (q Quantity) MarshalJSON() ([]byte, error) {
 	return []byte(q.StringFixed(QuantityPlaces)), nil
+}
+
+// Rate is the rate of a pricing adjustment that serializes at the six-place
+// scale the adjustments schema admits. A bare decimal renders 0.150000 as 0.15,
+// which drops the scale the rate was written with.
+type Rate struct {
+	decimal.Decimal
+}
+
+// NewRate wraps a decimal for serialization. It does not round: a rate is
+// parsed from an adjustments document, which admits at most six fractional
+// digits.
+func NewRate(d decimal.Decimal) Rate {
+	return Rate{Decimal: d}
+}
+
+// MarshalJSON renders the rate as a JSON number with exactly six decimal places.
+func (r Rate) MarshalJSON() ([]byte, error) {
+	return []byte(r.StringFixed(RatePlaces)), nil
 }
