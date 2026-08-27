@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -47,12 +49,15 @@ const duplicateRelationDetail = "a relation of this type between these projects 
 // The details that answer a relation a caller has to correct before it can be
 // stored: one end that is the other, a target outside the registry, an end
 // instant that is not after the start, a relation that would make attribution
-// circular, and an adjustments array the schema refuses.
+// circular, an adjustments array the schema refuses, and an update that would
+// change the adjustments a stored relation carries.
 const (
 	selfRelationDetail       = "a relation cannot leave and reach the same project"
 	closeBeforeStart         = "valid_to has to be after valid_from"
 	cycleDetail              = "this relation would close a cycle over the relation types that attribute cost"
 	invalidAdjustmentsDetail = "the pricing adjustments of this relation do not match the adjustments schema"
+	frozenAdjustmentsDetail  = "the pricing adjustments of a relation are fixed for its lifetime; " +
+		"close this relation and create a successor that carries the new ones"
 )
 
 // The unique index that holds one open relation per triple, as Postgres reports
@@ -77,10 +82,11 @@ const (
 // leaves the transaction as one of these and is routed by errors.Is once the
 // rollback has happened.
 var (
-	errUnknownSource    = errors.New("the project the relation leaves is not registered")
-	errSelfRelation     = errors.New("the relation leaves and reaches the same project")
-	errUnknownTarget    = errors.New("the project the relation reaches is not registered")
-	errClosedBeforeOpen = errors.New("the relation would end no later than it starts")
+	errUnknownSource     = errors.New("the project the relation leaves is not registered")
+	errSelfRelation      = errors.New("the relation leaves and reaches the same project")
+	errUnknownTarget     = errors.New("the project the relation reaches is not registered")
+	errClosedBeforeOpen  = errors.New("the relation would end no later than it starts")
+	errFrozenAdjustments = errors.New("the update would change the pricing adjustments of the relation")
 )
 
 // CreateProjectRelation relates the project of the path to another one and
@@ -182,6 +188,11 @@ func (s *server) CreateProjectRelation(w http.ResponseWriter, r *http.Request, i
 		}); err != nil {
 			return fmt.Errorf("relating %s to %s: %w", id, body.TargetID, err)
 		}
+		// The document is measured as the column holds it, which is the only
+		// place its normalized size is known.
+		if len(stored.Metadata) > maxStoredMetadata {
+			return errMetadataTooLarge
+		}
 		return audit.Log(ctx, q, audit.Entry{
 			Actor:      queryActor(ctx),
 			Action:     actionCreateRelation,
@@ -206,6 +217,10 @@ func (s *server) CreateProjectRelation(w http.ResponseWriter, r *http.Request, i
 		case violatesUnique(err, activeRelationConstraint):
 			problem.Write(w, http.StatusConflict, problem.TypeConflict,
 				"Conflict", duplicateRelationDetail)
+		case errors.Is(err, errMetadataTooLarge):
+			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+				"Validation failed", metadataTooLargeDetail,
+				problem.FieldError{Loc: "body.metadata", Msg: "the document is past the cap once stored"})
 		default:
 			writeInternal(ctx, w, "creating a relation", err, createRelationDetail)
 		}
@@ -278,6 +293,15 @@ func (s *server) ListProjectRelations(w http.ResponseWriter, r *http.Request, id
 // that is already closed corrects the instant it was closed at; the contract
 // types the member as not nullable, so reopening a closed relation is refused
 // in front of this.
+//
+// The adjustments a relation carries are fixed for its lifetime, so a document
+// whose pricing_adjustments member differs from the stored one is answered 409.
+// The relation history is then the only version of them, and every finalized
+// statement stays reproducible from it; changing what a project is charged is a
+// close and a successor relation. Which answer a request that gets several
+// things wrong reads is decided in the order 404, 422, 409: a relation the path
+// does not name is answered before its body is looked at, an end that is not
+// after the start before the adjustments are compared.
 func (s *server) UpdateProjectRelation(w http.ResponseWriter, r *http.Request,
 	id uuid.UUID, relationID uuid.UUID,
 ) {
@@ -291,6 +315,30 @@ func (s *server) UpdateProjectRelation(w http.ResponseWriter, r *http.Request,
 		writeInternal(ctx, w, "decoding an update the contract accepted", err,
 			updateRelationDetail)
 		return
+	}
+
+	// The adjustments of the sent document are held to the schema before any
+	// transaction opens, the way a creation holds them (decision D2), and the
+	// member the comparison below reads is decoded out here as well: it depends
+	// on the request alone, so decoding it inside the transaction would hold a
+	// pooled connection for as long as the document takes to walk. An update
+	// carrying no metadata at all is the close path: it touches no adjustments,
+	// so neither this check nor the comparison below has anything to read.
+	// Metadata that is null never gets here, because the contract types the
+	// member as an object.
+	var sentMember any
+	if len(body.Metadata) > 0 {
+		if err := adjustment.ValidateMetadata(body.Metadata); err != nil {
+			refuseAdjustments(ctx, w, err,
+				"reading the adjustments of an update the contract accepted", updateRelationDetail)
+			return
+		}
+		var err error
+		if sentMember, err = adjustmentsMember(body.Metadata); err != nil {
+			writeInternal(ctx, w, "decoding the metadata of an update the contract accepted", err,
+				updateRelationDetail)
+			return
+		}
 	}
 
 	var stored sqlcgen.ProjectRelation
@@ -310,6 +358,22 @@ func (s *server) UpdateProjectRelation(w http.ResponseWriter, r *http.Request,
 		if body.ValidTo != nil && !body.ValidTo.After(current.ValidFrom.Time) {
 			return errClosedBeforeOpen
 		}
+		// The update replaces the metadata wholesale, so a request that keeps
+		// the adjustments sends them back and one that changes them is refused
+		// here. It runs after the read and after the span check, which is what
+		// decides the order the three refusals are answered in, and before the
+		// write, so a refused update leaves neither a changed row nor an audit
+		// row claiming one.
+		if len(body.Metadata) > 0 {
+			storedMember, err := adjustmentsMember(current.Metadata)
+			if err != nil {
+				return fmt.Errorf("decoding the metadata of the relation %s of %s: %w",
+					relationID, id, err)
+			}
+			if !reflect.DeepEqual(storedMember, sentMember) {
+				return errFrozenAdjustments
+			}
+		}
 
 		if stored, err = q.UpdateProjectRelation(ctx, sqlcgen.UpdateProjectRelationParams{
 			ID:       relationID,
@@ -318,6 +382,12 @@ func (s *server) UpdateProjectRelation(w http.ResponseWriter, r *http.Request,
 			ValidTo:  filterInstant(body.ValidTo),
 		}); err != nil {
 			return fmt.Errorf("updating the relation %s of %s: %w", relationID, id, err)
+		}
+		// Only a request that carries metadata is measured: closing a relation
+		// stores nothing new, and a row already past the cap has to stay
+		// closable.
+		if len(body.Metadata) > 0 && len(stored.Metadata) > maxStoredMetadata {
+			return errMetadataTooLarge
 		}
 		return audit.Log(ctx, q, audit.Entry{
 			Actor:      queryActor(ctx),
@@ -333,6 +403,19 @@ func (s *server) UpdateProjectRelation(w http.ResponseWriter, r *http.Request,
 		case errors.Is(err, errClosedBeforeOpen):
 			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
 				"Validation failed", closeBeforeStart)
+		case errors.Is(err, errFrozenAdjustments):
+			// The transaction rolled back, so the audit log holds nothing about
+			// this attempt. What was refused is a change to what a project is
+			// charged, so the line naming the caller and the relation is the
+			// only record there is of who tried it, and how often.
+			Logger(ctx).Warn("refusing a change to the frozen pricing adjustments",
+				"actor", queryActor(ctx), "project", id, "relation", relationID)
+			problem.Write(w, http.StatusConflict, problem.TypeConflict,
+				"Conflict", frozenAdjustmentsDetail)
+		case errors.Is(err, errMetadataTooLarge):
+			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+				"Validation failed", metadataTooLargeDetail,
+				problem.FieldError{Loc: "body.metadata", Msg: "the document is past the cap once stored"})
 		default:
 			writeInternal(ctx, w, "updating a relation", err, updateRelationDetail)
 		}
@@ -526,6 +609,38 @@ func refuseAdjustments(ctx context.Context, w http.ResponseWriter, err error, me
 		"Validation failed", invalidAdjustmentsDetail, errs...)
 }
 
+// adjustmentsMember is the pricing_adjustments member of one metadata document
+// as the comparison of an update reads it: decoded, so that how the document
+// itself is spelled (its whitespace, the order of an object's members) counts
+// for nothing, while the order of the array and every value in it count. A
+// document without the member yields nil, which is what makes adding the member
+// and dropping it a change like any other. The decoding error is returned as it
+// stands, because the callers name the document it came from.
+func adjustmentsMember(metadata []byte) (any, error) {
+	document, err := metadataDocument(metadata)
+	if err != nil {
+		return nil, err
+	}
+	return document[adjustment.MetadataKey], nil
+}
+
+// metadataDocument decodes one metadata document into the members it carries.
+// Every number is kept as the literal the document spells rather than parsed
+// into a float64: the contract types metadata as a free object, so a member
+// naming a number the float64 range does not hold, 1e999 for example, is a
+// document this API accepted. Parsing it would make that document a decoding
+// failure here, and with it a body the contract took into a 500.
+func metadataDocument(metadata []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(metadata))
+	decoder.UseNumber()
+
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		return nil, err
+	}
+	return document, nil
+}
+
 // relationOf renders one relation row as the answer the contract promises. The
 // instants come out in UTC, the zone this API states them in, and the metadata
 // is decoded rather than passed through, because the contract types it as an
@@ -534,8 +649,8 @@ func refuseAdjustments(ctx context.Context, w http.ResponseWriter, err error, me
 // An open relation renders valid_to as null, which is what the column holding
 // NULL means: it has no end yet, rather than one that has passed.
 func relationOf(row sqlcgen.ProjectRelation) (Relation, error) {
-	var metadata map[string]any
-	if err := json.Unmarshal(row.Metadata, &metadata); err != nil {
+	metadata, err := metadataDocument(row.Metadata)
+	if err != nil {
 		return Relation{}, fmt.Errorf("decoding the metadata of %s: %w", row.ID, err)
 	}
 

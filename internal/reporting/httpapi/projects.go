@@ -42,6 +42,26 @@ const duplicateProjectDetail = "a project with this cloud and external id is alr
 // one to change.
 const virtualKeyDetail = "a meta or partner project carries its platform as its cloud, and no other project carries meta or partner as its cloud"
 
+// maxStoredMetadata bounds the metadata document a project or a relation
+// carries once the database has normalized it. The cap of router.go bounds what
+// a request body spells, not what the column holds: jsonb keeps a number as a
+// numeric, so a member a body spells as 1e131071 in eighteen bytes is stored,
+// and answered, as its 131072 digits. Without this bound a body of a few
+// kilobytes arms every later read of that row with a document thousands of
+// times its size.
+const maxStoredMetadata = 64 << 10
+
+// errMetadataTooLarge leaves the transaction of a write whose document is past
+// the cap, so the row rolls back rather than staying for every read to expand.
+var errMetadataTooLarge = errors.New("the stored metadata is past the cap")
+
+// metadataTooLargeDetail answers such a write. It names what the column holds
+// rather than what the body carried, because a body well inside the request cap
+// is what gets here.
+var metadataTooLargeDetail = fmt.Sprintf(
+	"a stored metadata document carries at most %d bytes once the database has normalized it",
+	maxStoredMetadata)
+
 // The code Postgres reports a unique violation under. violatesUnique matches it
 // together with the name of the constraint that was violated.
 const uniqueViolation = "23505"
@@ -98,7 +118,15 @@ func (s *server) CreateProject(w http.ResponseWriter, r *http.Request) {
 				Name:       filterText(body.Name),
 				Metadata:   body.Metadata,
 			})
-		return err
+		if err != nil {
+			return err
+		}
+		// The document is measured as the column holds it, which is the only
+		// place its normalized size is known.
+		if len(stored.Metadata) > maxStoredMetadata {
+			return errMetadataTooLarge
+		}
+		return nil
 	}); err != nil {
 		switch {
 		case errors.Is(err, projects.ErrVirtualKey):
@@ -111,6 +139,10 @@ func (s *server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, projects.ErrAlreadyRegistered):
 			problem.Write(w, http.StatusConflict, problem.TypeConflict,
 				"Conflict", duplicateProjectDetail)
+		case errors.Is(err, errMetadataTooLarge):
+			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+				"Validation failed", metadataTooLargeDetail,
+				problem.FieldError{Loc: "body.metadata", Msg: "the document is past the cap once stored"})
 		default:
 			writeInternal(ctx, w, "registering a project", err, createProjectDetail)
 		}
@@ -241,6 +273,12 @@ func (s *server) UpdateProject(w http.ResponseWriter, r *http.Request, id uuid.U
 		}); err != nil {
 			return fmt.Errorf("updating %s: %w", id, err)
 		}
+		// Only a request that carries metadata is measured: one that leaves the
+		// member out stores nothing new, and a row already past the cap has to
+		// stay renamable.
+		if len(body.Metadata) > 0 && len(stored.Metadata) > maxStoredMetadata {
+			return errMetadataTooLarge
+		}
 		return audit.Log(ctx, q, audit.Entry{
 			Actor:      queryActor(ctx),
 			Action:     actionUpdateProject,
@@ -248,12 +286,17 @@ func (s *server) UpdateProject(w http.ResponseWriter, r *http.Request, id uuid.U
 			ObjectID:   stored.ID.String(),
 		})
 	}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
 			problem.Write(w, http.StatusNotFound, problem.TypeNotFound,
 				"Not found", unknownProjectDetail)
-			return
+		case errors.Is(err, errMetadataTooLarge):
+			problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+				"Validation failed", metadataTooLargeDetail,
+				problem.FieldError{Loc: "body.metadata", Msg: "the document is past the cap once stored"})
+		default:
+			writeInternal(ctx, w, "updating a project", err, updateProjectDetail)
 		}
-		writeInternal(ctx, w, "updating a project", err, updateProjectDetail)
 		return
 	}
 
@@ -274,8 +317,8 @@ func (s *server) UpdateProject(w http.ResponseWriter, r *http.Request, id uuid.U
 // the column holding NULL means; the empty string would claim a name of no
 // characters.
 func projectOf(row sqlcgen.Project) (Project, error) {
-	var metadata map[string]any
-	if err := json.Unmarshal(row.Metadata, &metadata); err != nil {
+	metadata, err := metadataDocument(row.Metadata)
+	if err != nil {
 		return Project{}, fmt.Errorf("decoding the metadata of %s: %w", row.ID, err)
 	}
 

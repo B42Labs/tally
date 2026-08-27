@@ -422,6 +422,425 @@ func TestProjectRelationsOverHTTP(t *testing.T) {
 		}
 	})
 
+	// The contract types metadata as a free object, so a member naming a number
+	// the float64 range does not hold is a document it accepts. Everything
+	// behind the contract reads the whole document — the creation renders the
+	// row it wrote, the update decodes the member it compares against the
+	// stored one — so a body the contract took has to come back as an answer
+	// rather than as this service's own failure.
+	t.Run("keeps a metadata number no float64 holds", func(t *testing.T) {
+		pair := registerProjects(t, a, adminToken, "os-rel-adjust-huge", 2)
+
+		// The literal goes into the body as it stands, because no Go float64
+		// could carry it there. The column is jsonb, which holds a number as a
+		// numeric, so the answer spells the same value out rather than echoing
+		// the exponent the request sent.
+		const huge = "1e999"
+		spelled := "1" + strings.Repeat("0", 999)
+		metadata := map[string]any{
+			"budget": json.RawMessage(huge),
+			"pricing_adjustments": []any{
+				map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+			},
+		}
+
+		// budgetOf is the number one answer carries under budget. The answer is
+		// read member by member rather than decoded whole, because a decode
+		// into map[string]any is the very thing that used to fail here.
+		budgetOf := func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			t.Helper()
+
+			raw := memberRaw(t, rec, "metadata")
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &members); err != nil {
+				t.Fatalf("decoding the metadata %s: %v", raw, err)
+			}
+			return string(members["budget"])
+		}
+
+		rec := a.call(t, http.MethodPost, relationsPath(pair[0].Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": plainType, "metadata": metadata,
+			}))
+
+		if got := rec.Code; got != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusCreated, rec.Body)
+		}
+		if got := budgetOf(t, rec); got != spelled {
+			t.Errorf("budget = %s, want the sent %s spelled out", got, huge)
+		}
+		var created struct {
+			ID uuid.UUID `json:"id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decoding the body %q: %v", rec.Body, err)
+		}
+
+		// The adjustments come back unchanged, so what this update carries
+		// beside them is the number alone.
+		rec = a.call(t, http.MethodPatch, relationTarget(pair[0].Id, created.ID), adminToken,
+			projectDocument(t, map[string]any{"metadata": metadata}))
+
+		if got := rec.Code; got != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusOK, rec.Body)
+		}
+		if got := budgetOf(t, rec); got != spelled {
+			t.Errorf("budget = %s, want the sent %s spelled out", got, huge)
+		}
+
+		// The comparison still reads the adjustments out of such a document, so
+		// an update changing them beside the number is the conflict it was
+		// before.
+		rec = a.call(t, http.MethodPatch, relationTarget(pair[0].Id, created.ID), adminToken,
+			projectDocument(t, map[string]any{"metadata": map[string]any{
+				"budget": json.RawMessage(huge),
+				"pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+				},
+			}}))
+
+		assertProblem(t, rec, http.StatusConflict, problem.TypeConflict)
+		if got := problemDetail(t, rec); got != frozenAdjustmentsDetail {
+			t.Errorf("detail = %q, want %q", got, frozenAdjustmentsDetail)
+		}
+	})
+
+	// The request cap of the router bounds what a body spells, not what the
+	// column holds, and jsonb expands an exponent into every digit it names. A
+	// document past the cap is therefore refused rather than stored for every
+	// later read of the relation to answer.
+	t.Run("refuses metadata the column expands past the cap", func(t *testing.T) {
+		pair := registerProjects(t, a, adminToken, "os-rel-adjust-cap", 2)
+
+		// Eighteen bytes in the body, 131072 digits in the column.
+		const expanding = "1e131071"
+		metadata := map[string]any{"budget": json.RawMessage(expanding)}
+
+		rec := a.call(t, http.MethodPost, relationsPath(pair[0].Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": plainType, "metadata": metadata,
+			}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got, want := fieldErrorLocations(t, rec), []string{"body.metadata"}; !slices.Equal(got, want) {
+			t.Errorf("field errors = %v, want %v", got, want)
+		}
+		if got := storedRelationIDs(t, a, pair[0].Id, pair[1].Id); len(got) != 0 {
+			t.Errorf("stored relations = %v, want a refused creation to write none", got)
+		}
+
+		// An update carrying such a document is refused the same way, and the
+		// relation keeps what it had.
+		relation := relate(t, a, adminToken, pair[0].Id, pair[1].Id, plainType)
+		rec = a.call(t, http.MethodPatch, relationTarget(pair[0].Id, relation.Id), adminToken,
+			projectDocument(t, map[string]any{"metadata": metadata}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got := storedMetadata(t, a, relation.Id); len(got) != 0 {
+			t.Errorf("stored metadata = %v, want the empty object the creation wrote", got)
+		}
+	})
+
+	t.Run("keeps the pricing adjustments of a relation for its lifetime", func(t *testing.T) {
+		pair := registerProjects(t, a, adminToken, "os-rel-adjust-frozen", 2)
+
+		created := map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+			map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+		}}
+		adjusted := createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id),
+			adminToken, projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": plainType,
+				"valid_from": relationOpened, "metadata": created,
+			})))
+		// The unique index holds one open relation per source, target and type,
+		// so the relation that carries no adjustments takes a type of its own
+		// rather than being answered as a duplicate of the one above.
+		plain := createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id),
+			adminToken, projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": "peer-plain",
+				"metadata": map[string]any{"owner": "team-a"},
+			})))
+		// The array is compared position by position, so saying that the order
+		// counts takes a relation with two adjustments to swap.
+		paired := map[string]any{"pricing_adjustments": []any{
+			map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+			map[string]any{"type": "kickback", "rate": "0.10", "scope": "all"},
+		}}
+		ordered := createdRelation(t, a.call(t, http.MethodPost, relationsPath(pair[0].Id),
+			adminToken, projectDocument(t, map[string]any{
+				"target_id": pair[1].Id, "relation_type": "peer-ordered",
+				"metadata": paired,
+			})))
+
+		// assertFrozen says one update was refused as a change of the
+		// adjustments and left the row it addressed as it was.
+		assertFrozen := func(t *testing.T, rec *httptest.ResponseRecorder, relation uuid.UUID,
+			metadata map[string]any,
+		) {
+			t.Helper()
+
+			assertProblem(t, rec, http.StatusConflict, problem.TypeConflict)
+			if got := problemDetail(t, rec); got != frozenAdjustmentsDetail {
+				t.Errorf("detail = %q, want %q", got, frozenAdjustmentsDetail)
+			}
+			// A conflict names no member: the field errors of an answer locate
+			// what a caller got wrong, and here the whole document is right.
+			if got := fieldErrorLocations(t, rec); len(got) != 0 {
+				t.Errorf("field errors = %v, want a conflict to carry none", got)
+			}
+			if got := storedMetadata(t, a, relation); !reflect.DeepEqual(got, metadata) {
+				t.Errorf("stored metadata = %v, want the untouched %v", got, metadata)
+			}
+			// A refusal ends the whole update, so an end it carried beside the
+			// change was not written either.
+			if got := storedValidTo(t, a, relation); got != nil {
+				t.Errorf("valid_to = %v, want a refused update to leave the relation open", got)
+			}
+		}
+
+		for _, tc := range []struct {
+			name     string
+			metadata map[string]any
+		}{
+			{
+				name: "a rate it changes",
+				metadata: map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+				}},
+			},
+			{
+				// The values are compared as the documents spell them, so the
+				// same rate written another way is a change like any other.
+				name: "the same rate spelled another way",
+				metadata: map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.150", "scope": "all"},
+				}},
+			},
+			{
+				name: "an adjustment it adds",
+				metadata: map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+					map[string]any{"type": "kickback", "rate": "0.10", "scope": "all"},
+				}},
+			},
+			{
+				// The metadata is replaced wholesale, so a document leaving the
+				// member out drops the adjustments rather than keeping them.
+				name:     "the member it leaves out",
+				metadata: map[string]any{"owner": "team-b"},
+			},
+			{name: "the metadata it empties", metadata: map[string]any{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rec := a.call(t, http.MethodPatch, relationTarget(pair[0].Id, adjusted.Id),
+					adminToken, projectDocument(t, map[string]any{"metadata": tc.metadata}))
+
+				assertFrozen(t, rec, adjusted.Id, asDocument(t, created))
+			})
+		}
+
+		t.Run("the order it swaps", func(t *testing.T) {
+			rec := a.call(t, http.MethodPatch, relationTarget(pair[0].Id, ordered.Id), adminToken,
+				projectDocument(t, map[string]any{"metadata": map[string]any{
+					"pricing_adjustments": []any{
+						map[string]any{"type": "kickback", "rate": "0.10", "scope": "all"},
+						map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+					},
+				}}))
+
+			assertFrozen(t, rec, ordered.Id, asDocument(t, paired))
+		})
+
+		// The end this one names is one the relation can have, so what is
+		// refused is the change alone — and the relation stays open, rather
+		// than being closed by the request that was refused.
+		t.Run("a valid end beside the rate it changes", func(t *testing.T) {
+			rec := a.call(t, http.MethodPatch, relationTarget(pair[0].Id, adjusted.Id), adminToken,
+				projectDocument(t, map[string]any{
+					"valid_to": relationClosed,
+					"metadata": map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+						map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+					}},
+				}))
+
+			assertFrozen(t, rec, adjusted.Id, asDocument(t, created))
+		})
+
+		t.Run("the adjustments it adds to a relation that had none", func(t *testing.T) {
+			rec := a.call(t, http.MethodPatch, relationTarget(pair[0].Id, plain.Id), adminToken,
+				projectDocument(t, map[string]any{"metadata": map[string]any{
+					"owner": "team-a", "pricing_adjustments": []any{
+						map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+					},
+				}}))
+
+			assertFrozen(t, rec, plain.Id, map[string]any{"owner": "team-a"})
+		})
+
+		// The rest of the document is changed with the array sent back beside
+		// it, which is the update the comparison is there to let through.
+		kept := map[string]any{"owner": "team-b", "pricing_adjustments": []any{
+			map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+		}}
+		updated := relationFrom(t, a.call(t, http.MethodPatch,
+			relationTarget(pair[0].Id, adjusted.Id), adminToken,
+			projectDocument(t, map[string]any{"metadata": kept})))
+		if want := asDocument(t, kept); !reflect.DeepEqual(updated.Metadata, want) {
+			t.Errorf("metadata = %v, want the sent %v", updated.Metadata, want)
+		}
+		if got, want := storedMetadata(t, a, adjusted.Id), asDocument(t, kept); !reflect.DeepEqual(got, want) {
+			t.Errorf("stored metadata = %v, want the answered %v", got, want)
+		}
+
+		// The schema is checked in front of the comparison, so an array it
+		// refuses is answered as malformed rather than as a change.
+		rec := a.call(t, http.MethodPatch, relationTarget(pair[0].Id, adjusted.Id), adminToken,
+			projectDocument(t, map[string]any{"metadata": map[string]any{
+				"owner": "team-b", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "abc", "scope": "all"},
+				},
+			}}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got, want := fieldErrorLocations(t, rec),
+			[]string{"body.metadata.pricing_adjustments.0.rate"}; !slices.Equal(got, want) {
+			t.Errorf("field errors = %v, want %v", got, want)
+		}
+
+		// A request naming the end alone carries no metadata, so it closes the
+		// relation whatever the relation carries.
+		closed := relationFrom(t, a.call(t, http.MethodPatch,
+			relationTarget(pair[0].Id, adjusted.Id), adminToken,
+			projectDocument(t, map[string]any{"valid_to": relationClosed})))
+		if closed.ValidTo == nil || !closed.ValidTo.Equal(relationClosed) {
+			t.Errorf("valid_to = %v, want %s", closed.ValidTo, relationClosed)
+		}
+		if got, want := storedMetadata(t, a, adjusted.Id), asDocument(t, kept); !reflect.DeepEqual(got, want) {
+			t.Errorf("stored metadata = %v, want the untouched %v", got, want)
+		}
+
+		// The span is checked before the comparison, so a request that gets
+		// both wrong reads the end it cannot have.
+		rec = a.call(t, http.MethodPatch, relationTarget(pair[0].Id, adjusted.Id), adminToken,
+			projectDocument(t, map[string]any{
+				"valid_to": relationOpened,
+				"metadata": map[string]any{"owner": "team-a", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+				}},
+			}))
+
+		assertProblem(t, rec, http.StatusUnprocessableEntity, problem.TypeValidation)
+		if got := problemDetail(t, rec); got != closeBeforeStart {
+			t.Errorf("detail = %q, want %q", got, closeBeforeStart)
+		}
+
+		// A relation the path does not name is answered before its body is
+		// looked at.
+		rec = a.call(t, http.MethodPatch, relationTarget(pair[0].Id, uuid.New()), adminToken,
+			projectDocument(t, map[string]any{"metadata": map[string]any{
+				"owner": "team-a", "pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+				},
+			}}))
+
+		assertProblem(t, rec, http.StatusNotFound, problem.TypeNotFound)
+		if got := problemDetail(t, rec); got != unknownRelationDetail {
+			t.Errorf("detail = %q, want %q", got, unknownRelationDetail)
+		}
+
+		// One audit row per answered update, which is the change of the owner
+		// and the close. None of the refusals left one.
+		if rows := projectAudits(t, a, adminID.String(), actionUpdateRelation, adjusted.Id); len(rows) != 2 {
+			t.Errorf("update audit rows = %v, want one per answered update", rows)
+		}
+
+		// A relation carrying no adjustments is updated the way it was before.
+		renamed := relationFrom(t, a.call(t, http.MethodPatch,
+			relationTarget(pair[0].Id, plain.Id), adminToken,
+			projectDocument(t, map[string]any{"metadata": map[string]any{"owner": "team-c"}})))
+		if want := map[string]any{"owner": "team-c"}; !reflect.DeepEqual(renamed.Metadata, want) {
+			t.Errorf("metadata = %v, want %v", renamed.Metadata, want)
+		}
+	})
+
+	t.Run("versions the pricing adjustments by closing and recreating", func(t *testing.T) {
+		real := registerProjects(t, a, adminToken, "os-rel-adjust-succession", 1)[0]
+		partner := registeredProject(t, a.call(t, http.MethodPost, projectsRoute, adminToken,
+			projectDocument(t, map[string]any{
+				"platform": "partner", "cloud": "partner",
+				"external_id": "partner-corp-succession",
+			})))
+
+		// The rate the relation carries is changed the one way there is: the
+		// relation is closed and a successor starting where it ended carries
+		// the new one.
+		first := createdRelation(t, a.call(t, http.MethodPost, relationsPath(real.Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": partner.Id, "relation_type": "managed_by",
+				"valid_from": relationOpened,
+				"metadata": map[string]any{"pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+				}},
+			})))
+		relationFrom(t, a.call(t, http.MethodPatch, relationTarget(real.Id, first.Id), adminToken,
+			projectDocument(t, map[string]any{"valid_to": relationClosed})))
+		second := createdRelation(t, a.call(t, http.MethodPost, relationsPath(real.Id), adminToken,
+			projectDocument(t, map[string]any{
+				"target_id": partner.Id, "relation_type": "managed_by",
+				"valid_from": relationClosed,
+				"metadata": map[string]any{"pricing_adjustments": []any{
+					map[string]any{"type": "discount", "rate": "0.20", "scope": "all"},
+				}},
+			})))
+
+		if got, want := storedRelationIDs(t, a, real.Id, partner.Id),
+			[]uuid.UUID{first.Id, second.Id}; !slices.Equal(got, want) {
+			t.Fatalf("stored relations = %v, want the closed %s beside the successor %s",
+				got, first.Id, second.Id)
+		}
+
+		for _, tc := range []struct {
+			name string
+			at   time.Time
+			want uuid.UUID
+			rate string
+		}{
+			{
+				name: "inside the first span", at: time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC),
+				want: first.Id, rate: "0.15",
+			},
+			{
+				// The end of a span is the exclusive bound, so the instant the
+				// first relation was closed at is the successor's first.
+				name: "the instant the successor starts", at: relationClosed,
+				want: second.Id, rate: "0.20",
+			},
+			{
+				name: "after the first span", at: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+				want: second.Id, rate: "0.20",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				list := relationListOf(t, a.call(t, http.MethodGet,
+					relationsPath(real.Id)+"?relation_type=managed_by&at="+instant(tc.at),
+					adminToken, nil))
+
+				if got, want := relationIDs(list.Items), []uuid.UUID{tc.want}; !slices.Equal(got, want) {
+					t.Fatalf("relations at %s = %v, want %v", tc.at, got, want)
+				}
+				if got := firstRate(t, list.Items[0].Metadata); got != tc.rate {
+					t.Errorf("rate at %s = %q, want %q", tc.at, got, tc.rate)
+				}
+			})
+		}
+
+		// The closed relation keeps the rate it was rated with, so a statement
+		// finalized over its span is reproducible from it.
+		if got, want := firstRate(t, storedMetadata(t, a, first.Id)), "0.15"; got != want {
+			t.Errorf("stored rate of the closed relation = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("closes a relation and answers a repeated close the same way", func(t *testing.T) {
 		pair := registerProjects(t, a, adminToken, "os-rel-close", 2)
 		relation := relate(t, a, adminToken, pair[0].Id, pair[1].Id, plainType)
@@ -986,6 +1405,11 @@ func TestProjectRelationsReportAFailedQuery(t *testing.T) {
 		}},
 	})
 	update := projectDocument(t, map[string]any{"metadata": map[string]any{"owner": "team-a"}})
+	adjustedUpdate := projectDocument(t, map[string]any{
+		"metadata": map[string]any{"pricing_adjustments": []any{
+			map[string]any{"type": "discount", "rate": "0.15", "scope": "all"},
+		}},
+	})
 
 	// How long the database gets to shut down cleanly.
 	stopTimeout := 10 * time.Second
@@ -1025,6 +1449,14 @@ func TestProjectRelationsReportAFailedQuery(t *testing.T) {
 		{
 			name: "the update", method: http.MethodPatch,
 			target: relationTarget(project, relation), body: update,
+			detail: "the relation could not be updated",
+		},
+		{
+			// The adjustments the update carries match the schema, so what is
+			// left to fail is the transaction that reads the stored ones to
+			// compare them against.
+			name: "the update of the adjustments", method: http.MethodPatch,
+			target: relationTarget(project, relation), body: adjustedUpdate,
 			detail: "the relation could not be updated",
 		},
 		{
@@ -1306,6 +1738,45 @@ func storedValidTo(t *testing.T, a api, relation uuid.UUID) *time.Time {
 		t.Fatalf("reading the stored valid_to of %s: %v", relation, err)
 	}
 	return validTo
+}
+
+// storedMetadata is the metadata document the relation row carries. It is what
+// says a refused update left the row as it was, which no read of this API tells
+// apart from an update that sent the stored document back.
+func storedMetadata(t *testing.T, a api, relation uuid.UUID) map[string]any {
+	t.Helper()
+
+	var raw []byte
+	if err := a.store.Pool().QueryRow(t.Context(),
+		`SELECT metadata FROM project_relations WHERE id = $1`, relation).Scan(&raw); err != nil {
+		t.Fatalf("reading the stored metadata of %s: %v", relation, err)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("decoding the stored metadata %s of %s: %v", raw, relation, err)
+	}
+	return metadata
+}
+
+// firstRate is the rate of the first pricing adjustment a metadata document
+// carries, which is what tells two versions of one relation apart.
+func firstRate(t *testing.T, metadata map[string]any) string {
+	t.Helper()
+
+	adjustments, ok := metadata["pricing_adjustments"].([]any)
+	if !ok || len(adjustments) == 0 {
+		t.Fatalf("the metadata %v carries no pricing adjustment", metadata)
+	}
+	first, ok := adjustments[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the first pricing adjustment of %v is not an object", metadata)
+	}
+	rate, ok := first["rate"].(string)
+	if !ok {
+		t.Fatalf("the first pricing adjustment of %v carries no rate", metadata)
+	}
+	return rate
 }
 
 // storedRelationIDs names every relation row between two projects, oldest
