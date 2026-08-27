@@ -337,8 +337,11 @@ type Relation struct {
 	SourceID     uuid.UUID
 	TargetID     uuid.UUID
 	RelationType string
-	ValidFrom    time.Time
-	ValidTo      *time.Time
+	// Metadata is the stored document as JSONB renders it, {} for a relation
+	// created without one. It is read by adjustment resolution.
+	Metadata  json.RawMessage
+	ValidFrom time.Time
+	ValidTo   *time.Time
 }
 
 // Relations lists the relations of the given types whose validity overlaps the
@@ -348,6 +351,9 @@ type Relation struct {
 // An empty type list is attribution turned off, which is what an explicitly
 // empty TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES configures. No query runs then,
 // because every relation type is one attribution would not walk.
+//
+// Adjustment resolution is the second reader of these relations, and an empty
+// type list turns its walk off the same way.
 func (s *Snapshot) Relations(ctx context.Context, relationTypes []string, periodFrom, periodTo time.Time) ([]Relation, error) {
 	if len(relationTypes) == 0 {
 		return []Relation{}, nil
@@ -368,6 +374,7 @@ func (s *Snapshot) Relations(ctx context.Context, relationTypes []string, period
 			SourceID:     row.SourceID,
 			TargetID:     row.TargetID,
 			RelationType: row.RelationType,
+			Metadata:     json.RawMessage(row.Metadata),
 			ValidFrom:    row.ValidFrom.Time.UTC(),
 		}
 		if row.ValidTo.Valid {

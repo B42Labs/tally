@@ -41,7 +41,7 @@ ORDER BY cloud, external_id;
 -- the period produced before it closed; v1 does not prorate a relation within a
 -- period.
 -- name: ListRelationsOverlapping :many
-SELECT id, source_id, target_id, relation_type, valid_from, valid_to
+SELECT id, source_id, target_id, relation_type, metadata, valid_from, valid_to
 FROM project_relations
 WHERE relation_type = ANY(sqlc.arg('relation_types')::text[])
   AND valid_from < sqlc.arg('period_to')::timestamptz
