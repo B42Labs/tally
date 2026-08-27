@@ -32,6 +32,8 @@ const (
 	envGraceHours       = "TALLY_ENGINE_GRACE_HOURS"
 	envAutoFinalize     = "TALLY_ENGINE_AUTO_FINALIZE"
 	envAttributingTypes = "TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES"
+	envAdjustmentTypes  = "TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES"
+	envAdjustmentDepth  = "TALLY_ENGINE_ADJUSTMENT_DEPTH"
 	envCounterSources   = "TALLY_ENGINE_COUNTER_SOURCES"
 )
 
@@ -48,6 +50,8 @@ var EnvNames = []string{
 	envGraceHours,
 	envAutoFinalize,
 	envAttributingTypes,
+	envAdjustmentTypes,
+	envAdjustmentDepth,
 	envCounterSources,
 }
 
@@ -94,6 +98,15 @@ type Config struct {
 	// "member_of" and "managed_by" reach a virtual project and attribute no cost,
 	// so a list naming either is refused.
 	AttributingRelationTypes []string `env:"TALLY_ENGINE_ATTRIBUTING_RELATION_TYPES" envDefault:"infrastructure_tenant"`
+	// AdjustmentRelationTypes are the relation types adjustment resolution walks
+	// from a statement's project to collect the pricing adjustments that apply
+	// to it, "managed_by" and "member_of" by default. Setting the variable to
+	// the empty string yields the empty list, which turns adjustments off. A
+	// type in both lists is walked by attribution and by adjustment resolution.
+	AdjustmentRelationTypes []string `env:"TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES" envDefault:"managed_by,member_of"`
+	// AdjustmentDepth is how many relation levels the walk follows from the
+	// statement's project; 1 is the project's own relations. It is at least 1.
+	AdjustmentDepth int `env:"TALLY_ENGINE_ADJUSTMENT_DEPTH" envDefault:"3"`
 	// CounterSourcesPath is the path to the counter sources YAML, the file that
 	// declares which counters exist and how each one is measured;
 	// cmd/tally-engine/counter-sources.example.yaml shows the format. Setting
@@ -150,6 +163,22 @@ func Load() (Config, error) {
 		if project.IsVirtualRelationType(relationType) {
 			return Config{}, fmt.Errorf("%s: %q reaches a virtual project and attributes no cost", envAttributingTypes, relationType)
 		}
+	}
+	// The adjustment list is read the same way, and its explicitly empty value is
+	// the one switch that turns adjustments off. No type is refused here: the
+	// walk is independent of attribution, so a type named in both lists is walked
+	// by attribution and by adjustment resolution.
+	adjustmentRaw, isSet := os.LookupEnv(envAdjustmentTypes)
+	if isSet && adjustmentRaw == "" {
+		cfg.AdjustmentRelationTypes = []string{}
+	}
+	if slices.Contains(cfg.AdjustmentRelationTypes, "") {
+		return Config{}, fmt.Errorf("%s: %q must not contain an empty relation type", envAdjustmentTypes, adjustmentRaw)
+	}
+	// A depth below 1 would walk nothing while adjustments stay on, which the
+	// empty type list already says.
+	if cfg.AdjustmentDepth < 1 {
+		return Config{}, fmt.Errorf("%s: %d must be at least 1", envAdjustmentDepth, cfg.AdjustmentDepth)
 	}
 	// The counter sources path is read the same way: only the explicit empty
 	// value means no counter sources, which counters.Load honors by reading
