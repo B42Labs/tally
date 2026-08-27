@@ -1,17 +1,20 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/reporting/audit"
 	"github.com/b42labs/tally/internal/reporting/httpapi/problem"
 	"github.com/b42labs/tally/internal/reporting/projects"
@@ -43,12 +46,13 @@ const duplicateRelationDetail = "a relation of this type between these projects 
 
 // The details that answer a relation a caller has to correct before it can be
 // stored: one end that is the other, a target outside the registry, an end
-// instant that is not after the start, and a relation that would make
-// attribution circular.
+// instant that is not after the start, a relation that would make attribution
+// circular, and an adjustments array the schema refuses.
 const (
-	selfRelationDetail = "a relation cannot leave and reach the same project"
-	closeBeforeStart   = "valid_to has to be after valid_from"
-	cycleDetail        = "this relation would close a cycle over the relation types that attribute cost"
+	selfRelationDetail       = "a relation cannot leave and reach the same project"
+	closeBeforeStart         = "valid_to has to be after valid_from"
+	cycleDetail              = "this relation would close a cycle over the relation types that attribute cost"
+	invalidAdjustmentsDetail = "the pricing adjustments of this relation do not match the adjustments schema"
 )
 
 // The unique index that holds one open relation per triple, as Postgres reports
@@ -115,6 +119,16 @@ func (s *server) CreateProjectRelation(w http.ResponseWriter, r *http.Request, i
 		// The column is NOT NULL and the contract answers metadata as an object,
 		// so a creation that carries none stores the empty one.
 		metadata = []byte("{}")
+	}
+
+	// The adjustments are held to the schema before any transaction opens
+	// (decision D2): a document the schema refuses stores no relation and
+	// leaves no audit row, and it is refused at the operator's terminal rather
+	// than in a billing run weeks later.
+	if err := adjustment.ValidateMetadata(metadata); err != nil {
+		refuseAdjustments(ctx, w, err, "reading the adjustments of a relation the contract accepted",
+			createRelationDetail)
+		return
 	}
 
 	// Only a type that attributes cost is walked, and only such a type is worth
@@ -473,6 +487,43 @@ func (s *server) holdsProject(w http.ResponseWriter, r *http.Request, id uuid.UU
 		return false
 	}
 	return true
+}
+
+// refuseAdjustments answers a metadata document whose pricing adjustments the
+// schema refuses: one field error per violation, each located at the element
+// and the member that has to change, so a caller corrects all of them in one
+// go rather than one per round trip.
+//
+// Any other failure is this service disagreeing with itself: the contract has
+// already refused every metadata that is not an object, so nothing a caller
+// sent fails here in another way. It is logged and answered as an internal
+// failure.
+func refuseAdjustments(ctx context.Context, w http.ResponseWriter, err error, message, detail string) {
+	var invalid *adjustment.InvalidError
+	if !errors.As(err, &invalid) {
+		writeInternal(ctx, w, message, err, detail)
+		return
+	}
+
+	// A refused write leaves no audit row, so the refusal is logged with the
+	// caller it came from. The violations are counted rather than named: they
+	// go to the caller in the answer, and the count is what says how hard
+	// someone is trying.
+	Logger(ctx).Warn("refusing pricing adjustments the schema does not accept",
+		"actor", queryActor(ctx), "violations", len(invalid.Violations))
+
+	errs := make([]problem.FieldError, len(invalid.Violations))
+	for i, violation := range invalid.Violations {
+		errs[i] = problem.FieldError{
+			// The contract validator spells a body location with dots, so the
+			// pointer below the member is respelled the same way. It is empty
+			// when the array as a whole is refused.
+			Loc: "body.metadata." + adjustment.MetadataKey + strings.ReplaceAll(violation.Location, "/", "."),
+			Msg: violation.Message,
+		}
+	}
+	problem.Write(w, http.StatusUnprocessableEntity, problem.TypeValidation,
+		"Validation failed", invalidAdjustmentsDetail, errs...)
 }
 
 // relationOf renders one relation row as the answer the contract promises. The
