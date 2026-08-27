@@ -40,6 +40,25 @@ const (
 	largeSize    = `{"vcpus":625000000000,"ram_gb":2500000000000}`
 )
 
+// resellerAdjustments is what a relation to a reseller carries: 15 percent off
+// what the customer is billed, and 10 percent of what is left owed to the
+// partner. discountAdjustments is the one discount the cases that need nothing
+// else take.
+const (
+	resellerAdjustments = `{"pricing_adjustments":[` +
+		`{"type":"discount","rate":"0.15","scope":"all"},` +
+		`{"type":"kickback","rate":"0.10","scope":"all"}]}`
+	discountAdjustments = `{"pricing_adjustments":[{"type":"discount","rate":"0.10","scope":"all"}]}`
+)
+
+// adjustmentDepth is how deep the cases that resolve adjustments walk the
+// project graph, and adjustmentRelationTypes are the relation types they walk.
+// Three levels is past every graph the cases seed, and an empty type list is
+// adjustments turned off, which one of the cases runs with.
+const adjustmentDepth = 3
+
+var adjustmentRelationTypes = []string{"managed_by", "member_of"}
+
 // pricingDocument is the model every case is rated with. valid_from is filled
 // in with an instant before every period the cases meter.
 const pricingDocument = `version: "v1"
@@ -102,8 +121,8 @@ func month(offset int) (from, to time.Time) {
 //
 // The walk starts at offset -2 so that no month it returns is the one a test
 // runs in or the one before it. Seven months of twelve have 31 days, so the
-// third one is at most five offsets further back, which is what the offsets the
-// other cases pick stay clear of.
+// fifth one is at most eight offsets further back, which is what the offsets
+// the other cases pick stay clear of.
 func thirtyOneDayMonth(n int) (from, to time.Time) {
 	for offset := -2; ; offset-- {
 		from, to = month(offset)
@@ -302,6 +321,61 @@ func (f fixture) seedProject(t *testing.T, cloud, externalID string) {
 	}
 }
 
+// seedVirtualProject registers a project that owns no resources: a partner or
+// a meta-project. Its cloud is its platform, which is what a virtual project
+// carries there, and it returns the registry id a relation names it by.
+func (f fixture) seedVirtualProject(t *testing.T, platform, externalID string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`INSERT INTO projects (platform, cloud, external_id) VALUES ($1, $1, $2) RETURNING id`,
+		platform, externalID).Scan(&id); err != nil {
+		t.Fatalf("seeding the %s project %s: %v", platform, externalID, err)
+	}
+	return id
+}
+
+// projectIDOf is the registry id of one project, which a relation names and
+// seedProject does not report.
+func (f fixture) projectIDOf(t *testing.T, cloud, externalID string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`SELECT id FROM projects WHERE cloud = $1 AND external_id = $2`,
+		cloud, externalID).Scan(&id); err != nil {
+		t.Fatalf("reading the id of the project %s/%s: %v", cloud, externalID, err)
+	}
+	return id
+}
+
+// seedRelation writes one edge of the project graph and returns its id. An
+// empty metadata is the empty document a relation created without one carries,
+// and a nil validTo leaves the relation open. The two validity instants are
+// what fixes a relation to the periods it adjusts (D4).
+func (f fixture) seedRelation(
+	t *testing.T,
+	sourceID, targetID uuid.UUID,
+	relationType, metadata string,
+	validFrom time.Time,
+	validTo *time.Time,
+) uuid.UUID {
+	t.Helper()
+
+	if metadata == "" {
+		metadata = "{}"
+	}
+	var id uuid.UUID
+	if err := f.reporting.Store.Pool().QueryRow(t.Context(),
+		`INSERT INTO project_relations (source_id, target_id, relation_type, metadata, valid_from, valid_to)
+		 VALUES ($1, $2, $3, $4::jsonb, $5, $6) RETURNING id`,
+		sourceID, targetID, relationType, metadata, validFrom, validTo).Scan(&id); err != nil {
+		t.Fatalf("seeding the %s relation of %s: %v", relationType, sourceID, err)
+	}
+	return id
+}
+
 // runRow is a runs row as the cases read it back, past the package under test.
 // corrects_run_id is nullable, and a regular run reads as the zero id.
 type runRow struct {
@@ -445,6 +519,57 @@ func (f fixture) readStatements(t *testing.T, runID uuid.UUID) []string {
 	return keys
 }
 
+// adjustmentRow is an adjustment_records row as the cases read it back. The
+// rate and the two amounts are read as text, which is what keeps the assertion
+// off floats (roadmap/00-conventions.md section 6), and so is the relation id,
+// because that is what a case compares it against. beneficiary is nil on every
+// row but a kickback's.
+type adjustmentRow struct {
+	projectID      string
+	relationID     string
+	relationType   string
+	relationTarget string
+	beneficiary    *string
+	typ            string
+	scope          string
+	rate           string
+	base           string
+	amount         string
+	currency       string
+}
+
+// readAdjustments reads a run's adjustment records, in the order
+// ListAdjustmentRecords returns them, which is the order a correction diffs
+// them in.
+func (f fixture) readAdjustments(t *testing.T, runID uuid.UUID) []adjustmentRow {
+	t.Helper()
+
+	rows, err := f.engine.Store.Pool().Query(t.Context(),
+		`SELECT project_id, relation_id::text, relation_type, relation_target, beneficiary,
+		        type, scope, rate::text, base::text, amount::text, currency
+		 FROM adjustment_records WHERE run_id = $1
+		 ORDER BY project_id, relation_id, type, scope, rate, amount`, runID)
+	if err != nil {
+		t.Fatalf("reading the adjustment records of run %s: %v", runID, err)
+	}
+	defer rows.Close()
+
+	var records []adjustmentRow
+	for rows.Next() {
+		var row adjustmentRow
+		if err := rows.Scan(&row.projectID, &row.relationID, &row.relationType, &row.relationTarget,
+			&row.beneficiary, &row.typ, &row.scope, &row.rate, &row.base, &row.amount,
+			&row.currency); err != nil {
+			t.Fatalf("scanning an adjustment record of run %s: %v", runID, err)
+		}
+		records = append(records, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the adjustment records of run %s: %v", runID, err)
+	}
+	return records
+}
+
 // deltaRow is a correction_deltas row as the cases read it back. The three
 // amounts are read as text, which is what keeps the assertion off floats
 // (roadmap/00-conventions.md section 6).
@@ -519,13 +644,21 @@ func (f fixture) readStatementTotals(t *testing.T, runID uuid.UUID) map[string]s
 func (f fixture) readStatementDocument(t *testing.T, runID uuid.UUID, key string) map[string]any {
 	t.Helper()
 
+	return decodeJSON(t, f.readStatementBytes(t, runID, key))
+}
+
+// readStatementBytes reads one stored statement as the bytes the column holds,
+// which is what the case that renders one document twice compares.
+func (f fixture) readStatementBytes(t *testing.T, runID uuid.UUID, key string) []byte {
+	t.Helper()
+
 	var raw []byte
 	if err := f.engine.Store.Pool().QueryRow(t.Context(),
 		`SELECT document FROM project_statements WHERE run_id = $1 AND project_id = $2`,
 		runID, key).Scan(&raw); err != nil {
 		t.Fatalf("reading the statement of run %s for %s: %v", runID, key, err)
 	}
-	return decodeJSON(t, raw)
+	return raw
 }
 
 // readStats reads a run's stats as the generic values a case asserts over.
@@ -645,6 +778,26 @@ func assertCounts(t *testing.T, stats map[string]any, candidates, usage, rated, 
 	} {
 		if got := number(t, stats, tc.key); got != tc.want {
 			t.Errorf("stats %s = %s, want %s", tc.key, got, tc.want)
+		}
+	}
+}
+
+// assertNoRecords fails when a run holds any record at all, which is what a run
+// that failed before its write transaction has to leave behind.
+func (f fixture) assertNoRecords(t *testing.T, runID uuid.UUID) {
+	t.Helper()
+
+	for _, tc := range []struct {
+		records string
+		count   int
+	}{
+		{records: "usage records", count: len(f.readUsage(t, runID))},
+		{records: "rated records", count: len(f.readRated(t, runID))},
+		{records: "statements", count: len(f.readStatements(t, runID))},
+		{records: "adjustment records", count: len(f.readAdjustments(t, runID))},
+	} {
+		if tc.count != 0 {
+			t.Errorf("the failed run holds %d %s, want none", tc.count, tc.records)
 		}
 	}
 }
@@ -782,7 +935,8 @@ func TestExecute(t *testing.T) {
 		}
 
 		assertAbsent(t, stats, "warnings", "counter_warnings", "attribution_warnings",
-			"unpriced", "unreadable", "violations", "error")
+			"unpriced", "unreadable", "violations", "error",
+			"adjustment_records", "adjustment_warnings")
 	})
 
 	t.Run("leaves the period status alone", func(t *testing.T) {
@@ -1316,6 +1470,341 @@ func TestExecute(t *testing.T) {
 			if got := number(t, stored, tc.metric); got != tc.want {
 				t.Errorf("usage %s = %s, want %s", tc.metric, got, tc.want)
 			}
+		}
+	})
+
+	t.Run("applies the adjustments of a reseller relation", func(t *testing.T) {
+		from, to := month(-22)
+		const cloud = "os-run-reseller"
+		const key = cloud + "/proj-reseller"
+		f.seedProject(t, cloud, "proj-reseller")
+		f.seedResource(t, instance(cloud, "i-reseller", "proj-reseller", from, standardSize))
+		// The partner the project is managed by, and the relation that carries
+		// what its customers are billed at. It opens before the period, so it
+		// adjusts the whole of it.
+		relation := f.seedRelation(t, f.projectIDOf(t, cloud, "proj-reseller"),
+			f.seedVirtualProject(t, "partner", "partner-corp"),
+			"managed_by", resellerAdjustments, from.AddDate(0, -1, 0), nil)
+
+		result, err := f.execute(t, runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+
+		// 5.76 rated, 15 percent off it, and 10 percent of what is left owed to
+		// the partner beside the net rather than in it.
+		document := f.readStatementDocument(t, result.RunID, key)
+		for _, tc := range []struct{ field, want string }{
+			{"base_cost", "5.76"},
+			{"net_cost", "4.90"},
+			{"kickback_total", "0.49"},
+			{"total", "4.90"},
+		} {
+			if got := number(t, document, tc.field); got != tc.want {
+				t.Errorf("the statement's %s = %s, want %s", tc.field, got, tc.want)
+			}
+		}
+		lines := list(t, document, "adjustments")
+		if len(lines) != 2 {
+			t.Fatalf("the statement holds %d adjustments, want the discount and the kickback", len(lines))
+		}
+		for i, tc := range []struct{ typ, base, amount string }{
+			{typ: "discount", base: "5.76", amount: "-0.86"},
+			{typ: "kickback", base: "4.90", amount: "0.49"},
+		} {
+			if got := text(t, lines[i], "type"); got != tc.typ {
+				t.Errorf("adjustment %d is a %s, want a %s", i, got, tc.typ)
+			}
+			if got := number(t, lines[i], "base"); got != tc.base {
+				t.Errorf("the %s is rated on %s, want %s", tc.typ, got, tc.base)
+			}
+			if got := number(t, lines[i], "amount"); got != tc.amount {
+				t.Errorf("the %s is %s, want %s", tc.typ, got, tc.amount)
+			}
+		}
+		if got := f.readStatementTotals(t, result.RunID)[key]; got != "4.90" {
+			t.Errorf("the stored total of %s is %s, want the 4.90 the customer pays", key, got)
+		}
+
+		// One record per applied adjustment, each naming the relation it came
+		// from, and the partner named as owed the kickback alone.
+		records := f.readAdjustments(t, result.RunID)
+		if len(records) != 2 {
+			t.Fatalf("the run holds %d adjustment records, want one per applied adjustment", len(records))
+		}
+		for i, tc := range []struct{ typ, rate, base, amount, beneficiary string }{
+			{typ: "discount", rate: "0.150000", base: "5.76", amount: "-0.86"},
+			{typ: "kickback", rate: "0.100000", base: "4.90", amount: "0.49", beneficiary: "partner-corp"},
+		} {
+			want := adjustmentRow{
+				projectID: key, relationID: relation.String(), relationType: "managed_by",
+				relationTarget: "partner-corp", typ: tc.typ, scope: "all",
+				rate: tc.rate, base: tc.base, amount: tc.amount, currency: "EUR",
+			}
+			got := records[i]
+			beneficiary := ""
+			if got.beneficiary != nil {
+				beneficiary = *got.beneficiary
+			}
+			got.beneficiary = nil
+			if got != want || beneficiary != tc.beneficiary {
+				t.Errorf("the %s record is %+v owed to %q, want %+v owed to %q",
+					tc.typ, got, beneficiary, want, tc.beneficiary)
+			}
+		}
+
+		stats := f.readStats(t, result.RunID)
+		if got := number(t, stats, "adjustment_records"); got != "2" {
+			t.Errorf("stats adjustment_records = %s, want 2", got)
+		}
+		assertAbsent(t, stats, "adjustment_warnings")
+	})
+
+	t.Run("applies a relation closed inside the period and not one closed before it", func(t *testing.T) {
+		from, to := month(-23)
+		const cloud = "os-run-relation-validity"
+		f.seedProject(t, cloud, "proj-validity")
+		f.seedResource(t, instance(cloud, "i-validity", "proj-validity", from, standardSize))
+		project := f.projectIDOf(t, cloud, "proj-validity")
+
+		// A relation is read when its validity overlaps the period, and it then
+		// adjusts the whole of it (D4). One of these two was closed halfway
+		// through the month and one an hour before it began.
+		inside := from.Add(15 * 24 * time.Hour)
+		before := from.Add(-time.Hour)
+		overlapping := f.seedRelation(t, project, f.seedVirtualProject(t, "partner", "partner-inside"),
+			"managed_by", discountAdjustments, from.AddDate(0, -1, 0), &inside)
+		f.seedRelation(t, project, f.seedVirtualProject(t, "partner", "partner-before"),
+			"managed_by", discountAdjustments, from.AddDate(0, -2, 0), &before)
+
+		result, err := f.execute(t, runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+
+		records := f.readAdjustments(t, result.RunID)
+		if len(records) != 1 {
+			t.Fatalf("the run holds %d adjustment records, want the one of the relation the period overlaps",
+				len(records))
+		}
+		if records[0].relationID != overlapping.String() {
+			t.Errorf("the record names relation %s, want the %s the period overlaps",
+				records[0].relationID, overlapping)
+		}
+		if records[0].amount != "-0.58" {
+			t.Errorf("the discount is %s, want -0.58, a tenth of the 5.76 the month was rated at",
+				records[0].amount)
+		}
+	})
+
+	t.Run("leaves a statement alone when adjustments are turned off", func(t *testing.T) {
+		from, to := month(-24)
+		const cloud = "os-run-adjustments-off"
+		const key = cloud + "/proj-off"
+		f.seedProject(t, cloud, "proj-off")
+		f.seedResource(t, instance(cloud, "i-off", "proj-off", from, standardSize))
+		opts := runs.Options{PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud}}
+
+		unadjusted, err := f.execute(t, opts)
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+		document := f.readStatementBytes(t, unadjusted.RunID, key)
+
+		// The relation exists now, and the run still walks no relation type at
+		// all, which is what turns the resolution off.
+		f.seedRelation(t, f.projectIDOf(t, cloud, "proj-off"),
+			f.seedVirtualProject(t, "partner", "partner-off"),
+			"managed_by", resellerAdjustments, from.AddDate(0, -1, 0), nil)
+
+		result, err := f.execute(t, opts)
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+		if got := f.readStatementBytes(t, result.RunID, key); !bytes.Equal(got, document) {
+			t.Errorf("the statement is %s, want the %s it was rendered as before the relation existed",
+				got, document)
+		}
+		if got := len(f.readAdjustments(t, result.RunID)); got != 0 {
+			t.Errorf("the run holds %d adjustment records, want none", got)
+		}
+	})
+
+	t.Run("warns about a kickback to a meta-project", func(t *testing.T) {
+		from, to := month(-25)
+		const cloud = "os-run-kickback-warning"
+		const key = cloud + "/proj-warning"
+		f.seedProject(t, cloud, "proj-warning")
+		f.seedResource(t, instance(cloud, "i-warning", "proj-warning", from, standardSize))
+		// A meta-project is not a partner, so the kickback of the relation is
+		// dropped and the project discount beside it is applied.
+		relation := f.seedRelation(t, f.projectIDOf(t, cloud, "proj-warning"),
+			f.seedVirtualProject(t, "meta", "customer-alpha"), "member_of",
+			`{"pricing_adjustments":[{"type":"project_discount","rate":"0.05","scope":"all"},`+
+				`{"type":"kickback","rate":"0.10","scope":"all"}]}`,
+			from.AddDate(0, -1, 0), nil)
+
+		result, err := f.execute(t, runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+		if run := f.readRun(t, result.RunID); run.status != "completed" {
+			t.Errorf("status = %q, want completed: a kickback nobody is owed is a warning, not a failure",
+				run.status)
+		}
+
+		records := f.readAdjustments(t, result.RunID)
+		if len(records) != 1 {
+			t.Fatalf("the run holds %d adjustment records, want the project discount alone", len(records))
+		}
+		if records[0].typ != "project_discount" || records[0].base != "5.76" || records[0].amount != "-0.29" {
+			t.Errorf("the record is %+v, want the project discount of -0.29 on 5.76", records[0])
+		}
+
+		document := f.readStatementDocument(t, result.RunID, key)
+		if got := len(list(t, document, "adjustments")); got != 1 {
+			t.Errorf("the statement holds %d adjustments, want the project discount alone", got)
+		}
+		if got := number(t, document, "kickback_total"); got != "0.00" {
+			t.Errorf("kickback_total = %s, want 0.00: nobody is owed the commission", got)
+		}
+
+		warnings := list(t, f.readStats(t, result.RunID), "adjustment_warnings")
+		if len(warnings) != 1 {
+			t.Fatalf("adjustment_warnings = %v, want the one dropped kickback", warnings)
+		}
+		for _, tc := range []struct{ field, want string }{
+			{"code", "adjustment_kickback_target_not_partner"},
+			{"relation_id", relation.String()},
+			{"target_id", "customer-alpha"},
+		} {
+			if got := text(t, warnings[0], tc.field); got != tc.want {
+				t.Errorf("the warning's %s = %q, want %q", tc.field, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("fails the run on a relation whose adjustments the schema refuses", func(t *testing.T) {
+		from, to := month(-26)
+		const cloud = "os-run-adjustment-invalid"
+		f.seedProject(t, cloud, "proj-invalid")
+		f.seedResource(t, instance(cloud, "i-invalid", "proj-invalid", from, standardSize))
+		// A type the schema does not admit, which the registry's own API refuses
+		// on the way in. A relation whose stored array cannot be read must not
+		// bill as though it carried nothing.
+		//
+		// It is valid for this month alone, because a relation the resolution
+		// cannot parse fails every run whose period it overlaps, whatever
+		// project it names, and the months of the other cases are not this
+		// one's to fail.
+		relation := f.seedRelation(t, f.projectIDOf(t, cloud, "proj-invalid"),
+			f.seedVirtualProject(t, "partner", "partner-invalid"), "managed_by",
+			`{"pricing_adjustments":[{"type":"rebate","rate":"0.15","scope":"all"}]}`,
+			from, &to)
+
+		result, err := f.execute(t, runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err == nil {
+			t.Fatal("Execute() error = nil, want the relation the schema refuses reported")
+		}
+		for _, want := range []string{relation.String(), "do not match the schema"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Execute() error = %q, want it to name %q", err, want)
+			}
+		}
+
+		if run := f.readRun(t, result.RunID); run.status != "failed" {
+			t.Errorf("status = %q, want failed", run.status)
+		}
+		if got := text(t, f.readStats(t, result.RunID), "error"); got != err.Error() {
+			t.Errorf("stats error = %q, want the failure %q", got, err.Error())
+		}
+		f.assertNoRecords(t, result.RunID)
+	})
+
+	t.Run("writes nothing when an adjustment is out of range", func(t *testing.T) {
+		from, to := month(-27)
+		const cloud = "os-run-adjustment-overflow"
+		f.seedProject(t, cloud, "proj-adjustment-overflow")
+		// Two dimensions of six hundred billion each: every rated amount fits
+		// the column, and the surcharge on what they add up to does not, so the
+		// run is refused before its first insert.
+		f.seedResource(t, instance(cloud, "i-adjustment-overflow", "proj-adjustment-overflow", from, largeSize))
+		f.seedRelation(t, f.projectIDOf(t, cloud, "proj-adjustment-overflow"),
+			f.seedVirtualProject(t, "partner", "partner-overflow"), "managed_by",
+			`{"pricing_adjustments":[{"type":"surcharge","rate":"1","scope":"all"}]}`,
+			from.AddDate(0, -1, 0), nil)
+
+		result, err := f.execute(t, runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		})
+		if err == nil {
+			t.Fatal("Execute() error = nil, want the oversized adjustment refused")
+		}
+		if want := "past the 999999999999.99 the column holds"; !strings.Contains(err.Error(), want) {
+			t.Errorf("Execute() error = %q, want it to say %q", err, want)
+		}
+
+		if run := f.readRun(t, result.RunID); run.status != "failed" {
+			t.Errorf("status = %q, want failed", run.status)
+		}
+		f.assertNoRecords(t, result.RunID)
+	})
+
+	t.Run("stores the adjustment records with the run", func(t *testing.T) {
+		from, to := month(-28)
+		const cloud = "os-run-adjustment-records"
+		f.seedProject(t, cloud, "proj-records")
+		f.seedResource(t, instance(cloud, "i-records", "proj-records", from, standardSize))
+		f.seedRelation(t, f.projectIDOf(t, cloud, "proj-records"),
+			f.seedVirtualProject(t, "partner", "partner-records"), "managed_by",
+			resellerAdjustments, from.AddDate(0, -1, 0), nil)
+		opts := runs.Options{
+			PeriodFrom: from, PeriodTo: to, Clouds: []string{cloud},
+			AdjustmentRelationTypes: adjustmentRelationTypes, AdjustmentDepth: adjustmentDepth,
+		}
+
+		first, err := f.execute(t, opts)
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+		records := f.readAdjustments(t, first.RunID)
+		if len(records) != 2 {
+			t.Fatalf("the run holds %d adjustment records, want the discount and the kickback", len(records))
+		}
+		for _, record := range records {
+			if record.currency != "EUR" {
+				t.Errorf("the %s record is in %s, want the EUR the period was rated in",
+					record.typ, record.currency)
+			}
+		}
+
+		second, err := f.execute(t, opts)
+		if err != nil {
+			t.Fatalf("Execute() error = %v, want nil", err)
+		}
+		if !slices.Equal(second.Superseded, []uuid.UUID{first.RunID}) {
+			t.Errorf("Superseded = %v, want the completed run %s", second.Superseded, first.RunID)
+		}
+		// The records of a superseded run stay for the audit, the way its usage
+		// records do, and the run that replaced it holds its own.
+		if got := len(f.readAdjustments(t, first.RunID)); got != 2 {
+			t.Errorf("the superseded run holds %d adjustment records, want its own kept", got)
+		}
+		if got := len(f.readAdjustments(t, second.RunID)); got != 2 {
+			t.Errorf("the second run holds %d adjustment records, want the two it applied", got)
 		}
 	})
 }
