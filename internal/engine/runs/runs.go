@@ -400,7 +400,7 @@ func produce(
 	resolution := attribution.Resolve(projects, relations)
 	stats.AttributionWarnings = resolution.Warnings
 
-	built, err := statements.Build(opts.PeriodFrom, opts.PeriodTo, metered.Resources, rated, projects, resolution)
+	built, err := statements.Build(opts.PeriodFrom, opts.PeriodTo, metered.Resources, rated, projects, resolution, nil)
 	if err != nil {
 		return nil, err
 	}

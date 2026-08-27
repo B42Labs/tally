@@ -16,6 +16,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/pricing"
@@ -90,8 +91,16 @@ const (
 )
 
 // infrastructureTenant is the attributing relation type of the concept's
-// example.
-const infrastructureTenant = "infrastructure_tenant"
+// example, and managedBy the relation type its pricing adjustments hang off.
+const (
+	infrastructureTenant = "infrastructure_tenant"
+	managedBy            = "managed_by"
+)
+
+// adjustmentDepth is how many levels the adjustment walk of a case takes. The
+// cases below name a partner one edge away, so any depth of at least one
+// resolves them.
+const adjustmentDepth = 3
 
 // The period the cases bill: March 2026, the one the concept works through.
 var (
@@ -140,6 +149,34 @@ func relation(n, from, to int) source.Relation {
 		TargetID:     projectID(to),
 		RelationType: infrastructureTenant,
 	}
+}
+
+// relationWith is edge n of a given relation type, carrying the metadata a
+// pricing adjustment lives in. Empty metadata is a relation that adjusts
+// nothing, the way a relation created without one is stored.
+func relationWith(n, from, to int, relationType, metadata string) source.Relation {
+	edge := relation(n, from, to)
+	edge.RelationType = relationType
+	if metadata != "" {
+		edge.Metadata = json.RawMessage(metadata)
+	}
+	return edge
+}
+
+// adjusterOver resolves the adjustments of the given relations, which the case
+// expects to hold. A warning means the case built a relation it did not mean
+// to, so it fails there rather than on the numbers it produces.
+func adjusterOver(t *testing.T, relations []source.Relation, projects []source.Project) *adjustments.Adjuster {
+	t.Helper()
+
+	adjuster, warnings, err := adjustments.New(relations, projects, adjustmentDepth)
+	if err != nil {
+		t.Fatalf("adjustments.New() error = %v, want nil", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("adjustments.New() warnings = %+v, want none", warnings)
+	}
+	return adjuster
 }
 
 // resource is one candidate of the period.
@@ -201,7 +238,23 @@ func build(
 ) statements.BuildResult {
 	t.Helper()
 
-	result, err := statements.Build(periodFrom, periodTo, usage, rating.Rate(model, usage), projects, res)
+	return buildAdjusted(t, model, usage, projects, res, nil)
+}
+
+// buildAdjusted renders the same period with an adjuster over the project
+// graph, which is what a run hands in once it has resolved the adjustments of
+// the period.
+func buildAdjusted(
+	t *testing.T,
+	model pricing.Model,
+	usage []metering.ResourceUsage,
+	projects []source.Project,
+	res attribution.Resolution,
+	adjuster *adjustments.Adjuster,
+) statements.BuildResult {
+	t.Helper()
+
+	result, err := statements.Build(periodFrom, periodTo, usage, rating.Rate(model, usage), projects, res, adjuster)
 	if err != nil {
 		t.Fatalf("Build() error = %v, want nil", err)
 	}
@@ -278,6 +331,74 @@ func assertUsage(t *testing.T, period statements.Period, metric, want string) {
 		return
 	}
 	assertDecimal(t, "usage "+metric, quantity.Decimal, want)
+}
+
+// assertAmount holds one of the document's optional amount members against the
+// text it is expected to spell. A member the document does not carry fails the
+// case: the four adjustment members are rendered together or not at all.
+func assertAmount(t *testing.T, name string, got *money.Amount, want string) {
+	t.Helper()
+
+	if got == nil {
+		t.Errorf("%s is missing, want %s", name, want)
+		return
+	}
+	assertDecimal(t, name, got.Decimal, want)
+}
+
+// assertMemberOrder holds the marshalled document against the order the concept
+// prints its members in. The order is a property of the bytes, so it is read
+// off them: a decoded document carries the members in the order the Go type
+// declares them whatever the bytes held. Each name is searched for behind the
+// one ahead of it, so a name a nested object carries as well is not what the
+// next one is placed against.
+func assertMemberOrder(t *testing.T, body []byte, members ...string) {
+	t.Helper()
+
+	rest := body
+	for _, member := range members {
+		name := []byte(`"` + member + `":`)
+		at := bytes.Index(rest, name)
+		if at < 0 {
+			t.Fatalf("the document holds no %q behind the members ahead of it:\n%s", member, body)
+		}
+		rest = rest[at+len(name):]
+	}
+}
+
+// assertUnadjusted holds a statement against carrying no adjustment at all:
+// none of the four document members, no member name in the bytes, and no line
+// on the statement itself.
+func assertUnadjusted(t *testing.T, statement statements.Statement) {
+	t.Helper()
+
+	if statement.Adjustments != nil {
+		t.Errorf("Adjustments of %s = %+v, want none", statement.Key, statement.Adjustments)
+	}
+	document := documentOf(t, statement)
+	if document.BaseCost != nil || document.Adjustments != nil ||
+		document.NetCost != nil || document.KickbackTotal != nil {
+		t.Errorf("the document of %s decodes adjustment members, want none:\n%s", statement.Key, statement.Document)
+	}
+	for _, member := range []string{"base_cost", "adjustments", "net_cost", "kickback_total"} {
+		if bytes.Contains(statement.Document, []byte(`"`+member+`":`)) {
+			t.Errorf("the document of %s renders %q, want it left out:\n%s", statement.Key, member, statement.Document)
+		}
+	}
+}
+
+// powerCycleUsage is the usage of the concept's worked example, one instance
+// that ran for ten days, was shut off for ten and ran for the rest of March. It
+// is rated at 128.45, which is what the adjustment cases start from.
+func powerCycleUsage() []metering.ResourceUsage {
+	return []metering.ResourceUsage{{
+		Resource: resource(openstackCloud, "openstack", "instance", "abc-123"),
+		Drafts: []metering.UsageDraft{
+			draft("active", "proj-456", 240, m1Large(map[string]any{"egress_gb": float64(18.0)})),
+			draft("shutoff", "proj-456", 240, m1Large(map[string]any{"egress_gb": float64(0)})),
+			draft("active", "proj-456", 264, m1Large(map[string]any{"egress_gb": float64(22.5)})),
+		},
+	}}
 }
 
 // TestBuildRelatedCostsGolden renders the concept's related-costs example: a
@@ -430,6 +551,232 @@ func TestBuildPowerCycleDocument(t *testing.T) {
 	if !bytes.Equal(statement.Document, want) {
 		t.Errorf("Document =\n%s\nwant\n%s", statement.Document, want)
 	}
+}
+
+// TestBuildAdjustedDocument bills the concept's worked example through the
+// reseller of Phase 5: proj-456 is managed by a partner whose relation carries
+// a discount of 15 percent and a kickback of 10 percent on everything the
+// period was rated at. The document shows what it was rated at, what each
+// adjustment came to and what the customer pays, and its total is the net cost.
+func TestBuildAdjustedDocument(t *testing.T) {
+	projects := []source.Project{
+		project(1, openstackCloud, "openstack", "proj-456"),
+		project(2, "partner", "partner", "partner-corp"),
+	}
+	relations := []source.Relation{relationWith(1, 1, 2, managedBy, `{"pricing_adjustments":[
+		{"type": "discount", "rate": "0.15", "scope": "all", "description": "reseller discount"},
+		{"type": "kickback", "rate": "0.10", "scope": "all"}
+	]}`)}
+
+	result := buildAdjusted(t, mustParse(t, conceptModel), powerCycleUsage(), projects,
+		attribution.Resolve(projects, nil), adjusterOver(t, relations, projects))
+
+	statement := statementOf(t, result, "os-prod/proj-456")
+	assertDecimal(t, "Total", statement.Total, "109.18")
+	if len(statement.Adjustments) != 2 {
+		t.Fatalf("Statement.Adjustments = %d, want 2, the discount and the kickback", len(statement.Adjustments))
+	}
+
+	document := documentOf(t, statement)
+	assertAmount(t, "base_cost", document.BaseCost, "128.45")
+	assertAmount(t, "net_cost", document.NetCost, "109.18")
+	assertAmount(t, "kickback_total", document.KickbackTotal, "10.92")
+	// The total is what the customer pays, so the kickback the partner is owed
+	// sits beside it rather than in it.
+	assertDecimal(t, "document total", document.Total.Decimal, "109.18")
+
+	if len(document.Adjustments) != 2 {
+		t.Fatalf("adjustments = %d, want 2", len(document.Adjustments))
+	}
+	lines := []struct {
+		name        string
+		kind        string
+		rate        string
+		base        string
+		amount      string
+		description string
+	}{
+		// 15 percent of the rated total is 19.2675, rounded half away from zero.
+		{"the discount off the rated total", "discount", "0.15", "128.45", "-19.27", "reseller discount"},
+		// The kickback is rated on the net cost, 10.918 of it, and leaves it be.
+		{"the kickback off the net cost", "kickback", "0.10", "109.18", "10.92", ""},
+	}
+	for i, want := range lines {
+		t.Run(want.name, func(t *testing.T) {
+			line := document.Adjustments[i]
+			if line.Type != want.kind {
+				t.Errorf("type = %q, want %q", line.Type, want.kind)
+			}
+			if line.RelationType != managedBy || line.RelationTarget != "partner-corp" {
+				t.Errorf("the line names %s/%s, want %s/partner-corp",
+					line.RelationType, line.RelationTarget, managedBy)
+			}
+			if line.RelationID != relationID(1).String() {
+				t.Errorf("relation_id = %q, want %q", line.RelationID, relationID(1))
+			}
+			if line.Scope != "all" {
+				t.Errorf("scope = %q, want all", line.Scope)
+			}
+			if line.Description != want.description {
+				t.Errorf("description = %q, want %q", line.Description, want.description)
+			}
+			assertDecimal(t, "rate", line.Rate.Decimal, want.rate)
+			assertDecimal(t, "base", line.Base.Decimal, want.base)
+			assertDecimal(t, "amount", line.Amount.Decimal, want.amount)
+			// The statement carries the lines the document shows, which is what
+			// the run stores as its adjustment records.
+			if got := statement.Adjustments[i].Amount.StringFixed(2); got != want.amount {
+				t.Errorf("Statement.Adjustments[%d] = %s, want %s", i, got, want.amount)
+			}
+		})
+	}
+
+	assertMemberOrder(t, statement.Document,
+		"billing_period", "project_id", "platform", "line_items", "related_costs",
+		"base_cost", "adjustments", "net_cost", "kickback_total", "total", "currency")
+}
+
+// TestBuildAdjustsRelatedCosts adjusts a statement over the costs of the
+// project attributed to it. The workers of the shoot are billed on team-alpha's
+// document as a related cost, so a discount scoped to the OpenStack instances
+// reaches them: the customer pays one document, however many projects the lines
+// under it were metered in.
+//
+// The second half hangs the same discount off the tenant's own relation. The
+// walk starts at the project the statement is keyed to, which the tenant is
+// not, so nothing reaches the document and it renders the bytes an unadjusted
+// build renders.
+func TestBuildAdjustsRelatedCosts(t *testing.T) {
+	projects := []source.Project{
+		project(1, gardenerCloud, "gardener", "team-alpha"),
+		project(2, openstackCloud, "openstack", "shoot-abc-os-tenant"),
+		project(3, "partner", "partner", "partner-corp"),
+	}
+	usage := []metering.ResourceUsage{
+		{
+			Resource: resource(gardenerCloud, "gardener", "shoot", "shoot-abc"),
+			Drafts: []metering.UsageDraft{
+				draft("active", "team-alpha", 744, map[string]any{"worker_count": float64(3)}),
+			},
+		},
+		{
+			Resource: resource(openstackCloud, "openstack", "instance", "worker-1"),
+			Drafts: []metering.UsageDraft{
+				draft("active", "shoot-abc-os-tenant", 744, map[string]any{
+					"vcpus":   float64(8),
+					"ram_gb":  float64(16),
+					"disk_gb": float64(160),
+				}),
+			},
+		},
+	}
+	const discount = `{"pricing_adjustments": [{"type": "discount", "rate": "0.10", "scope": "openstack.instance"}]}`
+
+	model := mustParse(t, conceptModel)
+	res := attribution.Resolve(projects, []source.Relation{relation(1, 1, 2)})
+
+	adjusted := buildAdjusted(t, model, usage, projects, res,
+		adjusterOver(t, []source.Relation{relationWith(2, 1, 3, managedBy, discount)}, projects))
+
+	statement := statementOf(t, adjusted, "gardener-prod/team-alpha")
+	assertDecimal(t, "Total", statement.Total, "491.04")
+	document := documentOf(t, statement)
+	assertAmount(t, "base_cost", document.BaseCost, "520.80")
+	assertAmount(t, "net_cost", document.NetCost, "491.04")
+	assertAmount(t, "kickback_total", document.KickbackTotal, "0.00")
+	if len(document.Adjustments) != 1 {
+		t.Fatalf("adjustments = %d, want 1, the discount", len(document.Adjustments))
+	}
+	// The shoot is out of scope and the tenant's worker is in it, although the
+	// worker is billed here as a related cost rather than as a line of its own.
+	assertDecimal(t, "base", document.Adjustments[0].Base.Decimal, "297.60")
+	assertDecimal(t, "amount", document.Adjustments[0].Amount.Decimal, "-29.76")
+
+	unreached := buildAdjusted(t, model, usage, projects, res,
+		adjusterOver(t, []source.Relation{relationWith(2, 2, 3, managedBy, discount)}, projects))
+
+	untouched := statementOf(t, unreached, "gardener-prod/team-alpha")
+	assertDecimal(t, "Total of the statement the walk does not reach", untouched.Total, "520.80")
+	assertUnadjusted(t, untouched)
+	want := statementOf(t, build(t, model, usage, projects, res), "gardener-prod/team-alpha")
+	if !bytes.Equal(untouched.Document, want.Document) {
+		t.Errorf("Document =\n%s\nwant the bytes of a build without an adjuster\n%s",
+			untouched.Document, want.Document)
+	}
+}
+
+// TestBuildWithoutAdjustmentsIsByteIdentical renders the concept's worked
+// example three ways that adjust nothing. A statement no adjustment reaches
+// carries none of the four members, so the document is the fixture byte for
+// byte and an operator reading it sees what Phase 3 renders.
+func TestBuildWithoutAdjustmentsIsByteIdentical(t *testing.T) {
+	projects := []source.Project{
+		project(1, openstackCloud, "openstack", "proj-456"),
+		project(2, "partner", "partner", "partner-corp"),
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "power_cycle.json"))
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		adjuster *adjustments.Adjuster
+	}{
+		{name: "no adjuster at all", adjuster: nil},
+		{name: "an adjuster over no relations", adjuster: adjusterOver(t, nil, projects)},
+		{
+			name: "a relation that carries no metadata",
+			adjuster: adjusterOver(t,
+				[]source.Relation{relationWith(1, 1, 2, managedBy, "")}, projects),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := buildAdjusted(t, mustParse(t, conceptModel), powerCycleUsage(), projects,
+				attribution.Resolve(projects, nil), tc.adjuster)
+
+			statement := statementOf(t, result, "os-prod/proj-456")
+			assertDecimal(t, "Total", statement.Total, "128.45")
+			assertUnadjusted(t, statement)
+			if !bytes.Equal(statement.Document, want) {
+				t.Errorf("Document =\n%s\nwant\n%s", statement.Document, want)
+			}
+		})
+	}
+}
+
+// TestBuildUnregisteredProjectIsNotAdjusted bills drafts under a project id no
+// registry row matches. The pair is billed standalone, and there is no project
+// to walk from: the discount of a registered project that carries the same
+// external id in another cloud is not that pair's, and an external id is unique
+// per cloud only.
+func TestBuildUnregisteredProjectIsNotAdjusted(t *testing.T) {
+	projects := []source.Project{
+		project(1, gardenerCloud, "gardener", "proj-456"),
+		project(2, "partner", "partner", "partner-corp"),
+	}
+	usage := []metering.ResourceUsage{{
+		Resource: resource(openstackCloud, "openstack", "instance", "abc-123"),
+		Drafts:   []metering.UsageDraft{draft("active", "proj-456", 240, m1Large(nil))},
+	}}
+	relations := []source.Relation{relationWith(1, 1, 2, managedBy,
+		`{"pricing_adjustments": [{"type": "discount", "rate": "0.5", "scope": "all"}]}`)}
+
+	result := buildAdjusted(t, mustParse(t, conceptModel), usage, projects,
+		attribution.Resolve(projects, nil), adjusterOver(t, relations, projects))
+
+	if got := keys(result); !reflect.DeepEqual(got, []string{"os-prod/proj-456"}) {
+		t.Fatalf("statement keys = %v, want only os-prod/proj-456, billed under its raw id", got)
+	}
+	unregistered := []statements.UnregisteredProject{
+		{Cloud: openstackCloud, ProjectID: "proj-456", Resources: 1},
+	}
+	if !reflect.DeepEqual(result.Unregistered, unregistered) {
+		t.Errorf("Unregistered = %+v, want %+v", result.Unregistered, unregistered)
+	}
+	assertDecimal(t, "Total", result.Statements[0].Total, "48.00")
+	assertUnadjusted(t, result.Statements[0])
 }
 
 // TestBuildPartialHours renders drafts that did not run for whole hours. Hours
@@ -802,7 +1149,7 @@ func TestBuildEmptyInputs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := statements.Build(periodFrom, periodTo, tc.usage, tc.rated, nil, attribution.Resolution{})
+			result, err := statements.Build(periodFrom, periodTo, tc.usage, tc.rated, nil, attribution.Resolution{}, nil)
 			if err != nil {
 				t.Fatalf("Build() error = %v, want nil", err)
 			}
@@ -825,7 +1172,7 @@ func TestBuildReservedTotalMetric(t *testing.T) {
 	model := mustParse(t, reservedModel)
 
 	_, err := statements.Build(periodFrom, periodTo, usage, rating.Rate(model, usage), projects,
-		attribution.Resolve(projects, nil))
+		attribution.Resolve(projects, nil), nil)
 
 	if err == nil {
 		t.Fatalf("Build() error = nil, want the reserved metric refused")
@@ -872,7 +1219,7 @@ func TestBuildAlignmentErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := statements.Build(periodFrom, periodTo, tc.usage, tc.rated, nil, attribution.Resolution{})
+			_, err := statements.Build(periodFrom, periodTo, tc.usage, tc.rated, nil, attribution.Resolution{}, nil)
 			if err == nil {
 				t.Fatalf("Build() error = nil, want the misaligned resource refused")
 			}

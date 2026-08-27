@@ -24,7 +24,16 @@
 // run reports through runs.stats: usage somebody consumed is not dropped
 // because nobody registered the project it ran in.
 //
-// The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.7.
+// A caller that passes an adjuster has the pricing adjustments of the
+// statement's project applied here: the document then shows the base cost the
+// period was rated at, one line per adjustment, the net cost and the kickbacks
+// a partner is owed. Its total is the net cost, which is what the customer
+// pays. A statement no adjustment reaches holds none of those members and
+// renders the same bytes as one built without an adjuster.
+//
+// The normative specification is roadmap/03-phase-3-metering-rating.md, WP 3.7,
+// and roadmap/05-phase-5-commercial-pricing.md, WP 5.3, for the adjustment
+// members.
 package statements
 
 import (
@@ -40,6 +49,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/attribution"
 	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/rating"
@@ -100,6 +110,10 @@ type Statement struct {
 	Total decimal.Decimal
 	// Currency is the currency of the model the period was rated with.
 	Currency string
+	// Adjustments holds the adjustment lines the document shows, which the run
+	// stores as the statement's adjustment records. It is nil on a statement no
+	// adjustment reached.
+	Adjustments []adjustments.Line
 }
 
 // UnregisteredProject is a project id drafts carried that the registry does not
@@ -121,8 +135,21 @@ type Document struct {
 	Platform      string        `json:"platform"`
 	LineItems     []LineItem    `json:"line_items"`
 	RelatedCosts  []RelatedCost `json:"related_costs"`
-	Total         money.Amount  `json:"total"`
-	Currency      string        `json:"currency"`
+	// BaseCost is what the line items and the related costs add up to before
+	// the adjustments, NetCost what they come to after them, and KickbackTotal
+	// what a partner is owed beside the net cost rather than as part of it. The
+	// four members are nil on a statement no adjustment reached, whose bytes
+	// hold none of them. Total is the net cost where they are there, which is
+	// what the customer pays.
+	//
+	// None of them carries a currency of its own: every amount in the document
+	// is in the currency Currency names, the way Total already renders.
+	BaseCost      *money.Amount      `json:"base_cost,omitempty"`
+	Adjustments   []adjustments.Line `json:"adjustments,omitempty"`
+	NetCost       *money.Amount      `json:"net_cost,omitempty"`
+	KickbackTotal *money.Amount      `json:"kickback_total,omitempty"`
+	Total         money.Amount       `json:"total"`
+	Currency      string             `json:"currency"`
 }
 
 // BillingPeriod is the half-open interval the document bills, both ends in UTC
@@ -177,6 +204,12 @@ type RelatedCost struct {
 // billed under itself, which is what a top-level project, an orphaned one, and
 // one no relation touched all are.
 //
+// The adjuster applies the pricing adjustments of a project's relations to the
+// document it is billed on, and nil renders every document unadjusted. The walk
+// starts at the project the statement is keyed to, so an attributed project's
+// own relations reach no statement: its costs are billed on its root's
+// statement, and only the root's relations adjust them.
+//
 // Rendering nothing is not an error: a period without usage and without rated
 // resources yields no statements.
 func Build(
@@ -185,6 +218,7 @@ func Build(
 	rated rating.Result,
 	projects []source.Project,
 	res attribution.Resolution,
+	adjuster *adjustments.Adjuster,
 ) (BuildResult, error) {
 	if len(usage) == 0 && len(rated.Resources) == 0 {
 		return BuildResult{}, nil
@@ -249,7 +283,7 @@ func Build(
 			})
 			// A cloud is one installation of one platform, so the resources of a
 			// pair cannot disagree on which one that is.
-			documentOf(documents, own.key, own.key.projectID, items[0].Platform).add(items)
+			documentOf(documents, own.key, own.key.projectID, items[0].Platform, uuid.Nil).add(items)
 			continue
 		}
 
@@ -260,7 +294,8 @@ func Build(
 			// can be keyed to, and its costs stay on their own project's statement
 			// rather than on a document named after nobody.
 			if root, known := byID[attributed.Root]; known {
-				document := documentOf(documents, ownerKey{root.Cloud, root.ExternalID}, root.ExternalID, root.Platform)
+				document := documentOf(
+					documents, ownerKey{root.Cloud, root.ExternalID}, root.ExternalID, root.Platform, root.ID)
 				document.related = append(document.related, related{
 					key: own.key,
 					cost: RelatedCost{
@@ -275,12 +310,12 @@ func Build(
 			}
 		}
 
-		documentOf(documents, own.key, own.project.ExternalID, own.project.Platform).add(items)
+		documentOf(documents, own.key, own.project.ExternalID, own.project.Platform, own.project.ID).add(items)
 	}
 
 	result.Statements = make([]Statement, 0, len(documents))
 	for _, document := range documents {
-		statement, err := document.render(billingPeriod, rated.Currency)
+		statement, err := document.render(billingPeriod, rated.Currency, adjuster)
 		if err != nil {
 			return BuildResult{}, err
 		}
@@ -330,8 +365,13 @@ type builder struct {
 	key       string
 	projectID string
 	platform  string
-	items     []LineItem
-	related   []related
+	// project is the registry id of the project the document is keyed to, and
+	// uuid.Nil for a pair the registry does not hold. The adjustment walk starts
+	// at the project, and a pair the registry does not hold is one no relation
+	// names.
+	project uuid.UUID
+	items   []LineItem
+	related []related
 }
 
 // related is one related-costs entry and the pair of the project it bills,
@@ -408,13 +448,19 @@ func (o *owner) lineItems() []LineItem {
 // The project a document names is the one it is keyed to, so a root reached
 // over an attributed project first is named after the root rather than after
 // whoever arrived with it.
-func documentOf(documents map[ownerKey]*builder, key ownerKey, projectID, platform string) *builder {
+func documentOf(
+	documents map[ownerKey]*builder,
+	key ownerKey,
+	projectID, platform string,
+	project uuid.UUID,
+) *builder {
 	document, held := documents[key]
 	if !held {
 		document = &builder{
 			key:       Key(key.cloud, key.projectID),
 			projectID: projectID,
 			platform:  platform,
+			project:   project,
 			items:     []LineItem{},
 		}
 		documents[key] = document
@@ -432,7 +478,20 @@ func (d *builder) add(items []LineItem) {
 // ordered among themselves, the related entries are ordered here, and the map
 // keys of a period are ordered by encoding/json, so the bytes are a function of
 // the input alone.
-func (d *builder) render(billingPeriod BillingPeriod, currency string) (Statement, error) {
+//
+// The adjustments are applied to the sum of every line the statement bills, its
+// own and the related ones, because that sum is what the customer is invoiced.
+// A walk that collects nothing leaves the four adjustment members nil, and the
+// document is the one an unadjusted build renders. A pair the registry does not
+// hold is billed under its raw project id, which no relation names, so it is
+// rendered unadjusted as well. A relation the walk reaches whose stored
+// adjustments cannot be read fails the build, because the statement would
+// otherwise be billed short of what that relation carries.
+func (d *builder) render(
+	billingPeriod BillingPeriod,
+	currency string,
+	adjuster *adjustments.Adjuster,
+) (Statement, error) {
 	slices.SortFunc(d.related, func(a, b related) int {
 		return cmp.Or(
 			cmp.Compare(a.key.cloud, b.key.cloud),
@@ -453,13 +512,62 @@ func (d *builder) render(billingPeriod BillingPeriod, currency string) (Statemen
 		document.RelatedCosts = append(document.RelatedCosts, entry.cost)
 		total = total.Add(entry.cost.Total.Decimal)
 	}
+
+	if adjuster != nil && d.project != uuid.Nil {
+		outcome, err := adjuster.Adjust(d.project, bases(d.items, document.RelatedCosts))
+		if err != nil {
+			return Statement{}, fmt.Errorf("adjusting the statement of %s: %w", d.key, err)
+		}
+		if len(outcome.Lines) > 0 {
+			baseCost := money.NewAmount(total)
+			netCost := money.NewAmount(outcome.NetCost)
+			kickbackTotal := money.NewAmount(outcome.KickbackTotal)
+			document.BaseCost = &baseCost
+			document.Adjustments = outcome.Lines
+			document.NetCost = &netCost
+			document.KickbackTotal = &kickbackTotal
+			total = outcome.NetCost
+		}
+	}
 	document.Total = money.NewAmount(total)
 
 	body, err := json.Marshal(document)
 	if err != nil {
 		return Statement{}, fmt.Errorf("marshalling the statement of %s: %w", d.key, err)
 	}
-	return Statement{Key: d.key, Document: body, Total: total, Currency: currency}, nil
+	return Statement{
+		Key:         d.key,
+		Document:    body,
+		Total:       total,
+		Currency:    currency,
+		Adjustments: document.Adjustments,
+	}, nil
+}
+
+// bases is every rated line the statement bills, its own and those of the
+// projects attributed to it, as the amounts an adjustment is scoped against. A
+// related line carries the platform and the resource type it was rated under,
+// so an adjustment scoped to a platform reaches the lines of that platform
+// wherever on the document they sit.
+func bases(items []LineItem, related []RelatedCost) []adjustments.Base {
+	collected := make([]adjustments.Base, 0, len(items))
+	for _, item := range items {
+		collected = append(collected, adjustments.Base{
+			Platform:     item.Platform,
+			ResourceType: item.ResourceType,
+			Amount:       item.Total.Decimal,
+		})
+	}
+	for _, cost := range related {
+		for _, item := range cost.LineItems {
+			collected = append(collected, adjustments.Base{
+				Platform:     item.Platform,
+				ResourceType: item.ResourceType,
+				Amount:       item.Total.Decimal,
+			})
+		}
+	}
+	return collected
 }
 
 // periodOf renders one rated record and the draft it rates, and returns the
