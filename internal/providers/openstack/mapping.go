@@ -202,6 +202,51 @@ var mappings = map[string]mappingEntry{
 		resourceIDPath: []string{"id"},
 		projectIDPath:  []string{"owner"},
 	},
+	// Octavia publishes the load balancer dictionary the controller carried
+	// through the flow that just finished, and two shapes of that dictionary
+	// exist. The one the worker passes between its tasks names the load balancer
+	// loadbalancer_id and carries no status at all; the one octavia's own admin
+	// guide records names it id and repeats provisioning_status. Both are read,
+	// and both are recorded under testdata/golden/notifications.
+	//
+	// The state is fixed rather than read because these notifications are sent
+	// by the task that follows MarkLBActiveInDB, so the load balancer is active
+	// however stale the published dictionary is. The reconciliation adapter
+	// books the same load balancer as active, and a state read from the payload
+	// would report drift against every event this entry produced.
+	//
+	// Octavia notifies on the load balancer alone: a listener, pool, member, or
+	// health monitor changes without a notification, and a failover sends none
+	// either, so those changes reach Tally through reconciliation.
+	"octavia.loadbalancer.create.end": {
+		eventType:              "octavia.loadbalancer.create.end",
+		resourceType:           "loadbalancer",
+		state:                  fixedState("active"),
+		size:                   loadBalancerSize,
+		resourceIDPath:         []string{"loadbalancer_id"},
+		resourceIDFallbackPath: []string{"id"},
+		projectIDPath:          []string{"project_id"},
+	},
+	// The update carries the load balancer as it stood when the update was
+	// requested: the flow reloads nothing before it notifies. Its listener and
+	// pool counts are therefore the ones of that moment, which is what the size
+	// records.
+	"octavia.loadbalancer.update.end": {
+		eventType:              "octavia.loadbalancer.update.end",
+		resourceType:           "loadbalancer",
+		state:                  fixedState("active"),
+		size:                   loadBalancerSize,
+		resourceIDPath:         []string{"loadbalancer_id"},
+		resourceIDFallbackPath: []string{"id"},
+		projectIDPath:          []string{"project_id"},
+	},
+	"octavia.loadbalancer.delete.end": {
+		eventType:              "octavia.loadbalancer.delete.end",
+		resourceType:           "loadbalancer",
+		resourceIDPath:         []string{"loadbalancer_id"},
+		resourceIDFallbackPath: []string{"id"},
+		projectIDPath:          []string{"project_id"},
+	},
 }
 
 // MapNotification turns one oslo notification into the Tally event it stands
@@ -372,6 +417,21 @@ func floatingIPSize(payload map[string]any) map[string]any {
 	return map[string]any{"ip_version": version}
 }
 
+// loadBalancerSize describes a load balancer by the two counts the registered
+// size schema requires, which migrations/reporting/0006_seed_loadbalancer_type.sql
+// seeds: how many listeners and how many pools it carries. The reconciliation
+// adapter reports the same two, so a sync over a load balancer this mapping
+// already booked finds no drift.
+func loadBalancerSize(payload map[string]any) map[string]any {
+	size := make(map[string]any, 2)
+	for _, member := range []string{"listeners", "pools"} {
+		if count, ok := countAt(payload, member); ok {
+			size[member] = count
+		}
+	}
+	return size
+}
+
 // lookup walks the payload along a path of keys. A step that is missing, or that
 // is not an object where the path continues, yields nil: reading a payload never
 // fails, it only comes back empty.
@@ -392,6 +452,27 @@ func lookup(payload map[string]any, path ...string) any {
 func stringAt(payload map[string]any, path ...string) string {
 	value, _ := lookup(payload, path...).(string)
 	return value
+}
+
+// countAt counts the elements of the array at a payload path. An absent member
+// and a null one both count as zero, because a service with none of something
+// leaves the member out or nulls it rather than sending an empty array, and a
+// load balancer without listeners is a load balancer with zero of them.
+//
+// A value that is not an array is reported as uncountable, the way every other
+// unusable value in this file is: the member is left out of the size object, and
+// the Reporting API refuses the event against the registered schema rather than
+// booking a count nobody reported.
+func countAt(payload map[string]any, path ...string) (int, bool) {
+	value := lookup(payload, path...)
+	if value == nil {
+		return 0, true
+	}
+	elements, ok := value.([]any)
+	if !ok {
+		return 0, false
+	}
+	return len(elements), true
 }
 
 // numberAt returns the JSON number at a payload path. The literal is kept as it

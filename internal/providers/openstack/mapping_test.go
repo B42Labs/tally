@@ -564,6 +564,175 @@ func TestMapNotificationDerivesAnEventIDWithoutMessageID(t *testing.T) {
 	})
 }
 
+// TestMapNotificationCountsListenersAndPools covers the size of a load balancer.
+// Octavia leaves an empty collection out of the dictionary it publishes, so an
+// absent member is a load balancer with none of them rather than a size the
+// mapping could not read. A member of another shape is left out instead, and the
+// Reporting API then refuses the event against the schema
+// migrations/reporting/0006_seed_loadbalancer_type.sql seeds, which requires
+// both counts.
+func TestMapNotificationCountsListenersAndPools(t *testing.T) {
+	tests := []struct {
+		name       string
+		collection map[string]any
+		want       map[string]any
+	}{
+		{
+			name:       "a payload naming neither collection counts both as zero",
+			collection: map[string]any{},
+			want:       map[string]any{"listeners": 0, "pools": 0},
+		},
+		{
+			name:       "a collection that is null counts as zero",
+			collection: map[string]any{"listeners": nil, "pools": nil},
+			want:       map[string]any{"listeners": 0, "pools": 0},
+		},
+		{
+			name:       "an empty array counts as zero",
+			collection: map[string]any{"listeners": []any{}, "pools": []any{}},
+			want:       map[string]any{"listeners": 0, "pools": 0},
+		},
+		{
+			name: "the elements of both collections are counted",
+			collection: map[string]any{
+				"listeners": []any{map[string]any{}, map[string]any{}},
+				"pools":     []any{map[string]any{}},
+			},
+			want: map[string]any{"listeners": 2, "pools": 1},
+		},
+		{
+			name:       "a collection that is a string is left out while the other is counted",
+			collection: map[string]any{"listeners": "2", "pools": []any{map[string]any{}}},
+			want:       map[string]any{"pools": 1},
+		},
+		{
+			name:       "a collection that is a number is left out while the other is counted",
+			collection: map[string]any{"listeners": json.Number("2"), "pools": []any{}},
+			want:       map[string]any{"pools": 0},
+		},
+		{
+			name:       "a collection that is an object is left out too",
+			collection: map[string]any{"listeners": map[string]any{}, "pools": []any{}},
+			want:       map[string]any{"pools": 0},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"loadbalancer_id": "5e6f7081-92a3-4b4c-8d5e-6f708192a3b4",
+				"project_id":      "project-1",
+			}
+			for key, value := range tc.collection {
+				payload[key] = value
+			}
+
+			got, ok := MapNotification(notify("octavia.loadbalancer.create.end", payload), goldenCloud)
+			if !ok {
+				t.Fatal("MapNotification() ok = false, want true")
+			}
+			if len(got.Payload.Size) != len(tc.want) {
+				t.Errorf("size = %v, want %v", got.Payload.Size, tc.want)
+			}
+			for member, want := range tc.want {
+				if got.Payload.Size[member] != want {
+					t.Errorf("size[%s] = %v (%T), want %v",
+						member, got.Payload.Size[member], got.Payload.Size[member], want)
+				}
+			}
+		})
+	}
+}
+
+// TestMapNotificationFallsBackToTheAdminGuideID covers the two spellings octavia
+// publishes a load balancer's own id under. The dictionary its controller passes
+// between tasks names it loadbalancer_id, and the one its admin guide records
+// names it id. Both are read, and the controller's wins where a payload carries
+// both, because that is the shape the running service actually sends.
+func TestMapNotificationFallsBackToTheAdminGuideID(t *testing.T) {
+	tests := []struct {
+		name       string
+		identifier map[string]any
+		want       string
+	}{
+		{
+			name:       "the controller's own spelling is read",
+			identifier: map[string]any{"loadbalancer_id": "lb-1"},
+			want:       "lb-1",
+		},
+		{
+			name:       "a payload naming only id falls back to it",
+			identifier: map[string]any{"id": "lb-2"},
+			want:       "lb-2",
+		},
+		{
+			name:       "a payload carrying both is booked under loadbalancer_id",
+			identifier: map[string]any{"loadbalancer_id": "lb-3", "id": "lb-4"},
+			want:       "lb-3",
+		},
+		{
+			name:       "a payload naming neither produces an empty resource id",
+			identifier: map[string]any{},
+			want:       "",
+		},
+	}
+
+	// Every octavia entry carries the fallback, so every one of them is held to
+	// it: a delete that read the id differently from its create would book the
+	// end of a resource Tally never started.
+	eventTypes := []string{
+		"octavia.loadbalancer.create.end",
+		"octavia.loadbalancer.update.end",
+		"octavia.loadbalancer.delete.end",
+	}
+
+	for _, tc := range tests {
+		for _, eventType := range eventTypes {
+			t.Run(tc.name+" ("+eventType+")", func(t *testing.T) {
+				payload := map[string]any{"project_id": "project-1"}
+				for key, value := range tc.identifier {
+					payload[key] = value
+				}
+
+				got, ok := MapNotification(notify(eventType, payload), goldenCloud)
+				if !ok {
+					t.Fatal("MapNotification() ok = false, want true")
+				}
+				if got.ResourceID != tc.want {
+					t.Errorf("ResourceID = %q, want %q", got.ResourceID, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestMapNotificationProducesAnOctaviaEventFromAnEmptyPayload covers a load
+// balancer notification the mapping understands nothing in. It still becomes an
+// event, for the reason every unreadable payload does: the Reporting API
+// dead-letters it with the rule it broke, and that record is what an operator
+// needs to fix the deployment.
+func TestMapNotificationProducesAnOctaviaEventFromAnEmptyPayload(t *testing.T) {
+	got, ok := MapNotification(notify("octavia.loadbalancer.create.end", map[string]any{}), goldenCloud)
+	if !ok {
+		t.Fatal("MapNotification() ok = false, want true")
+	}
+
+	if got.ResourceID != "" {
+		t.Errorf("ResourceID = %q, want the empty string", got.ResourceID)
+	}
+	if got.ProjectID != "" {
+		t.Errorf("ProjectID = %q, want the empty string", got.ProjectID)
+	}
+	if got.Payload.State == nil || *got.Payload.State != "active" {
+		t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, "active")
+	}
+	for member, want := range map[string]int{"listeners": 0, "pools": 0} {
+		if got.Payload.Size[member] != want {
+			t.Errorf("size[%s] = %v, want %d", member, got.Payload.Size[member], want)
+		}
+	}
+}
+
 // TestMapNotificationReadsTheIPVersion covers the one billable property of a
 // floating IP. An address the mapping cannot read counts as IPv4, since that is
 // what a deployment allocates unless it says otherwise, and skipping the event
