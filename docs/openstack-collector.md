@@ -17,6 +17,9 @@ duplicates.
 The collector runs next to the OpenStack control plane, close to its broker.
 `make images` builds its image as `tally-openstack-collector:dev`; `make up`
 deploys only the Tally services into the dev cluster and does not load it.
+`make simulator-up` runs it on the developer's machine beside a broker and a
+simulated month of notifications;
+[`openstack-simulator.md`](openstack-simulator.md) describes that stack.
 
 ## Required OpenStack service settings
 
