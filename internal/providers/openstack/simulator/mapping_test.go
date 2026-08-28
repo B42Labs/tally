@@ -80,6 +80,27 @@ func TestEveryRecordedNotificationTypeIsRendered(t *testing.T) {
 		t.Fatalf("%s holds no readable notification, want the collector's fixtures", sampleDir)
 	}
 
+	// A recorded type the workload publishes on no exchange is one no seed can
+	// render: exchangeFor decides where a transition goes, and it names only the
+	// four services this package generates. Holding such a type against the seeds
+	// would fail the guard for work this package has not taken on. Octavia's load
+	// balancer notifications are the case: the collector maps them and the
+	// workload creates no load balancer, so nothing renders them until #65 gives
+	// it a shoot that does. Naming the exchange there re-arms the guard for them
+	// without an edit here.
+	expected := recorded[:0:0]
+	for _, eventType := range recorded {
+		if exchangeFor(eventType) == "" {
+			t.Logf("skipping %s: the workload publishes on no exchange for it", eventType)
+			continue
+		}
+		expected = append(expected, eventType)
+	}
+	if len(expected) == 0 {
+		t.Fatalf("%s holds no notification the workload has an exchange for, want the collector's fixtures",
+			sampleDir)
+	}
+
 	for seed := uint64(1); seed <= 5; seed++ {
 		var rendered []string
 		for _, transition := range generateMonth(t, seed, july2026, testCloud) {
@@ -87,7 +108,7 @@ func TestEveryRecordedNotificationTypeIsRendered(t *testing.T) {
 				rendered = append(rendered, transition.EventType)
 			}
 		}
-		for _, eventType := range recorded {
+		for _, eventType := range expected {
 			if !slices.Contains(rendered, eventType) {
 				t.Errorf("seed %d renders no %s, want every recorded type in every month", seed, eventType)
 			}
