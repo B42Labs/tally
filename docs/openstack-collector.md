@@ -30,7 +30,7 @@ envelope. A nova configured for `versioned` notifications publishes other type
 names and wraps its payload in `nova_object.data`, which the mapping table does
 not know.
 
-Nova, neutron, cinder, and glance must publish through the `messagingv2`
+Nova, neutron, cinder, glance, and octavia must publish through the `messagingv2`
 notification driver. A service left on `noop` sends nothing, and the collector
 has nothing to consume for it.
 
@@ -41,9 +41,16 @@ notification_format = unversioned
 notify_on_state_change = vm_state
 
 [oslo_messaging_notifications]
-# nova, neutron, cinder, and glance
+# nova, neutron, cinder, glance, and octavia
 driver = messagingv2
 ```
+
+Octavia notifies on a load balancer's create, update, and delete, and on nothing
+below it: a listener, a pool, a member, or a health monitor changes without a
+notification, and so does a failover. Reconciliation is what books those. The
+notifications are on by default, since `[controller_worker] event_notifications`
+defaults to `True`, but octavia sends none until the driver above is set, because
+oslo's own default for that setting is the empty string.
 
 The broker must cap the message size, because the collector cannot. It bounds
 the bodies it parses at 1 MiB, but that check runs once the AMQP client has
@@ -73,6 +80,15 @@ exchange that does not exist on the broker fails the connection with an error
 naming it. Its own queue is `tally-notifications`, durable and bound to every
 exchange and topic pair. Notifications therefore pile up in that queue while the
 collector is down and are consumed when it returns.
+
+Octavia's `control_exchange` is `octavia`, and the default leaves it out on
+purpose. Because that declare is passive, a collector listing an exchange the
+broker does not carry never connects at all, so a default naming `octavia` would
+stop every deployment that runs none. A deployment with octavia sets
+`TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia`. Until it does, octavia's
+notifications reach no queue of this collector and show up in none of its
+counters, `tally_collector_skipped_total` included: a topic exchange copies a
+message only to the queues bound to it.
 
 ## The ingest credential
 
@@ -104,7 +120,7 @@ deployment actually publishes before the collector is pointed at it:
 
 ```sh
 export TALLY_OSC_AMQP_URL='amqp://user:password@rabbitmq.example:5672/'
-export TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance
+export TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia
 export TALLY_OSC_TOPICS=notifications.info
 tally-openstack-collector --dump
 ```
@@ -129,14 +145,15 @@ theirs. An interrupted dump leaves no queue behind.
 
 With the dump running, perform the operations that are meant to be billed: boot
 and delete an instance, create and resize a volume, allocate and release a
-floating IP, upload and delete an image. Then compare what it printed against
-the mapping table in
+floating IP, upload and delete an image, create and delete a load balancer. Then
+compare what it printed against the mapping table in
 [`internal/providers/openstack/mapping.go`](../internal/providers/openstack/mapping.go):
 
 - the printed `event_type` values against the oslo types listed below,
 - the payload members each entry reads (`instance_id`, `tenant_id`, `vcpus`,
   `memory_mb`, `root_gb`, `ephemeral_gb`, `instance_type`, `volume_id`, `size`,
-  `volume_type`, `floatingip.id`, `owner`) against the payloads printed,
+  `volume_type`, `floatingip.id`, `owner`, `loadbalancer_id`, `id`, `project_id`,
+  `listeners`, `pools`) against the payloads printed,
 - the deliveries against the recorded samples under
   [`internal/providers/openstack/testdata/golden/notifications/`](../internal/providers/openstack/testdata/golden/notifications),
   whose expected events sit next to them under
@@ -169,10 +186,31 @@ table is counted as skipped and recorded nowhere.
 | `image.create` | `image.create` |
 | `image.upload` | `image.create` |
 | `image.delete` | `image.delete` |
+| `octavia.loadbalancer.create.end` | `octavia.loadbalancer.create.end` |
+| `octavia.loadbalancer.update.end` | `octavia.loadbalancer.update.end` |
+| `octavia.loadbalancer.delete.end` | `octavia.loadbalancer.delete.end` |
 
 An `image.create` whose payload carries no size, or a size of zero, is skipped.
 Glance creates an image before its bits are uploaded, and the `image.upload`
 that follows is what the image is booked from.
+
+The three octavia types are read from the load balancer dictionary the controller
+carried through the flow that finished, and two shapes of it are in circulation:
+the one octavia's worker passes between its own tasks names the load balancer
+`loadbalancer_id` and carries no status at all, while the one its admin guide
+records names it `id` and repeats `provisioning_status`. The mapping reads
+`loadbalancer_id` and falls back to `id`. The state is `active` on a create and
+an update, whatever status the published dictionary still carries, because
+octavia sends both from the task that follows the one marking the load balancer
+active; the delete carries no state, as every delete does. The size counts the
+`listeners` and `pools` arrays, and a payload naming neither is a load balancer
+with none of them, counted as zero.
+
+An update carries the load balancer as it stood when the update was requested, so
+a listener or a pool added or removed without a later load balancer update
+produces no notification. Reconciliation books those, on a cloud that enables
+`include_octavia`; see
+[`openstack-reconciliation.md`](openstack-reconciliation.md).
 
 ## Refused events
 

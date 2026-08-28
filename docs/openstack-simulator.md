@@ -13,7 +13,9 @@ It has no fault switches, no oracle to hold a run against, no fake OpenStack
 API, and no metrics endpoint of its own. #65 owns the workloads, the noise, the
 faults, and the oracle; #66 the fake API and the clock seam; #67 the traffic
 series and `/metrics`. The drill #51 cites this simulator as the way a month
-reaches the Reporting API. Octavia notifications wait for #64.
+reaches the Reporting API. The collector maps octavia's load balancer
+notifications, but this workload creates no load balancer, so no seed renders one
+until #65 gives it a shoot that does.
 
 ## The world and the workload
 
@@ -88,8 +90,11 @@ the resize and retype of the second instance's first volume) are what make
 every seed render every type rather than most of them. The test suite holds
 seeds 1 to 5 over July 2026 against the recorded samples under
 [`internal/providers/openstack/testdata/golden/notifications/`](../internal/providers/openstack/testdata/golden/notifications),
-so a sample the catalog does not render fails the suite. The octavia
-notifications of #64 are such a sample.
+so a sample the catalog does not render fails the suite. A recorded type this
+workload publishes on no exchange is left out of that check, because no seed can
+reach one: octavia's three load balancer types are recorded there for the
+collector and rendered by nobody. Giving the workload an octavia exchange re-arms
+the check for them.
 
 ## Determinism
 

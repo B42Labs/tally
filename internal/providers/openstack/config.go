@@ -109,8 +109,14 @@ type Config struct {
 	// broker password, so it supports the *_FILE convention.
 	AMQPURL string `env:"TALLY_OSC_AMQP_URL"`
 	// Exchanges are the service exchanges the collector binds its queue to. The
-	// default covers the four services the mapping table knows; a deployment that
-	// renamed them through control_exchange lists its own.
+	// default covers nova, neutron, cinder and glance; a deployment that renamed
+	// them through control_exchange lists its own.
+	//
+	// Octavia publishes on the exchange octavia, and the default leaves it out.
+	// The exchanges are declared passively, so a collector refuses to run while
+	// one it lists is missing from the broker, and a default naming octavia would
+	// stop every deployment that runs none. A deployment with octavia lists
+	// nova,neutron,cinder,glance,octavia.
 	Exchanges []string `env:"TALLY_OSC_EXCHANGES" envSeparator:"," envDefault:"nova,neutron,cinder,glance"`
 	// Topics are the notification topics bound on each exchange, matching the
 	// notification_topics of the services being collected.
