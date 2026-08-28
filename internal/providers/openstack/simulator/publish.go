@@ -9,12 +9,12 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
-// CollectorQueue is the queue the collector consumes from, which is what the
+// collectorQueue is the queue the collector consumes from, which is what the
 // wait for a consumer looks at. It repeats queueName in
 // internal/providers/openstack/osloamqp.go, which is unexported and stays so:
 // the queue belongs to the collector, and naming it here keeps the collector
 // package from exporting anything for the sake of a simulator.
-const CollectorQueue = "tally-notifications"
+const collectorQueue = "tally-notifications"
 
 // serviceExchanges are the exchanges a stock deployment publishes
 // notifications on, one per service. They are also the default of the
