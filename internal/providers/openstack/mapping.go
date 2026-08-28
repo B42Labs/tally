@@ -44,6 +44,10 @@ type mappingEntry struct {
 	// resourceIDPath is where in the payload the resource id sits, as a path
 	// because neutron nests its resource inside the payload.
 	resourceIDPath []string
+	// resourceIDFallbackPath is read when resourceIDPath leads nowhere. It is nil
+	// on every entry whose service names its resource one way, and set where a
+	// service is known to publish two shapes of the same payload.
+	resourceIDFallbackPath []string
 	// projectIDPath is where in the payload the owning project sits. It is empty
 	// when the notification carries no project of its own and the request context
 	// is the only source.
@@ -219,6 +223,12 @@ func MapNotification(n Notification, cloud string) (event.Event, bool) {
 	}
 
 	resourceID := stringAt(n.Payload, entry.resourceIDPath...)
+	// The fallback is consulted only once the first path came back empty, which
+	// is what keeps the primary path authoritative for a payload carrying both
+	// spellings.
+	if resourceID == "" && entry.resourceIDFallbackPath != nil {
+		resourceID = stringAt(n.Payload, entry.resourceIDFallbackPath...)
+	}
 	mapped := event.Event{
 		// The oslo message id is unique per notification, which is what makes a
 		// redelivery a duplicate at ingestion rather than a second event.
