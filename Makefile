@@ -29,7 +29,28 @@ SERVICES := tally-reporting tally-engine
 # CronJob, so it belongs there beside the Reporting API. IMAGES is everything
 # `images` builds: the collector image is built and publishable, but it runs
 # beside the broker of an OpenStack control plane rather than in the dev cluster.
-IMAGES := $(SERVICES) tally-openstack-collector
+# The simulator is on the producing side of the same kind of broker, and
+# `simulator-up` starts one for it on the developer's machine.
+IMAGES := $(SERVICES) tally-openstack-collector tally-openstack-simulator
+
+# The images the stack runs, which is what `simulator-up` builds. It is not
+# IMAGES: the Reporting API is deployed into the cluster by `up`, which loads it
+# there and applies the migration chain, so building it here would leave a tag
+# nothing loads and a schema nobody applied. After a change to the Reporting API
+# or to the migrations, run `make up` again rather than this.
+SIM_IMAGES := tally-openstack-collector tally-openstack-simulator
+
+# The simulator stack, deploy/compose/compose.yaml: a broker, the collector, and
+# the simulator, run beside the dev cluster rather than in it. The four SIM_
+# values below are what `simulator-up` writes into the .env file compose reads.
+# A factor of 744 puts a 31-day month on the bus in an hour.
+SIM_CLOUD ?= os-sim
+SIM_SEED ?= 1
+SIM_FACTOR ?= 744
+# No default: the target refuses to run until a month is named, because any
+# month guessed here would be as wrong as another.
+SIM_PERIOD ?=
+COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
 # switches the current context, but reusing an existing one does not, so an
@@ -55,7 +76,8 @@ TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-
 VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' deploy/kubernetes/base/vmalert/vmalert.yaml | head -n1)
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
-.PHONY: up down dev ca test lint fmt check-alerting migrate generate images
+.PHONY: up down dev ca test lint fmt check-alerting migrate generate images \
+	simulator-up simulator-down
 
 ## up: create the kind cluster, install the add-ons, and deploy the dev overlay
 up:
@@ -135,6 +157,46 @@ down:
 ## dev: rebuild and redeploy on change
 dev:
 	tilt up
+
+# The stack needs a dev cluster from `make up`. Nothing here creates one, and
+# the credential step below is where a missing one fails, with the admin CLI's
+# connection error.
+#
+# That credential is issued fresh on every run because the cluster may have been
+# recreated since the last one, and a new database knows none of the tokens the
+# old one handed out. A stale token is quiet: the Reporting API answers 401, the
+# collector keeps the events and retries the batch once per flush, and the only
+# sign of it is a line in the collector's log.
+## simulator-up: run the simulator, the collector, and a broker against the dev cluster
+simulator-up:
+	@[ -n '$(SIM_PERIOD)' ] || { echo 'ERROR: set SIM_PERIOD to the past month to simulate, e.g. make simulator-up SIM_PERIOD=2026-07' >&2; exit 1; }
+	$(MAKE) images IMAGES='$(SIM_IMAGES)'
+	@echo '==> writing the dev CA to tally-ca.crt'
+	$(MAKE) -s ca > tally-ca.crt
+	@echo '==> issuing an ingest credential for $(SIM_CLOUD)'
+	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-ingest-credential --platform openstack --cloud '$(SIM_CLOUD)' --description 'openstack simulator')"; printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_OSC_TOKEN=%s\n' '$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' "$$token" > deploy/compose/.env
+	$(COMPOSE) up -d
+	@echo
+	@echo 'Simulator stack is up:'
+	@echo '  http://127.0.0.1:15672                          broker UI, guest/guest'
+	@echo '  http://127.0.0.1:8090/metrics                   collector'
+	@echo '  http://127.0.0.1:8091/clock                     simulator control'
+	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1  Reporting API'
+	@echo
+	@echo "Finish the month at once with:"
+	@echo "  curl -X PUT -d '{\"factor\": 0}' http://127.0.0.1:8091/clock"
+
+# Dropping the volumes empties the outbox and the broker's queue, so the next
+# `simulator-up` starts from nothing rather than delivering what the last run
+# left behind. The dev reporting database is not part of that: the events of the
+# last run stay ingested, and no subcommand of tally-reporting-admin deletes
+# them. Running the same period again under another seed or another cloud adds a
+# second, disjoint set of rows beside the first, and `make down && make up` is
+# what drops them.
+## simulator-down: stop the simulator stack and drop its volumes
+simulator-down:
+	$(COMPOSE) down --volumes
+	rm -f deploy/compose/.env
 
 ## ca: print the dev CA certificate, for curl --cacert and browser trust
 ca:
