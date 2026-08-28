@@ -1,0 +1,21 @@
+{
+  "event_id": "2c3d4e5f-6071-4829-ab3c-4d5e6f708192",
+  "timestamp": "2026-03-02T09:31:00Z",
+  "event_type": "octavia.loadbalancer.create.end",
+  "platform": "openstack",
+  "cloud": "os-dev",
+  "resource_type": "loadbalancer",
+  "resource_id": "6f708192-a3b4-4c5d-9e6f-708192a3b4c5",
+  "project_id": "9c4a1b2d3e4f5061728394a5b6c7d8e9",
+  "source": "collector",
+  "payload": {
+    "state": "active",
+    "size": {
+      "listeners": 0,
+      "pools": 0
+    },
+    "provider": {
+      "oslo_event_type": "octavia.loadbalancer.create.end"
+    }
+  }
+}

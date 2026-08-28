@@ -1,0 +1,4 @@
+{
+  "oslo.version": "2.0",
+  "oslo.message": "{\"message_id\": \"4e5f6071-8293-4a4b-cd5e-6f708192a3b4\", \"event_type\": \"octavia.loadbalancer.delete.end\", \"publisher_id\": null, \"priority\": \"INFO\", \"timestamp\": \"2026-03-20 08:00:00.000000\", \"_context_project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"_context_project\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"payload\": {\"admin_state_up\": true, \"description\": \"\", \"loadbalancer_id\": \"5e6f7081-92a3-4b4c-8d5e-6f708192a3b4\", \"name\": \"web-lb\", \"project_id\": \"9c4a1b2d3e4f5061728394a5b6c7d8e9\", \"vip_address\": \"10.0.0.10\", \"vip_network_id\": \"81a2b3c4-d5e6-41f2-9364-7f8091a2b3c4\", \"vip_port_id\": \"a7b8c9d0-e1f2-4304-9516-2738495a6b7c\", \"vip_qos_policy_id\": null, \"vip_subnet_id\": \"92b3c4d5-e6f7-4203-8475-8091a2b3c4d5\", \"vip_sg_ids\": [], \"additional_vips\": []}}"
+}
