@@ -43,10 +43,10 @@ const (
 	pollDeadline = 30 * time.Second
 )
 
-// testOutboxMax is the outbox bound the collector runs under here. A simulated
-// month is thousands of notifications and nothing drains the outbox during a
-// test, so the bound is far above what one month produces: a consumer that
-// paused on backpressure would stall the run rather than fail it.
+// testOutboxMax is the outbox bound the collector runs under here. Nothing
+// drains the outbox during a test, so the bound is far above the few hundred
+// notifications one month produces: a consumer that paused on backpressure
+// would stall the run rather than fail it.
 const testOutboxMax = 100_000
 
 // startBroker runs a RabbitMQ container for the test and returns the URL it is

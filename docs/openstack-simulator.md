@@ -293,7 +293,8 @@ document. The month itself does not move: only what comes after the change runs
 at another speed. A body that is not JSON, one without the member, and one with
 a negative factor all answer 400 with
 `factor must be a JSON object with a number member "factor" that is zero or
-positive`. Any other method on either route answers 405. A run in file mode serves nothing.
+positive`. Any other method on either route answers 405. A run in file mode
+serves nothing.
 
 ## Configuration
 
