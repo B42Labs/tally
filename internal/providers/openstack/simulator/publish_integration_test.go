@@ -316,13 +316,14 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 		t.Errorf("the event ids in events.jsonl = %v, want %v", got, want)
 	}
 
-	// The month carries one image.create per image, eight in all: two for each of
-	// the three classic projects and one for each of the two Gardener tenants.
-	// The mapping skips every one of them because an announced image has no size
-	// yet. Nothing else in the month may go unrecorded: a notification the
-	// collector cannot parse is one the simulator rendered wrong.
-	if got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", "image.create"); got != 8 {
-		t.Errorf("tally_collector_skipped_total{event_type=\"image.create\"} = %v, want 8", got)
+	// The month carries one image.create per image, nine in all: two for each of
+	// the three classic projects, one for each of the two Gardener tenants, and
+	// one for the CI tenant. The mapping skips every one of them because an
+	// announced image has no size yet. Nothing else in the month may go
+	// unrecorded: a notification the collector cannot parse is one the simulator
+	// rendered wrong.
+	if got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", "image.create"); got != 9 {
+		t.Errorf("tally_collector_skipped_total{event_type=\"image.create\"} = %v, want 9", got)
 	}
 	if got := counterValue(t, reg, "tally_collector_unparseable_total", "", ""); got != 0 {
 		t.Errorf("tally_collector_unparseable_total = %v, want 0", got)

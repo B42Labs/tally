@@ -36,11 +36,11 @@ const remoteBroker = "amqp://guest:hunter2@rabbit.control-plane.example:5672/"
 // nonBillableNotifications is how many notifications of a generated month the
 // collector maps to no event: the ones that are published to describe the
 // month's shape without being billable. They are the unsized image.create of
-// every image, two for each of the three classic projects and one for each of
-// the two Gardener tenants. notifications.jsonl holds every notification and
-// events.jsonl only the billable ones, so the two files differ by exactly this
-// many lines.
-const nonBillableNotifications = 8
+// every image: two for each of the three classic projects, one for each of the
+// two Gardener tenants, and one for the CI tenant. notifications.jsonl holds
+// every notification and events.jsonl only the billable ones, so the two files
+// differ by exactly this many lines.
+const nonBillableNotifications = 9
 
 func TestHelpNeedsNoEnvironment(t *testing.T) {
 	blankEnvironment(t)
