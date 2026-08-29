@@ -48,10 +48,17 @@ func stamp(t time.Time) string {
 // point: the collector decodes the body twice, so a simulator that nested the
 // notification would produce something only the simulator could read.
 func Render(t Transition) ([]byte, error) {
+	// octavia publishes a null publisher, the way the recorded samples carry it.
+	// Every other service names the instance the notification came from.
+	var publisher any
+	if t.PublisherID != "" {
+		publisher = t.PublisherID
+	}
+
 	inner, err := json.Marshal(map[string]any{
 		"message_id":   t.MessageID,
 		"event_type":   t.EventType,
-		"publisher_id": t.PublisherID,
+		"publisher_id": publisher,
 		"priority":     "INFO",
 		"timestamp":    stamp(t.At),
 		// Services differ in which of the two they set. Setting both is what a
@@ -80,6 +87,13 @@ func Render(t Transition) ([]byte, error) {
 // image the server was booted from, none of which the later notifications
 // repeat in full.
 func instanceCreatePayload(p *project, inst *instance, cloud string) map[string]any {
+	// A server booted from a volume names no image, because the image was
+	// written to the volume before the server existed.
+	imageURL := ""
+	if inst.bootVolume == nil {
+		imageURL = fmt.Sprintf("http://glance.%s.example:9292/images/%s", cloud, inst.imageID)
+	}
+
 	return map[string]any{
 		"instance_id":        inst.id,
 		"tenant_id":          p.id,
@@ -97,7 +111,7 @@ func instanceCreatePayload(p *project, inst *instance, cloud string) map[string]
 		"instance_flavor_id": inst.flavor.flavorID,
 		"host":               inst.host,
 		"availability_zone":  availabilityZone,
-		"image_ref_url":      fmt.Sprintf("http://glance.%s.example:9292/images/%s", cloud, inst.imageID),
+		"image_ref_url":      imageURL,
 		"created_at":         stamp(inst.createdAt.Add(-instanceBoot)),
 		"launched_at":        stamp(inst.createdAt),
 	}
@@ -193,6 +207,16 @@ func instanceShelvePayload(p *project, inst *instance, state string) map[string]
 // newer project_id, which is why the mapping reads the address through a path
 // instead of a member name.
 func floatingIPCreatePayload(p *project, fip *floatingIP, networkID string) map[string]any {
+	// An address is allocated before it is associated with a port, so it points
+	// at nothing yet and is down. The VIP port of a load balancer is the
+	// exception: that address is associated the moment it is created.
+	var fixedAddress, portID, routerID any
+	status := "DOWN"
+	if fip.portID != "" {
+		fixedAddress, portID, routerID = fip.fixedAddress, fip.portID, fip.routerID
+		status = "ACTIVE"
+	}
+
 	return map[string]any{
 		"floatingip": map[string]any{
 			"id":                  fip.id,
@@ -200,13 +224,11 @@ func floatingIPCreatePayload(p *project, fip *floatingIP, networkID string) map[
 			"project_id":          p.id,
 			"floating_ip_address": fip.address,
 			"floating_network_id": networkID,
-			// An address is allocated before it is associated with a port, so it
-			// points at nothing yet and is down.
-			"fixed_ip_address": nil,
-			"port_id":          nil,
-			"router_id":        nil,
-			"status":           "DOWN",
-			"description":      "",
+			"fixed_ip_address":    fixedAddress,
+			"port_id":             portID,
+			"router_id":           routerID,
+			"status":              status,
+			"description":         "",
 		},
 	}
 }
@@ -335,4 +357,88 @@ func volumeStatePayload(p *project, vol *volume) map[string]any {
 		"host":         volumeHost,
 		"created_at":   stamp(vol.createdAt.Add(-volumeProvision)),
 	}
+}
+
+// listenerSpecs are the listeners a load balancer gets, in the order a shoot
+// adds them. A service publishes one port after another, so a balancer that
+// carries two listeners carries the first two of these.
+var listenerSpecs = []struct {
+	name     string
+	protocol string
+	port     int
+}{
+	{name: "http", protocol: "HTTP", port: 80},
+	{name: "https", protocol: "TERMINATED_HTTPS", port: 443},
+	{name: "metrics", protocol: "TCP", port: 9100},
+}
+
+// loadBalancerPayload describes one octavia load balancer. Octavia reports the
+// listeners and the pools on an update alone, which is why the collector books
+// a balancer's size from the update: the create carries a size of zero
+// listeners and zero pools, and the delete carries neither member at all.
+func loadBalancerPayload(p *project, s *shoot, lb *loadBalancer, withMembers bool) map[string]any {
+	payload := map[string]any{
+		"admin_state_up":    true,
+		"description":       "",
+		"loadbalancer_id":   lb.id,
+		"name":              lb.name,
+		"project_id":        p.id,
+		"vip_address":       lb.vipAddress,
+		"vip_network_id":    s.networkID,
+		"vip_port_id":       lb.vipPortID,
+		"vip_qos_policy_id": nil,
+		"vip_subnet_id":     s.subnetID,
+		"vip_sg_ids":        []any{},
+		"additional_vips":   []any{},
+	}
+	if !withMembers {
+		return payload
+	}
+
+	// Both members are slices even when they hold nothing, because the mapping
+	// counts the array and a null is not one it can count.
+	listeners := make([]any, 0, len(lb.listenerIDs))
+	for index, id := range lb.listenerIDs {
+		// A balancer that carries more listeners than the catalog names takes the
+		// catalog from the front again. The mapping books the count and nothing
+		// else of a listener, so a repeated name and port cost the month nothing,
+		// where reaching past the catalog would end the run in this renderer with
+		// the balancer that outgrew it named nowhere.
+		spec := listenerSpecs[index%len(listenerSpecs)]
+		// A listener points at the pool behind it, and a balancer with fewer
+		// pools than listeners has them share one. One with no pool at all points
+		// its listeners at nothing, the way octavia reports a listener whose
+		// default pool was never created, rather than ending the run here.
+		var poolID any
+		if len(lb.poolIDs) > 0 {
+			poolID = lb.poolIDs[index%len(lb.poolIDs)]
+		}
+		listeners = append(listeners, map[string]any{
+			"admin_state_up":  true,
+			"default_pool_id": poolID,
+			"listener_id":     id,
+			"loadbalancer_id": lb.id,
+			"name":            spec.name,
+			"project_id":      p.id,
+			"protocol":        spec.protocol,
+			"protocol_port":   spec.port,
+		})
+	}
+
+	pools := make([]any, 0, len(lb.poolIDs))
+	for index, id := range lb.poolIDs {
+		pools = append(pools, map[string]any{
+			"admin_state_up":  true,
+			"lb_algorithm":    "ROUND_ROBIN",
+			"loadbalancer_id": lb.id,
+			"name":            fmt.Sprintf("pool-%d", index),
+			"pool_id":         id,
+			"project_id":      p.id,
+			"protocol":        "HTTP",
+		})
+	}
+
+	payload["listeners"] = listeners
+	payload["pools"] = pools
+	return payload
 }

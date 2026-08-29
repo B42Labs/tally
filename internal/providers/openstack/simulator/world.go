@@ -48,6 +48,20 @@ var flavors = []flavor{
 // ephemeral disk into every generated month.
 var largeFlavor = flavors[2]
 
+// bootVolumeFlavor is the flavor a server that boots from a volume runs on. A
+// server reports the root disk of its flavor whether it boots from one or not,
+// so a flavor without root disk is what keeps the root volume from being billed
+// twice, once as disk and once as volume. It sits outside flavors so that the
+// draws over the catalog keep the shape they have.
+var bootVolumeFlavor = flavor{
+	name: "c1.large", vcpus: 4, memoryMB: 8192, rootGB: 0, ephemeralGB: 0,
+	typeID: 9, flavorID: "e2d4b6a8-0c1e-4f3a-95b7-6d8f0a2c4e61",
+}
+
+// runnerFlavors are the flavors a CI runner is drawn from. A runner holds one
+// job and is gone again, so it runs on the two small flavors of the catalog.
+var runnerFlavors = []flavor{flavors[0], flavors[1]}
+
 // volumeTypes are the cinder types a simulated volume carries. ssd and hdd
 // carry a type_modifier in pricing/2026-03.yaml; standard carries none there
 // and is rated at the implicit modifier 1. Drawing from all three is what makes
@@ -56,6 +70,19 @@ var volumeTypes = []string{"ssd", "hdd", "standard"}
 
 // volumeSizesGB are the sizes a volume is created with, in gibibytes.
 var volumeSizesGB = []int{50, 100, 200}
+
+// claimSizesGB are the sizes a persistent volume claim is created with, in
+// gibibytes. A claim holds the data of one workload and starts smaller than a
+// volume a tenant creates by hand.
+var claimSizesGB = []int{10, 20, 50}
+
+// The root volume of a worker that boots from one. Its size comes from the
+// shoot rather than from the flavor, and a Kubernetes worker keeps its root
+// filesystem on the fast type.
+const (
+	rootVolumeSizeGB = 50
+	rootVolumeType   = "ssd"
+)
 
 // quarterGiB is the step image sizes are drawn on. Glance reports bytes and the
 // mapping divides them into gibibytes, so a size that is a whole number of
@@ -87,6 +114,14 @@ const (
 var (
 	imageNames    = []string{"debian-13-golden", "ubuntu-24.04"}
 	instanceNames = []string{"web", "db", "batch", "cache"}
+)
+
+// The images the two machine-driven workloads boot from. A shoot's workers run
+// the distribution Gardener ships, and a CI runner runs the one its jobs are
+// built on.
+const (
+	gardenerImageName = "gardenlinux-1592.4"
+	ciImageName       = "ubuntu-24.04-ci"
 )
 
 // project is one tenant of the simulated cloud together with everything it
@@ -127,6 +162,9 @@ type instance struct {
 	deletedAt time.Time
 	volumes   []*volume
 	fip       *floatingIP
+	// bootVolume is the volume the server boots from, and nil on a server that
+	// boots from an image.
+	bootVolume *volume
 }
 
 // volume is one cinder volume. attached is what the world knows and cinder
@@ -140,6 +178,10 @@ type volume struct {
 	volumeType string
 	attached   bool
 	createdAt  time.Time
+	// resizes is how often the volume has grown. A claim grows at most twice,
+	// and the count does not follow from the size: 10 grown twice and 20 grown
+	// once are both 40.
+	resizes int
 }
 
 // floatingIP is one neutron address. It has no timestamps of its own, because
@@ -147,4 +189,62 @@ type volume struct {
 type floatingIP struct {
 	id      string
 	address string
+	// The port the address is associated with, the address behind that port, and
+	// the router that carries the traffic. All three are empty on an address
+	// that is associated with nothing, which every classic tenant's address is.
+	portID       string
+	fixedAddress string
+	routerID     string
+}
+
+// gardenerProject is one Gardener project: the shoots it holds and the
+// OpenStack tenant they run on. Gardener bills the tenant, and the project is
+// the name an operator knows the shoots under.
+type gardenerProject struct {
+	name   string
+	tenant *project
+	shoots []*shoot
+}
+
+// shoot is one Kubernetes cluster Gardener runs on the tenant. Its workers are
+// nova servers, its persistent volume claims are cinder volumes, and each of
+// its services of type LoadBalancer is an octavia load balancer with a floating
+// address.
+type shoot struct {
+	name, technicalID string
+	owner             *gardenerProject
+	// index counts the shoots of all projects from 1. It is the third octet of
+	// the shoot's VIP addresses, which keeps two shoots off each other's range.
+	index          int
+	flavor         flavor
+	bootFromVolume bool
+	hibernates     bool
+	// transient marks the shoot that is created and deleted inside the month.
+	transient   bool
+	baseWorkers int
+
+	networkID, subnetID, routerID, securityGroupID, keypairName string
+
+	// createdAt is when the shoot comes up. deletedAt is the zero instant on a
+	// shoot that outlives the month.
+	createdAt, deletedAt time.Time
+	// The midnights of the days the shoot's one-off steps fall on. Each is the
+	// zero instant when the shoot has no such step.
+	rollingUpdateDay, secondBalancerDay, listenerDay time.Time
+
+	awake bool
+	// workers are the servers alive now, and added are the ones the autoscaler
+	// added today.
+	workers, added []*instance
+	claims         []*volume
+	loadBalancers  []*loadBalancer
+}
+
+// loadBalancer is one octavia load balancer. The id slices hold every listener
+// and every pool the balancer has, so their lengths are the counts an update
+// reports.
+type loadBalancer struct {
+	id, name, vipPortID, vipAddress string
+	listenerIDs, poolIDs            []string
+	fip                             *floatingIP
 }
