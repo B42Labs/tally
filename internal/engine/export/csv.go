@@ -14,7 +14,8 @@ import (
 
 // The two files a CSV export writes off the rating. rated.csv is every run's,
 // deltas.csv only a correction's. kickbacks.csv, every run's as well, is named
-// in kickbacks.go beside the renderer that fills it.
+// in kickbacks.go beside the renderer that fills it, and rollup.csv, which a run
+// that carries a rollup writes, in rollup.go beside its own.
 const (
 	ratedFileName  = "rated.csv"
 	deltasFileName = "deltas.csv"
@@ -39,8 +40,10 @@ var (
 
 // CSVFiles writes a run as CSV files into a directory: rated.csv, one row per
 // rated record, kickbacks.csv, one row per kickback the run settles for a
-// partner, and, for a correction run, deltas.csv, one row per delta. It is the
-// BillingExporter an ERP that imports tables rather than documents is fed from.
+// partner, and, for a correction run, deltas.csv, one row per delta. A run that
+// carries a rollup writes rollup.csv on top, one row per member of every group.
+// It is the BillingExporter an ERP that imports tables rather than documents is
+// fed from.
 type CSVFiles struct {
 	// Dir is where the files are written. It is created, with every parent it
 	// needs, when the export has rendered everything.
@@ -57,7 +60,8 @@ type CSVFiles struct {
 // correction with no deltas writes deltas.csv holding its header alone, and a
 // run that owes no partner writes kickbacks.csv holding its header alone: an
 // empty table says the run produced no rows, and a missing file says nothing at
-// all.
+// all. A run that carries a rollup writes rollup.csv after kickbacks.csv, and a
+// rollup with no member writes that header alone under the same rule.
 //
 // The context is not read, for the reason JSONFiles.Export gives.
 func (c CSVFiles) Export(_ context.Context, run Run) error {
@@ -77,6 +81,12 @@ func (c CSVFiles) Export(_ context.Context, run Run) error {
 	if err != nil {
 		return err
 	}
+	var rollup []byte
+	if run.Rollup != nil {
+		if rollup, err = RollupCSV(run); err != nil {
+			return err
+		}
+	}
 
 	if err := prepareDir(c.Dir); err != nil {
 		return err
@@ -86,6 +96,9 @@ func (c CSVFiles) Export(_ context.Context, run Run) error {
 		files = append(files, artifact{name: deltasFileName, body: deltas})
 	}
 	files = append(files, artifact{name: kickbacksCSVFileName, body: kickbacks})
+	if run.Rollup != nil {
+		files = append(files, artifact{name: rollupCSVFileName, body: rollup})
+	}
 	return writeFiles(c.Dir, files)
 }
 

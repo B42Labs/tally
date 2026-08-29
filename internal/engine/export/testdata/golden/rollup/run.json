@@ -1,0 +1,50 @@
+{
+  "run_id": "3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4",
+  "kind": "regular",
+  "corrects_run_id": null,
+  "period_from": "2026-03-01T00:00:00Z",
+  "period_to": "2026-04-01T00:00:00Z",
+  "status": "finalized",
+  "pricing_version": "2026-03",
+  "clouds": [],
+  "started_at": "2026-04-04T00:00:00Z",
+  "completed_at": "2026-04-04T00:01:00Z",
+  "stats": {},
+  "statements": [
+    {
+      "file": "statement-os-dr%2Fproj-789.json",
+      "cloud": "os-dr",
+      "project_id": "proj-789",
+      "total": 22.32,
+      "currency": "EUR"
+    },
+    {
+      "file": "statement-os-prod%2Fproj-456.json",
+      "cloud": "os-prod",
+      "project_id": "proj-456",
+      "total": 128.45,
+      "currency": "EUR"
+    }
+  ],
+  "rollup": {
+    "relation_type": "member_of",
+    "documents": [
+      {
+        "file": "rollup-meta%2Fcustomer-alpha.json",
+        "cloud": "meta",
+        "project_id": "customer-alpha",
+        "members": 1,
+        "total": 128.45,
+        "currency": "EUR"
+      },
+      {
+        "file": "rollup-meta%2Fcustomer-beta.json",
+        "cloud": "meta",
+        "project_id": "customer-beta",
+        "members": 2,
+        "total": 150.77,
+        "currency": "EUR"
+      }
+    ]
+  }
+}

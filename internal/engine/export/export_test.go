@@ -118,7 +118,9 @@ const (
 	kickbacksJSONFile = "kickbacks.json"
 	kickbacksCSVFile  = "kickbacks.csv"
 
-	rollupCSVFile = "rollup.csv"
+	rollupCSVFile   = "rollup.csv"
+	rollupAlphaFile = "rollup-meta%2Fcustomer-alpha.json"
+	rollupBetaFile  = "rollup-meta%2Fcustomer-beta.json"
 )
 
 // regularRun is the finalized run of the concept's power-cycle month: the
@@ -182,6 +184,57 @@ func correctionRun(t *testing.T) export.Run {
 		Rated:  ratedRecords(),
 		Deltas: deltas(),
 	}
+}
+
+// rollupRun is that month summed under the two meta-projects its projects are
+// members of: customer-alpha, which holds the one project, and customer-beta,
+// which holds both. The two groups share os-prod/proj-456, so a statement that
+// is a member of two groups and a group whose total is the sum of two members
+// are both covered, and the second group's total is a number no statement of the
+// run carries.
+func rollupRun(t *testing.T) export.Run {
+	t.Helper()
+
+	run := regularRun(t)
+	run.Rollup = &export.Rollup{
+		RelationType: "member_of",
+		Groups: []export.RollupGroup{{
+			Key:       statements.Key("meta", "customer-alpha"),
+			Cloud:     "meta",
+			ProjectID: "customer-alpha",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: statementKey,
+				Cloud:        "os-prod",
+				ProjectID:    projectID,
+				Total:        decimal.RequireFromString("128.45"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("128.45"),
+			Currency: currency,
+		}, {
+			Key:       statements.Key("meta", "customer-beta"),
+			Cloud:     "meta",
+			ProjectID: "customer-beta",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: drStatementKey,
+				Cloud:        "os-dr",
+				ProjectID:    "proj-789",
+				Total:        decimal.RequireFromString("22.32"),
+				Currency:     currency,
+			}, {
+				StatementKey: statementKey,
+				Cloud:        "os-prod",
+				ProjectID:    projectID,
+				Total:        decimal.RequireFromString("128.45"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("150.77"),
+			Currency: currency,
+		}},
+	}
+	return run
 }
 
 // ratedRecords is what the month billed the instance for: the three periods the
@@ -523,6 +576,23 @@ func TestExportGolden(t *testing.T) {
 			golden: "correction",
 			files:  []string{ratedFile, deltasFile, kickbacksCSVFile},
 		},
+		{
+			name:   "the JSON writer over a rolled-up run",
+			writer: jsonFiles,
+			run:    rollupRun,
+			golden: "rollup",
+			files: []string{
+				runFile, drStatementFile, statementFile, kickbacksJSONFile,
+				rollupAlphaFile, rollupBetaFile,
+			},
+		},
+		{
+			name:   "the CSV writer over a rolled-up run",
+			writer: csvFiles,
+			run:    rollupRun,
+			golden: "rollup",
+			files:  []string{ratedFile, kickbacksCSVFile, rollupCSVFile},
+		},
 	}
 
 	for _, c := range cases {
@@ -608,6 +678,142 @@ func TestJSONFilesWithoutStatements(t *testing.T) {
 	}
 }
 
+// TestJSONFilesWithoutRollupGroups pins what a run whose rollup reached no
+// target exports: run.json says which relation type it was summed over and
+// carries an empty document list, and no rollup document is written. Whoever
+// asked for the rollup is told the run rolled nothing up, rather than reading a
+// missing member as an export that does not say.
+func TestJSONFilesWithoutRollupGroups(t *testing.T) {
+	dir := t.TempDir()
+	run := regularRun(t)
+	run.Rollup = &export.Rollup{RelationType: "member_of", Groups: []export.RollupGroup{}}
+
+	if err := jsonFiles(dir).Export(t.Context(), run); err != nil {
+		t.Fatalf("Export() error = %v, want nil", err)
+	}
+
+	assertNames(t, dir, []string{runFile, drStatementFile, statementFile, kickbacksJSONFile})
+	body := string(read(t, filepath.Join(dir, runFile)))
+	for _, want := range []string{
+		`"rollup": {`,
+		`"relation_type": "member_of"`,
+		`"documents": []`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%s =\n%s\nwant it to carry %s", runFile, body, want)
+		}
+	}
+}
+
+// TestRollupOfACorrection pins what a correction's rollup carries: the kind and
+// the run it corrects, so a reader tells a credit from a month's bill without
+// opening a member, and credit notes under it rather than statements, because a
+// correction writes its documents under the other prefix and a group names the
+// file each of its members was written to.
+func TestRollupOfACorrection(t *testing.T) {
+	dir := t.TempDir()
+	run := correctionRun(t)
+	run.Rollup = &export.Rollup{
+		RelationType: "member_of",
+		Groups: []export.RollupGroup{{
+			Key:       statements.Key("meta", "customer-alpha"),
+			Cloud:     "meta",
+			ProjectID: "customer-alpha",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: statementKey,
+				Cloud:        "os-prod",
+				ProjectID:    projectID,
+				Total:        decimal.RequireFromString("-24.00"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("-24.00"),
+			Currency: currency,
+		}},
+	}
+
+	if err := jsonFiles(dir).Export(t.Context(), run); err != nil {
+		t.Fatalf("Export() error = %v, want nil", err)
+	}
+
+	var document struct {
+		Kind          string  `json:"kind"`
+		CorrectsRunID *string `json:"corrects_run_id"`
+		Members       []struct {
+			File  string      `json:"file"`
+			Total json.Number `json:"total"`
+		} `json:"members"`
+		Total json.Number `json:"total"`
+	}
+	if err := json.Unmarshal(read(t, filepath.Join(dir, rollupAlphaFile)), &document); err != nil {
+		t.Fatalf("decoding %s: %v", rollupAlphaFile, err)
+	}
+
+	if document.Kind != runs.KindCorrection {
+		t.Errorf("kind = %q, want %q", document.Kind, runs.KindCorrection)
+	}
+	switch {
+	case document.CorrectsRunID == nil:
+		t.Errorf("corrects_run_id is absent, want %s", regularRunID)
+	case *document.CorrectsRunID != regularRunID.String():
+		t.Errorf("corrects_run_id = %s, want %s", *document.CorrectsRunID, regularRunID)
+	}
+	if len(document.Members) != 1 {
+		t.Fatalf("%s holds %d members, want the one the correction credits",
+			rollupAlphaFile, len(document.Members))
+	}
+	if got := document.Members[0].File; got != creditNoteFile {
+		t.Errorf("the member names the file %q, want %q", got, creditNoteFile)
+	}
+	if got, want := document.Total.String(), "-24.00"; got != want {
+		t.Errorf("total = %s, want %s", got, want)
+	}
+}
+
+// TestJSONFilesRefusesARollupMemberItWroteNoStatementFor pins what an export
+// does with a rollup whose member the run carries no statement for. Nothing
+// binds a rollup to the run it is attached to, so a rollup built over one run
+// and handed to another one's export lands here: the member would name an empty
+// file beside a total that still balances against the members listed inline, and
+// an ERP walking members[].file would find nothing under a group that reads as
+// authoritative. The export is refused instead, and --out stays uncreated the
+// way it does for every other refusal.
+func TestJSONFilesRefusesARollupMemberItWroteNoStatementFor(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "out")
+	run := regularRun(t)
+	run.Rollup = &export.Rollup{
+		RelationType: "member_of",
+		Groups: []export.RollupGroup{{
+			Key:       statements.Key("meta", "customer-alpha"),
+			Cloud:     "meta",
+			ProjectID: "customer-alpha",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: "os-prod/team-beta",
+				Cloud:        "os-prod",
+				ProjectID:    "team-beta",
+				Total:        decimal.RequireFromString("100.00"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("100.00"),
+			Currency: currency,
+		}},
+	}
+
+	err := jsonFiles(dir).Export(t.Context(), run)
+	if err == nil {
+		t.Fatalf("Export() error = nil, want the member no statement was written for")
+	}
+	want := "the rollup of meta/customer-alpha names the member os-prod/team-beta, which run " +
+		run.ID.String() + " wrote no statement for"
+	if got := err.Error(); got != want {
+		t.Errorf("Export() error = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the output directory exists and holds %v, want nothing written", names(t, dir))
+	}
+}
+
 // TestCSVFilesWithoutRows pins the header-only tables. A run that billed
 // nothing, and a correction that changed nothing, write their files all the
 // same: an empty table says the run produced no rows, and a missing file says
@@ -640,6 +846,21 @@ func TestCSVFilesWithoutRows(t *testing.T) {
 		assertNames(t, dir, []string{deltasFile, kickbacksCSVFile, ratedFile})
 		if got, want := string(read(t, filepath.Join(dir, deltasFile))), deltasHeader+"\n"; got != want {
 			t.Errorf("%s = %q, want %q", deltasFile, got, want)
+		}
+	})
+
+	t.Run("a rollup with no members", func(t *testing.T) {
+		dir := t.TempDir()
+		run := regularRun(t)
+		run.Rollup = &export.Rollup{RelationType: "member_of", Groups: []export.RollupGroup{}}
+
+		if err := csvFiles(dir).Export(t.Context(), run); err != nil {
+			t.Fatalf("Export() error = %v, want nil", err)
+		}
+
+		assertNames(t, dir, []string{kickbacksCSVFile, ratedFile, rollupCSVFile})
+		if got, want := string(read(t, filepath.Join(dir, rollupCSVFile))), rollupHeader+"\n"; got != want {
+			t.Errorf("%s = %q, want %q", rollupCSVFile, got, want)
 		}
 	})
 }
@@ -855,6 +1076,95 @@ func TestJSONFilesNamesTwoStatementsOneFileSystemHoldsAsOneApart(t *testing.T) {
 	}
 }
 
+// TestJSONFilesNamesTwoRollupsOneFileSystemHoldsAsOneApart pins the pair above
+// for two targets rather than two projects. A meta-project id is free text the
+// registry carries, so two of them that differ only in ASCII case are valid
+// input, and the second rename would replace the first group's document while
+// run.json went on naming both: one customer would be reported the other's
+// total. The second document takes its digest name, which no fold collides with.
+func TestJSONFilesNamesTwoRollupsOneFileSystemHoldsAsOneApart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "out")
+	run := regularRun(t)
+	// In this order rather than sorted: the writer renders the groups the way the
+	// rollup hands them over, and the first of the pair is the one that keeps the
+	// name its key renders.
+	run.Rollup = &export.Rollup{
+		RelationType: "member_of",
+		Groups: []export.RollupGroup{{
+			Key:       statements.Key("meta", "Customer-A"),
+			Cloud:     "meta",
+			ProjectID: "Customer-A",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: drStatementKey,
+				Cloud:        "os-dr",
+				ProjectID:    "proj-789",
+				Total:        decimal.RequireFromString("22.32"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("22.32"),
+			Currency: currency,
+		}, {
+			Key:       statements.Key("meta", "customer-a"),
+			Cloud:     "meta",
+			ProjectID: "customer-a",
+			Platform:  "meta",
+			Members: []export.RollupMember{{
+				StatementKey: statementKey,
+				Cloud:        "os-prod",
+				ProjectID:    projectID,
+				Total:        decimal.RequireFromString("128.45"),
+				Currency:     currency,
+			}},
+			Total:    decimal.RequireFromString("128.45"),
+			Currency: currency,
+		}},
+	}
+
+	if err := jsonFiles(dir).Export(t.Context(), run); err != nil {
+		t.Fatalf("Export() error = %v, want nil", err)
+	}
+
+	var index struct {
+		Rollup struct {
+			Documents []struct {
+				File      string      `json:"file"`
+				ProjectID string      `json:"project_id"`
+				Total     json.Number `json:"total"`
+			} `json:"documents"`
+		} `json:"rollup"`
+	}
+	if err := json.Unmarshal(read(t, filepath.Join(dir, runFile)), &index); err != nil {
+		t.Fatalf("decoding %s: %v", runFile, err)
+	}
+	if len(index.Rollup.Documents) != 2 {
+		t.Fatalf("%s names %d rollup documents, want both of the pair", runFile, len(index.Rollup.Documents))
+	}
+	first, second := index.Rollup.Documents[0], index.Rollup.Documents[1]
+
+	if want := export.RollupFileName(statements.Key("meta", "Customer-A")); first.File != want {
+		t.Errorf("%s names the file %q, want %q", runFile, first.File, want)
+	}
+	if strings.EqualFold(first.File, second.File) {
+		t.Errorf("%s names %q and %q, which are one file on a case-insensitive filesystem",
+			runFile, first.File, second.File)
+	}
+	// Both documents are in the directory beside the statements they sum, and
+	// each target is named by the index rather than by its file.
+	assertNames(t, dir, []string{
+		runFile, kickbacksJSONFile, drStatementFile, statementFile, first.File, second.File,
+	})
+	for i, want := range []struct{ projectID, total string }{
+		{projectID: "Customer-A", total: "22.32"},
+		{projectID: "customer-a", total: "128.45"},
+	} {
+		if entry := index.Rollup.Documents[i]; entry.ProjectID != want.projectID || entry.Total.String() != want.total {
+			t.Errorf("%s names the target %q with the total %s under %q, want %q and %s",
+				runFile, entry.ProjectID, entry.Total, entry.File, want.projectID, want.total)
+		}
+	}
+}
+
 // TestJSONFilesRendersTheAbsentValuesAsNull pins what run.json carries for a run
 // whose row holds NULL under the three nullable columns. A regular run corrects
 // nothing, a run of a period no model priced carries no version, and a run that
@@ -930,6 +1240,13 @@ func TestExportRemovesWhatItWroteWhenAWriteFails(t *testing.T) {
 			run:     correctionRun,
 			blocked: kickbacksCSVFile,
 			removed: deltasFile,
+		},
+		{
+			name:    "the JSON writer over a rollup document that fails",
+			writer:  jsonFiles,
+			run:     rollupRun,
+			blocked: rollupAlphaFile,
+			removed: statementFile,
 		},
 	}
 
@@ -1238,12 +1555,15 @@ func TestExportIntoAWriteProtectedDirectory(t *testing.T) {
 
 // TestExportModes pins the permissions an export carries. A billing artifact
 // names every project of an installation and what it was invoiced, so the
-// directory is the exporting user's own and so is every file in it.
+// directory is the exporting user's own and so is every file in it. The run
+// carries a rollup, which puts the group documents and rollup.csv under the
+// check as well: a group's document names every project under one customer and
+// what each of them was billed.
 func TestExportModes(t *testing.T) {
 	for _, c := range writers() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "out")
-			if err := c.writer(dir).Export(t.Context(), regularRun(t)); err != nil {
+			if err := c.writer(dir).Export(t.Context(), rollupRun(t)); err != nil {
 				t.Fatalf("Export() error = %v, want nil", err)
 			}
 

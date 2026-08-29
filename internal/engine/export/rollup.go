@@ -253,6 +253,86 @@ func RollupFileName(key string) string {
 	return escapedName(rollupPrefix, key)
 }
 
+// rollupDocument is rollup-<key>.json: which target the group sums under, the
+// period and the kind of the run that produced it, and one entry per member
+// beside the file that member's invoice was written to. Nothing here names the
+// run itself, the way a statement document does not: run.json is the index that
+// ties a file to its run. The field order is the order it is marshalled in.
+type rollupDocument struct {
+	BillingPeriod statements.BillingPeriod `json:"billing_period"`
+	ProjectID     string                   `json:"project_id"`
+	Platform      string                   `json:"platform"`
+	RelationType  string                   `json:"relation_type"`
+	Kind          string                   `json:"kind"`
+	// CorrectsRunID is the run a correction's rollup corrects. A pointer, so a
+	// regular run renders null the way runDocument and kickbacksDocument render
+	// the run they correct: one export's documents say the same thing about an
+	// absent value.
+	CorrectsRunID *string             `json:"corrects_run_id"`
+	Members       []rollupMemberEntry `json:"members"`
+	Total         money.Amount        `json:"total"`
+	Currency      string              `json:"currency"`
+}
+
+// rollupMemberEntry is one member under a group: the file its statement was
+// written to, the pair it bills, and the total that statement carries. The two
+// halves of the key are unescaped, the way the index carries them.
+type rollupMemberEntry struct {
+	File      string       `json:"file"`
+	Cloud     string       `json:"cloud"`
+	ProjectID string       `json:"project_id"`
+	Total     money.Amount `json:"total"`
+	Currency  string       `json:"currency"`
+}
+
+// renderRollup renders one group of a rollup. files is the name every statement
+// of the run was written under, keyed by its statement key: a member names the
+// file its invoice is in rather than the name its key renders to, so a document
+// that had to give its name up to a case-fold collision is still the one the
+// group points at. A member no name was recorded for is refused: an empty
+// pointer beside a total that still balances is worse than no document at all,
+// because an ERP walking members[].file finds nothing and the group reads as
+// authoritative all the same.
+func renderRollup(run Run, rollup Rollup, group RollupGroup, files map[string]string) ([]byte, error) {
+	document := rollupDocument{
+		BillingPeriod: statements.BillingPeriod{
+			From: instant(run.PeriodFrom),
+			To:   instant(run.PeriodTo),
+		},
+		ProjectID:    group.ProjectID,
+		Platform:     group.Platform,
+		RelationType: rollup.RelationType,
+		Kind:         run.Kind,
+		Members:      make([]rollupMemberEntry, 0, len(group.Members)),
+		Total:        money.NewAmount(group.Total),
+		Currency:     group.Currency,
+	}
+	if run.CorrectsRunID != uuid.Nil {
+		corrects := run.CorrectsRunID.String()
+		document.CorrectsRunID = &corrects
+	}
+	for _, member := range group.Members {
+		file, wrote := files[member.StatementKey]
+		if !wrote {
+			return nil, fmt.Errorf("the rollup of %s names the member %s, which run %s wrote no statement for",
+				group.Key, member.StatementKey, run.ID)
+		}
+		document.Members = append(document.Members, rollupMemberEntry{
+			File:      file,
+			Cloud:     member.Cloud,
+			ProjectID: member.ProjectID,
+			Total:     money.NewAmount(member.Total),
+			Currency:  member.Currency,
+		})
+	}
+
+	body, err := marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("rendering %s of run %s: %w", RollupFileName(group.Key), run.ID, err)
+	}
+	return body, nil
+}
+
 // RollupCSV renders rollup.csv: the header and one row per member of every
 // group, in the order the rollup holds them. Every row carries the run, its kind
 // and its period beside the target it is summed under, the way a row of

@@ -46,7 +46,9 @@ const nameMaxLen = 200
 // its stats, and one entry per document beside the file it was written to, and
 // kickbacks.json, what the run settles for its partners. The settlement is
 // written for every run and carries an empty beneficiary list where the run
-// owes nobody. It is the file implementation of BillingExporter.
+// owes nobody. A run that carries a rollup writes one document per group beside
+// the statements, which run.json names under rollup. It is the file
+// implementation of BillingExporter.
 type JSONFiles struct {
 	// Dir is where the files are written. It is created, with every parent it
 	// needs, when the export has rendered everything.
@@ -134,6 +136,9 @@ type runDocument struct {
 	CompletedAt    *string          `json:"completed_at"`
 	Stats          json.RawMessage  `json:"stats"`
 	Statements     []statementEntry `json:"statements"`
+	// Rollup is absent from the index of an export that summed nothing under a
+	// meta-project or a partner, which is every export no rollup was asked for.
+	Rollup *rollupIndex `json:"rollup,omitempty"`
 }
 
 // statementEntry is one document in the index: the file it was written to, the
@@ -148,12 +153,33 @@ type statementEntry struct {
 	Currency  string       `json:"currency"`
 }
 
+// rollupIndex is what the index says about the rollup: the relation type the
+// run was summed over, and one entry per group. The document list is empty
+// rather than absent where the rollup reached no group, which is what says the
+// run rolled nothing up.
+type rollupIndex struct {
+	RelationType string        `json:"relation_type"`
+	Documents    []rollupEntry `json:"documents"`
+}
+
+// rollupEntry is one group in the index: the file it was written to, the
+// virtual project it sums under, how many members it holds, and their total.
+type rollupEntry struct {
+	File      string       `json:"file"`
+	Cloud     string       `json:"cloud"`
+	ProjectID string       `json:"project_id"`
+	Members   int          `json:"members"`
+	Total     money.Amount `json:"total"`
+	Currency  string       `json:"currency"`
+}
+
 // Export writes the run's documents, its settlement and its index into Dir.
 // Everything is rendered before the directory is touched, so a statement whose
 // key or whose stored document is refused leaves no directory and no file
 // behind, and a write that fails takes the documents before it with it: an
 // export that reports an error wrote nothing, rather than every document up to
-// the bad one.
+// the bad one. The group documents of a run that carries a rollup are written
+// between the statements and the settlement.
 //
 // run.json is written last, after every document it names and the settlement
 // beside them are on stable storage, so a reader that picks the index up finds
@@ -192,6 +218,11 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 	}
 
 	documents := make(map[string][]byte, len(run.Statements))
+	// The name every statement was written under, keyed by its statement key. A
+	// rollup names the file of each of its members, and the name a document took
+	// is not always the one its key renders: a member that pointed at the name
+	// instead would point at a file the digest fallback below moved.
+	written := make(map[string]string, len(run.Statements))
 	// The names the run renders, folded to lower case. A case-insensitive file
 	// system (APFS, SMB, NTFS) resolves two names that differ only in case to
 	// one file, so the second rename would replace the first project's document
@@ -213,6 +244,7 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 		}
 		name := uniqueName(folded, documentPrefix(run.Kind), statement.Key)
 		documents[name] = document
+		written[statement.Key] = name
 		index.Statements = append(index.Statements, statementEntry{
 			File:      name,
 			Cloud:     cloud,
@@ -220,6 +252,35 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 			Total:     money.NewAmount(statement.Total),
 			Currency:  statement.Currency,
 		})
+	}
+
+	if run.Rollup != nil {
+		index.Rollup = &rollupIndex{
+			RelationType: run.Rollup.RelationType,
+			// Non-nil, for the reason the statement list is: a rollup that reached
+			// no group renders an empty list rather than a null.
+			Documents: make([]rollupEntry, 0, len(run.Rollup.Groups)),
+		}
+		// In the order the rollup holds them, which BuildRollup sorted by key.
+		for _, group := range run.Rollup.Groups {
+			body, err := renderRollup(run, *run.Rollup, group, written)
+			if err != nil {
+				return err
+			}
+			// Two targets whose keys differ in ASCII case alone resolve to one file
+			// on APFS, SMB and NTFS, so the second of such a pair takes its digest
+			// name, the way the second of two such statements does.
+			name := uniqueName(folded, rollupPrefix, group.Key)
+			documents[name] = body
+			index.Rollup.Documents = append(index.Rollup.Documents, rollupEntry{
+				File:      name,
+				Cloud:     group.Cloud,
+				ProjectID: group.ProjectID,
+				Members:   len(group.Members),
+				Total:     money.NewAmount(group.Total),
+				Currency:  group.Currency,
+			})
+		}
 	}
 
 	kickbacks, err := KickbacksJSON(run)
@@ -235,14 +296,21 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 	if err := prepareDir(j.Dir); err != nil {
 		return err
 	}
-	files := make([]artifact, 0, len(index.Statements)+1)
+	files := make([]artifact, 0, len(documents)+1)
 	for _, entry := range index.Statements {
 		files = append(files, artifact{name: entry.File, body: documents[entry.File]})
+	}
+	// The rollup documents follow the statements they sum, so a reader that picks
+	// one up finds every invoice it names beside it.
+	if index.Rollup != nil {
+		for _, entry := range index.Rollup.Documents {
+			files = append(files, artifact{name: entry.File, body: documents[entry.File]})
+		}
 	}
 	// The settlement goes in with the documents rather than after the index, so
 	// it is on stable storage before run.json names the month. No document takes
 	// its name away from it: DocumentFileName prefixes every one of them with
-	// statement- or credit-note-.
+	// statement- or credit-note-, and RollupFileName every group's with rollup-.
 	files = append(files, artifact{name: kickbacksJSONFileName, body: kickbacks})
 	return writeIndexedFiles(j.Dir, files, artifact{name: runFileName, body: body})
 }
