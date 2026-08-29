@@ -19,6 +19,24 @@ import "time"
 // there so that a dumped month reads like a deployment rather than like a list
 // of ids.
 
+// The shape of one burst: how many runners it holds and how far apart they are
+// requested. runnerGapCeiling is exclusive, the way span draws whole seconds
+// below the duration it is handed.
+const (
+	minBurstRunners  = 2
+	maxBurstRunners  = 5
+	minRunnerGap     = 1 * time.Second
+	runnerGapCeiling = 4 * time.Second
+)
+
+// longestBurst is how long after its first runner the last runner of a burst
+// boots: the gaps of the widest burst, each of them the longest one a draw
+// yields. It is derived from the burst above rather than written out, because
+// the first runner is drawn so that even the last one of its burst comes up
+// before the working hours end, and a burst widened past a constant that stated
+// its own number would push runners past that end unnoticed.
+const longestBurst = (maxBurstRunners - 1) * (runnerGapCeiling - time.Second)
+
 // ci generates the CI tenant's month. The image comes first because every
 // runner boots from it, and it is the one resource of this tenant that outlives
 // a single job.
@@ -30,10 +48,10 @@ func (g *generator) ci() {
 		// in bursts rather than one at a time: the runners of one burst are
 		// requested seconds apart and run side by side.
 		for range 4 + g.shape.IntN(5) {
-			t := drawInstant(g.shape, at(d, 7, 0), at(d, 19, 0))
-			for range 2 + g.shape.IntN(4) {
+			t := drawInstant(g.shape, at(d, officeFrom, 0), at(d, officeTo, 0).Add(-longestBurst))
+			for range minBurstRunners + g.shape.IntN(maxBurstRunners-minBurstRunners+1) {
 				g.runner(t)
-				t = t.Add(span(g.shape, time.Second, 4*time.Second))
+				t = t.Add(span(g.shape, minRunnerGap, runnerGapCeiling))
 			}
 		}
 	}
