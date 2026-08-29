@@ -1,40 +1,49 @@
 # OpenStack notification simulator
 
 The simulator is one binary that puts a month of oslo.messaging notifications
-on a RabbitMQ broker the way nova, cinder, neutron, and glance put them there.
-The collector described in [`openstack-collector.md`](openstack-collector.md)
-consumes them unmodified, off its ordinary `tally-notifications` queue, and
-posts the mapped events to the Reporting API, so a month of usage reaches Tally
-with no OpenStack deployment behind it. The month is rendered from a small
-simulated cloud and paced by a virtual clock, so a 31-day month goes out in the
-wall time the factor compresses it into.
+on a RabbitMQ broker the way nova, cinder, neutron, glance, and octavia put
+them there. The collector described in
+[`openstack-collector.md`](openstack-collector.md) consumes them unmodified,
+off its ordinary `tally-notifications` queue, and posts the mapped events to
+the Reporting API, so a month of usage reaches Tally with no OpenStack
+deployment behind it. The month is rendered from a small simulated cloud and
+paced by a virtual clock, so a 31-day month goes out in the wall time the
+factor compresses it into.
 
 It has no fault switches, no oracle to hold a run against, no fake OpenStack
-API, and no metrics endpoint of its own. #65 owns the workloads, the noise, the
-faults, and the oracle; #66 the fake API and the clock seam; #67 the traffic
-series and `/metrics`. The drill #51 cites this simulator as the way a month
-reaches the Reporting API. The collector maps octavia's load balancer
-notifications, but this workload creates no load balancer, so no seed renders one
-until #65 gives it a shoot that does.
+API, and no metrics endpoint of its own. #65 is the meta issue the simulated
+workloads belong to, and this document describes its first stage: #86 owns the
+noise (the notifications the collector does not bill), #87 the oracle, #88 the
+fault switches, and #89 the project registry; #66 the fake API and the clock
+seam; #67 the traffic series and `/metrics`. The drill #51 cites this simulator
+as the way a month reaches the Reporting API. The workload renders octavia's
+three load balancer types from the shoots' load balancers.
 
 ## The world and the workload
 
-The simulated cloud has three projects and one external network. It is small on
-purpose: what a run has to cover is every notification type and every shape of
-resource life, not a realistic tenant count.
+The simulated cloud has three classic projects, two Gardener projects on two
+tenants, one CI tenant, and one external network. It is small on purpose: what
+a run has to cover is every notification type and every shape of resource life,
+not a realistic tenant count. Every tenant of it is addressed by its id alone:
+no notification, payload, or log line of a month carries a tenant name.
 
 The flavor catalog holds four entries: `m1.small` with 1 vCPU, 2048 MB of
 memory, and a 20 GB root disk; `m1.medium` with 2, 4096, and 40; `m1.large`
 with 4, 8192, and 40 GB root plus 40 GB ephemeral; `m1.xlarge` with 8, 16384,
 and 160. `m1.large` is the only one with ephemeral disk, and the first instance
 of every project runs on it, so every month exercises the mapping's sum of root
-and ephemeral disk.
+and ephemeral disk. Beside the catalog stands `c1.large` with 4 vCPUs, 8192 MB
+of memory, and no root disk. It is the flavor of a worker that boots from a
+volume: a server reports the root disk of its flavor whether it boots from one
+or not, so a flavor without root disk keeps the root volume from being billed
+twice, once as disk and once as volume.
 
 A volume carries one of the types `ssd`, `hdd`, and `standard`. The first two
 appear under `type_modifiers` in `pricing/2026-03.yaml` and `standard` does
-not, so a month prices both paths. Image sizes are drawn at quarter-gibibyte
-steps from 1 GiB to 4 GiB, which keeps the mapping's division into gibibytes on
-exact decimals.
+not, so a month prices both paths. A persistent volume claim is created with
+10, 20, or 50 GB, and the root volume of a worker that boots from one is 50 GB
+of `ssd`. Image sizes are drawn at quarter-gibibyte steps from 1 GiB to 4 GiB,
+which keeps the mapping's division into gibibytes on exact decimals.
 
 Instances run on `compute-01` to `compute-04` and keep the host they were
 created on. Cinder publishes as `storage-01@ceph`, neutron as `neutron-01`, and
@@ -42,7 +51,7 @@ glance as `glance-01`. Floating addresses come from `203.0.113.0/24`, the
 documentation range of RFC 5737, drawn as a permutation so that no address is
 handed out twice inside a month.
 
-Every project gets:
+Every classic project gets:
 
 - two images, each announced by an unsized `image.create` and uploaded 30 to
   120 seconds later by an `image.upload`. The second image is deleted in the
@@ -58,7 +67,105 @@ Every project gets:
   while the instance behind it lives on.
 - one spare volume, transferred to the next project.
 
-The workload renders 18 oslo notification types.
+### The Gardener projects
+
+Two Gardener projects run their shoots on two OpenStack tenants. Nothing of the
+Kubernetes side is rendered: what the simulator generates is what the platform
+underneath a shoot creates in OpenStack, the workers of the machine controller,
+the volumes of the CSI driver, and the load balancers of the cloud controller.
+Each tenant uploads one image, `gardenlinux-1592.4`, in the first half hour of
+the month and never deletes it, because the fleet that boots from it is created
+and destroyed all month long. The project names below reach a notification
+through the technical ids of the shoots, `shoot--alpha--api-prod` and the like,
+and the tenants they run on carry no name of their own.
+
+`alpha` runs on a tenant of its own with two shoots:
+
+- `api-prod` on `m1.xlarge`, booted from the tenant image, created in the first
+  hours of the month and alive through it. It rolls its workers once on a
+  working day between 8 and 20 days into the month, takes a second load
+  balancer between 3 and 20 days in, and a third listener on its first balancer
+  between 5 and 25 days in.
+- `api-dev` on `c1.large` from a 50 GB root volume, created in the first hours
+  as well. It hibernates at 19:00 of every day it is awake and wakes at 07:00
+  of every working day. Half the seeds give it a second load balancer.
+
+`beta` runs on the other tenant with one shoot: `batch` on `m1.large`, created
+in the working hours of a day between 2 and 8 days into the month and torn down
+in the working hours of one between 18 and 27 days in.
+
+A shoot's life renders:
+
+- three or four workers, booted seconds apart. A worker that boots from a
+  volume reports its `volume.create.end` 5 to 15 seconds before its
+  `compute.instance.create.end` and carries an empty `image_ref_url`.
+- two or three claims, each of them a `volume.create.end`. On a working day a
+  claim is added with probability 1/3, one is doubled with probability 1/4 (at
+  most twice per claim), and one is deleted with probability 1/5, never the
+  first one.
+- an autoscaler that adds one or two workers in the morning and gives them back
+  in the evening of every working day the shoot is fully alive.
+- a rolling update that boots a replacement and deletes the worker it replaces
+  minutes later.
+- hibernation, which deletes every worker and its root volume and keeps the
+  claims, the balancers, and their addresses.
+- a tear-down in the order the resources depend on each other: address,
+  balancer, workers, claims.
+
+A load balancer renders three notifications. `octavia.loadbalancer.create.end`
+carries no listeners and no pools, a `floatingip.create.end` gives its VIP port
+an address, and an `octavia.loadbalancer.update.end` one to five minutes later
+carries the listeners and the pools, which is what the balancer's size is
+booked from. The address of a balancer is associated from the moment it is
+allocated: it names its `port_id`, its `fixed_ip_address`, and its `router_id`,
+and its status is `ACTIVE`. The classic tenants' addresses are allocated
+unassociated instead, with the three members `null` and the status `DOWN`.
+Every octavia notification carries a `publisher_id` of `null`, the way the
+recorded samples do.
+
+The names are the shapes Gardener's OpenStack extension and the
+machine-controller-manager give the resources they create: the technical id
+`shoot--<project>--<shoot>`, a worker
+`<technical id>-worker-z1-<5 hex>-<5 hex>`, a root volume named after the
+worker it carries, a claim `<technical id>-dynamic-pvc-<volume id>`, a load
+balancer `kube_service_<technical id>_<namespace>_<service>`, and a keypair
+`<technical id>-ssh-publickey`. They are cosmetic: nothing is metered by a name.
+
+The notifications of the network, the subnet, the router, the security group,
+the keypair, and the ports belong to #86, together with the keystone
+notifications and the attach and detach notifications. Three of those
+identifiers are already named by a payload: a load balancer reports its
+`vip_network_id` and its `vip_subnet_id`, and the address of one reports its
+`router_id`. The security group and the keypair are drawn here and read by
+nothing yet: they hold their place in the identifier stream until #86 renders
+the notifications about them.
+
+### The CI tenant
+
+The CI tenant uploads the image `ubuntu-24.04-ci` and boots runners on every
+Monday to Friday of the month: 4 to 8 bursts of 2 to 5 runners each, the
+runners of one burst 1 to 3 seconds apart. A runner runs on `m1.small` or
+`m1.medium`, is called `runner-<8 hex>`, and is deleted 3 to 40 minutes after
+its create. It holds no volume and no address.
+
+### The profile
+
+The Gardener and the CI workload draw their instants on a working-week profile.
+Every hour of the period carries a weight: 10 for a Monday to Friday between
+07:00 and 19:00 UTC, 3 for 05:00 to 07:00 and 19:00 to 23:00 of those days, and
+1 for every other hour, the nights and the weekends. What a machine drives (a
+scale-up, the claim activity, a CI burst) is drawn on those weights. What
+somebody triggers (a shoot's creation and its deletion, the rolling update day,
+a second balancer, a listener) falls on the working hours alone.
+
+The working days are the Mondays to Fridays of the real calendar of the
+simulated period: July 2026 begins on a Wednesday and has 23 of them. The
+profile follows that calendar rather than a synthetic one, which is the author's
+decision of 2026-08-29. The consequence is that the same seed run over another
+month keeps the classic tenants at their offsets from the month start and moves
+the shoot and the CI activity onto that month's working days.
+
+The workload renders 21 oslo notification types.
 
 | Notification | Exchange | Billable |
 | --- | --- | --- |
@@ -80,28 +187,45 @@ The workload renders 18 oslo notification types.
 | `image.create` | `glance` | no |
 | `image.upload` | `glance` | yes |
 | `image.delete` | `glance` | yes |
+| `octavia.loadbalancer.create.end` | `octavia` | yes |
+| `octavia.loadbalancer.update.end` | `octavia` | yes |
+| `octavia.loadbalancer.delete.end` | `octavia` | yes |
 
 `image.create` is rendered in the unsized form glance emits before an upload,
 and the mapping skips it on purpose: the `image.upload` that follows is the
-first notification with a size to bill.
+first notification with a size to bill. A load balancer is billed from its
+update: the create carries no listeners and no pools, and the mapping counts
+both as 0 there.
 
-The forced steps (the resize on the first instance, the shelve on the second,
-the resize and retype of the second instance's first volume) are what make
-every seed render every type rather than most of them. The test suite holds
-seeds 1 to 5 over July 2026 against the recorded samples under
+Billable here means the collector books the notification as an event, not that
+the engine prices it. `pricing/2026-03.yaml`, the model
+`tally-engine pricing import` loads, prices `instance`, `volume`, and
+`floating_ip` and no `loadbalancer`, so a rated month counts every balancer of
+it under `runs.stats.unpriced` instead of billing it. Pricing the resource type
+is a change to that model and not to this simulator.
+
+The forced steps of the classic tenants and of the shoots (the resize on the
+first instance, the shelve on the second, the resize and retype of the second
+instance's first volume, the rolling update of `api-prod`, the tear-down of
+`batch`, and the load balancers) are what make every seed render every type
+rather than most of them. The test suite holds seeds 1 to 5 over July 2026
+against the recorded samples under
 [`internal/providers/openstack/testdata/golden/notifications/`](../internal/providers/openstack/testdata/golden/notifications),
-so a sample the catalog does not render fails the suite. A recorded type this
-workload publishes on no exchange is left out of that check, because no seed can
-reach one: octavia's three load balancer types are recorded there for the
-collector and rendered by nobody. Giving the workload an octavia exchange re-arms
-the check for them.
+so a sample the catalog does not render fails the suite. The check holds the
+octavia types against every seed as well, because every seed's `batch` tears its
+balancer down and every shoot updates the balancers it creates.
 
 ## Determinism
 
-The shape of a month (what happens, when, and with which sizes) is a function
-of `--seed` alone. The identifiers (the project and user ids, the resource ids,
-the floating addresses, the message ids) are a function of the seed together
-with the period and the cloud.
+The shape of the classic tenants (what happens, when, and with which sizes) is
+a function of `--seed` alone. The shape of the Gardener and the CI workload is a
+function of the seed and the period's calendar, because their steps fall on the
+working days of the month. The identifiers (the project and user ids, the
+resource ids, the floating addresses, the message ids) are a function of the
+seed together with the period and the cloud. The identifiers of the resources a
+month churns (the workers, their root volumes, the claims, the load balancers
+with their ports, listeners, pools, and addresses, and the CI runners) come from
+that same salted stream at the moment the resource is created.
 
 The same seed, period, and cloud therefore publish byte-identical
 notifications, and a rerun costs nothing at the far end: the collector books
@@ -112,9 +236,11 @@ another month publishes fresh resources under fresh message ids, so two
 collectors fed by two simulated clouds never collide on `event_id` at one
 Reporting API.
 
-Between two months of the same length the notifications sit at the same offsets
-from the month start. The transitions anchored on the month's end (the second
-image's delete and the first instance's) move with its length.
+Between two months of the same length the classic tenants' notifications sit at
+the same offsets from the month start. The transitions anchored on the month's
+end (the second image's delete and the first instance's) move with its length.
+The activity of the shoots and of the CI tenant follows each month's own
+working days.
 
 ## Running a month against the dev cluster
 
@@ -158,6 +284,15 @@ Every host port is bound to `127.0.0.1` and lies above 1024;
 cluster through `extra_hosts`, which maps `api.tally.127-0-0-1.nip.io` to
 `host-gateway`, and `tally-ca.crt` is mounted read-only at the path
 `SSL_CERT_FILE` names, which is what makes the Gateway's certificate verify.
+
+The collector service of the stack lists five exchanges in
+`TALLY_OSC_EXCHANGES`: `nova,neutron,cinder,glance,octavia`. The simulator
+publishes the shoots' load balancers on `octavia`, and a topic exchange copies a
+message only to the queues bound to it, so a collector left at its default of
+four exchanges receives none of the load balancers and shows no `octavia.`
+series in any of its counters, `tally_collector_skipped_total` included.
+[`openstack-collector.md`](openstack-collector.md), "Exchanges and topics", is
+where that default and the reason it leaves octavia out are described.
 
 The simulator waits for a consumer on the collector's `tally-notifications`
 queue before its first publish, because a topic exchange drops what no queue is
@@ -218,15 +353,17 @@ curl --cacert tally-ca.crt -H "Authorization: Bearer $token" \
 
 ## What the collector shows
 
-Seed 1 over `2026-07` renders 180 notifications, 174 of them billable. The
-other six are the unsized `image.create`, one per image of the three projects.
+Seed 1 over `2026-07` renders 1821 notifications, 1812 of them billable. The
+other nine are the unsized `image.create`, one per image: two per classic
+project, one per Gardener tenant, and one for the CI tenant.
 
 `curl http://127.0.0.1:8090/readyz` answers 200 once the collector holds its
 broker connection and its outbox. On `http://127.0.0.1:8090/metrics`:
 
 - `tally_collector_consumed_total` grows per event type while the month goes
-  out.
-- `tally_collector_skipped_total{event_type="image.create"}` ends at 6 for that
+  out, and carries the three `octavia.loadbalancer.*.end` series among the
+  others.
+- `tally_collector_skipped_total{event_type="image.create"}` ends at 9 for that
   seed and period.
 - `tally_collector_unparseable_total` stays 0. Anything else is a rendered body
   the collector could not read.
@@ -260,7 +397,7 @@ puts on the bus.
 
 `events.jsonl` holds one canonical event per billable notification, computed by
 the collector's own parser and mapping table rather than by the simulator's
-idea of them. For seed 1 the first file therefore has six more lines than the
+idea of them. For seed 1 the first file therefore has nine more lines than the
 second. A broker and `--out` combine: a run does both.
 
 `replay --in FILE --factor N` publishes a captured file onto a broker, with the
@@ -289,7 +426,7 @@ at another speed.
 `GET /healthz` answers `ok`. `GET /clock` answers the document of that moment:
 
 ```json
-{"virtual_now":"2026-07-09T14:22:00Z","factor":744,"published":52,"total":180,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+{"virtual_now":"2026-07-09T14:22:00Z","factor":744,"published":52,"total":1821,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
 ```
 
 `PUT /clock` with a body of `{"factor": N}`, where N is zero or positive,
