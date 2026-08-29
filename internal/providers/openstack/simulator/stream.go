@@ -17,7 +17,7 @@ import (
 // would publish a month no collector receives.
 type Line struct {
 	// Exchange is the service exchange the notification belongs on, one of nova,
-	// cinder, neutron, and glance.
+	// cinder, neutron, glance, and octavia.
 	Exchange string `json:"exchange"`
 	// RoutingKey is the topic the notification was published under.
 	RoutingKey string `json:"routing_key"`

@@ -48,6 +48,12 @@ var flavors = []flavor{
 // ephemeral disk into every generated month.
 var largeFlavor = flavors[2]
 
+// xlargeFlavor is the flavor a production shoot's workers run on. It is named
+// beside largeFlavor so that the catalog is read by position in one place: a
+// workload that picked its flavor by index would change what it runs on when an
+// entry is inserted before it.
+var xlargeFlavor = flavors[3]
+
 // bootVolumeFlavor is the flavor a server that boots from a volume runs on. A
 // server reports the root disk of its flavor whether it boots from one or not,
 // so a flavor without root disk is what keeps the root volume from being billed

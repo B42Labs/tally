@@ -29,7 +29,9 @@ type Transition struct {
 	// "compute.instance.create.end".
 	EventType string
 	// Exchange is the notification exchange the type belongs on. A deployment
-	// gives each service its own, and the collector binds its queue to all four.
+	// gives each service its own. The collector's default binds nova, neutron,
+	// cinder, and glance, and a deployment running octavia lists the fifth
+	// itself.
 	Exchange string
 	// Billable reports whether the collector's mapping records an event for this
 	// notification. It is false only for the image.create that precedes an
@@ -97,11 +99,11 @@ const (
 	workloadCI       = "ci"
 )
 
-// exchangeFor names the exchange a type is published on. The four are the
-// service exchanges of nova, cinder, neutron, and glance. A type outside them
-// is one this package does not generate, and it is reported as the empty
-// exchange rather than guessed at, because a wrong exchange is a notification
-// no bound queue receives.
+// exchangeFor names the exchange a type is published on. The five are the
+// service exchanges of nova, cinder, neutron, glance, and octavia. A type
+// outside them is one this package does not generate, and it is reported as the
+// empty exchange rather than guessed at, because a wrong exchange is a
+// notification no bound queue receives.
 func exchangeFor(eventType string) string {
 	switch {
 	case strings.HasPrefix(eventType, "compute."):
@@ -112,6 +114,8 @@ func exchangeFor(eventType string) string {
 		return "neutron"
 	case strings.HasPrefix(eventType, "image."):
 		return "glance"
+	case strings.HasPrefix(eventType, "octavia."):
+		return "octavia"
 	default:
 		return ""
 	}
@@ -159,10 +163,14 @@ const shapeStream = 1
 // while the same triple republishes the very notifications ingestion has
 // already deduplicated.
 //
-// Splitting them is what makes both properties hold at once. Identifiers are
-// drawn in a fixed order before the first transition is generated, so how many
-// of them a month costs depends on the shape and never on the salt, and a month
-// keeps its shape when the cloud changes.
+// Splitting them is what makes both properties hold at once, and the rule that
+// keeps them apart runs in both directions: an identifier comes from the
+// identifier stream and never from the shape stream, and what happens, when,
+// and therefore how many identifiers a month draws comes from the shape stream
+// and the period's calendar and never from the value of an identifier. The same
+// seed, period, and cloud draw the same identifiers in the same order, and
+// another cloud or another month renames everything while the shape stays the
+// shape stream's.
 func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
 	// A caller that reached here without going through period.Parse is caught
 	// before it produces a month that no billing period covers.
@@ -265,10 +273,18 @@ type generator struct {
 	schedule Schedule
 }
 
-// newGenerator draws every identifier of the month and returns the generator
-// that walks the world they name. The order of the draws is fixed here and
-// finished before the first transition is generated, which is what keeps the
-// number of identifiers a function of the shape alone.
+// newGenerator draws the identifiers of the world a month starts from and
+// returns the generator that walks it. The fixed resources are the ones that
+// exist before the first transition: the tenants, their users and images, the
+// classic tenants' servers, volumes and addresses, and the network, subnet,
+// router, and security group of a shoot. They are drawn here, in this order.
+//
+// What a month churns is drawn from the same stream at the moment the generator
+// creates the resource: the workers of a shoot and their root volumes, the
+// workers a rolling update puts in their place, the claims, the load balancers
+// with their VIP ports, listeners, pools, and addresses, and the CI runners.
+// How many of them a month makes follows from its calendar, so drawing them
+// here would mean counting the month's days twice.
 func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cloud string) *generator {
 	g := &generator{shape: shape, identifiers: identifiers, from: from, to: to, cloud: cloud}
 
@@ -308,13 +324,38 @@ func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cl
 			name: fmt.Sprintf("handover-%02d", index+1),
 		}
 	}
+
+	shoots := 0
+	for _, gp := range newGardenerProjects() {
+		gp.tenant = &project{id: identifiers.nextHexID()}
+		gp.tenant.userID = identifiers.nextHexID()
+		gp.tenant.images = []*image{{id: identifiers.nextUUID(), name: gardenerImageName}}
+		for _, s := range gp.shoots {
+			s.owner = gp
+			// The technical id is what Gardener names a shoot's OpenStack
+			// resources after, and every name of the shoot is built from it.
+			s.technicalID = "shoot--" + gp.name + "--" + s.name
+			s.keypairName = s.technicalID + "-ssh-publickey"
+			shoots++
+			s.index = shoots
+			s.awake = true
+			s.networkID = identifiers.nextUUID()
+			s.subnetID = identifiers.nextUUID()
+			s.routerID = identifiers.nextUUID()
+			s.securityGroupID = identifiers.nextUUID()
+		}
+		g.gardenerProjects = append(g.gardenerProjects, gp)
+	}
 	return g
 }
 
-// run generates every project's month. The phases are ordered the way a tenant
+// run generates the month of every workload, one block after another, and tags
+// what each block emits with the workload it came from.
+//
+// The classic tenants come first. Their phases are ordered the way a tenant
 // works: the images come first because an instance boots from one, the volumes
 // and addresses follow the instances they belong to, and the tear-down comes
-// last.
+// last. The Gardener projects follow, each shoot walking its own days.
 func (g *generator) run() {
 	g.workload = workloadClassic
 	for index, p := range g.projects {
@@ -324,6 +365,11 @@ func (g *generator) run() {
 		g.floatingIPs(p)
 		g.deleteFirstInstance(p)
 		g.spareVolume(p, g.projects[(index+1)%len(g.projects)])
+	}
+
+	g.workload = workloadGardener
+	for _, gp := range g.gardenerProjects {
+		g.gardener(gp)
 	}
 }
 
