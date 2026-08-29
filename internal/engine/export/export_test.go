@@ -103,6 +103,8 @@ const (
 		"resource_type,resource_id,project_id,dimension,old_amount,new_amount,delta,currency"
 	kickbacksHeader = "run_id,kind,corrects_run_id,period_from,period_to,beneficiary,cloud," +
 		"project_id,relation_id,scope,rate,base,amount,currency"
+	rollupHeader = "run_id,kind,corrects_run_id,period_from,period_to,relation_type," +
+		"target_cloud,target_project_id,cloud,project_id,total,currency"
 )
 
 // The file names the two writers produce over the fixtures.
@@ -115,6 +117,8 @@ const (
 
 	kickbacksJSONFile = "kickbacks.json"
 	kickbacksCSVFile  = "kickbacks.csv"
+
+	rollupCSVFile = "rollup.csv"
 )
 
 // regularRun is the finalized run of the concept's power-cycle month: the
@@ -331,6 +335,138 @@ func kickbackRows(kickbacks []export.Kickback) []kickbackRow {
 			amount:      entry.Amount.StringFixed(2),
 			currency:    entry.Currency,
 		})
+	}
+	return rows
+}
+
+// The registry rows the rollup cases are built over: two meta-projects and a
+// partner, which are the virtual projects a rollup sums under, the three real
+// projects the run bills, and one real project a relation reaches that no
+// rollup may sum under. A relation names both of its ends by id, so the ids are
+// written out rather than generated: a case names which row it meant.
+var (
+	metaAlphaID   = uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	metaBetaID    = uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	partnerCorpID = uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
+	teamAlphaID   = uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
+	teamBetaID    = uuid.MustParse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+	drProjectID   = uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
+	realTargetID  = uuid.MustParse("0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a")
+	// The id of a project no registry snapshot holds, which is what a relation
+	// naming an end the projects do not carry is refused over.
+	strangerID = uuid.MustParse("9b9b9b9b-9b9b-9b9b-9b9b-9b9b9b9b9b9b")
+)
+
+// The relations those rows are related by, one id per edge a case names.
+var (
+	alphaMemberID   = uuid.MustParse("1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a")
+	betaMemberID    = uuid.MustParse("2a2a2a2a-2a2a-2a2a-2a2a-2a2a2a2a2a2a")
+	drMemberID      = uuid.MustParse("3a3a3a3a-3a3a-3a3a-3a3a-3a3a3a3a3a3a")
+	alphaSecondID   = uuid.MustParse("4a4a4a4a-4a4a-4a4a-4a4a-4a4a4a4a4a4a")
+	alphaManagedID  = uuid.MustParse("5a5a5a5a-5a5a-5a5a-5a5a-5a5a5a5a5a5a")
+	alphaStrangerID = uuid.MustParse("6a6a6a6a-6a6a-6a6a-6a6a-6a6a6a6a6a6a")
+)
+
+// The keys of the two statements the rollup cases bill beside drStatementKey,
+// and the instant a membership that was replaced inside the month was closed
+// and its successor opened at.
+const (
+	alphaStatementKey = "os-prod/team-alpha"
+	betaStatementKey  = "os-prod/team-beta"
+)
+
+var midMarch = time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+
+// billedTotal is one statement a rollup case's run carries: the key it is
+// stored under and the total it bills.
+type billedTotal struct{ key, total string }
+
+// statementsOf is a run's statements as a rollup case names them. A rollup
+// reads the key, the total and the currency and never opens the document, so
+// the stored bytes are the empty object rather than a rendered invoice.
+func statementsOf(billed ...billedTotal) []statements.Statement {
+	entries := make([]statements.Statement, 0, len(billed))
+	for _, entry := range billed {
+		entries = append(entries, statements.Statement{
+			Key:      entry.key,
+			Document: []byte("{}"),
+			Total:    decimal.RequireFromString(entry.total),
+			Currency: currency,
+		})
+	}
+	return entries
+}
+
+// registryProject is one row of the registry snapshot a rollup is built over. A
+// virtual project carries its platform as its cloud, which is what the cases
+// pass for a meta-project and a partner.
+func registryProject(id uuid.UUID, platform, cloud, externalID string) source.Project {
+	return source.Project{ID: id, Platform: platform, Cloud: cloud, ExternalID: externalID}
+}
+
+// relationOf is one relation of the period between two of those rows, open at
+// its end. A case that means a closed one sets ValidTo on what it gets back.
+func relationOf(id, sourceID, targetID uuid.UUID, relationType string) source.Relation {
+	return source.Relation{
+		ID:           id,
+		SourceID:     sourceID,
+		TargetID:     targetID,
+		RelationType: relationType,
+		ValidFrom:    periodFrom,
+	}
+}
+
+// closedAt is that relation ended at an instant, and openedAt is the successor
+// that took over there: the pair a rate change of WP 5.2 leaves behind, and
+// both of them overlap the period the run billed.
+func closedAt(relation source.Relation, at time.Time) source.Relation {
+	relation.ValidTo = &at
+	return relation
+}
+
+func openedAt(relation source.Relation, at time.Time) source.Relation {
+	relation.ValidFrom = at
+	return relation
+}
+
+// rollupGroupRow is one group as a case compares it: every field, with the
+// totals at the scale they are rendered at. Two decimals that are the same
+// number are not the same decimal.Decimal, so the comparison is over what they
+// render as.
+type rollupGroupRow struct {
+	key, cloud, projectID, platform string
+	total, currency                 string
+	members                         []rollupMemberRow
+}
+
+// rollupMemberRow is one member under such a group.
+type rollupMemberRow struct {
+	statementKey, cloud, projectID string
+	total, currency                string
+}
+
+// rollupRows renders what BuildRollup returned, in the order it came back in.
+func rollupRows(groups []export.RollupGroup) []rollupGroupRow {
+	rows := make([]rollupGroupRow, 0, len(groups))
+	for _, group := range groups {
+		row := rollupGroupRow{
+			key:       group.Key,
+			cloud:     group.Cloud,
+			projectID: group.ProjectID,
+			platform:  group.Platform,
+			total:     group.Total.StringFixed(2),
+			currency:  group.Currency,
+		}
+		for _, member := range group.Members {
+			row.members = append(row.members, rollupMemberRow{
+				statementKey: member.StatementKey,
+				cloud:        member.Cloud,
+				projectID:    member.ProjectID,
+				total:        member.Total.StringFixed(2),
+				currency:     member.Currency,
+			})
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -1443,6 +1579,532 @@ func TestKickbacksCSVRefusesAFormulaToTheSpreadsheet(t *testing.T) {
 	})
 }
 
+// TestBuildRollup pins what an export sums under a meta-project or a partner.
+// A group's total is the sum of the member totals it lists, so a member counted
+// twice, one left out, or one summed under a target it is not related to is a
+// number the customer reconciles their projects against and does not arrive at.
+func TestBuildRollup(t *testing.T) {
+	cases := []struct {
+		name         string
+		correction   bool
+		billed       []billedTotal
+		relationType string
+		projects     []source.Project
+		relations    []source.Relation
+		want         []rollupGroupRow
+	}{
+		{
+			name: "two meta-projects over the three projects they hold",
+			billed: []billedTotal{
+				{key: drStatementKey, total: "22.32"},
+				{key: alphaStatementKey, total: "520.80"},
+				{key: betaStatementKey, total: "100.00"},
+			},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(metaBetaID, "meta", "meta", "customer-beta"),
+				registryProject(drProjectID, "openstack", "os-dr", "proj-789"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, metaAlphaID, "member_of"),
+				relationOf(drMemberID, drProjectID, metaBetaID, "member_of"),
+			},
+			want: []rollupGroupRow{
+				{
+					key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+					platform: "meta", total: "620.80", currency: currency,
+					members: []rollupMemberRow{
+						{
+							statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+							total: "520.80", currency: currency,
+						},
+						{
+							statementKey: betaStatementKey, cloud: "os-prod", projectID: "team-beta",
+							total: "100.00", currency: currency,
+						},
+					},
+				},
+				{
+					key: "meta/customer-beta", cloud: "meta", projectID: "customer-beta",
+					platform: "meta", total: "22.32", currency: currency,
+					members: []rollupMemberRow{
+						{
+							statementKey: drStatementKey, cloud: "os-dr", projectID: "proj-789",
+							total: "22.32", currency: currency,
+						},
+					},
+				},
+			},
+		},
+		{
+			// The membership was closed mid-month and opened again, which is how WP
+			// 5.2 changes a rate, and both relations overlap the period. Summing the
+			// statement once per relation would bill the customer the project twice.
+			name:         "a membership replaced inside the month is one member",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				closedAt(relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"), midMarch),
+				openedAt(relationOf(alphaSecondID, teamAlphaID, metaAlphaID, "member_of"), midMarch),
+			},
+			want: []rollupGroupRow{{
+				key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+				platform: "meta", total: "520.80", currency: currency,
+				members: []rollupMemberRow{{
+					statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+					total: "520.80", currency: currency,
+				}},
+			}},
+		},
+		{
+			// The two groups sum to 1041.60 over a run that billed 520.80: the
+			// rollups of one export are not disjoint, and adding them up is not a
+			// second reading of the month.
+			name:         "a project of two meta-projects is summed under both",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(metaBetaID, "meta", "meta", "customer-beta"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamAlphaID, metaBetaID, "member_of"),
+			},
+			want: []rollupGroupRow{
+				{
+					key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+					platform: "meta", total: "520.80", currency: currency,
+					members: []rollupMemberRow{{
+						statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+						total: "520.80", currency: currency,
+					}},
+				},
+				{
+					key: "meta/customer-beta", cloud: "meta", projectID: "customer-beta",
+					platform: "meta", total: "520.80", currency: currency,
+					members: []rollupMemberRow{{
+						statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+						total: "520.80", currency: currency,
+					}},
+				},
+			},
+		},
+		{
+			name:         "a managed_by rollup sums under the partner",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "managed_by",
+			projects: []source.Project{
+				registryProject(partnerCorpID, "partner", "partner", "partner-corp"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaManagedID, teamAlphaID, partnerCorpID, "managed_by"),
+			},
+			want: []rollupGroupRow{{
+				key: "partner/partner-corp", cloud: "partner", projectID: "partner-corp",
+				platform: "partner", total: "520.80", currency: currency,
+				members: []rollupMemberRow{{
+					statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+					total: "520.80", currency: currency,
+				}},
+			}},
+		},
+		{
+			// team-beta is related to customer-beta and the run billed it nothing,
+			// so customer-beta is no group at all: a document reporting a total of
+			// zero would read as a customer that used nothing rather than as one
+			// this month has no statements for.
+			name:         "a member the run billed nothing opens no group",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(metaBetaID, "meta", "meta", "customer-beta"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, metaBetaID, "member_of"),
+			},
+			want: []rollupGroupRow{{
+				key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+				platform: "meta", total: "520.80", currency: currency,
+				members: []rollupMemberRow{{
+					statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+					total: "520.80", currency: currency,
+				}},
+			}},
+		},
+		{
+			// proj-real is not virtual, and the run billed team-beta nothing, so the
+			// relation reaching it adds no member and is not judged for it either: a
+			// registry row of a project this run has no statement for refuses no
+			// month it has no part in.
+			name:         "a relation to a project which is not virtual the run billed nothing for",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(realTargetID, "openstack", "os-prod", "proj-real"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, realTargetID, "member_of"),
+			},
+			want: []rollupGroupRow{{
+				key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+				platform: "meta", total: "520.80", currency: currency,
+				members: []rollupMemberRow{{
+					statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+					total: "520.80", currency: currency,
+				}},
+			}},
+		},
+		{
+			name:         "a registry that relates none of the billed projects",
+			billed:       []billedTotal{{key: alphaStatementKey, total: "520.80"}},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			want: []rollupGroupRow{},
+		},
+		{
+			name:         "a run that billed nobody over three memberships",
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(metaBetaID, "meta", "meta", "customer-beta"),
+				registryProject(drProjectID, "openstack", "os-dr", "proj-789"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, metaAlphaID, "member_of"),
+				relationOf(drMemberID, drProjectID, metaBetaID, "member_of"),
+			},
+			want: []rollupGroupRow{},
+		},
+		{
+			// The credit notes of a correction are stored under the keys the
+			// statements were, so a rollup of one sums to what the customer is owed
+			// back rather than to what they were billed.
+			name:       "a correction sums its credits to a negative total",
+			correction: true,
+			billed: []billedTotal{
+				{key: alphaStatementKey, total: "-24.00"},
+				{key: betaStatementKey, total: "-1.50"},
+			},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, metaAlphaID, "member_of"),
+			},
+			want: []rollupGroupRow{{
+				key: "meta/customer-alpha", cloud: "meta", projectID: "customer-alpha",
+				platform: "meta", total: "-25.50", currency: currency,
+				members: []rollupMemberRow{
+					{
+						statementKey: alphaStatementKey, cloud: "os-prod", projectID: "team-alpha",
+						total: "-24.00", currency: currency,
+					},
+					{
+						statementKey: betaStatementKey, cloud: "os-prod", projectID: "team-beta",
+						total: "-1.50", currency: currency,
+					},
+				},
+			}},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run := regularRun(t)
+			if c.correction {
+				run = correctionRun(t)
+			}
+			run.Statements = statementsOf(c.billed...)
+
+			rollup, err := export.BuildRollup(run, c.relationType, c.projects, c.relations)
+			if err != nil {
+				t.Fatalf("BuildRollup() error = %v, want nil", err)
+			}
+			if rollup.RelationType != c.relationType {
+				t.Errorf("RelationType = %q, want %q", rollup.RelationType, c.relationType)
+			}
+			// Non-nil whatever the registry held, so a reader renders an empty list
+			// rather than a null: a run that rolls up to nothing said so.
+			if rollup.Groups == nil {
+				t.Fatalf("Groups = nil, want an empty list")
+			}
+			if got := rollupRows(rollup.Groups); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("BuildRollup() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestBuildRollupRefusals pins what a rollup nothing can be summed from
+// reports. Every one of them would otherwise produce a document that reads like
+// a total: a customer's projects under a partner's name, a group missing the
+// member whose registry row was not read, one under a project that carries a
+// statement of its own, or two currencies added together.
+func TestBuildRollupRefusals(t *testing.T) {
+	cases := []struct {
+		name         string
+		billed       []statements.Statement
+		relationType string
+		projects     []source.Project
+		relations    []source.Relation
+		wantErr      string
+		exact        bool
+	}{
+		{
+			name:         "a relation type that reaches no virtual project",
+			relationType: "infrastructure_tenant",
+			wantErr:      `the rollup relation type "infrastructure_tenant" is not member_of or managed_by`,
+			exact:        true,
+		},
+		{
+			name:    "no relation type at all",
+			wantErr: `the rollup relation type "" is not member_of or managed_by`,
+			exact:   true,
+		},
+		{
+			name:         "a relation of another type among the ones handed in",
+			billed:       statementsOf(billedTotal{key: alphaStatementKey, total: "520.80"}),
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(partnerCorpID, "partner", "partner", "partner-corp"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaManagedID, teamAlphaID, partnerCorpID, "managed_by"),
+			},
+			wantErr: "is of type managed_by, and the rollup is over member_of",
+		},
+		{
+			name:         "a relation whose source the registry snapshot does not hold",
+			billed:       statementsOf(billedTotal{key: alphaStatementKey, total: "520.80"}),
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, strangerID, metaAlphaID, "member_of"),
+			},
+			wantErr: "names the project " + strangerID.String() + ", which the registry snapshot does not hold",
+		},
+		{
+			name:         "a relation whose target the registry snapshot does not hold",
+			billed:       statementsOf(billedTotal{key: alphaStatementKey, total: "520.80"}),
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaStrangerID, teamAlphaID, strangerID, "member_of"),
+			},
+			wantErr: "names the project " + strangerID.String() + ", which the registry snapshot does not hold",
+		},
+		{
+			// proj-real owns resources and carries a statement of its own, which a
+			// group under it would leave out of the total it reports.
+			name:         "a relation that reaches a project which is not virtual",
+			billed:       statementsOf(billedTotal{key: alphaStatementKey, total: "520.80"}),
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(realTargetID, "openstack", "os-prod", "proj-real"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, realTargetID, "member_of"),
+			},
+			wantErr: `reaches os-prod/proj-real, whose platform "openstack" is not meta or partner`,
+		},
+		{
+			name: "two members of one meta-project billed in two currencies",
+			billed: []statements.Statement{
+				{
+					Key: alphaStatementKey, Document: []byte("{}"),
+					Total: decimal.RequireFromString("520.80"), Currency: currency,
+				},
+				{
+					Key: betaStatementKey, Document: []byte("{}"),
+					Total: decimal.RequireFromString("100.00"), Currency: "USD",
+				},
+			},
+			relationType: "member_of",
+			projects: []source.Project{
+				registryProject(metaAlphaID, "meta", "meta", "customer-alpha"),
+				registryProject(teamAlphaID, "openstack", "os-prod", "team-alpha"),
+				registryProject(teamBetaID, "openstack", "os-prod", "team-beta"),
+			},
+			relations: []source.Relation{
+				relationOf(alphaMemberID, teamAlphaID, metaAlphaID, "member_of"),
+				relationOf(betaMemberID, teamBetaID, metaAlphaID, "member_of"),
+			},
+			wantErr: "the rollup of meta/customer-alpha holds statements in EUR and in USD",
+			exact:   true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run := regularRun(t)
+			run.Statements = c.billed
+
+			_, err := export.BuildRollup(run, c.relationType, c.projects, c.relations)
+			if err == nil {
+				t.Fatalf("BuildRollup() error = nil, want %q", c.wantErr)
+			}
+			if c.exact {
+				if got := err.Error(); got != c.wantErr {
+					t.Errorf("BuildRollup() error = %q, want %q", got, c.wantErr)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("BuildRollup() error = %v, want it to hold %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestRollupFileName pins the names a group's document is written under. The
+// key of a target escapes its two halves and the file name escapes that key
+// again, the way a statement's name does, so two targets never meet in one file.
+func TestRollupFileName(t *testing.T) {
+	t.Run("a group is named after the key of its target", func(t *testing.T) {
+		got := export.RollupFileName("meta/customer-alpha")
+		if want := "rollup-meta%2Fcustomer-alpha.json"; got != want {
+			t.Errorf("RollupFileName() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a target that holds a slash keeps it out of the name", func(t *testing.T) {
+		got := export.RollupFileName(statements.Key("meta", "a/b"))
+		if want := "rollup-meta%2Fa%252Fb.json"; got != want {
+			t.Errorf("RollupFileName() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a key past what a file name holds is named after its digest", func(t *testing.T) {
+		// nameMax is what POSIX guarantees a file name holds, and os.CreateTemp
+		// appends a pattern to the name before the rename, so a name has to stay
+		// under it with room to spare.
+		const nameMax = 255
+
+		got := export.RollupFileName(statements.Key("meta", strings.Repeat("p", 500)))
+		if len(got) >= nameMax {
+			t.Errorf("RollupFileName() = %q, which is %d bytes and past the %d a name holds",
+				got, len(got), nameMax)
+		}
+		if !strings.HasPrefix(got, "rollup-") || !strings.HasSuffix(got, ".json") {
+			t.Errorf("RollupFileName() = %q, want it to start with rollup- and end in .json", got)
+		}
+		// The name is a function of the key: exporting one finalized run twice
+		// yields the same file either way.
+		if again := export.RollupFileName(statements.Key("meta", strings.Repeat("p", 500))); again != got {
+			t.Errorf("RollupFileName() = %q on the second call, want the %q of the first", again, got)
+		}
+	})
+}
+
+// TestRollupCSV pins the table a rollup renders. The identifiers come out of an
+// event stream and a registry, and this is the file whoever reports to the
+// customer opens in a spreadsheet, so they carry the prefix that keeps it from
+// evaluating them, for the reason the rated.csv case gives.
+func TestRollupCSV(t *testing.T) {
+	t.Run("a group and the member under it", func(t *testing.T) {
+		run := regularRun(t)
+		run.Rollup = &export.Rollup{
+			RelationType: "member_of",
+			Groups: []export.RollupGroup{{
+				Key:       statements.Key("meta", "-customer"),
+				Cloud:     "meta",
+				ProjectID: "-customer",
+				Platform:  "meta",
+				Members: []export.RollupMember{{
+					StatementKey: statements.Key("os-prod", `=HYPERLINK("x")`),
+					Cloud:        "os-prod",
+					ProjectID:    `=HYPERLINK("x")`,
+					Total:        decimal.RequireFromString("-24.00"),
+					Currency:     currency,
+				}},
+				Total:    decimal.RequireFromString("-24.00"),
+				Currency: currency,
+			}},
+		}
+
+		rows := rollupTable(t, run)
+		if len(rows) != 2 {
+			t.Fatalf("the table holds %d rows, want the header and one member", len(rows))
+		}
+		if got := strings.Join(rows[0], ","); got != rollupHeader {
+			t.Errorf("the header of %s = %q, want %q", rollupCSVFile, got, rollupHeader)
+		}
+		// Column nine is the member's project id and column seven the target's.
+		// Both reach an importer whole, under the apostrophe a spreadsheet reads
+		// as "this is text".
+		if got, want := rows[1][9], `'=HYPERLINK("x")`; got != want {
+			t.Errorf("project_id = %q, want %q", got, want)
+		}
+		if got, want := rows[1][7], "'-customer"; got != want {
+			t.Errorf("target_project_id = %q, want %q", got, want)
+		}
+		// Column ten is the total. It is a number, so it does not go through the
+		// prefix: a leading minus there is what the correction credits.
+		if got, want := rows[1][10], "-24.00"; got != want {
+			t.Errorf("total = %q, want %q", got, want)
+		}
+	})
+
+	empty := []struct {
+		name   string
+		rollup *export.Rollup
+	}{
+		{name: "an export without a rollup"},
+		{name: "a rollup that holds no group", rollup: &export.Rollup{
+			RelationType: "member_of",
+			Groups:       []export.RollupGroup{},
+		}},
+	}
+	for _, c := range empty {
+		t.Run(c.name+" renders the header alone", func(t *testing.T) {
+			run := regularRun(t)
+			run.Rollup = c.rollup
+
+			body, err := export.RollupCSV(run)
+			if err != nil {
+				t.Fatalf("RollupCSV() error = %v, want nil", err)
+			}
+			if got, want := string(body), rollupHeader+"\n"; got != want {
+				t.Errorf("%s = %q, want %q", rollupCSVFile, got, want)
+			}
+		})
+	}
+}
+
 // jsonFiles and csvFiles are the two writers over one directory, as the cases
 // hand them around.
 func jsonFiles(dir string) export.BillingExporter { return export.JSONFiles{Dir: dir} }
@@ -1543,6 +2205,22 @@ func kickbackTable(t *testing.T, run export.Run) [][]string {
 	rows, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
 	if err != nil {
 		t.Fatalf("reading the settlement back: %v", err)
+	}
+	return rows
+}
+
+// rollupTable is one rendered rollup, parsed: the header row and the rows under
+// it, the way kickbackTable parses a settlement.
+func rollupTable(t *testing.T, run export.Run) [][]string {
+	t.Helper()
+
+	body, err := export.RollupCSV(run)
+	if err != nil {
+		t.Fatalf("RollupCSV() error = %v, want nil", err)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatalf("reading the rollup back: %v", err)
 	}
 	return rows
 }

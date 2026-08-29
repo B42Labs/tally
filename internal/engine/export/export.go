@@ -25,7 +25,10 @@
 // The normative specification is roadmap/03-phase-3-metering-rating.md, WP
 // 3.10, and, for the partner settlement the writers put beside the statements
 // as kickbacks.json or kickbacks.csv, roadmap/05-phase-5-commercial-pricing.md,
-// WP 5.4.
+// WP 5.4. The rollup an export writes on request, one document per meta-project
+// or partner summing the statements of its members as rollup-{key}.json or
+// rollup.csv, with the membership read from the registry at export time, is WP
+// 5.5 of that phase.
 package export
 
 import (
@@ -101,6 +104,12 @@ type Run struct {
 	// scope, rate, amount, base. A correction's are the differences to the run
 	// it corrects, and a run that owes nobody carries none.
 	Kickbacks []Kickback
+	// Rollup is the meta-project or partner rollup an export writes beside the
+	// statements, and nil for an export without one. Load and LoadKickbacks leave
+	// it nil: the membership comes out of the reporting database rather than out
+	// of the engine's, and the export subcommand sets it from LoadRollup where
+	// --rollup names a relation type.
+	Rollup *Rollup
 }
 
 // RatedRecord is one rated_records row with the usage record it rates: what was
