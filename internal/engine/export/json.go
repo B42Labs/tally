@@ -53,31 +53,17 @@ type JSONFiles struct {
 	Dir string
 }
 
-// DocumentFileName is the file one statement is written to: the prefix its
-// kind carries, the statement key escaped, and .json.
-//
-// The key is escaped as a whole, and its halves are escaped already, so the
-// slash between them becomes %2F and the percent of an escape inside a half
-// becomes %25. The double escaping is what keeps the names apart: the cloud
-// "os-prod/a" with project "b" and the cloud "os-prod" with project "a/b"
-// render one key each, and escaping those keys once more renders one file name
-// each rather than the same one twice.
-//
-// A key that renders past nameMaxLen is named after its SHA-256 digest instead:
-// the pair such a document bills is read off run.json, which names the cloud and
-// the project id beside every file.
+// DocumentFileName is the file one statement is written to: escapedName under
+// the prefix the run's kind carries, statement- or credit-note-. The key is
+// escaped twice and falls back to its digest past the length a file name holds,
+// for the reasons escapedName gives.
 //
 // The roadmap writes this file as statement-{project}.json. External project
 // ids are unique per cloud only, which is why a statement is stored under a key
 // of both halves, and why the file is named after that key rather than after
 // the project alone (author's decision of 2026-08-24).
 func DocumentFileName(kind, key string) string {
-	name := documentPrefix(kind) + url.PathEscape(key) + ".json"
-	if len(name) <= nameMaxLen {
-		return name
-	}
-	// A key no file system holds a name for is named after its digest instead.
-	return digestFileName(kind, key)
+	return escapedName(documentPrefix(kind), key)
 }
 
 // documentPrefix is the prefix the documents of a run's kind carry.
@@ -88,15 +74,45 @@ func documentPrefix(kind string) string {
 	return statementPrefix
 }
 
-// digestFileName names a document after the SHA-256 of its key: the fallback
-// for the two keys no escaped name serves, the one that renders past
-// nameMaxLen and the one whose name a directory already holds under a different
-// case. run.json carries the cloud and the project id beside every file, so the
-// pair a digest-named document bills is read off the index rather than off the
-// name, and one project id no longer takes the export of the whole month with
-// it.
-func digestFileName(kind, key string) string {
-	return fmt.Sprintf("%s%x.json", documentPrefix(kind), sha256.Sum256([]byte(key)))
+// uniqueName is the file one key is written to under a prefix, held apart from
+// the names rendered before it: escapedName, or digestName where the name it
+// renders is one folded already holds. The name is recorded in folded.
+func uniqueName(folded map[string]bool, prefix, key string) string {
+	name := escapedName(prefix, key)
+	if folded[strings.ToLower(name)] {
+		name = digestName(prefix, key)
+	}
+	folded[strings.ToLower(name)] = true
+	return name
+}
+
+// escapedName is the file one key is written to under a prefix: the prefix, the
+// key escaped, and .json.
+//
+// The key is escaped as a whole, and its halves are escaped already, so the
+// slash between them becomes %2F and the percent of an escape inside a half
+// becomes %25. The double escaping is what keeps the names apart: the cloud
+// "os-prod/a" with project "b" and the cloud "os-prod" with project "a/b"
+// render one key each, and escaping those keys once more renders one file name
+// each rather than the same one twice.
+//
+// A key that renders past nameMaxLen is named after its SHA-256 digest instead:
+// the pair such a name stands for is read off the index that carries it beside
+// the file.
+func escapedName(prefix, key string) string {
+	name := prefix + url.PathEscape(key) + ".json"
+	if len(name) <= nameMaxLen {
+		return name
+	}
+	// A key no file system holds a name for is named after its digest instead.
+	return digestName(prefix, key)
+}
+
+// digestName names a key after its SHA-256 under a prefix: the fallback for the
+// two keys no escaped name serves, the one that renders past nameMaxLen and the
+// one whose name a directory already holds under a different case.
+func digestName(prefix, key string) string {
+	return fmt.Sprintf("%s%x.json", prefix, sha256.Sum256([]byte(key)))
 }
 
 // runDocument is run.json. The field order is the order it is marshalled in.
@@ -195,11 +211,7 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 		if err != nil {
 			return err
 		}
-		name := DocumentFileName(run.Kind, statement.Key)
-		if folded[strings.ToLower(name)] {
-			name = digestFileName(run.Kind, statement.Key)
-		}
-		folded[strings.ToLower(name)] = true
+		name := uniqueName(folded, documentPrefix(run.Kind), statement.Key)
 		documents[name] = document
 		index.Statements = append(index.Statements, statementEntry{
 			File:      name,
