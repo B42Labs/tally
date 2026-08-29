@@ -82,12 +82,11 @@ func TestEveryRecordedNotificationTypeIsRendered(t *testing.T) {
 
 	// A recorded type the workload publishes on no exchange is one no seed can
 	// render: exchangeFor decides where a transition goes, and it names only the
-	// four services this package generates. Holding such a type against the seeds
-	// would fail the guard for work this package has not taken on. Octavia's load
-	// balancer notifications are the case: the collector maps them and the
-	// workload creates no load balancer, so nothing renders them until #65 gives
-	// it a shoot that does. Naming the exchange there re-arms the guard for them
-	// without an edit here.
+	// services this package generates. Holding such a type against the seeds
+	// would fail the guard for work this package has not taken on. Every type
+	// recorded today has an exchange, octavia's load balancer types among them,
+	// so the filter drops none of them. It stays for the next service the
+	// collector records before the workload renders it.
 	expected := recorded[:0:0]
 	for _, eventType := range recorded {
 		if exchangeFor(eventType) == "" {
