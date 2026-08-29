@@ -13,13 +13,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
+	"github.com/b42labs/tally/internal/core/project"
 	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/runs"
 	"github.com/b42labs/tally/internal/engine/scheduler"
+	"github.com/b42labs/tally/internal/engine/source"
 	"github.com/b42labs/tally/internal/engine/store"
 	"github.com/b42labs/tally/internal/engine/store/sqlcgen"
 )
@@ -472,7 +475,7 @@ const (
 
 // newExportCmd builds the export subcommand.
 func newExportCmd() *cobra.Command {
-	var runID, format, out string
+	var runID, format, out, rollup string
 
 	cmd := &cobra.Command{
 		Use:   "export",
@@ -481,10 +484,16 @@ func newExportCmd() *cobra.Command {
 			"json writes run.json and one statement document per project, or one credit note per project " +
 			"for a correction run. csv writes the rated records into rated.csv, and the deltas of a " +
 			"correction into deltas.csv. Both formats write the run's partner settlement beside them, " +
-			"kickbacks.json or kickbacks.csv, empty when the run owes nobody. --out has to be empty or " +
+			"kickbacks.json or kickbacks.csv, empty when the run owes nobody. --rollup member_of or " +
+			"--rollup managed_by writes one rollup document per meta-project or partner beside the " +
+			"statements, rollup-<key>.json or rollup.csv, summing the statements of its members; it reads " +
+			"the membership from the reporting database when the export runs, so " +
+			"TALLY_ENGINE_REPORTING_DB_URL has to be set for it. --out has to be empty or " +
 			"absent, so what it holds afterwards is one run's artifacts and nothing an earlier export of " +
 			"another run left there. Exporting a finalized run twice into a clean directory yields the " +
-			"same files, because a finalized run's records no longer change.",
+			"same files, because a finalized run's records no longer change. A --rollup export is the " +
+			"exception: the membership is read from the registry when the export runs, so two exports " +
+			"differ where a relation was created or closed between them.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			id, err := validateRunID(runID)
@@ -494,23 +503,41 @@ func newExportCmd() *cobra.Command {
 			if err := validateFormat(format); err != nil {
 				return err
 			}
+			if err := validateRollup(rollup); err != nil {
+				return err
+			}
 			if err := validateOut(out); err != nil {
 				return err
 			}
 
 			// Everything an export renders was written to the engine database by
-			// the run, so this reads that one database.
-			db, err := openStore(cmd.Context())
-			if err != nil {
-				return err
+			// the run, so an export reads that one database. A rollup is the one
+			// export that reads the registry as well, because the membership it
+			// sums under lives in the reporting database: a missing reporting url
+			// is refused there rather than after a month of records was read.
+			var pool *pgxpool.Pool
+			var reporting *source.DB
+			if rollup == "" {
+				db, err := openStore(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				pool = db.Pool()
+			} else {
+				dbs, err := openDatabases(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer dbs.Close()
+				pool, reporting = dbs.engine.Pool(), dbs.reporting
 			}
-			defer db.Close()
 
 			// The run is read before an exporter is built, and an exporter
 			// creates its directory only once it has rendered everything: a run
 			// id no row carries, and a run no export is produced from, leave the
 			// --out directory uncreated.
-			run, err := export.Load(cmd.Context(), db.Pool(), id)
+			run, err := export.Load(cmd.Context(), pool, id)
 			if err != nil {
 				return err
 			}
@@ -522,12 +549,23 @@ func newExportCmd() *cobra.Command {
 			// records were being read is refused rather than written out. What is
 			// left after this is the rendering and the writing, which the row
 			// lock the export deliberately does not take would not cover either.
-			current, err := sqlcgen.New(db.Pool()).GetRun(cmd.Context(), pgtype.UUID{Bytes: id, Valid: true})
+			current, err := sqlcgen.New(pool).GetRun(cmd.Context(), pgtype.UUID{Bytes: id, Valid: true})
 			if err != nil {
 				return fmt.Errorf("re-reading the run %s: %w", id, err)
 			}
 			if current.Status != run.Status {
 				return fmt.Errorf("run %s became %s while it was read, and was not exported", id, current.Status)
+			}
+
+			// The membership is read before the exporter is built, for the reason
+			// the run itself is: a registry read that fails leaves the operator's
+			// --out uncreated rather than holding half an export.
+			if rollup != "" {
+				loaded, err := export.LoadRollup(cmd.Context(), reporting, run, rollup)
+				if err != nil {
+					return err
+				}
+				run.Rollup = &loaded
 			}
 
 			// The format names the implementation. Every consumer of billing
@@ -559,6 +597,9 @@ func newExportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&runID, "run", "", "id of the run to export")
 	cmd.Flags().StringVar(&format, "format", "", "output format: json or csv")
 	cmd.Flags().StringVar(&out, "out", "", "directory the exported files are written to")
+	cmd.Flags().StringVar(&rollup, "rollup", "",
+		"relation type to sum the statements under, member_of or managed_by: "+
+			"one document per meta-project or partner; no rollup when absent")
 	_ = cmd.MarkFlagRequired("run")
 	_ = cmd.MarkFlagRequired("format")
 	_ = cmd.MarkFlagRequired("out")
@@ -779,7 +820,10 @@ func runLines(month string, result runs.Result) []string {
 // directory. The counts say how much of the month is in those files, so a run
 // that billed nobody says so here rather than in a listing of the directory.
 // The partner settlement, kickbacks.json or kickbacks.csv, is written by both
-// formats, so its line stands under either of them.
+// formats, so its line stands under either of them. A run the export summed
+// under a relation type says so on a line of its own, which is what tells an
+// operator whether the meta-projects they asked for were reached at all: a
+// rollup that found no member writes its files and counts nothing.
 func exportLines(month, format, out string, run export.Run) []string {
 	lines := []string{fmt.Sprintf("run %s exported for %s as %s into %s", run.ID, month, format, out)}
 	correction := run.Kind == runs.KindCorrection
@@ -802,12 +846,26 @@ func exportLines(month, format, out string, run export.Run) []string {
 		lines = append(lines,
 			fmt.Sprintf("wrote run.json and %d %s", len(run.Statements), documents),
 			fmt.Sprintf("wrote kickbacks.json with %d %s", len(run.Kickbacks), kickbacks))
+		if run.Rollup != nil {
+			lines = append(lines, fmt.Sprintf("wrote %d rollup documents over %s",
+				len(run.Rollup.Groups), run.Rollup.RelationType))
+		}
 	case formatCSV:
 		lines = append(lines, fmt.Sprintf("wrote rated.csv with %d rated records", len(run.Rated)))
 		if correction {
 			lines = append(lines, fmt.Sprintf("wrote deltas.csv with %d deltas", len(run.Deltas)))
 		}
 		lines = append(lines, fmt.Sprintf("wrote kickbacks.csv with %d %s", len(run.Kickbacks), kickbacks))
+		if run.Rollup != nil {
+			// One row per member rather than per group, which is what the table
+			// holds: a group's total is the sum of its rows.
+			members := 0
+			for _, group := range run.Rollup.Groups {
+				members += len(group.Members)
+			}
+			lines = append(lines, fmt.Sprintf("wrote rollup.csv with %d members over %s",
+				members, run.Rollup.RelationType))
+		}
 	}
 	return lines
 }
@@ -972,6 +1030,20 @@ func validateRunID(value string) (uuid.UUID, error) {
 func validateFormat(value string) error {
 	if value != formatJSON && value != formatCSV {
 		return fmt.Errorf("--format: %q must be %s or %s", value, formatJSON, formatCSV)
+	}
+	return nil
+}
+
+// validateRollup checks a --rollup flag against the relation types a rollup
+// sums under. An absent flag passes: an export without one writes no rollup at
+// all. Any other type points at a project that owns resources and carries a
+// statement of its own, which a rollup under it would leave out.
+func validateRollup(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !project.IsVirtualRelationType(value) {
+		return fmt.Errorf("--rollup: %q must be %s or %s", value, project.RelationMemberOf, project.RelationManagedBy)
 	}
 	return nil
 }
