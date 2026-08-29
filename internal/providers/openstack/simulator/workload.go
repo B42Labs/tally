@@ -35,6 +35,11 @@ type Transition struct {
 	// notification. It is false only for the image.create that precedes an
 	// upload: that one carries no size yet, and the mapping skips it on purpose.
 	Billable bool
+	// Workload names which of the three workloads emitted the transition, one of
+	// the workload constants. Nothing on the wire carries it: it is what a test
+	// and the later reconciliation oracle tell the workloads of one month apart
+	// by, since the tenants of a month are otherwise ids alone.
+	Workload string
 	// MessageID is the oslo message id, which the Reporting API deduplicates on.
 	// It is drawn after the month is sorted, so the ids run in the order the
 	// notifications are published.
@@ -82,6 +87,15 @@ const routingKey = "notifications.info"
 // notification has no size to bill, and the upload that follows is what the
 // image is booked from.
 const imageCreateType = "image.create"
+
+// The workloads a month is made of. The classic tenants are the ones a person
+// works in, a Gardener project's shoots are driven by their machine controller,
+// and the CI tenant is driven by its pipelines.
+const (
+	workloadClassic  = "classic"
+	workloadGardener = "gardener"
+	workloadCI       = "ci"
+)
 
 // exchangeFor names the exchange a type is published on. The four are the
 // service exchanges of nova, cinder, neutron, and glance. A type outside them
@@ -223,9 +237,13 @@ func (r idReader) nextHexID() string {
 // they populated, and the transitions so far.
 type generator struct {
 	shape *rand.Rand
-	from  time.Time
-	to    time.Time
-	cloud string
+	// identifiers is the month's identifier stream, kept past the fixed draws
+	// because the resources a month churns are named when they are created: how
+	// many workers or runners a month makes follows from its calendar.
+	identifiers idReader
+	from        time.Time
+	to          time.Time
+	cloud       string
 
 	// networkID is the external network the month's addresses come from. There
 	// is one per month, the way a deployment has one.
@@ -236,7 +254,14 @@ type generator struct {
 	addresses []int
 	assigned  int
 
-	projects []*project
+	projects         []*project
+	gardenerProjects []*gardenerProject
+	ciTenant         *project
+
+	// workload is the one emit tags its transitions with. run sets it before
+	// each block of the month, so a transition carries the workload that was
+	// running when it was generated.
+	workload string
 	schedule Schedule
 }
 
@@ -245,7 +270,7 @@ type generator struct {
 // finished before the first transition is generated, which is what keeps the
 // number of identifiers a function of the shape alone.
 func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cloud string) *generator {
-	g := &generator{shape: shape, from: from, to: to, cloud: cloud}
+	g := &generator{shape: shape, identifiers: identifiers, from: from, to: to, cloud: cloud}
 
 	g.networkID = identifiers.nextUUID()
 	g.addresses = identifiers.src.Perm(addressPoolSize)
@@ -291,6 +316,7 @@ func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cl
 // and addresses follow the instances they belong to, and the tear-down comes
 // last.
 func (g *generator) run() {
+	g.workload = workloadClassic
 	for index, p := range g.projects {
 		g.images(p)
 		g.instances(p)
@@ -312,6 +338,7 @@ func (g *generator) emit(at time.Time, eventType, publisherID, resourceID string
 		EventType:   eventType,
 		Exchange:    exchangeFor(eventType),
 		Billable:    eventType != imageCreateType,
+		Workload:    g.workload,
 		PublisherID: publisherID,
 		ProjectID:   requester.id,
 		UserID:      requester.userID,
