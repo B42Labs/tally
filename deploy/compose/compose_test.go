@@ -158,6 +158,22 @@ func TestCollectorEnvironmentIsWhatTheCollectorReads(t *testing.T) {
 	}
 }
 
+func TestCollectorBindsEveryExchangeTheSimulatorPublishesOn(t *testing.T) {
+	// A topic exchange copies a message only to the queues bound to it, so a
+	// notification published on an exchange the collector never binds is dropped
+	// by the broker: no queue, no counter, and no event. The collector's default
+	// binds four of the five the simulator publishes on, which makes the fifth
+	// this stack's to list.
+	svc := serviceNamed(t, loadCompose(t), collectorService)
+
+	bound := strings.Split(svc.Environment["TALLY_OSC_EXCHANGES"], ",")
+	slices.Sort(bound)
+	if want := slices.Sorted(slices.Values(simulator.ServiceExchanges)); !slices.Equal(bound, want) {
+		t.Errorf("TALLY_OSC_EXCHANGES binds %v, want %v, the exchanges the simulator publishes on (simulator.ServiceExchanges); a notification on an unbound exchange reaches no queue and no counter",
+			bound, want)
+	}
+}
+
 func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 	// The simulator ignores an unknown variable the same way the collector does,
 	// and a run without the broker in its environment writes the month nowhere
