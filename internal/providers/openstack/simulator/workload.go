@@ -346,6 +346,10 @@ func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cl
 		}
 		g.gardenerProjects = append(g.gardenerProjects, gp)
 	}
+
+	g.ciTenant = &project{id: identifiers.nextHexID()}
+	g.ciTenant.userID = identifiers.nextHexID()
+	g.ciTenant.images = []*image{{id: identifiers.nextUUID(), name: ciImageName}}
 	return g
 }
 
@@ -355,7 +359,9 @@ func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cl
 // The classic tenants come first. Their phases are ordered the way a tenant
 // works: the images come first because an instance boots from one, the volumes
 // and addresses follow the instances they belong to, and the tear-down comes
-// last. The Gardener projects follow, each shoot walking its own days.
+// last. The Gardener projects follow, each shoot walking its own days, and the
+// CI tenant comes last, bursting its runners through the working days of the
+// month.
 func (g *generator) run() {
 	g.workload = workloadClassic
 	for index, p := range g.projects {
@@ -371,6 +377,9 @@ func (g *generator) run() {
 	for _, gp := range g.gardenerProjects {
 		g.gardener(gp)
 	}
+
+	g.workload = workloadCI
+	g.ci()
 }
 
 // emit records one transition. The project is the one the request ran in, which

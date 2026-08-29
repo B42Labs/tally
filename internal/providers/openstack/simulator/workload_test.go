@@ -255,7 +255,7 @@ func TestGenerateSaltsIdentifiersWithPeriodAndCloud(t *testing.T) {
 		}
 
 		// A month that moved its machine-driven workloads still holds them.
-		for _, workload := range []string{workloadGardener} {
+		for _, workload := range []string{workloadGardener, workloadCI} {
 			for name, schedule := range map[string]Schedule{"July": july, "May": may} {
 				if len(ofWorkload(schedule, workload)) == 0 {
 					t.Errorf("%s holds no %s transition, want every workload in every month",
@@ -754,4 +754,56 @@ func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
 				lb.name, grown["pools"], attached["pools"])
 		}
 	})
+}
+
+// TestCIRunnersBurstInWorkingHours covers when the CI tenant's runners exist
+// and how long each of them lives. A runner holds one job, so a month of them
+// is churn the other two workloads do not produce: hundreds of servers that are
+// created and closed inside the period rather than carried over it.
+func TestCIRunnersBurstInWorkingHours(t *testing.T) {
+	schedule := ofWorkload(generateMonth(t, 1, july2026, testCloud), workloadCI)
+
+	created := make(map[string]time.Time)
+	deleted := make(map[string]time.Time)
+	perDay := make(map[time.Time]int)
+	for _, transition := range schedule {
+		switch transition.EventType {
+		case "compute.instance.create.end":
+			created[transition.ResourceID] = transition.At
+			perDay[at(transition.At, 0, 0)]++
+			if !workingDay(transition.At) || transition.At.Hour() < 7 || transition.At.Hour() >= 19 {
+				t.Errorf("the runner %s comes up on a %s at %s, want a Monday to Friday between "+
+					"07:00 and 19:00 UTC: a CI runner runs while the pipelines that ask for it run",
+					transition.ResourceID, transition.At.Weekday(), transition.At.Format(time.RFC3339))
+			}
+		case "compute.instance.delete.end":
+			deleted[transition.ResourceID] = transition.At
+		}
+	}
+	if len(created) == 0 {
+		t.Fatalf("the month holds no CI runner, want the bursts of every working day of July")
+	}
+
+	for id, createdAt := range created {
+		deletedAt, ok := deleted[id]
+		if !ok {
+			t.Errorf("the runner %s comes up at %s and reports no delete, want one: a runner "+
+				"nothing deletes is billed as a server that outlives its job",
+				id, createdAt.Format(time.RFC3339))
+			continue
+		}
+		if life := deletedAt.Sub(createdAt); life < 3*time.Minute || life >= 40*time.Minute {
+			t.Errorf("the runner %s lives %s, want [3m, 40m): a runner is destroyed when its job "+
+				"ends, and a longer life is a fleet the month bills by the hour", id, life)
+		}
+	}
+
+	// Four to eight bursts of two to five runners each.
+	for _, d := range workingDays(july2026, july2026.AddDate(0, 1, 0)) {
+		if runners := perDay[d]; runners < 8 || runners > 40 {
+			t.Errorf("%s brings %d runners, want 8 to 40: a day outside the band is a month whose "+
+				"bursts drifted off the working days they belong on",
+				d.Format("2006-01-02"), runners)
+		}
+	}
 }
