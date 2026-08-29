@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/engine/corrections"
@@ -1104,6 +1105,348 @@ func TestExportCLI(t *testing.T) {
 	})
 }
 
+// TestExportRollupCLI exports a run whose projects are billed under one
+// meta-project. Two of the three are members of it and are given the group's
+// discount, the third is a member of nothing and is billed what it was rated,
+// and the rollup sums the two member statements alone. That a group's total is
+// the sum of the statements it lists, and that a project outside the group is
+// in neither the document nor the table, is what roadmap WP 5.5 asks the tests
+// to prove.
+func TestExportRollupCLI(t *testing.T) {
+	f := newPipelineFixture(t)
+	// The fixture blanks the environment, so the relation types the adjustments
+	// are resolved through are set after it rather than before it.
+	t.Setenv("TALLY_ENGINE_ADJUSTMENT_RELATION_TYPES", "managed_by,member_of")
+
+	from, _ := billingMonth(-3)
+	month := period.Format(from)
+	const (
+		cloud    = "os-cli-rollup"
+		alpha    = "team-alpha"
+		beta     = "team-beta"
+		outsider = "outsider"
+		metaID   = "customer-alpha-rollup"
+	)
+	for _, name := range []string{alpha, beta, outsider} {
+		f.seedProject(t, cloud, name)
+		f.seedInstance(t, cloud, "i-"+name, name, from)
+	}
+	meta := f.seedVirtualProject(t, "meta", metaID)
+	// Valid from a month before the one that is billed, so the membership covers
+	// the whole of it. The third project is left out of the group, which is what
+	// makes it the control the assertions below read.
+	for _, member := range []string{alpha, beta} {
+		f.seedRelation(t, f.projectIDOf(t, cloud, member), meta, "member_of", groupDiscount, from.AddDate(0, -1, 0))
+	}
+
+	stdout, stderr, err := runCLI(t, "run", "--period", month, "--clouds", cloud)
+	if err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	// One per member of the group, and none for the project outside it.
+	if want := "applied 2 pricing adjustments"; !strings.Contains(stdout, want) {
+		t.Errorf("stdout of run = %q, want it to contain %q", stdout, want)
+	}
+	id := f.completedRun(t, from)
+
+	documents := filepath.Join(t.TempDir(), "json")
+	stdout, stderr, err = runCLI(t, "export",
+		"--run", id.String(), "--format", "json", "--out", documents, "--rollup", "member_of")
+	if err != nil {
+		t.Fatalf("export as json error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("run %s exported for %s as json into %s\n"+
+		"wrote run.json and 3 statements\nwrote kickbacks.json with 0 kickbacks\n"+
+		"wrote 1 rollup documents over member_of\n",
+		id, month, documents)
+	if stdout != want {
+		t.Errorf("stdout of export as json = %q, want %q", stdout, want)
+	}
+
+	// Every member inherits the group's 5 percent off what it was rated: 3.84
+	// less the 0.19 the discount comes to is the 3.65 the rollup sums.
+	memberFiles := make(map[string]string, 2)
+	for _, name := range []string{alpha, beta} {
+		file := "statement-" + url.PathEscape(statements.Key(cloud, name)) + ".json"
+		memberFiles[name] = file
+
+		var document statements.Document
+		readJSONFile(t, filepath.Join(documents, file), &document)
+		if document.BaseCost == nil || document.NetCost == nil {
+			t.Fatalf("%s carries no base or net cost, want the group's discount applied to it", file)
+		}
+		if len(document.Adjustments) != 1 {
+			t.Fatalf("%s carries %d adjustments, want the group's one", file, len(document.Adjustments))
+		}
+		line := document.Adjustments[0]
+		for _, tc := range []struct{ what, got, want string }{
+			{"base cost", document.BaseCost.StringFixed(2), "3.84"},
+			{"adjustment type", line.Type, "project_discount"},
+			{"relation type", line.RelationType, "member_of"},
+			{"relation target", line.RelationTarget, metaID},
+			{"rate", line.Rate.StringFixed(6), "0.050000"},
+			{"base", line.Base.StringFixed(2), "3.84"},
+			{"amount", line.Amount.StringFixed(2), "-0.19"},
+			{"net cost", document.NetCost.StringFixed(2), "3.65"},
+			{"total", document.Total.StringFixed(2), "3.65"},
+		} {
+			if tc.got != tc.want {
+				t.Errorf("%s %s = %q, want %q", file, tc.what, tc.got, tc.want)
+			}
+		}
+	}
+
+	// The project no relation reaches is billed the list price: a group discount
+	// is given to its members and to nobody else.
+	var control statements.Document
+	readJSONFile(t, filepath.Join(documents,
+		"statement-"+url.PathEscape(statements.Key(cloud, outsider))+".json"), &control)
+	if control.BaseCost != nil || control.NetCost != nil || control.Adjustments != nil {
+		t.Errorf("the statement of %s carries the adjustments %v, want none", outsider, control.Adjustments)
+	}
+	if got := control.Total.StringFixed(2); got != "3.84" {
+		t.Errorf("the statement of %s totals %s, want the undiscounted 3.84", outsider, got)
+	}
+
+	// The group's document is named after the key of the meta-project, escaped
+	// the way a statement's is, so the literal is pinned beside the rendering.
+	rollupFile := "rollup-" + url.PathEscape(statements.Key("meta", metaID)) + ".json"
+	if want := "rollup-meta%2Fcustomer-alpha-rollup.json"; rollupFile != want {
+		t.Fatalf("the rollup document is named %q, want %q", rollupFile, want)
+	}
+
+	var report rollupReport
+	readJSONFile(t, filepath.Join(documents, rollupFile), &report)
+	for _, tc := range []struct{ what, got, want string }{
+		{"project id", report.ProjectID, metaID},
+		{"platform", report.Platform, "meta"},
+		{"relation type", report.RelationType, "member_of"},
+		{"kind", report.Kind, runs.KindRegular},
+		{"total", report.Total.String(), "7.30"},
+		{"currency", report.Currency, "EUR"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s %s = %q, want %q", rollupFile, tc.what, tc.got, tc.want)
+		}
+	}
+	if report.CorrectsRunID != nil {
+		t.Errorf("%s corrects run %q, want a regular run's rollup to correct nothing", rollupFile, *report.CorrectsRunID)
+	}
+	if len(report.Members) != 2 {
+		t.Fatalf("%s lists %d members, want the two of the group", rollupFile, len(report.Members))
+	}
+	// Every member points at the file its own invoice is in, so an ERP reads the
+	// group and the statements it is made of out of one directory.
+	for i, name := range []string{alpha, beta} {
+		for _, tc := range []struct{ what, got, want string }{
+			{"file", report.Members[i].File, memberFiles[name]},
+			{"cloud", report.Members[i].Cloud, cloud},
+			{"project id", report.Members[i].ProjectID, name},
+			{"total", report.Members[i].Total.String(), "3.65"},
+		} {
+			if tc.got != tc.want {
+				t.Errorf("%s member %d %s = %q, want %q", rollupFile, i, tc.what, tc.got, tc.want)
+			}
+		}
+	}
+
+	// Attribution and billing stay per project, so the group's total has to be
+	// the sum of the member totals rather than a number of its own. It is
+	// checked against both: the totals the document lists, and the digits the
+	// database holds for those two statements.
+	total := decimal.RequireFromString(report.Total.String())
+	listed := decimal.Zero
+	for _, member := range report.Members {
+		listed = listed.Add(decimal.RequireFromString(member.Total.String()))
+	}
+	if !total.Equal(listed) {
+		t.Errorf("%s totals %s, want the %s its members add up to", rollupFile, total, listed)
+	}
+	stored := decimal.RequireFromString(f.statementTotalOf(t, id, statements.Key(cloud, alpha))).
+		Add(decimal.RequireFromString(f.statementTotalOf(t, id, statements.Key(cloud, beta))))
+	if !total.Equal(stored) {
+		t.Errorf("%s totals %s, want the %s the database holds for its members", rollupFile, total, stored)
+	}
+
+	// The index names the group beside the statements, which is how a reader
+	// that walks run.json alone finds the rollup document at all.
+	var index runIndex
+	readJSONFile(t, filepath.Join(documents, "run.json"), &index)
+	if index.Rollup == nil {
+		t.Fatal("run.json names no rollup, want the one the export summed")
+	}
+	if got := index.Rollup.RelationType; got != "member_of" {
+		t.Errorf("run.json rolls up over %q, want %q", got, "member_of")
+	}
+	if len(index.Rollup.Documents) != 1 {
+		t.Fatalf("run.json names %d rollup documents, want the one group the run reached", len(index.Rollup.Documents))
+	}
+	entry := index.Rollup.Documents[0]
+	for _, tc := range []struct{ what, got, want string }{
+		{"file", entry.File, rollupFile},
+		{"cloud", entry.Cloud, "meta"},
+		{"project id", entry.ProjectID, metaID},
+		{"total", entry.Total.String(), "7.30"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("run.json rollup %s = %q, want %q", tc.what, tc.got, tc.want)
+		}
+	}
+	if entry.Members != 2 {
+		t.Errorf("run.json counts %d members under the rollup, want 2", entry.Members)
+	}
+
+	// The project outside the group is nowhere in the group's document: a rollup
+	// sums what is related to its target and says nothing about the rest of the
+	// run.
+	body, err := os.ReadFile(filepath.Join(documents, rollupFile))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rollupFile, err)
+	}
+	if bytes.Contains(body, []byte(outsider)) {
+		t.Errorf("%s names %s, want the group to hold its two members alone", rollupFile, outsider)
+	}
+
+	tables := filepath.Join(t.TempDir(), "csv")
+	stdout, stderr, err = runCLI(t, "export",
+		"--run", id.String(), "--format", "csv", "--out", tables, "--rollup", "member_of")
+	if err != nil {
+		t.Fatalf("export as csv error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want = fmt.Sprintf("run %s exported for %s as csv into %s\n"+
+		"wrote rated.csv with 3 rated records\nwrote kickbacks.csv with 0 kickbacks\n"+
+		"wrote rollup.csv with 2 members over member_of\n",
+		id, month, tables)
+	if stdout != want {
+		t.Errorf("stdout of export as csv = %q, want %q", stdout, want)
+	}
+
+	header, rows := readCSVFile(t, filepath.Join(tables, "rollup.csv"))
+	if len(header) != 12 {
+		t.Fatalf("rollup.csv holds %d columns, want 12", len(header))
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rollup.csv holds %d rows under its header, want one per member", len(rows))
+	}
+	// One row per member rather than per group, each naming the target it is
+	// summed under, so the two rows add up to the group's total.
+	for i, name := range []string{alpha, beta} {
+		for _, tc := range []struct{ column, want string }{
+			{"target_project_id", metaID},
+			{"project_id", name},
+			{"total", "3.65"},
+			{"currency", "EUR"},
+		} {
+			if got := rows[i][tc.column]; got != tc.want {
+				t.Errorf("rollup.csv row %d %s = %q, want %q", i, tc.column, got, tc.want)
+			}
+		}
+	}
+
+	t.Run("writes no rollup without --rollup", func(t *testing.T) {
+		// The same run, exported the way every other export of it is: a rollup is
+		// asked for or it is not written at all, so a reader of an export that
+		// never asked for one finds nothing to read.
+		out := filepath.Join(t.TempDir(), "no-rollup")
+		stdout, stderr, err := runCLI(t, "export", "--run", id.String(), "--format", "json", "--out", out)
+		if err != nil {
+			t.Fatalf("export error = %v, want nil (stderr %q)", err, stderr)
+		}
+		want := fmt.Sprintf("run %s exported for %s as json into %s\n"+
+			"wrote run.json and 3 statements\nwrote kickbacks.json with 0 kickbacks\n",
+			id, month, out)
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+
+		entries, err := os.ReadDir(out)
+		if err != nil {
+			t.Fatalf("reading %s: %v", out, err)
+		}
+		for _, written := range entries {
+			if strings.HasPrefix(written.Name(), "rollup-") {
+				t.Errorf("the export wrote %s, want no rollup document", written.Name())
+			}
+		}
+		body, err := os.ReadFile(filepath.Join(out, "run.json"))
+		if err != nil {
+			t.Fatalf("reading run.json: %v", err)
+		}
+		if bytes.Contains(body, []byte(`"rollup"`)) {
+			t.Error("run.json names a rollup, want the field absent from an export that summed none")
+		}
+	})
+
+	t.Run("refuses --rollup without the reporting database", func(t *testing.T) {
+		// A rollup is the one export that reads the registry, and the membership
+		// lives in the reporting database. A machine that has only the engine
+		// database is told which variable is missing before a run is read.
+		useDatabase(t, f.engine.URL)
+
+		out := filepath.Join(t.TempDir(), "no-reporting")
+		stdout, _, err := runCLI(t, "export",
+			"--run", id.String(), "--format", "json", "--out", out, "--rollup", "member_of")
+		if err == nil {
+			t.Fatal("export error = nil, want the missing reporting database reported")
+		}
+		if want := "TALLY_ENGINE_REPORTING_DB_URL: must be set"; !strings.Contains(err.Error(), want) {
+			t.Errorf("export error = %q, want it to contain %q", err, want)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an export that wrote nothing", stdout)
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("os.Stat(%s) error = %v, want it to report a directory that was never created", out, err)
+		}
+	})
+
+	t.Run("refuses a run no row carries with --rollup", func(t *testing.T) {
+		missing := uuid.New()
+		out := filepath.Join(t.TempDir(), "unknown-run")
+
+		stdout, _, err := runCLI(t, "export",
+			"--run", missing.String(), "--format", "json", "--out", out, "--rollup", "member_of")
+		if err == nil {
+			t.Fatal("export error = nil, want the unknown run reported")
+		}
+		if !strings.Contains(err.Error(), missing.String()) {
+			t.Errorf("export error = %q, want it to name the run %s", err, missing)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an export that wrote nothing", stdout)
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("os.Stat(%s) error = %v, want it to report a directory that was never created", out, err)
+		}
+	})
+
+	t.Run("reports a reporting database it cannot read", func(t *testing.T) {
+		// The engine database holds no registry, so the rollup fails at the
+		// projects it reads. The membership is read before the exporter is built,
+		// which is what leaves --out uncreated rather than holding statements
+		// beside a rollup that was never summed.
+		t.Setenv("TALLY_ENGINE_REPORTING_DB_URL", f.engine.URL)
+
+		out := filepath.Join(t.TempDir(), "wrong-reporting")
+		stdout, _, err := runCLI(t, "export",
+			"--run", id.String(), "--format", "json", "--out", out, "--rollup", "member_of")
+		if err == nil {
+			t.Fatal("export error = nil, want the unreadable registry reported")
+		}
+		for _, want := range []string{"rolling up run ", id.String(), "listing the projects", `"projects" does not exist`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("export error = %q, want it to contain %q", err, want)
+			}
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing printed by an export that wrote nothing", stdout)
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("os.Stat(%s) error = %v, want it to report a directory that was never created", out, err)
+		}
+	})
+}
+
 // TestKickbacksCLI reports what a run owes its partners: the month's regular
 // run, the same run named with --run, and the correction that booked a resize
 // afterwards. The correction settles negative numbers because the resize halved
@@ -1504,6 +1847,40 @@ type runIndex struct {
 		File  string      `json:"file"`
 		Total json.Number `json:"total"`
 	} `json:"statements"`
+	// A pointer, so an index that names no rollup at all is told apart from one
+	// whose rollup reached no group.
+	Rollup *struct {
+		RelationType string `json:"relation_type"`
+		Documents    []struct {
+			File      string      `json:"file"`
+			Cloud     string      `json:"cloud"`
+			ProjectID string      `json:"project_id"`
+			Members   int         `json:"members"`
+			Total     json.Number `json:"total"`
+		} `json:"documents"`
+	} `json:"rollup"`
+}
+
+// rollupReport is one rollup-<key>.json, as much of it as the assertions above
+// read. The export package's own tests pin the rest. The amounts are
+// json.Number, so they are compared as the digits the document holds rather
+// than through a float.
+type rollupReport struct {
+	ProjectID    string `json:"project_id"`
+	Platform     string `json:"platform"`
+	RelationType string `json:"relation_type"`
+	Kind         string `json:"kind"`
+	// A pointer, so a regular run's absent field is told apart from the run a
+	// correction's rollup names.
+	CorrectsRunID *string `json:"corrects_run_id"`
+	Members       []struct {
+		File      string      `json:"file"`
+		Cloud     string      `json:"cloud"`
+		ProjectID string      `json:"project_id"`
+		Total     json.Number `json:"total"`
+	} `json:"members"`
+	Total    json.Number `json:"total"`
+	Currency string      `json:"currency"`
 }
 
 // kickbacksReport is the settlement document the kickbacks subcommand prints,
@@ -1663,6 +2040,12 @@ const modelVersion = "v1"
 const resellerAdjustments = `{"pricing_adjustments":[` +
 	`{"type":"discount","rate":"0.15","scope":"all"},` +
 	`{"type":"kickback","rate":"0.10","scope":"all"}]}`
+
+// groupDiscount is the metadata of the relation between a project and the
+// meta-project it belongs to: 5 percent off what the project is rated, which
+// every member of the group is given and nobody outside it. One adjustment, so
+// a member's statement carries exactly one line.
+const groupDiscount = `{"pricing_adjustments":[{"type":"project_discount","rate":"0.05","scope":"all"}]}`
 
 // pipelineFixture is the pair of databases a run works over: the engine
 // database it is written to, and the reporting database it reads its resources
@@ -1921,6 +2304,22 @@ func (f pipelineFixture) statementTotal(t *testing.T, id uuid.UUID) string {
 	return total
 }
 
+// statementTotalOf is the total of one statement of a run, named by the key it
+// was stored under, which is what project_statements.project_id holds.
+// statementTotal reads the one statement of its run, and a run that billed
+// several projects has no single row to read.
+func (f pipelineFixture) statementTotalOf(t *testing.T, id uuid.UUID, key string) string {
+	t.Helper()
+
+	var total string
+	if err := f.engine.Store.Pool().QueryRow(t.Context(),
+		`SELECT total::text FROM project_statements WHERE run_id = $1 AND project_id = $2`,
+		id, key).Scan(&total); err != nil {
+		t.Fatalf("reading the total of the statement %s of the run %s: %v", key, id, err)
+	}
+	return total
+}
+
 // TestTickLinesReportsWhatTheWalkLeftBehind pins the two lines a tick prints
 // beside the steps a month took. Both stand for a month that is not fine while
 // the tick's exit status is zero, so nothing else would say they happened: the
@@ -2061,6 +2460,18 @@ func TestBadCommandLinesAreRefusedWithoutAConfiguration(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("export error = %q, want it to name %q", err, want)
 			}
+		}
+	})
+
+	t.Run("export refuses a rollup relation type it does not sum under", func(t *testing.T) {
+		_, _, err := runCLI(t, "export", "--run", runID, "--format", "json", "--out", "./out",
+			"--rollup", "infrastructure_tenant")
+		if err == nil {
+			t.Fatal("export error = nil, want the relation type refused")
+		}
+		want := `--rollup: "infrastructure_tenant" must be member_of or managed_by`
+		if err.Error() != want {
+			t.Errorf("export error = %q, want %q", err, want)
 		}
 	})
 
