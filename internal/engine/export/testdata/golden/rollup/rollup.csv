@@ -1,0 +1,4 @@
+run_id,kind,corrects_run_id,period_from,period_to,relation_type,target_cloud,target_project_id,cloud,project_id,total,currency
+3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,regular,,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,member_of,meta,customer-alpha,os-prod,proj-456,128.45,EUR
+3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,regular,,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,member_of,meta,customer-beta,os-dr,proj-789,22.32,EUR
+3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4,regular,,2026-03-01T00:00:00Z,2026-04-01T00:00:00Z,member_of,meta,customer-beta,os-prod,proj-456,128.45,EUR
