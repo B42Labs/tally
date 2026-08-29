@@ -100,15 +100,21 @@ func connect(t *testing.T, url string) *Publisher {
 	return publisher
 }
 
-// startCollector runs the collector's own consumer against the broker, into an
-// outbox and a registry of its own, until the test ends. It is the collector as
-// the pipeline runs it: the same consumer, the same buffer, and the same
-// counters, so what a test asserts is what a deployment would see.
+// defaultCollectorExchanges are the exchanges a collector binds when nothing
+// sets TALLY_OSC_EXCHANGES: the default of the variable in
+// internal/providers/openstack/config.go.
+var defaultCollectorExchanges = []string{"nova", "neutron", "cinder", "glance"}
+
+// startCollector runs the collector's own consumer against the broker, bound to
+// the exchanges it is given, into an outbox and a registry of its own, until
+// the test ends. It is the collector as the pipeline runs it: the same
+// consumer, the same buffer, and the same counters, so what a test asserts is
+// what a deployment would see.
 //
 // The returned stop waits for the consumer's loop to return before it closes the
 // outbox, so nothing the collector logs outlives the test and nothing touches a
 // closed handle.
-func startCollector(t *testing.T, url string) (*openstack.Outbox, *prometheus.Registry, func()) {
+func startCollector(t *testing.T, url string, exchanges []string) (*openstack.Outbox, *prometheus.Registry, func()) {
 	t.Helper()
 
 	outbox, err := openstack.OpenOutbox(filepath.Join(t.TempDir(), "outbox.db"))
@@ -122,7 +128,7 @@ func startCollector(t *testing.T, url string) (*openstack.Outbox, *prometheus.Re
 		outbox.OldestBufferedSeconds)
 	consumer := openstack.NewConsumer(openstack.Config{
 		AMQPURL:         url,
-		Exchanges:       collectorExchanges,
+		Exchanges:       exchanges,
 		Topics:          []string{collectorTopic},
 		Cloud:           testCloud,
 		Prefetch:        10,
@@ -283,7 +289,7 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 	// passive ones find: a consumer started against a fresh broker reconnects
 	// until the exchanges exist.
 	publisher := connect(t, url)
-	outbox, reg, _ := startCollector(t, url)
+	outbox, reg, _ := startCollector(t, url, ServiceExchanges)
 
 	out := t.TempDir()
 	err := Run(t.Context(), Config{Cloud: testCloud, HTTPPort: 0}, RunOptions{
@@ -310,15 +316,81 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 		t.Errorf("the event ids in events.jsonl = %v, want %v", got, want)
 	}
 
-	// The month carries one image.create per image, six in all, and the mapping
-	// skips every one of them because an announced image has no size yet. Nothing
-	// else in the month may go unrecorded: a notification the collector cannot
-	// parse is one the simulator rendered wrong.
-	if got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", "image.create"); got != 6 {
-		t.Errorf("tally_collector_skipped_total{event_type=\"image.create\"} = %v, want 6", got)
+	// The month carries one image.create per image, eight in all: two for each of
+	// the three classic projects and one for each of the two Gardener tenants.
+	// The mapping skips every one of them because an announced image has no size
+	// yet. Nothing else in the month may go unrecorded: a notification the
+	// collector cannot parse is one the simulator rendered wrong.
+	if got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", "image.create"); got != 8 {
+		t.Errorf("tally_collector_skipped_total{event_type=\"image.create\"} = %v, want 8", got)
 	}
 	if got := counterValue(t, reg, "tally_collector_unparseable_total", "", ""); got != 0 {
 		t.Errorf("tally_collector_unparseable_total = %v, want 0", got)
+	}
+}
+
+// TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers is what a
+// deployment that runs octavia and left TALLY_OSC_EXCHANGES alone gets. A topic
+// exchange copies a message only to the queues bound to it, so the octavia
+// notifications of the month reach a collector bound to the other four
+// exchanges neither as an event nor as a skip: they are dropped at the broker,
+// and nothing in the collector counts them.
+func TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers(t *testing.T) {
+	url, _ := startBroker(t)
+	// The publisher declares all five, so the octavia exchange exists and takes
+	// its messages whether a queue is bound to it or not.
+	publisher := connect(t, url)
+	outbox, reg, _ := startCollector(t, url, defaultCollectorExchanges)
+
+	err := Run(t.Context(), Config{Cloud: testCloud, HTTPPort: 0}, RunOptions{
+		Period:           "2026-07",
+		Seed:             1,
+		Factor:           0,
+		Out:              t.TempDir(),
+		WaitForCollector: pollDeadline,
+	}, publisher, testLogger(t))
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	billable := generateMonth(t, 1, july2026, testCloud).Billable()
+	want := make([]string, 0, len(billable))
+	for _, transition := range billable {
+		if transition.Exchange != "octavia" {
+			want = append(want, transition.MessageID)
+		}
+	}
+	slices.Sort(want)
+	if len(want) == len(billable) {
+		t.Fatalf("the month carries no billable notification on the octavia exchange, want the load " +
+			"balancers of the shoots: a month without one holds nothing back from this collector")
+	}
+
+	waitFor(t, "every notification off the four default exchanges is buffered", func() bool {
+		return outbox.Depth() == int64(len(want))
+	})
+	if got := storedEventIDs(t, outbox, len(want)); !slices.Equal(got, want) {
+		t.Errorf("buffered event ids = %v, want %v", got, want)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v, want nil", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "tally_collector_skipped_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() != "event_type" || !strings.HasPrefix(label.GetValue(), "octavia.") {
+					continue
+				}
+				t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want the type in no counter "+
+					"at all: a message the broker drops is one the collector never sees",
+					label.GetValue(), metric.GetCounter().GetValue())
+			}
+		}
 	}
 }
 
@@ -340,7 +412,7 @@ func TestReplayPublishesACapturedMonth(t *testing.T) {
 
 	url, _ := startBroker(t)
 	publisher := connect(t, url)
-	outbox, _, _ := startCollector(t, url)
+	outbox, _, _ := startCollector(t, url, ServiceExchanges)
 
 	replayErr := Replay(t.Context(), Config{HTTPPort: 0}, ReplayOptions{
 		In:               filepath.Join(out, "notifications.jsonl"),
@@ -422,7 +494,7 @@ func TestRunWaitsForTheCollector(t *testing.T) {
 
 		// And it published nothing while it waited: a collector started now binds
 		// its queue and finds it empty, however long it looks.
-		outbox, _, _ := startCollector(t, url)
+		outbox, _, _ := startCollector(t, url, ServiceExchanges)
 		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
 			if depth := outbox.Depth(); depth != 0 {
 				t.Fatalf("Depth() = %d, want 0: the refused run published anyway", depth)

@@ -16,11 +16,13 @@ import (
 // package from exporting anything for the sake of a simulator.
 const collectorQueue = "tally-notifications"
 
-// serviceExchanges are the exchanges a stock deployment publishes
-// notifications on, one per service. They are also the default of the
-// collector's TALLY_OSC_EXCHANGES, so a simulator and a collector that were
-// both left at their defaults meet on all four.
-var serviceExchanges = []string{"nova", "cinder", "neutron", "glance"}
+// ServiceExchanges are the exchanges the simulator publishes notifications on,
+// one per service, and the ones Connect declares. The collector's default
+// TALLY_OSC_EXCHANGES lists the first four, and a deployment that runs octavia
+// lists the fifth itself (docs/openstack-collector.md, "Exchanges and topics"),
+// so a collector left at its default receives the month without its load
+// balancers.
+var ServiceExchanges = []string{"nova", "cinder", "neutron", "glance", "octavia"}
 
 // probeInterval is how long AwaitConsumer waits between two looks at the
 // collector's queue. It is short enough that a collector started a moment later
@@ -108,7 +110,7 @@ func Connect(url string) (*Publisher, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("enabling publisher confirms: %w", err)
 	}
-	for _, exchange := range serviceExchanges {
+	for _, exchange := range ServiceExchanges {
 		if err := channel.ExchangeDeclare(exchange, "topic",
 			true, false, false, false, nil); err != nil {
 			_ = conn.Close()

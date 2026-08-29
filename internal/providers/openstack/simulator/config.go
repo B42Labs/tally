@@ -1,7 +1,8 @@
 // Package simulator publishes one simulated month of oslo.messaging
-// notifications. It renders a seeded month of nova, cinder, neutron, and glance
-// notifications onto a RabbitMQ broker, or into files when no broker is
-// configured, and a virtual clock decides how much wall time that month costs.
+// notifications. It renders a seeded month of nova, cinder, neutron, glance,
+// and octavia notifications onto a RabbitMQ broker, or into files when no
+// broker is configured, and a virtual clock decides how much wall time that
+// month costs.
 //
 // The notifications are the ones a real deployment publishes, so the collector
 // in internal/providers/openstack consumes them unmodified: the simulator sits
