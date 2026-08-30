@@ -10,15 +10,15 @@ deployment behind it. The month is rendered from a small simulated cloud and
 paced by a virtual clock, so a 31-day month goes out in the wall time the
 factor compresses it into.
 
-It has no fault switches, no oracle to hold a run against, no fake OpenStack
-API, and no metrics endpoint of its own. #65 is the meta issue the simulated
-workloads belong to, and this document describes its first stage. The noise,
-the notifications the collector does not bill, is rendered and described under
-"The noise" below; #87 owns the oracle, #88 the fault switches, and #89 the
-project registry; #66 the fake API and the clock seam; #67 the traffic series
-and `/metrics`. The drill #51 cites this simulator as the way a month reaches
-the Reporting API. The workload renders octavia's three load balancer types
-from the shoots' load balancers.
+It has no fault switches, no fake OpenStack API, and no metrics endpoint of its
+own. #65 is the meta issue the simulated workloads belong to, and this document
+describes its first stage. The noise, the notifications the collector does not
+bill, is rendered and described under "The noise" below. The oracle of a month
+and the comparison against an engine export are described under "The oracle"
+below; #88 owns the fault switches and #89 the project registry; #66 the fake
+API and the clock seam; #67 the traffic series and `/metrics`. The drill #51
+cites this simulator as the way a month reaches the Reporting API. The workload
+renders octavia's three load balancer types from the shoots' load balancers.
 
 ## The world and the workload
 
@@ -733,9 +733,9 @@ sends before a delete.
 
 ## File mode and replay
 
-`run --out DIR` writes the whole month before it publishes anything, so a run
-interrupted halfway still leaves a complete month on disk. With no broker
-configured it writes the files and publishes nothing:
+`run --out DIR` writes three files, and it writes the whole month before it
+publishes anything, so a run interrupted halfway still leaves a complete month
+on disk. With no broker configured it writes the files and publishes nothing:
 
 ```sh
 TALLY_SIM_CLOUD=os-sim tally-openstack-simulator run \
@@ -757,6 +757,11 @@ the collector's own parser and mapping table rather than by the simulator's
 idea of them. For seed 1 the first file therefore has 13915 more lines than the
 second. A broker and `--out` combine: a run does both.
 
+`oracle.json` is the third of them, the generator's statement of what the month
+was meant to meter to: the intervals every billable resource was to be billed
+over and the events the collector has to record per project. "The oracle" below
+describes it.
+
 `replay --in FILE --factor N` publishes a captured file onto a broker, with the
 virtual clock started at the first line's timestamp, so a month needs neither
 the generator nor the seed that produced it. The message ids are the recorded
@@ -767,6 +772,211 @@ what lets a file that is not perfectly sorted replay whole.
 `ReadStream` reads the file before the first message goes out and refuses an
 empty file, a line that is not JSON, and a body without a timestamp. A replay
 that would fail halfway through a month fails with nothing published.
+
+## The oracle
+
+`oracle.json` states the month the generator built. It holds the `format` of the
+document, the `cloud` and the `seed` it was rendered from, the month as
+`period_from` and `period_to`, the `resources` the month bills, and the `counts`
+of the events the collector has to record. A resource names its type, its id, and its workload (`classic`,
+`gardener`, or `ci`), and lists the intervals of constant state, size, and
+project it was billed over. The spare volume of a
+classic project has two of them, meeting at the transfer that hands it to the
+next project:
+
+```json
+{
+  "resource_type": "volume",
+  "resource_id": "1746df50-32e2-480a-9cc2-8773e40058a9",
+  "workload": "classic",
+  "intervals": [
+    {
+      "from": "2026-07-01T04:39:38Z",
+      "to": "2026-07-20T08:06:41Z",
+      "state": "available",
+      "project_id": "34e991db9fc6466f8ca69b43f70fce65",
+      "size": {
+        "size_gb": 200,
+        "type": "hdd"
+      }
+    },
+    {
+      "from": "2026-07-20T08:06:41Z",
+      "to": "2026-08-01T00:00:00Z",
+      "state": "available",
+      "project_id": "018504a6cc10019a40e3f9eef4dae529",
+      "size": {
+        "size_gb": 200,
+        "type": "hdd"
+      }
+    }
+  ]
+}
+```
+
+The resources are sorted by type and then by id, the intervals by their start,
+and the counts by project and then by event type. Two runs of one seed, period,
+and cloud therefore write a file a diff reports nothing about.
+
+The state is the one the billable notification reports, translated the way
+[`mapping.go`](../internal/providers/openstack/mapping.go) translates it. A
+power-off books `shutoff`, a shelve `shelved`, and an unshelve, a power-on, and
+a `finish_resize` book `active`. A `compute.instance.resize.end` books `resized`
+for the sixty seconds until its `finish_resize`, because `osmap.VMState` passes
+nova's `resized` through unchanged. A volume books `available` on its create
+whatever attaches it a second later, which is the state the mapping fixes on
+`volume.create.end`, and on a resize, a retype, and a transfer it books `in-use`
+when the world holds it attached and `available` otherwise. A state change that
+only a non-billable notification carries, the attach and the detach of the noise
+catalogue, changes nothing in the oracle until the next billable notification
+reports it. A floating IP, an image, and a load balancer are `active` from their
+create to their delete.
+
+The size is the simulator's own view of the resource, written as JSON numbers
+that carry every digit. An instance holds `vcpus`, `ram_gb` (the reported memory
+in MiB over 1024), `disk_gb` (the root disk plus the ephemeral one), and
+`flavor`; a volume `size_gb` and `type`; an image `size_gb`, its bytes over
+2^30, which is exact because every image size is a whole number of quarter
+gibibytes; a floating IP `ip_version` 4. A load balancer holds `listeners` and
+`pools`: 0 and 0 on its create, which is rendered without either list and whose
+absent members the mapping counts as zero, and the two lengths on its update.
+
+The fold splits an interval where the state, the size, or the project changes,
+closes it on a delete, keeps two consecutive facts of equal state, size, and
+project in one interval, and drops an interval of no length. Every interval is
+then clipped to the month: a start before the period start moves to it, an open
+end or one past the period end moves to the period end, and a resource whose
+intervals all fall outside the month is left out. Every instant a month emits
+today lies inside the month, so the clip only closes the open interval of a
+resource that outlives it. The general rule is written out because the
+pre-existing resources of #88 rely on it.
+
+The counts are one entry per project and Tally event type, one count per
+billable notification the collector records. The event types are the mapping's:
+an `image.upload` counts as `image.create`, a `compute.instance.power_off.end`
+as `compute.instance.power_off`, and the transfer of a spare volume counts under
+the accepting project. They are what `GET /api/v1/stats/events` of the Reporting
+API holds for the month.
+
+The oracle is folded by the simulator's own code out of what the generator knows
+while it emits a billable transition, not out of the rendered notification and
+not out of what the engine made of it. A payload that lost a member renders a
+notification the collector maps to a size nobody meant, and an oracle read back
+from that notification would agree with it. The fold imports neither
+`internal/core/timeline` nor `internal/engine/metering`, which
+`TestOracleUsesNoEngineFold` holds it to. `TestOracleAgreesWithTheMapping` holds
+its vocabulary against the collector's, and `TestOracleAgreesWithTheEngineFold`
+folds seeds 1 to 5 twice, once here and once through the engine over the events
+the mapping makes of the same transitions, so a drift between the two folds
+fails a test rather than a drill.
+
+The compose stack publishes without `--out` and leaves no oracle behind. A
+file-mode `run` of the same seed, period, and cloud writes the oracle of the
+month it published, because the same triple renders the same month byte for
+byte — within one build. Another build renders another month from the same seed
+as soon as the generator gains a billable transition or a size member, so the
+oracle has to be folded by the binary that published the month. `format` is what
+makes that visible where it can be: it is raised whenever what the generator
+books, what a size holds, or what the document states changes, and `ReadOracle`
+refuses a document of another format, one that states a member this build does
+not read, and one that leaves a member it does read unstated. The last of the
+three is the one nothing else would catch, because JSON leaves an absent member
+at its zero value: an oracle without its sizes would be compared, and every
+`time_gauge` dimension of every priced resource would come out as a difference
+the engine did not cause.
+
+### Comparing an export
+
+Three commands hold what the engine billed against the oracle:
+
+```sh
+tally-engine run --period 2026-07
+tally-engine export --run <id> --format csv --out /tmp/export
+tally-openstack-simulator compare --oracle /tmp/m/oracle.json \
+  --export /tmp/export --pricing pricing/2026-03.yaml
+```
+
+`compare` reads `rated.csv` out of the export directory and the pricing model
+the run rated with. Per resource it compares the bounds of every interval, the
+state and the project it was booked under, and the quantity of every
+`time_gauge` dimension the model prices the resource type by: a dimension named
+after a size member against that member, `count` against 1, `minutes` against
+the interval's whole seconds over sixty, and a member the size lacks or holds as
+text against 0. The quantities are compared as decimals rounded to four places,
+which is the rounding the export prints. The intervals of the two sides are held
+against each other by index rather than by their bounds, so an interval one fold
+split in two is reported at the place the two folds part ways rather than on
+every interval behind it.
+
+The `counter` dimensions are left out, `egress_gb` among them: the counters pass
+measures one from the events table or from a metrics store, and the oracle
+models neither. Left out as well are the amounts, the state modifiers, the
+statement totals, and the resource types the model does not price. Under
+`pricing/2026-03.yaml` an `image` and a `loadbalancer` are unpriced, so the
+rating pass writes no record of one, and the report names each such type on a
+line of its own instead of calling its resources missing:
+
+```text
+image: 9 resources are not priced by pricing model 2026-03 and were not compared
+loadbalancer: 5 resources are not priced by pricing model 2026-03 and were not compared
+```
+
+Rated records of another cloud or another platform are skipped and counted on
+one more line, `skipped N rated records of other clouds or platforms`, which is
+what an export of a deployment that bills more than the simulated cloud carries.
+
+`rated.csv` is read rather than the JSON statements because a statement period
+carries hours and no timestamps and folds attributed projects into related
+costs, so an interval cannot be matched against it. A rated record carries
+`from_ts`, `to_ts`, `state`, `project_id`, `dimension`, and `quantity`, and its
+`project_id` is the usage draft's project, the tenant that owned the resource.
+
+A difference is one line, `<resource_type> <resource_id>: <detail>`, with
+` (and N more)` appended when the resource carries further ones: a resource
+booked under the wrong project differs in every interval it has, and a report
+that spelled all of them out would bury the resource beside it. The lines are
+sorted by resource type and then by id, and every instant in them is written in
+UTC as RFC 3339. The details:
+
+- `missing from the export` and `not in the oracle`, for a resource one side
+  holds and the other does not.
+- `the export lacks [a, b)` and `the export books [c, d), which the oracle does
+  not hold`, when the two sides carry a different number of intervals for one
+  resource.
+- `the oracle expects [a, b) and the export books [c, d)`, for two intervals
+  that differ in their bounds.
+- `state "x" over [a, b), the oracle expects "y"` and `project x over [a, b),
+  the oracle expects y`.
+- `<dimension> <actual> over [a, b), the oracle expects <expected>`, both at
+  four places, and `no <dimension> quantity over [a, b)` when the export books
+  the interval without that dimension.
+- `the export books [a, b) under more than one state or project` and `the export
+  rates [a, b) by <dimension> more than once`, the two details that stop the
+  comparison of their resource: the first because there is no single booking to
+  hold the oracle against, the second because a month billed twice over carries
+  the very same row twice, and the quantity read back off the second one is the
+  right quantity.
+
+The last line is the verdict, `the export matches the oracle over N resources`
+or `N of M resources differ from the oracle`. A comparison that matches exits 0.
+One that differs exits 1, and cobra prints the error `N resources differ from
+the oracle` on stderr under the lines, so a drill that runs unattended fails
+where it ran. Every other failure exits 1 as well.
+
+Four exports are refused rather than compared, because each of them would turn
+every resource of the month into a difference: a `rated.csv` without a rated
+record of the oracle's cloud on platform `openstack` (`rated.csv holds no rated
+record of cloud os-sim on platform openstack: the run that wrote it did not bill
+this month`), one whose period columns name another month (`rated.csv bills
+[a, b) and the oracle describes [c, d)`), one rating a resource type or a
+dimension the model at hand does not price (`rated.csv rates instance by vcpus,
+which pricing model 2026-03 does not price: pass the model the run rated with`),
+and one the model prices a rated resource type by a `time_gauge` no record rates
+it by (`pricing model 2026-03 prices instance by disk_gb and rated.csv rates no
+record by it: pass the model the run rated with`). The last two are one gate held
+in both directions: a model that prices otherwise than the run rated with is not
+the model to read an export through, whichever of the two names the dimension. A
+`counter` is outside it, because a comparison reads none of them.
 
 ## The control endpoint
 
@@ -827,6 +1037,9 @@ The compose stack passes it, because its broker is the container next door.
 `--out` (empty), `--wait-for-collector` (two minutes), and
 `--allow-remote-broker` (off). `replay` takes `--in` (required), `--factor`
 (744), `--wait-for-collector` (two minutes), and `--allow-remote-broker` (off).
+`compare` takes `--oracle`, `--export`, and `--pricing`, all three required, and
+reads no variable of the table at all: it holds three files against each other
+and touches neither a broker nor the Reporting API.
 
 `TALLY_METRICS_ENABLED` is not read: the simulator exports no metrics, and #67
 owns the endpoint that would serve them.
