@@ -445,6 +445,19 @@ func imageUploadPayload(p *project, img *image, at time.Time) map[string]any {
 	}
 }
 
+// imagePreparePayload describes an image glance is receiving the bits of. It
+// carries the members of the finished image with the three that only exist once
+// the content is there left empty: the size on disk, the size the disk grows
+// to, and the checksum over what arrived.
+func imagePreparePayload(p *project, img *image) map[string]any {
+	payload := imageUploadPayload(p, img, img.createdAt)
+	payload["status"] = "saving"
+	payload["size"] = nil
+	payload["virtual_size"] = nil
+	payload["checksum"] = nil
+	return payload
+}
+
 // imageDeletePayload describes a removed image. Glance still reports the size
 // it had, which is what lets the projection close the record with the size it
 // was billed at.

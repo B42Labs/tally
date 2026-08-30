@@ -492,8 +492,7 @@ func (g *generator) images(p *project) {
 		img.size = int64(4+g.shape.IntN(13)) * quarterGiB
 
 		g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img))
-		g.emit(uploadedAt, "image.upload", imagePublisher, img.id, p,
-			imageUploadPayload(p, img, uploadedAt))
+		g.uploadImage(p, img, uploadedAt)
 
 		if index == len(p.images)-1 {
 			deletedAt := g.to.Add(-span(g.shape, day, 7*day))

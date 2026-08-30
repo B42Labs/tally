@@ -307,3 +307,21 @@ func (g *generator) deleteVolume(p *project, vol *volume, t time.Time) {
 
 	g.emit(t, "volume.delete.end", volumePublisher, vol.id, p, volumeDeletePayload(p, vol, t))
 }
+
+// uploadImage renders one image upload: glance taking the bits in, the upload
+// the collector bills, and the activation a second later.
+//
+// The prepare is the image while its content is still arriving, which is the
+// one notification about it that carries neither a size nor a checksum. The
+// activate repeats the payload of the upload unchanged, because nothing about
+// the image changes when glance flips it to active.
+func (g *generator) uploadImage(p *project, img *image, uploadedAt time.Time) {
+	g.noise(uploadedAt.Add(-imagePrepareLead), "image.prepare", imagePublisher, img.id, p,
+		imagePreparePayload(p, img))
+
+	g.emit(uploadedAt, "image.upload", imagePublisher, img.id, p,
+		imageUploadPayload(p, img, uploadedAt))
+
+	g.noise(uploadedAt.Add(imageActivateLag), "image.activate", imagePublisher, img.id, p,
+		imageUploadPayload(p, img, uploadedAt))
+}
