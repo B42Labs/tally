@@ -1,6 +1,10 @@
 package simulator
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // flavor is one entry of the simulated nova flavor catalog. It carries all
 // three names nova reports a flavor under, because a notification repeats all
@@ -114,6 +118,24 @@ const (
 	floatingPrefix = "203.0.113."
 )
 
+// The publishers of the services the noise catalogue speaks for. None of the
+// recorded fixtures holds one, so they are written in oslo's <service>.<host>
+// form rather than copied: a publisher id is what an operator reads the
+// emitting service off, and nothing is metered by it.
+const (
+	schedulerPublisher = "scheduler.controller-01"
+	// apiPublisher is nova-api, which is the service that sends the keypair
+	// notifications rather than a compute.
+	apiPublisher      = "api.controller-01"
+	identityPublisher = "identity.keystone-01"
+	dnsPublisher      = "central.designate-01"
+	barbicanPublisher = "barbican.barbican-01"
+)
+
+// barbicanPort is the port of the barbican endpoint an audit record names,
+// which is https://barbican.<cloud>.example:9311.
+const barbicanPort = 9311
+
 // imageNames and instanceNames are what the resources of a project are called.
 // The names are cosmetic: nothing is metered by them, and they exist so that a
 // dumped month reads like a deployment rather than like a list of ids.
@@ -136,6 +158,10 @@ const (
 type project struct {
 	id     string
 	userID string
+
+	// network is the tenant's own network with its subnet. It is nil on a
+	// Gardener tenant, whose shoots each carry one of their own.
+	network *network
 
 	images    []*image
 	instances []*instance
@@ -163,26 +189,32 @@ type instance struct {
 	imageID   string
 	createdAt time.Time
 	// deletedAt is when the instance is destroyed, and the zero instant on one
-	// that outlives the month. It is drawn with the create, because it bounds
-	// what the instance may still report.
+	// that outlives the month. On the classic tenants' first instance it is
+	// drawn with the create, because it bounds what the instance may still
+	// report.
 	deletedAt time.Time
-	volumes   []*volume
-	fip       *floatingIP
+	// port is the neutron port the server holds its address on. It is built
+	// when the instance is created.
+	port    *port
+	volumes []*volume
+	fip     *floatingIP
 	// bootVolume is the volume the server boots from, and nil on a server that
 	// boots from an image.
 	bootVolume *volume
 }
 
-// volume is one cinder volume. attached is what the world knows and cinder
-// reports as the status: the attach itself produces no notification the
-// collector maps, so the volume simply is in use from the moment it is created
-// for an instance.
+// volume is one cinder volume. An attach and a detach are notifications the
+// collector does not map, and attached is what cinder reports as the status on
+// the billable ones.
 type volume struct {
 	id         string
 	name       string
 	sizeGB     int
 	volumeType string
 	attached   bool
+	// attachment is what the attach reported, held so that the detach repeats
+	// the same attachment, and cleared by that detach.
+	attachment map[string]any
 	createdAt  time.Time
 	// resizes is how often the volume has grown. A claim grows at most twice,
 	// and the count does not follow from the size: 10 grown twice and 20 grown
@@ -203,6 +235,57 @@ type floatingIP struct {
 	routerID     string
 }
 
+// network is one neutron network with its subnet and its router. The classic
+// tenants and the CI tenant have one each, and every shoot carries the one
+// Gardener creates for it.
+//
+// routerID is empty on a classic tenant's network, which pre-exists the month
+// and is therefore never announced. routerPortID is the port of the router's
+// interface on the subnet, drawn when the network is built. securityGroupID is
+// set on a shoot's network alone, because a shoot is the only workload whose
+// group is created inside the month.
+//
+// The cidr is 192.168.<project>.0/24 on a classic tenant counting from 1,
+// 10.100.0.0/24 on the CI tenant, and 10.250.<shoot>.0/24 on a shoot, which is
+// the range that shoot's VIP addresses already lie in.
+type network struct {
+	id, subnetID, routerID, routerPortID, securityGroupID, name, cidr string
+	// hosts counts the addresses handed to ports.
+	hosts int
+}
+
+// prefix is the cidr up to its last dot, which is the part every address on the
+// network shares.
+func (n *network) prefix() string {
+	return n.cidr[:strings.LastIndex(n.cidr, ".")]
+}
+
+// nextAddress hands out the next address of the subnet. The addresses of ports
+// are cosmetic, and a network that hands out more than 240 of them starts over,
+// the way a real subnet hands a released address to the next port that asks.
+func (n *network) nextAddress() string {
+	address := fmt.Sprintf("%s.%d", n.prefix(), 10+n.hosts%240)
+	n.hosts++
+	return address
+}
+
+// port is one neutron port: the address a device holds on a network. The subnet
+// and the security group are copied from that network, because neutron reports
+// both on the port itself.
+//
+// deviceOwner is compute:nova on a server's port and Octavia on the VIP port of
+// a load balancer, and deviceID names the device behind it: the instance id, or
+// lb-<load balancer id>.
+type port struct {
+	id, networkID, subnetID, securityGroupID, address, macAddress, deviceID, deviceOwner, host string
+}
+
+// recordSet is one designate record set in a Gardener project's zone.
+type recordSet struct {
+	id, name, recordType string
+	records              []string
+}
+
 // gardenerProject is one Gardener project: the shoots it holds and the
 // OpenStack tenant they run on. Gardener bills the tenant, and the project is
 // the name an operator knows the shoots under.
@@ -210,6 +293,11 @@ type gardenerProject struct {
 	name   string
 	tenant *project
 	shoots []*shoot
+	// zoneID and zoneName are the designate zone the shoots' records live in.
+	// The zone is <project name>.<cloud>.example., and the cloud is in the name
+	// for the reason it is in the glance URL of an instance create payload: two
+	// clouds fed the same seed must not report the same one.
+	zoneID, zoneName string
 }
 
 // shoot is one Kubernetes cluster Gardener runs on the tenant. Its workers are
@@ -230,6 +318,15 @@ type shoot struct {
 	baseWorkers int
 
 	networkID, subnetID, routerID, securityGroupID, keypairName string
+	// network holds the four ids above in the form the neutron notifications
+	// report them, together with the addresses the shoot's ports are handed.
+	network *network
+	// securityGroupRuleIDs are the two rules of the shoot's security group.
+	securityGroupRuleIDs []string
+	// apiRecord is the record set of the shoot's API server. ingressRecord is
+	// the one of its ingress controller, and it is nil until the first load
+	// balancer has an address to point at.
+	apiRecord, ingressRecord *recordSet
 
 	// createdAt is when the shoot comes up. deletedAt is the zero instant on a
 	// shoot that outlives the month.
@@ -253,4 +350,8 @@ type loadBalancer struct {
 	id, name, vipPortID, vipAddress string
 	listenerIDs, poolIDs            []string
 	fip                             *floatingIP
+	// secretID and containerID are the barbican secret and container holding
+	// the balancer's certificate. Both are empty on a balancer that terminates
+	// no https listener.
+	secretID, containerID string
 }

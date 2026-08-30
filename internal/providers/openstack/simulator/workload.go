@@ -34,9 +34,15 @@ type Transition struct {
 	// itself.
 	Exchange string
 	// Billable reports whether the collector's mapping records an event for this
-	// notification. It is false only for the image.create that precedes an
-	// upload: that one carries no size yet, and the mapping skips it on purpose.
+	// notification. It is false on the image.create that precedes an upload,
+	// which carries no size yet and is skipped on purpose, and on every
+	// transition of the noise catalogue (noise.go).
 	Billable bool
+	// noise reports whether the transition belongs to that catalogue. Nothing on
+	// the wire carries it and nothing outside this package reads it: it is what
+	// tells the noise apart from the one skipped billable type when the message
+	// ids are drawn, so the catalogue takes its ids from its own stream.
+	noise bool
 	// Workload names which of the three workloads emitted the transition, one of
 	// the workload constants. Nothing on the wire carries it: it is what a test
 	// and the later reconciliation oracle tell the workloads of one month apart
@@ -171,6 +177,13 @@ const shapeStream = 1
 // seed, period, and cloud draw the same identifiers in the same order, and
 // another cloud or another month renames everything while the shape stays the
 // shape stream's.
+//
+// A third generator names the resources of the noise catalogue (noise.go). It
+// is salted the way the identifier generator is, and it is a stream of its own
+// so that the identifier generator draws the billable month and nothing else,
+// down to the message ids: a noise transition takes its own from the third
+// stream, so a catalogue that grows by one transition renumbers nothing the
+// collector bills.
 func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
 	// A caller that reached here without going through period.Parse is caught
 	// before it produces a month that no billing period covers.
@@ -182,7 +195,8 @@ func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
 	shape := rand.New(rand.NewPCG(seed, shapeStream))
 	identifiers := idReader{src: rand.New(rand.NewPCG(seed, identifierSalt(cloud, month)))}
 
-	g := newGenerator(shape, identifiers, month, month.AddDate(0, 1, 0), cloud)
+	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, cloud, month),
+		month, month.AddDate(0, 1, 0), cloud)
 	g.run()
 	if len(g.schedule) == 0 {
 		return nil, errors.New("the generated month holds no transitions")
@@ -191,7 +205,15 @@ func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
 	slices.SortStableFunc(g.schedule, func(a, b Transition) int { return a.At.Compare(b.At) })
 	// The message ids come last so that they run in publication order, which is
 	// what a dumped month reads like when it is compared against a real bus.
+	// Each of the two streams hands out its own: a noise message id drawn from
+	// the identifier stream would tie the ids of the billable month to how much
+	// noise stands beside it, and a catalogue one transition longer would
+	// renumber every event the collector books for every seed.
 	for i := range g.schedule {
+		if g.schedule[i].noise {
+			g.schedule[i].MessageID = g.noiseIDs.nextUUID()
+			continue
+		}
 		g.schedule[i].MessageID = identifiers.nextUUID()
 	}
 	return g.schedule, nil
@@ -249,9 +271,13 @@ type generator struct {
 	// because the resources a month churns are named when they are created: how
 	// many workers or runners a month makes follows from its calendar.
 	identifiers idReader
-	from        time.Time
-	to          time.Time
-	cloud       string
+	// noiseIDs is the month's third stream, salted the way the identifier
+	// stream is and drawn by noise.go alone. Holding it apart is what lets the
+	// identifier stream draw exactly what it draws without the noise.
+	noiseIDs idReader
+	from     time.Time
+	to       time.Time
+	cloud    string
 
 	// networkID is the external network the month's addresses come from. There
 	// is one per month, the way a deployment has one.
@@ -285,8 +311,21 @@ type generator struct {
 // with their VIP ports, listeners, pools, and addresses, and the CI runners.
 // How many of them a month makes follows from its calendar, so drawing them
 // here would mean counting the month's days twice.
-func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cloud string) *generator {
-	g := &generator{shape: shape, identifiers: identifiers, from: from, to: to, cloud: cloud}
+//
+// The identifier stream draws the billable month and nothing besides it. Every
+// identifier of a resource that exists only to be announced comes from the
+// noise identifier stream instead: the classic and CI tenants' networks, the
+// zones, the ports, the attachments, the security group rules, the record sets,
+// the secrets and containers, and the CADF record ids. The fixed ones are drawn
+// below, after the last draw the identifier stream makes, and the rest at the
+// moment the resource is created.
+func newGenerator(shape *rand.Rand, identifiers, noiseIDs idReader,
+	from, to time.Time, cloud string,
+) *generator {
+	g := &generator{
+		shape: shape, identifiers: identifiers, noiseIDs: noiseIDs,
+		from: from, to: to, cloud: cloud,
+	}
 
 	g.networkID = identifiers.nextUUID()
 	g.addresses = identifiers.src.Perm(addressPoolSize)
@@ -350,6 +389,29 @@ func newGenerator(shape *rand.Rand, identifiers idReader, from, to time.Time, cl
 	g.ciTenant = &project{id: identifiers.nextHexID()}
 	g.ciTenant.userID = identifiers.nextHexID()
 	g.ciTenant.images = []*image{{id: identifiers.nextUUID(), name: ciImageName}}
+
+	// The networks the tenants are announced on and the zones their records live
+	// in. A classic tenant's network has no router of its own, because it
+	// pre-exists the month and neutron announces nothing about it.
+	for index, p := range g.projects {
+		p.network = &network{
+			id:       g.noiseIDs.nextUUID(),
+			subnetID: g.noiseIDs.nextUUID(),
+			name:     fmt.Sprintf("tenant-%02d", index+1),
+			cidr:     fmt.Sprintf("192.168.%d.0/24", index+1),
+		}
+	}
+	g.ciTenant.network = &network{
+		id:       g.noiseIDs.nextUUID(),
+		subnetID: g.noiseIDs.nextUUID(),
+		routerID: g.noiseIDs.nextUUID(),
+		name:     "ci",
+		cidr:     "10.100.0.0/24",
+	}
+	for _, gp := range g.gardenerProjects {
+		gp.zoneID = g.noiseIDs.nextUUID()
+		gp.zoneName = gp.name + "." + cloud + ".example."
+	}
 	return g
 }
 
