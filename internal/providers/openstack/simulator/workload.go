@@ -516,15 +516,19 @@ func (g *generator) instances(p *project) {
 		inst.createdAt = g.from.Add(span(g.shape, 2*time.Hour, 6*time.Hour))
 		inst.imageID = p.images[g.shape.IntN(len(p.images))].id
 
-		g.emit(inst.createdAt, "compute.instance.create.end", computePublisher(inst), inst.id, p,
-			instanceCreatePayload(p, inst, g.cloud))
+		g.createInstance(p, inst, p.network, inst.createdAt)
 
 		// The end bounds what the instance may still report, so the delete
 		// instant is drawn here rather than in the tear-down phase that uses it.
+		// The last step of a deleted instance lies before the sequence its
+		// delete begins with, which is why the bound is the first notification
+		// of that sequence and not the delete: a step whose .end would fall
+		// inside those five seconds is dropped the way a step at or after the
+		// delete is dropped, and no draw moves either way.
 		end := g.to
 		if index == 0 {
 			inst.deletedAt = g.to.Add(-span(g.shape, day, 10*day))
-			end = inst.deletedAt
+			end = inst.deletedAt.Add(-instanceDeleteLead)
 		}
 		g.lifetime(p, inst, index, end)
 	}
@@ -539,6 +543,9 @@ func (g *generator) instances(p *project) {
 // stops the walk. Dropping the rest with it is what keeps a deleted instance
 // from reporting anything after its delete, and a step from straddling the
 // month's end with only its first half inside the period.
+//
+// Every step is a pair: its .start half is rendered stepLead before its .end,
+// and the bound keeps both halves before the instance's end.
 func (g *generator) lifetime(p *project, inst *instance, index int, end time.Time) {
 	cursor := inst.createdAt.Add(span(g.shape, time.Hour, 3*day))
 
@@ -547,8 +554,12 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		if !poweredOnAt.Before(end) {
 			return
 		}
+		g.noise(cursor.Add(-stepLead), "compute.instance.power_off.start", computePublisher(inst),
+			inst.id, p, instancePowerPayload(p, inst, "active"))
 		g.emit(cursor, "compute.instance.power_off.end", computePublisher(inst), inst.id, p,
 			instancePowerPayload(p, inst, "stopped"))
+		g.noise(poweredOnAt.Add(-stepLead), "compute.instance.power_on.start", computePublisher(inst),
+			inst.id, p, instancePowerPayload(p, inst, "stopped"))
 		g.emit(poweredOnAt, "compute.instance.power_on.end", computePublisher(inst), inst.id, p,
 			instancePowerPayload(p, inst, "active"))
 		cursor = poweredOnAt.Add(span(g.shape, time.Hour, 3*day))
@@ -559,11 +570,18 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		if !finishedAt.Before(end) {
 			return
 		}
+		// The start of a resize is the one .start half that reports another
+		// flavor than its .end: it announces the server as it still is, which is
+		// why it is rendered before the new flavor is drawn.
+		g.noise(cursor.Add(-stepLead), "compute.instance.resize.start", computePublisher(inst),
+			inst.id, p, instanceResizePayload(p, inst, "active"))
 		// Both halves of a resize report the flavor the instance is moving to,
 		// and every notification after them reports it as well.
 		inst.flavor = otherFlavor(g.shape, inst.flavor)
 		g.emit(cursor, "compute.instance.resize.end", computePublisher(inst), inst.id, p,
 			instanceResizePayload(p, inst, "resized"))
+		g.noise(finishedAt.Add(-stepLead), "compute.instance.finish_resize.start", computePublisher(inst),
+			inst.id, p, instanceResizePayload(p, inst, "resized"))
 		g.emit(finishedAt, "compute.instance.finish_resize.end", computePublisher(inst), inst.id, p,
 			instanceResizePayload(p, inst, "active"))
 		cursor = finishedAt.Add(span(g.shape, time.Hour, 3*day))
@@ -574,8 +592,12 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		if !unshelvedAt.Before(end) {
 			return
 		}
+		g.noise(cursor.Add(-stepLead), "compute.instance.shelve_offload.start", computePublisher(inst),
+			inst.id, p, instanceShelvePayload(p, inst, "active"))
 		g.emit(cursor, "compute.instance.shelve_offload.end", computePublisher(inst), inst.id, p,
 			instanceShelvePayload(p, inst, "shelved_offloaded"))
+		g.noise(unshelvedAt.Add(-stepLead), "compute.instance.unshelve.start", computePublisher(inst),
+			inst.id, p, instanceShelvePayload(p, inst, "shelved_offloaded"))
 		g.emit(unshelvedAt, "compute.instance.unshelve.end", computePublisher(inst), inst.id, p,
 			instanceShelvePayload(p, inst, "active"))
 	}
@@ -660,8 +682,7 @@ func (g *generator) deleteFirstInstance(p *project) {
 
 	g.emit(inst.deletedAt.Add(-releaseLead), "floatingip.delete.end", networkPublisher,
 		inst.fip.id, p, floatingIPDeletePayload(inst.fip))
-	g.emit(inst.deletedAt, "compute.instance.delete.end", computePublisher(inst), inst.id, p,
-		instanceDeletePayload(p, inst, inst.deletedAt))
+	g.destroyInstance(p, inst, inst.deletedAt)
 
 	for i, vol := range inst.volumes {
 		deletedAt := inst.deletedAt.Add(volumeDeleteLead + time.Duration(i)*volumeDeleteGap)

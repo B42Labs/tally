@@ -73,10 +73,8 @@ func (g *generator) runner(t time.Time) {
 		createdAt: t,
 	}
 
-	g.emit(t, "compute.instance.create.end", computePublisher(inst), inst.id, tenant,
-		instanceCreatePayload(tenant, inst, g.cloud))
+	g.createInstance(tenant, inst, tenant.network, t)
 
 	deletedAt := t.Add(span(g.shape, 3*time.Minute, 40*time.Minute))
-	g.emit(deletedAt, "compute.instance.delete.end", computePublisher(inst), inst.id, tenant,
-		instanceDeletePayload(tenant, inst, deletedAt))
+	g.destroyInstance(tenant, inst, deletedAt)
 }
