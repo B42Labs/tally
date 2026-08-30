@@ -18,11 +18,13 @@ const collectorQueue = "tally-notifications"
 
 // ServiceExchanges are the exchanges the simulator publishes notifications on,
 // one per service, and the ones Connect declares. The collector's default
-// TALLY_OSC_EXCHANGES lists the first four, and a deployment that runs octavia
-// lists the fifth itself (docs/openstack-collector.md, "Exchanges and topics"),
-// so a collector left at its default receives the month without its load
-// balancers.
-var ServiceExchanges = []string{"nova", "cinder", "neutron", "glance", "octavia"}
+// TALLY_OSC_EXCHANGES lists the first four, and a deployment lists the other
+// four itself (docs/openstack-collector.md, "Exchanges and topics"), so a
+// collector left at its default receives the month without its load balancers
+// and without the keystone, designate, and barbican notifications.
+var ServiceExchanges = []string{
+	"nova", "cinder", "neutron", "glance", "octavia", "keystone", "designate", "barbican",
+}
 
 // probeInterval is how long AwaitConsumer waits between two looks at the
 // collector's queue. It is short enough that a collector started a moment later

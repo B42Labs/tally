@@ -50,11 +50,14 @@ services:
         condition: service_healthy
     environment:
       TALLY_OSC_AMQP_URL: amqp://guest:guest@rabbitmq:5672/
-      # The simulator publishes the shoots' load balancers on octavia. A topic
-      # exchange copies a message only to the queues bound to it, so a collector
-      # left at its default, the four without octavia, receives no load balancer
-      # from this stack and shows no `octavia.` series in any counter.
-      TALLY_OSC_EXCHANGES: nova,neutron,cinder,glance,octavia
+      # The simulator publishes on four exchanges the collector's default leaves
+      # out: octavia carries the shoots' load balancers, keystone the tenant and
+      # authentication records, designate the zones and record sets, and
+      # barbican the certificate audit records. A topic exchange copies a
+      # message only to the queues bound to it, so a collector left at its
+      # default of four sees none of them in any counter, neither as an event
+      # nor as a skip.
+      TALLY_OSC_EXCHANGES: nova,neutron,cinder,glance,octavia,keystone,designate,barbican
       TALLY_OSC_CLOUD: ${TALLY_SIM_CLOUD}
       TALLY_OSC_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:8443
       TALLY_OSC_TOKEN: ${TALLY_OSC_TOKEN}

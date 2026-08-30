@@ -29,9 +29,10 @@ type Transition struct {
 	// "compute.instance.create.end".
 	EventType string
 	// Exchange is the notification exchange the type belongs on. A deployment
-	// gives each service its own. The collector's default binds nova, neutron,
-	// cinder, and glance, and a deployment running octavia lists the fifth
-	// itself.
+	// gives each service its own, and a month uses eight: nova, cinder,
+	// neutron, glance, octavia, keystone, designate, and barbican. The
+	// collector's default binds nova, neutron, cinder, and glance, and a
+	// deployment lists the other four itself.
 	Exchange string
 	// Billable reports whether the collector's mapping records an event for this
 	// notification. It is false on the image.create that precedes an upload,
@@ -105,23 +106,38 @@ const (
 	workloadCI       = "ci"
 )
 
-// exchangeFor names the exchange a type is published on. The five are the
-// service exchanges of nova, cinder, neutron, glance, and octavia. A type
-// outside them is one this package does not generate, and it is reported as the
-// empty exchange rather than guessed at, because a wrong exchange is a
-// notification no bound queue receives.
+// exchangeFor names the exchange a type is published on. The eight are the
+// service exchanges of nova, cinder, neutron, glance, octavia, keystone,
+// designate, and barbican. A type outside them is one this package does not
+// generate, and it is reported as the empty exchange rather than guessed at,
+// because a wrong exchange is a notification no bound queue receives.
 func exchangeFor(eventType string) string {
 	switch {
-	case strings.HasPrefix(eventType, "compute."):
+	case strings.HasPrefix(eventType, "compute."),
+		strings.HasPrefix(eventType, "scheduler."),
+		strings.HasPrefix(eventType, "keypair."):
 		return "nova"
 	case strings.HasPrefix(eventType, "volume."):
 		return "cinder"
-	case strings.HasPrefix(eventType, "floatingip."):
+	case strings.HasPrefix(eventType, "floatingip."),
+		strings.HasPrefix(eventType, "network."),
+		strings.HasPrefix(eventType, "subnet."),
+		strings.HasPrefix(eventType, "router."),
+		strings.HasPrefix(eventType, "port."),
+		// Without the trailing dot, so that the one prefix covers both
+		// security_group. and security_group_rule.
+		strings.HasPrefix(eventType, "security_group"):
 		return "neutron"
 	case strings.HasPrefix(eventType, "image."):
 		return "glance"
 	case strings.HasPrefix(eventType, "octavia."):
 		return "octavia"
+	case strings.HasPrefix(eventType, "identity."):
+		return "keystone"
+	case strings.HasPrefix(eventType, "dns."):
+		return "designate"
+	case strings.HasPrefix(eventType, "audit."):
+		return "barbican"
 	default:
 		return ""
 	}
