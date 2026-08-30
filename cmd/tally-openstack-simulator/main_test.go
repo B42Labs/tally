@@ -2,15 +2,21 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/core/money"
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
@@ -69,7 +75,7 @@ func nonBillableNotifications(t *testing.T, seed uint64, month, cloud string) in
 func TestHelpNeedsNoEnvironment(t *testing.T) {
 	blankEnvironment(t)
 
-	// The root and both leaves. Building the tree reads no configuration, so the
+	// The root and every leaf. Building the tree reads no configuration, so the
 	// help of all of them works on a machine that has none.
 	for _, tc := range []struct {
 		name string
@@ -78,6 +84,7 @@ func TestHelpNeedsNoEnvironment(t *testing.T) {
 		{"tally-openstack-simulator", nil},
 		{"run", []string{"run"}},
 		{"replay", []string{"replay"}},
+		{"compare", []string{"compare"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, err := runCLI(t, append(tc.path, "--help")...)
@@ -399,6 +406,180 @@ func TestReplayRefusesBadInput(t *testing.T) {
 	})
 }
 
+// testModel prices three of the five resource types a month holds and leaves
+// the other two unpriced, the way the shipped models do. It is the same
+// fixture the simulator package's own comparison tests read, repeated here
+// because a test binary reaches no other package's test files.
+const testModel = `
+version: "test"
+valid_from: "2026-01-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    instance:
+      dimensions:
+        - metric: "vcpus"
+          type: "time_gauge"
+          price_per_unit_hour: "0.02"
+        - metric: "ram_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+        - metric: "disk_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.001"
+        - metric: "egress_gb"
+          type: "counter"
+          price_per_unit: "0.09"
+    volume:
+      dimensions:
+        - metric: "size_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.0001"
+        - metric: "minutes"
+          type: "time_gauge"
+          price_per_unit_hour: "0.00001"
+    floating_ip:
+      dimensions:
+        - metric: "count"
+          type: "time_gauge"
+          price_per_unit_hour: "0.005"
+`
+
+// The two resource types the cases name: the one the counter dimension belongs
+// to, and the one the case about a lost resource drops from the export.
+const (
+	instanceType = "instance"
+	volumeType   = "volume"
+)
+
+// testRunID is the run every rendered row belongs to. A comparison reads
+// neither the run nor its kind, so one id stands for the whole export.
+const testRunID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+// testEgress is the quantity every counter row carries. No transition of a
+// simulated month meters egress, so no comparison reads the quantity of a
+// counter row.
+const testEgress = "12.3456"
+
+// ratedHeader is the header of the rated.csv tally-engine export --format csv
+// writes. A comparison finds its columns by name, and these are the names the
+// two commands agree on.
+var ratedHeader = []string{
+	"run_id", "kind", "corrects_run_id", "period_from", "period_to",
+	"cloud", "platform", "resource_type", "resource_id", "project_id", "state",
+	"from_ts", "to_ts", "dimension", "quantity", "amount", "currency",
+}
+
+// columnResourceID is where resource_id stands in ratedHeader, which is how
+// the case about a lost resource finds the rows to drop.
+const columnResourceID = 8
+
+// timeGauges are the time gauge dimensions testModel prices each resource type
+// by. A type the map does not hold is one the model leaves unpriced, so no row
+// of the export is written for its resources and no comparison examines them.
+var timeGauges = map[string][]string{
+	instanceType:  {"vcpus", "ram_gb", "disk_gb"},
+	volumeType:    {"size_gb", "minutes"},
+	"floating_ip": {"count"},
+}
+
+func TestCompareRequiresItsFlags(t *testing.T) {
+	blankEnvironment(t)
+
+	// Cobra names every missing flag at once, so each case checks the one it is
+	// about rather than the whole message.
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"nothing to compare", nil, `"oracle"`},
+		{"an oracle alone", []string{"--oracle", "x"}, `"export"`},
+		{"an oracle and an export", []string{"--oracle", "x", "--export", "y"}, `"pricing"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, err := runCLI(t, append([]string{"compare"}, tc.args...)...)
+			if err == nil {
+				t.Fatalf("compare error = nil, want the missing flag reported (stderr %q)", stderr)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("compare error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompareMatchesAndDiffers runs the comparison over an export rendered
+// from the oracle itself. Such an export is what an engine that billed the
+// month exactly as the generator built it would write, so the cases hold the
+// command against a month it must pass and against one it must fail.
+func TestCompareMatchesAndDiffers(t *testing.T) {
+	useCloud(t)
+
+	dir := t.TempDir()
+	if _, stderr, err := runCLI(t,
+		"run", "--period", endedMonth, "--seed", "1", "--out", dir); err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+	oraclePath := filepath.Join(dir, "oracle.json")
+	oracle, err := simulator.ReadOracle(oraclePath)
+	if err != nil {
+		t.Fatalf("ReadOracle() error = %v, want nil", err)
+	}
+	model := writeFile(t, t.TempDir(), "pricing.yaml", testModel)
+	rows := ratedOf(t, oracle)
+
+	t.Run("an export that bills the month as the oracle states it", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "compare",
+			"--oracle", oraclePath, "--export", writeRated(t, rows), "--pricing", model)
+		if err != nil {
+			t.Fatalf("compare error = %v, want nil (stderr %q)", err, stderr)
+		}
+		want := fmt.Sprintf("the export matches the oracle over %d resources", pricedResources(oracle))
+		if last := lastLine(stdout); last != want {
+			t.Errorf("last line = %q, want %q (stdout %q)", last, want, stdout)
+		}
+	})
+
+	t.Run("an export a volume never reached", func(t *testing.T) {
+		id := firstResourceID(t, oracle, volumeType)
+		kept := make([][]string, 0, len(rows))
+		for _, row := range rows {
+			if row[columnResourceID] != id {
+				kept = append(kept, row)
+			}
+		}
+
+		stdout, _, err := runCLI(t, "compare",
+			"--oracle", oraclePath, "--export", writeRated(t, kept), "--pricing", model)
+		if err == nil {
+			t.Fatalf("compare error = nil, want the missing volume reported (stdout %q)", stdout)
+		}
+		if want := "1 resources differ from the oracle"; err.Error() != want {
+			t.Errorf("compare error = %q, want %q", err, want)
+		}
+		want := fmt.Sprintf("%s %s: missing from the export", volumeType, id)
+		if !strings.Contains(stdout, want+"\n") {
+			t.Errorf("stdout = %q, want a line %q", stdout, want)
+		}
+	})
+
+	t.Run("an export directory holding no rated.csv", func(t *testing.T) {
+		_, stderr, err := runCLI(t, "compare",
+			"--oracle", oraclePath, "--export", t.TempDir(), "--pricing", model)
+		if err == nil {
+			t.Fatalf("compare error = nil, want the missing rated.csv reported (stderr %q)", stderr)
+		}
+		if want := "rated.csv"; !strings.Contains(err.Error(), want) {
+			t.Errorf("compare error = %q, want it to contain %q", err, want)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("compare error = %v, want it to wrap fs.ErrNotExist", err)
+		}
+	})
+}
+
 // TestEnvExampleListsEveryVariable keeps the example file complete: a variable
 // the CLI reads but nobody documents is one an operator finds out about from a
 // failure.
@@ -486,4 +667,131 @@ func readLines(t *testing.T, path string) ([]byte, [][]byte) {
 		t.Fatalf("%s is empty", path)
 	}
 	return content, bytes.Split(bytes.TrimSuffix(content, []byte("\n")), []byte("\n"))
+}
+
+// ratedOf renders the rows an export holds for a month the engine billed
+// without a fault: the header, and one row per resource of a priced type,
+// interval and dimension of that type. A time gauge carries the quantity the
+// oracle states, and the counter one nothing reads.
+func ratedOf(t *testing.T, oracle simulator.Oracle) [][]string {
+	t.Helper()
+
+	rows := [][]string{ratedHeader}
+	for _, resource := range oracle.Resources {
+		dimensions, priced := timeGauges[resource.ResourceType]
+		if !priced {
+			continue
+		}
+		for _, interval := range resource.Intervals {
+			for _, dimension := range dimensions {
+				rows = append(rows, ratedRow(oracle, resource, interval,
+					dimension, quantityOf(t, dimension, interval)))
+			}
+			if resource.ResourceType == instanceType {
+				rows = append(rows, ratedRow(oracle, resource, interval, "egress_gb", testEgress))
+			}
+		}
+	}
+	return rows
+}
+
+// ratedRow renders one row of rated.csv, in the order ratedHeader names the
+// columns.
+func ratedRow(oracle simulator.Oracle, resource simulator.OracleResource,
+	interval simulator.OracleInterval, dimension, quantity string,
+) []string {
+	return []string{
+		testRunID, "regular", "",
+		instantCell(oracle.PeriodFrom), instantCell(oracle.PeriodTo),
+		oracle.Cloud, "openstack", resource.ResourceType, resource.ResourceID,
+		interval.ProjectID, interval.State,
+		instantCell(interval.From), instantCell(interval.To), dimension, quantity,
+		"0.00", "EUR",
+	}
+}
+
+// quantityOf is the quantity a rated row carries for one time gauge dimension
+// of an interval: one for the dimension that prices a resource by its
+// existence, the minutes the interval lasts, and otherwise the size member the
+// dimension is named after, at the four places an export prints a quantity to.
+// A dimension the interval states no number for fails the case rather than
+// being read as a difference.
+func quantityOf(t *testing.T, dimension string, interval simulator.OracleInterval) string {
+	t.Helper()
+
+	switch dimension {
+	case "count":
+		return "1.0000"
+	case "minutes":
+		return money.Minutes(int64(interval.To.Sub(interval.From) / time.Second)).StringFixed(4)
+	}
+	number, ok := interval.Size[dimension].(json.Number)
+	if !ok {
+		t.Fatalf("the interval carries %s = %v, want the json.Number the dimension is priced by",
+			dimension, interval.Size[dimension])
+	}
+	// From the text the oracle carries rather than through a float: a quantity
+	// that went through one is no longer the number the notification stated.
+	value, err := decimal.NewFromString(number.String())
+	if err != nil {
+		t.Fatalf("NewFromString(%q) error = %v, want nil", number.String(), err)
+	}
+	return value.StringFixed(4)
+}
+
+// instantCell renders an instant the way an export writes one.
+func instantCell(instant time.Time) string {
+	return instant.UTC().Format(time.RFC3339Nano)
+}
+
+// writeRated writes the rows of an export into a rated.csv of its own and
+// returns the directory holding it, which is what --export names.
+func writeRated(t *testing.T, rows [][]string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rated.csv")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("creating %s: %v", path, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	writer := csv.NewWriter(file)
+	if err := writer.WriteAll(rows); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return dir
+}
+
+// pricedResources counts the resources a comparison examines: the ones
+// testModel prices, and no others.
+func pricedResources(oracle simulator.Oracle) int {
+	count := 0
+	for _, resource := range oracle.Resources {
+		if _, priced := timeGauges[resource.ResourceType]; priced {
+			count++
+		}
+	}
+	return count
+}
+
+// firstResourceID is the id of the oracle's first resource of that type.
+func firstResourceID(t *testing.T, oracle simulator.Oracle, resourceType string) string {
+	t.Helper()
+
+	for _, resource := range oracle.Resources {
+		if resource.ResourceType == resourceType {
+			return resource.ResourceID
+		}
+	}
+	t.Fatalf("the oracle holds no %s, and the case needs one", resourceType)
+	return ""
+}
+
+// lastLine is the last line of what a command printed, which is the verdict of
+// a report.
+func lastLine(stdout string) string {
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	return lines[len(lines)-1]
 }

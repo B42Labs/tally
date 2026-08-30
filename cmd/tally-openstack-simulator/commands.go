@@ -142,6 +142,46 @@ func newReplayCmd() *cobra.Command {
 	return cmd
 }
 
+// newCompareCmd builds the compare subcommand.
+func newCompareCmd() *cobra.Command {
+	var opts simulator.CompareOptions
+
+	cmd := &cobra.Command{
+		Use:   "compare",
+		Short: "Compare an engine export of the month against the oracle a run wrote",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Neither the configuration nor a logger: the comparison reads the three
+			// files its flags name and nothing else, so it needs no environment and
+			// no broker.
+			report, err := simulator.Compare(opts)
+			if err != nil {
+				return err
+			}
+			if err := write(cmd.OutOrStdout(), report.Lines()...); err != nil {
+				return err
+			}
+			// A month that differs ends the process with exit status 1, through the
+			// os.Exit(1) main gives every error, and cobra prints the count to
+			// stderr under the lines. A drill that runs unattended then fails where
+			// it ran rather than in whoever reads the output later.
+			if len(report.Differences) > 0 {
+				return fmt.Errorf("%d resources differ from the oracle", len(report.Differences))
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.Oracle, "oracle", "", "path of an oracle.json written by run --out")
+	cmd.Flags().StringVar(&opts.Export, "export", "",
+		"directory tally-engine export --format csv --out wrote; rated.csv is read from it")
+	cmd.Flags().StringVar(&opts.Pricing, "pricing", "", "pricing model YAML the run rated with")
+	_ = cmd.MarkFlagRequired("oracle")
+	_ = cmd.MarkFlagRequired("export")
+	_ = cmd.MarkFlagRequired("pricing")
+	return cmd
+}
+
 // newLogger builds the logger both subcommands log through and makes it the
 // process default. The default is what the control endpoint writes its factor
 // changes through, so leaving it unset would put those lines on stderr,
@@ -177,4 +217,16 @@ func connect(cfg simulator.Config, allowRemoteBroker bool, logger *slog.Logger) 
 			logger.Error("closing the broker connection failed", "error", err)
 		}
 	}, nil
+}
+
+// write puts every line on w. A failed write is reported rather than dropped:
+// output the operator's terminal never received must not leave the process with
+// a zero exit status.
+func write(w io.Writer, lines ...string) error {
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return fmt.Errorf("writing the output: %w", err)
+		}
+	}
+	return nil
 }

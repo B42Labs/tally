@@ -3,10 +3,14 @@
 //
 // The run subcommand generates the month from --seed and --period and publishes
 // it onto the broker TALLY_SIM_AMQP_URL names, at --factor virtual seconds per
-// wall second. With --out it writes the month to notifications.jsonl and
-// events.jsonl instead, and with both it does both. The replay subcommand
-// publishes a notifications.jsonl an earlier run wrote, which puts the same
-// month on a bus again without the generator behind it.
+// wall second. With --out it writes the month to notifications.jsonl,
+// events.jsonl and oracle.json instead, and with both it does both. The replay
+// subcommand publishes a notifications.jsonl an earlier run wrote, which puts
+// the same month on a bus again without the generator behind it. The compare
+// subcommand reads the oracle a run wrote, an engine export of the month and
+// the pricing model the run rated with, and lists every resource whose metered
+// intervals or quantities differ from the oracle; it exits 1 when anything
+// differs.
 //
 // The control endpoint on TALLY_SIM_HTTP_PORT changes the factor while a run
 // publishes, so a month that is going out too slowly is sped up without being
@@ -55,6 +59,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newRunCmd(),
 		newReplayCmd(),
+		newCompareCmd(),
 	)
 	return root
 }
