@@ -37,7 +37,7 @@ const collectorTopic = "notifications.info"
 func generateMonth(t *testing.T, seed uint64, from time.Time, cloud string) Schedule {
 	t.Helper()
 
-	month, err := GenerateMonth(seed, from, from.AddDate(0, 1, 0), cloud)
+	month, err := GenerateMonth(seed, from, from.AddDate(0, 1, 0), cloud, Faults{})
 	if err != nil {
 		t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed, from.Format(time.RFC3339), cloud, err)
 	}
@@ -358,7 +358,7 @@ func TestGenerateRefusesANonMonth(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := GenerateMonth(1, c.from, c.to, testCloud)
+			_, err := GenerateMonth(1, c.from, c.to, testCloud, Faults{})
 			if err == nil {
 				t.Fatalf("GenerateMonth(1, %s, %s, %q) error = nil, want a refusal",
 					c.from.Format(time.RFC3339), c.to.Format(time.RFC3339), testCloud)

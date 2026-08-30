@@ -58,7 +58,7 @@ func nonBillableNotifications(t *testing.T, seed uint64, month, cloud string) in
 	if err != nil {
 		t.Fatalf("period.Parse(%q) error = %v, want nil", month, err)
 	}
-	generated, err := simulator.GenerateMonth(seed, from, to, cloud)
+	generated, err := simulator.GenerateMonth(seed, from, to, cloud, simulator.Faults{})
 	if err != nil {
 		t.Fatalf("GenerateMonth() error = %v, want nil", err)
 	}
@@ -231,6 +231,10 @@ func TestRunRefusesBadInput(t *testing.T) {
 	notADirectory := writeFile(t, t.TempDir(), "notifications.jsonl", "")
 	urlFile := writeFile(t, t.TempDir(), "amqp-url", closedBroker)
 	emptyURLFile := writeFile(t, t.TempDir(), "empty-amqp-url", "")
+	// The output directory of the case about an unknown fault switch. It is held
+	// outside the case so the body can read it back: a refused switch has to end
+	// the run before the month is written.
+	faultOut := t.TempDir()
 
 	for _, tc := range []struct {
 		name string
@@ -247,6 +251,9 @@ func TestRunRefusesBadInput(t *testing.T) {
 		// absent is a fragment the error must not carry, which is how the case
 		// about a secret checks that the secret stayed out of it.
 		absent string
+		// emptyDir is a directory the run must have written nothing into, which
+		// is how a case checks that it ended before it generated the month.
+		emptyDir string
 	}{
 		{
 			name: "a period that is not a month",
@@ -329,6 +336,21 @@ func TestRunRefusesBadInput(t *testing.T) {
 			args:     []string{"--period", endedMonth, "--out", filepath.Join(notADirectory, "sub")},
 			contains: fmt.Sprintf("creating %s:", filepath.Join(notADirectory, "sub")),
 		},
+		{
+			name: "a fault switch nobody named that way",
+			args: []string{"--period", endedMonth, "--faults", "bogus", "--out", faultOut},
+			want: `--faults: unknown fault switch "bogus"; the switches are ` +
+				`pre-existing, missing-create, duplicates, reordering, refused-shapes, held-back`,
+			emptyDir: faultOut,
+		},
+		{
+			name: "two fault switches that exclude each other",
+			args: []string{
+				"--period", endedMonth, "--faults", "pre-existing,missing-create",
+				"--out", t.TempDir(),
+			},
+			want: "--faults: pre-existing and missing-create exclude each other",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useCloud(t)
@@ -349,7 +371,37 @@ func TestRunRefusesBadInput(t *testing.T) {
 			if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
 				t.Errorf("run error = %q, want it to keep %q out", err, tc.absent)
 			}
+			if tc.emptyDir != "" {
+				entries, err := os.ReadDir(tc.emptyDir)
+				if err != nil {
+					t.Fatalf("reading %s: %v", tc.emptyDir, err)
+				}
+				if len(entries) > 0 {
+					t.Errorf("%s holds %d entries, want the run to have written nothing", tc.emptyDir, len(entries))
+				}
+			}
 		})
+	}
+}
+
+// TestRunHelpListsTheFaultSwitches holds the help of run to the six switches.
+// A switch --faults takes but the help does not name is one nobody reaches
+// without reading the source.
+func TestRunHelpListsTheFaultSwitches(t *testing.T) {
+	blankEnvironment(t)
+
+	stdout, stderr, err := runCLI(t, "run", "--help")
+	if err != nil {
+		t.Fatalf("run --help error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "--faults"; !strings.Contains(stdout, want) {
+		t.Fatalf("stdout = %q, want the flag %q in it", stdout, want)
+	}
+	for _, name := range simulator.FaultNames {
+		if !strings.Contains(stdout, name) {
+			t.Errorf("run --help does not name the fault switch %q, want all of %v listed",
+				name, simulator.FaultNames)
+		}
 	}
 }
 
