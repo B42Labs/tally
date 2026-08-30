@@ -44,6 +44,11 @@ type Transition struct {
 	// tells the noise apart from the one skipped billable type when the message
 	// ids are drawn, so the catalogue takes its ids from its own stream.
 	noise bool
+	// truncated marks a transition that is rendered as an envelope whose
+	// oslo.message is cut in half, so the collector's ParseEnvelope refuses it.
+	// Nothing on the wire names it: it is set on the truncated twin of the
+	// refused-shapes switch (faults.go) and read by Render alone.
+	truncated bool
 	// Workload names which of the three workloads emitted the transition, one of
 	// the workload constants. Nothing on the wire carries it: it is what a test
 	// and the later reconciliation oracle tell the workloads of one month apart
@@ -176,8 +181,18 @@ const shapeStream = 1
 // Month is one generated month: the transitions the simulated cloud publishes
 // and the oracle of what they were meant to mean.
 type Month struct {
+	// Schedule is what the simulated cloud did: every transition once, sorted by
+	// its instant. It is what the oracle and WriteEvents are read from.
 	Schedule Schedule
-	Oracle   Oracle
+	// Stream is the notifications in publication order, which is what
+	// notifications.jsonl holds and what the bus carries. The switches of
+	// faults.go move, repeat, and add to it. With every switch off it is the
+	// schedule.
+	Stream Schedule
+	// Held holds the transitions the held-back switch keeps off the bus until a
+	// run releases them, in instant order. It is empty unless that switch is on.
+	Held   Schedule
+	Oracle Oracle
 }
 
 // GenerateMonth builds one month of the simulated cloud's lifecycle
@@ -258,11 +273,15 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string, faults Faults)
 		g.schedule[i].MessageID = identifiers.nextUUID()
 	}
 
+	// The stream passes run before the oracle is folded, because they record the
+	// resources they touched and the oracle states those per resource.
+	stream, held := applyStreamFaults(g.schedule, seed, faults, g.touched)
+
 	oracle, err := buildOracle(g.facts, seed, cloud, start, start.AddDate(0, 1, 0), faults, g.touched)
 	if err != nil {
 		return Month{}, err
 	}
-	return Month{Schedule: g.schedule, Oracle: oracle}, nil
+	return Month{Schedule: g.schedule, Stream: stream, Held: held, Oracle: oracle}, nil
 }
 
 // identifierSalt mixes the cloud and the billing month into the identifier

@@ -690,3 +690,31 @@ func TestAuditPayloadReportsTheStatusOnTheResponse(t *testing.T) {
 			got, want)
 	}
 }
+
+// TestRenderTruncatesATwinPastTheCollectorsParser covers the one shape the
+// renderer knows about: the truncated twin of the refused-shapes switch
+// (faults.go). The cut runs through the inner message and not through the
+// outer body, so the envelope stays a JSON document and the stream file can
+// carry it, while the collector's second decode fails on the half that is left.
+func TestRenderTruncatesATwinPastTheCollectorsParser(t *testing.T) {
+	original := generateMonth(t, 1, july2026, testCloud).Billable()[0]
+	twin := truncatedTwin(original, "7c8d9e0f-1a2b-4c3d-8e4f-5a6b7c8d9e0f")
+
+	body := render(t, twin)
+
+	if !json.Valid(body) {
+		t.Errorf("the truncated twin of %s renders %s, want a JSON document WriteStream can carry as a line",
+			original.EventType, body)
+	}
+	if _, err := openstack.ParseEnvelope(body); err == nil {
+		t.Errorf("ParseEnvelope of the truncated twin of %s error = nil, want the collector to refuse it",
+			original.EventType)
+	}
+
+	untruncated := twin
+	untruncated.truncated = false
+	if whole := render(t, untruncated); len(body) >= len(whole) {
+		t.Errorf("the truncated twin of %s renders %d bytes and the twin itself %d, want the cut to "+
+			"shorten it", original.EventType, len(body), len(whole))
+	}
+}

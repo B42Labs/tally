@@ -74,6 +74,16 @@ func Render(t Transition) ([]byte, error) {
 		return nil, fmt.Errorf("rendering %s: %w", t.EventType, err)
 	}
 
+	// The truncated twin of the refused-shapes switch (faults.go) cuts the inner
+	// message and not the outer body, so the envelope stays a JSON document:
+	// WriteStream carries every line as json.RawMessage, which cannot hold a
+	// body that is not one. The collector's second decode, of oslo.message,
+	// fails on the half that is left, and handle counts the delivery as
+	// unparseable.
+	if t.truncated {
+		inner = inner[:len(inner)/2]
+	}
+
 	body, err := json.Marshal(map[string]string{
 		"oslo.version": "2.0",
 		"oslo.message": string(inner),
