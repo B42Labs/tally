@@ -57,28 +57,57 @@ func sampleFile(eventType string) string {
 	return sampleName.Replace(eventType) + ".json"
 }
 
-// memberShape is a payload's structure as its sorted member names, with a
-// nested object's members named under their parent. Neutron nests its resource
-// one level down, so comparing the top level alone would let a floating IP
-// payload pass with nothing in it.
+// memberShape is a payload's structure as its sorted member names, with the
+// members of a nested object, and of the objects an array holds, named under
+// their parent. Neutron nests its resource one level down, so comparing the top
+// level alone would let a floating IP payload pass with nothing in it, and
+// cinder, neutron and octavia carry records inside arrays that nothing else
+// would name.
 func memberShape(payload map[string]any) []string {
 	names := make([]string, 0, len(payload))
 	for name, value := range payload {
-		// An empty object is a member with nothing under it, so flattening it
-		// would leave it out of the shape. Naming it is what lets a member test
-		// catch a builder that drops one: the noise payloads carry an empty
-		// bandwidth and an empty image_meta.
-		nested, ok := value.(map[string]any)
-		if !ok || len(nested) == 0 {
-			names = append(names, name)
-			continue
-		}
-		for _, inner := range memberShape(nested) {
-			names = append(names, name+"."+inner)
+		for _, suffix := range memberSuffixes(value) {
+			names = append(names, name+suffix)
 		}
 	}
 	slices.Sort(names)
-	return names
+	// Two records of one array have the same members, and each of them is worth
+	// naming once.
+	return slices.Compact(names)
+}
+
+// memberSuffixes are what a value adds to the name of the member holding it:
+// the empty string for a scalar, and one ".<inner>" per member underneath an
+// object or underneath the objects of an array.
+//
+// An empty object, an empty array, and an array of scalars have nothing to name
+// underneath them, so they add the empty string and the member stays in the
+// shape under its own name. Leaving them out would let a builder drop one
+// unnoticed: the payloads carry an empty bandwidth, an empty image_meta, an
+// empty attachment list, and arrays of plain ids.
+func memberSuffixes(value any) []string {
+	var inner []string
+	switch typed := value.(type) {
+	case map[string]any:
+		inner = memberShape(typed)
+	case []any:
+		for _, element := range typed {
+			nested, ok := element.(map[string]any)
+			if !ok {
+				continue
+			}
+			inner = append(inner, memberShape(nested)...)
+		}
+	}
+	if len(inner) == 0 {
+		return []string{""}
+	}
+
+	suffixes := make([]string, 0, len(inner))
+	for _, name := range inner {
+		suffixes = append(suffixes, "."+name)
+	}
+	return suffixes
 }
 
 // missingFrom returns the names of want that names does not carry.
@@ -144,6 +173,261 @@ func TestRenderedPayloadsCarryTheRecordedMembers(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Errorf("%s payload members = %v, want %v (rendered and not recorded: %v; recorded and not rendered: %v)",
 				transition.EventType, got, want, missingFrom(want, got), missingFrom(got, want))
+		}
+	}
+}
+
+// The members the payload builders of the billable month render. The catalogue
+// repeats them: nova sends the same server description before a create that it
+// sends with one, and cinder the same volume on an attach that it sends on a
+// resize, so the noise is pinned against these sets rather than against
+// sixty-two lists written out one by one.
+var (
+	createMembers = []string{
+		"availability_zone", "created_at", "disk_gb", "display_name", "ephemeral_gb", "host",
+		"image_ref_url", "instance_flavor_id", "instance_id", "instance_type", "instance_type_id",
+		"launched_at", "memory_mb", "root_gb", "state", "state_description", "tenant_id", "user_id",
+		"vcpus",
+	}
+	powerMembers = []string{
+		"display_name", "host", "instance_id", "instance_type", "memory_mb", "state",
+		"state_description", "tenant_id", "user_id", "vcpus",
+	}
+	shelveMembers = append(slices.Clone(powerMembers), "ephemeral_gb", "root_gb")
+	resizeMembers = []string{
+		"availability_zone", "created_at", "display_name", "ephemeral_gb", "host", "instance_id",
+		"instance_type", "instance_type_id", "launched_at", "memory_mb", "root_gb", "state",
+		"state_description", "tenant_id", "user_id", "vcpus",
+	}
+	volumeCreateMembers = []string{
+		"availability_zone", "created_at", "display_name", "host", "launched_at",
+		"replication_status", "size", "status", "tenant_id", "user_id", "volume_id", "volume_type",
+	}
+	volumeStateMembers = []string{
+		"created_at", "display_name", "host", "size", "status", "tenant_id", "user_id", "volume_id",
+		"volume_type",
+	}
+	imageMembers = []string{
+		"checksum", "container_format", "created_at", "disk_format", "id", "min_disk", "min_ram",
+		"name", "owner", "protected", "size", "status", "updated_at", "virtual_size", "visibility",
+	}
+)
+
+// The members the catalogue adds to those sets, and the ones of the resources
+// no billable notification is sent about. A CADF record is one skeleton: an
+// authentication is the shortest form of it, a barbican request names the call
+// on top of that, and the response the status of the call on top of that again.
+var (
+	updateMembers = append(slices.Clone(powerMembers),
+		"audit_period_beginning", "audit_period_ending", "bandwidth", "new_task_state", "old_state",
+		"old_task_state")
+	existsMembers = append(slices.Clone(createMembers),
+		"audit_period_beginning", "audit_period_ending", "bandwidth", "image_meta")
+	// The attachment list of a volume connected to nothing is empty, which is
+	// the member with nothing under it, and the one of a volume a server holds
+	// carries the record cinder wrote. The two halves of an attach and of a
+	// detach are one of each.
+	attachmentMembers = append(slices.Clone(volumeStateMembers), "volume_attachment")
+	attachedMembers   = append(slices.Clone(volumeStateMembers),
+		"volume_attachment.attach_mode", "volume_attachment.attach_status",
+		"volume_attachment.attach_time", "volume_attachment.attached_host",
+		"volume_attachment.id", "volume_attachment.instance_uuid",
+		"volume_attachment.mountpoint", "volume_attachment.volume_id")
+	schedulerMembers = []string{
+		"request_spec.image.id",
+		"request_spec.instance_properties.availability_zone",
+		"request_spec.instance_properties.display_name",
+		"request_spec.instance_properties.ephemeral_gb",
+		"request_spec.instance_properties.memory_mb",
+		"request_spec.instance_properties.project_id",
+		"request_spec.instance_properties.root_gb",
+		"request_spec.instance_properties.user_id",
+		"request_spec.instance_properties.uuid",
+		"request_spec.instance_properties.vcpus",
+		"request_spec.instance_type.ephemeral_gb",
+		"request_spec.instance_type.flavorid",
+		"request_spec.instance_type.id",
+		"request_spec.instance_type.memory_mb",
+		"request_spec.instance_type.name",
+		"request_spec.instance_type.root_gb",
+		"request_spec.instance_type.vcpus",
+		"request_spec.num_instances",
+	}
+	keypairMembers = []string{"key_name", "tenant_id", "user_id"}
+	portMembers    = []string{
+		"port.admin_state_up", "port.binding:host_id", "port.binding:vif_type", "port.device_id",
+		"port.device_owner", "port.fixed_ips.ip_address", "port.fixed_ips.subnet_id", "port.id",
+		"port.mac_address", "port.name", "port.network_id", "port.project_id",
+		"port.security_groups", "port.status", "port.tenant_id",
+	}
+	securityGroupRuleMembers = []string{
+		"security_group_rule.description", "security_group_rule.direction",
+		"security_group_rule.ethertype", "security_group_rule.port_range_max",
+		"security_group_rule.port_range_min", "security_group_rule.project_id",
+		"security_group_rule.protocol", "security_group_rule.remote_group_id",
+		"security_group_rule.remote_ip_prefix", "security_group_rule.security_group_id",
+		"security_group_rule.tenant_id",
+	}
+	authenticateMembers = []string{
+		"action", "eventTime", "eventType", "id", "initiator.host.address", "initiator.id",
+		"initiator.project_id", "initiator.typeURI", "observer.id", "observer.typeURI", "outcome",
+		"target.id", "target.typeURI", "typeURI",
+	}
+	auditRequestMembers  = append(slices.Clone(authenticateMembers), "requestPath", "target.addresses.url")
+	auditResponseMembers = append(slices.Clone(auditRequestMembers), "reason.reasonCode", "reason.reasonType")
+	recordSetMembers     = []string{
+		"action", "created_at", "id", "name", "project_id", "records", "status", "ttl", "type",
+		"version", "zone_id", "zone_name",
+	}
+)
+
+// noiseMembers is the payload of every type of the catalogue, by the members it
+// carries. The collector maps none of these types, so none of them was ever
+// recorded from a real deployment and
+// TestRenderedPayloadsCarryTheRecordedMembers has no fixture to hold them
+// against. This table is that fixture: a builder that drops a member or renames
+// one changes a payload nothing else in the package reads.
+var noiseMembers = map[string][]string{
+	"scheduler.select_destinations.start":   schedulerMembers,
+	"scheduler.select_destinations.end":     schedulerMembers,
+	"compute.instance.create.start":         createMembers,
+	"compute.instance.update":               updateMembers,
+	"compute.instance.exists":               existsMembers,
+	"compute.instance.delete.start":         shelveMembers,
+	"compute.instance.shutdown.start":       shelveMembers,
+	"compute.instance.shutdown.end":         shelveMembers,
+	"compute.instance.shelve_offload.start": shelveMembers,
+	"compute.instance.unshelve.start":       shelveMembers,
+	"compute.instance.power_off.start":      powerMembers,
+	"compute.instance.power_on.start":       powerMembers,
+	"compute.instance.resize.start":         resizeMembers,
+	"compute.instance.finish_resize.start":  resizeMembers,
+	"keypair.import.start":                  keypairMembers,
+	"keypair.import.end":                    keypairMembers,
+	"keypair.delete.start":                  keypairMembers,
+	"keypair.delete.end":                    keypairMembers,
+
+	"volume.create.start":          volumeCreateMembers,
+	"volume.delete.start":          volumeStateMembers,
+	"volume.resize.start":          volumeStateMembers,
+	"volume.transfer.accept.start": volumeStateMembers,
+	"volume.attach.start":          attachmentMembers,
+	"volume.attach.end":            attachedMembers,
+	"volume.detach.start":          attachedMembers,
+	"volume.detach.end":            attachmentMembers,
+
+	"network.create.start": {"network.admin_state_up", "network.name"},
+	"network.create.end": {
+		"network.admin_state_up", "network.description", "network.id", "network.mtu",
+		"network.name", "network.project_id", "network.router:external", "network.shared",
+		"network.status", "network.subnets", "network.tenant_id",
+	},
+	"network.delete.start": {"network_id"},
+	"network.delete.end":   {"network_id"},
+	"subnet.create.start": {
+		"subnet.cidr", "subnet.ip_version", "subnet.name", "subnet.network_id",
+	},
+	"subnet.create.end": {
+		"subnet.allocation_pools.end", "subnet.allocation_pools.start", "subnet.cidr",
+		"subnet.dns_nameservers", "subnet.enable_dhcp", "subnet.gateway_ip", "subnet.id",
+		"subnet.ip_version", "subnet.name", "subnet.network_id", "subnet.project_id",
+		"subnet.tenant_id",
+	},
+	"subnet.delete.start": {"subnet_id"},
+	"subnet.delete.end":   {"subnet_id"},
+	"router.create.start": {
+		"router.admin_state_up", "router.external_gateway_info.network_id", "router.name",
+	},
+	"router.create.end": {
+		"router.admin_state_up", "router.external_gateway_info.enable_snat",
+		"router.external_gateway_info.network_id", "router.id", "router.name", "router.project_id",
+		"router.status", "router.tenant_id",
+	},
+	"router.interface.create": {
+		"router_interface.id", "router_interface.network_id", "router_interface.port_id",
+		"router_interface.subnet_id", "router_interface.subnet_ids", "router_interface.tenant_id",
+	},
+	"router.interface.delete": {
+		"router_interface.id", "router_interface.network_id", "router_interface.port_id",
+		"router_interface.subnet_id", "router_interface.subnet_ids", "router_interface.tenant_id",
+	},
+	"router.delete.start":         {"router_id"},
+	"router.delete.end":           {"router_id"},
+	"security_group.create.start": {"security_group.description", "security_group.name"},
+	"security_group.create.end": {
+		"security_group.description", "security_group.id", "security_group.name",
+		"security_group.project_id", "security_group.security_group_rules",
+		"security_group.tenant_id",
+	},
+	"security_group.delete.start":      {"security_group_id"},
+	"security_group.delete.end":        {"security_group_id"},
+	"security_group_rule.create.start": securityGroupRuleMembers,
+	"security_group_rule.create.end": append(slices.Clone(securityGroupRuleMembers),
+		"security_group_rule.id"),
+	"port.create.start": {
+		"port.admin_state_up", "port.device_id", "port.device_owner", "port.name",
+		"port.network_id", "port.project_id", "port.tenant_id",
+	},
+	"port.create.end":   portMembers,
+	"port.update.start": {"port.binding:host_id", "port.device_id", "port.device_owner"},
+	"port.update.end":   portMembers,
+	"port.delete.start": {"port_id"},
+	"port.delete.end":   {"port_id"},
+
+	"image.prepare":  imageMembers,
+	"image.activate": imageMembers,
+
+	"identity.project.created": {"resource_info"},
+	"identity.user.created":    {"resource_info"},
+	"identity.authenticate":    authenticateMembers,
+
+	"dns.zone.create": {
+		"action", "created_at", "email", "id", "name", "project_id", "serial", "status", "ttl",
+		"type", "version",
+	},
+	"dns.recordset.create": recordSetMembers,
+	"dns.recordset.delete": recordSetMembers,
+
+	"audit.http.request":  auditRequestMembers,
+	"audit.http.response": auditResponseMembers,
+}
+
+// TestNoisePayloadsCarryTheirMembers is what
+// TestRenderedPayloadsCarryTheRecordedMembers is for the billable month: the
+// payload of every type of the catalogue, held against the members it is to
+// carry. The two together cover every type a month renders.
+func TestNoisePayloadsCarryTheirMembers(t *testing.T) {
+	if len(noiseMembers) != len(noiseTypes) {
+		t.Errorf("the table pins %d payloads and the catalogue names %d types, want one per type",
+			len(noiseMembers), len(noiseTypes))
+	}
+	for _, eventType := range noiseTypes {
+		if _, ok := noiseMembers[eventType]; !ok {
+			t.Fatalf("the catalogue type %s has no pinned members, want every type of it in the "+
+				"table: a payload nothing pins is one a builder may quietly drop a member from",
+				eventType)
+		}
+	}
+
+	seen := make(map[string]bool, len(noiseTypes))
+	for _, transition := range generateMonth(t, 1, july2026, testCloud) {
+		pinned, ok := noiseMembers[transition.EventType]
+		if !ok || seen[transition.EventType] {
+			continue
+		}
+		seen[transition.EventType] = true
+
+		got := memberShape(parse(t, render(t, transition)).Payload)
+		want := slices.Sorted(slices.Values(pinned))
+		if !slices.Equal(got, want) {
+			t.Errorf("%s payload members = %v, want %v (rendered and not pinned: %v; pinned and not rendered: %v)",
+				transition.EventType, got, want, missingFrom(want, got), missingFrom(got, want))
+		}
+	}
+	for _, eventType := range noiseTypes {
+		if !seen[eventType] {
+			t.Errorf("the month renders no %s, want every type of the catalogue: a pinned payload "+
+				"nothing renders is one the table alone agrees with", eventType)
 		}
 	}
 }

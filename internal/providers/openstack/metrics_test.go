@@ -142,7 +142,7 @@ func TestConsumedFoldsEveryEventTypePastTheLimitIntoOneSeries(t *testing.T) {
 	// the number of them the vector may hold is what has to be bounded.
 	m := freshMetrics(t)
 
-	for i := range labelValueLimit {
+	for i := range LabelValueLimit {
 		m.Consumed("compute.instance.type-" + strconv.Itoa(i))
 	}
 	// The first type past the limit, recorded twice so the overflow series can be
@@ -151,8 +151,8 @@ func TestConsumedFoldsEveryEventTypePastTheLimitIntoOneSeries(t *testing.T) {
 	m.Consumed("compute.instance.past-the-limit")
 
 	// The admitted values plus the one bucket the rest share.
-	if got := testutil.CollectAndCount(m.consumed); got != labelValueLimit+1 {
-		t.Errorf("tally_collector_consumed_total has %d series, want %d", got, labelValueLimit+1)
+	if got := testutil.CollectAndCount(m.consumed); got != LabelValueLimit+1 {
+		t.Errorf("tally_collector_consumed_total has %d series, want %d", got, LabelValueLimit+1)
 	}
 	if got := testutil.ToFloat64(m.consumed.WithLabelValues(cardinality.Overflow)); got != 2 {
 		t.Errorf(`tally_collector_consumed_total{event_type=%q} = %v, want the 2 past the limit`,
@@ -166,7 +166,7 @@ func TestConsumedKeepsALongEventTypeOutOfTheSeriesAndOfTheBudget(t *testing.T) {
 	m := freshMetrics(t)
 
 	m.Consumed(strings.Repeat("a", cardinality.ValueMax+1))
-	for i := range labelValueLimit {
+	for i := range LabelValueLimit {
 		m.Consumed("compute.instance.type-" + strconv.Itoa(i))
 	}
 
@@ -175,7 +175,7 @@ func TestConsumedKeepsALongEventTypeOutOfTheSeriesAndOfTheBudget(t *testing.T) {
 			cardinality.Overflow, got)
 	}
 	if got := testutil.ToFloat64(m.consumed.WithLabelValues(
-		"compute.instance.type-" + strconv.Itoa(labelValueLimit-1),
+		"compute.instance.type-" + strconv.Itoa(LabelValueLimit-1),
 	)); got != 1 {
 		t.Error("the long event type consumed a slot, so the last real event type was folded into the overflow bucket")
 	}
@@ -187,7 +187,7 @@ func TestSkippedSharesTheBoundWithConsumed(t *testing.T) {
 	// is spent once rather than per instrument.
 	m := freshMetrics(t)
 
-	for i := range labelValueLimit {
+	for i := range LabelValueLimit {
 		m.Consumed("compute.instance.type-" + strconv.Itoa(i))
 	}
 	m.Skipped("compute.instance.type-0")
@@ -205,7 +205,7 @@ func TestSkippedSharesTheBoundWithConsumed(t *testing.T) {
 func TestLabelValueLimitIsTheCollectorsOwnBound(t *testing.T) {
 	// The reporting registry bounds its labels at 128. This one is fixed at 100
 	// by WP 1.12, and the two are not meant to drift together.
-	if labelValueLimit != 100 {
-		t.Errorf("labelValueLimit = %d, want the 100 the collector is specified with", labelValueLimit)
+	if LabelValueLimit != 100 {
+		t.Errorf("LabelValueLimit = %d, want the 100 the collector is specified with", LabelValueLimit)
 	}
 }
