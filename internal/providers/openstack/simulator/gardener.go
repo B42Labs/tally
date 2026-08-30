@@ -84,7 +84,8 @@ func (g *generator) tenantImage(p *project) {
 	// Every quarter gibibyte from one to four, the way a classic image is sized.
 	img.size = int64(4+g.shape.IntN(13)) * quarterGiB
 
-	g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img))
+	g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img),
+		unbooked)
 	g.uploadImage(p, img, uploadedAt)
 }
 
@@ -184,10 +185,10 @@ func (g *generator) shootDay(s *shoot, d time.Time) {
 		s.awake = true
 	}
 
-	alive := s.createdAt.Before(at(d, officeFrom, 0)) &&
+	fullyAlive := s.createdAt.Before(at(d, officeFrom, 0)) &&
 		(s.deletedAt.IsZero() || !s.deletedAt.Before(at(d, officeTo, 0))) && s.awake
 
-	if workingDay(d) && alive {
+	if workingDay(d) && fullyAlive {
 		t := drawInstant(g.shape, at(d, 8, 0), at(d, 12, 0))
 		for range 1 + g.shape.IntN(2) {
 			s.added = append(s.added, g.bootWorker(s, t))
@@ -227,14 +228,15 @@ func (g *generator) shootDay(s *shoot, d time.Time) {
 		lb.listenerIDs = append(lb.listenerIDs, g.identifiers.nextUUID())
 		g.emit(drawWorkingInstant(g.shape, at(d, 9, 0), at(d, 17, 0)),
 			"octavia.loadbalancer.update.end", "", lb.id, s.owner.tenant,
-			loadBalancerPayload(s.owner.tenant, s, lb, true))
+			loadBalancerPayload(s.owner.tenant, s, lb, true),
+			alive(stateActive, loadBalancerSizeOf(len(lb.listenerIDs), len(lb.poolIDs))))
 	}
 
-	if workingDay(d) && alive {
+	if workingDay(d) && fullyAlive {
 		g.claimActivity(s, d)
 	}
 
-	if workingDay(d) && alive && len(s.added) > 0 {
+	if workingDay(d) && fullyAlive && len(s.added) > 0 {
 		t := drawInstant(g.shape, at(d, 16, 0), at(d, 18, 30))
 		for _, w := range slices.Clone(s.added) {
 			g.deleteWorker(s, w, t)
@@ -393,7 +395,7 @@ func (g *generator) claimActivity(s *shoot, d time.Time) {
 			vol.sizeGB *= 2
 			vol.resizes++
 			g.emit(t, "volume.resize.end", volumePublisher, vol.id, tenant,
-				volumeStatePayload(tenant, vol))
+				volumeStatePayload(tenant, vol), alive(volumeStateOf(vol), volumeSizeOf(vol)))
 			grown = vol
 		}
 	}
@@ -466,10 +468,10 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 		portPayload(tenant, vipPort, false))
 
 	g.emit(t, "octavia.loadbalancer.create.end", "", lb.id, tenant,
-		loadBalancerPayload(tenant, s, lb, false))
+		loadBalancerPayload(tenant, s, lb, false), alive(stateActive, loadBalancerSizeOf(0, 0)))
 	allocatedAt := t.Add(span(g.shape, 2*time.Second, 10*time.Second))
 	g.emit(allocatedAt, "floatingip.create.end", networkPublisher, lb.fip.id, tenant,
-		floatingIPCreatePayload(tenant, lb.fip, g.networkID))
+		floatingIPCreatePayload(tenant, lb.fip, g.networkID), alive(stateActive, floatingIPSizeOf()))
 
 	// The ingress record is created with the first balancer of the shoot and
 	// points at its address, which is the wildcard every service of the cluster
@@ -498,7 +500,8 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 
 	g.emit(t.Add(span(g.shape, 60*time.Second, 300*time.Second)),
 		"octavia.loadbalancer.update.end", "", lb.id, tenant,
-		loadBalancerPayload(tenant, s, lb, true))
+		loadBalancerPayload(tenant, s, lb, true),
+		alive(stateActive, loadBalancerSizeOf(len(lb.listenerIDs), len(lb.poolIDs))))
 }
 
 // tearDown deletes a shoot in the order Gardener does, which is the order its
@@ -516,10 +519,10 @@ func (g *generator) tearDown(s *shoot) {
 
 	for _, lb := range s.loadBalancers {
 		g.emit(t, "floatingip.delete.end", networkPublisher, lb.fip.id, tenant,
-			floatingIPDeletePayload(lb.fip))
+			floatingIPDeletePayload(lb.fip), deleted)
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 		g.emit(t, "octavia.loadbalancer.delete.end", "", lb.id, tenant,
-			loadBalancerPayload(tenant, s, lb, false))
+			loadBalancerPayload(tenant, s, lb, false), deleted)
 		// The VIP port goes with the balancer that held it.
 		g.noise(t.Add(time.Second), "port.delete.start", networkPublisher, lb.vipPortID, tenant,
 			neutronDeletePayload("port", lb.vipPortID))

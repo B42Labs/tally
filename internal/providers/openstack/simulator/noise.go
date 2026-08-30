@@ -209,7 +209,7 @@ func (g *generator) createInstance(p *project, inst *instance, net *network, t t
 		portPayload(p, inst.port, true))
 
 	g.emit(t, "compute.instance.create.end", computePublisher(inst), inst.id, p,
-		instanceCreatePayload(p, inst, g.cloud))
+		instanceCreatePayload(p, inst, g.cloud), alive(stateActive, instanceSizeOf(inst.flavor)))
 }
 
 // destroyInstance renders one delete: the sequence nova sends before it, the
@@ -235,7 +235,7 @@ func (g *generator) destroyInstance(p *project, inst *instance, t time.Time) {
 		inst.id, p, instanceShelvePayload(p, inst, "active"))
 
 	g.emit(t, "compute.instance.delete.end", computePublisher(inst), inst.id, p,
-		instanceDeletePayload(p, inst, t))
+		instanceDeletePayload(p, inst, t), deleted)
 
 	// Nothing in the month creates a server without a port, so the branch is
 	// what keeps the helper from dereferencing a nil rather than a shape a
@@ -268,7 +268,9 @@ func (g *generator) createVolume(p *project, vol *volume, t time.Time) {
 	g.noise(t.Add(-volumeProvision), "volume.create.start", volumePublisher, vol.id, p,
 		volumeCreateStartPayload(p, vol))
 
-	g.emit(t, "volume.create.end", volumePublisher, vol.id, p, volumeCreatePayload(p, vol))
+	// The mapping books a create under a fixed available, and the attach that follows is noise.
+	g.emit(t, "volume.create.end", volumePublisher, vol.id, p, volumeCreatePayload(p, vol),
+		alive(stateAvailable, volumeSizeOf(vol)))
 }
 
 // attach connects a volume to a server. Cinder announces the attach with the
@@ -318,7 +320,8 @@ func (g *generator) deleteVolume(p *project, vol *volume, t time.Time) {
 	g.noise(t.Add(-volumeDeleteStartLead), "volume.delete.start", volumePublisher, vol.id, p,
 		volumeStatusPayload(p, vol, "deleting"))
 
-	g.emit(t, "volume.delete.end", volumePublisher, vol.id, p, volumeDeletePayload(p, vol, t))
+	g.emit(t, "volume.delete.end", volumePublisher, vol.id, p, volumeDeletePayload(p, vol, t),
+		deleted)
 }
 
 // uploadImage renders one image upload: glance taking the bits in, the upload
@@ -333,7 +336,7 @@ func (g *generator) uploadImage(p *project, img *image, uploadedAt time.Time) {
 		imagePreparePayload(p, img))
 
 	g.emit(uploadedAt, "image.upload", imagePublisher, img.id, p,
-		imageUploadPayload(p, img, uploadedAt))
+		imageUploadPayload(p, img, uploadedAt), alive(stateActive, imageSizeOf(img)))
 
 	g.noise(uploadedAt.Add(imageActivateLag), "image.activate", imagePublisher, img.id, p,
 		imageUploadPayload(p, img, uploadedAt))
