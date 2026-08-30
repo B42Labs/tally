@@ -2,7 +2,11 @@ package simulator
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -188,4 +192,253 @@ var billableTypes = map[string]billableType{
 	"octavia.loadbalancer.create.end": {"loadbalancer", "octavia.loadbalancer.create.end"},
 	"octavia.loadbalancer.update.end": {"loadbalancer", "octavia.loadbalancer.update.end"},
 	"octavia.loadbalancer.delete.end": {"loadbalancer", "octavia.loadbalancer.delete.end"},
+}
+
+// oracleFormat is the format of the document this build writes and reads. It
+// is what tells an oracle of this build from one another build wrote: the two
+// things a comparison holds an oracle and an export together by, the cloud and
+// the period, both pass for an oracle of the same month folded by a generator
+// that has since gained a billable transition or a size member, and every
+// resource that changed would then be reported as a difference the engine did
+// not cause.
+//
+// Whoever changes what the generator books, what a size holds, or what this
+// document states raises the number, and an oracle written before that change
+// is refused rather than compared. What holds them to it is
+// TestOracleFormatCoversTheGeneratorsBookedSurface, which fails on a booked
+// transition, a size member, a member of this document or a state the number
+// was not raised for.
+//
+// The guard runs both ways: ReadOracle refuses a document of another format,
+// and DisallowUnknownFields refuses one that states a member this build does
+// not read.
+const oracleFormat = 1
+
+// Oracle is the generator's statement of what a month contained: for every
+// billable resource the intervals of constant state, size and project it
+// intended, clipped to the month, and the count of events it expects the
+// collector to record per project and Tally event type.
+type Oracle struct {
+	Format     int              `json:"format"`
+	Cloud      string           `json:"cloud"`
+	Seed       uint64           `json:"seed"`
+	PeriodFrom time.Time        `json:"period_from"`
+	PeriodTo   time.Time        `json:"period_to"`
+	Resources  []OracleResource `json:"resources"`
+	Counts     []OracleCount    `json:"counts"`
+}
+
+// OracleResource is one billable resource of the month and the intervals it
+// was meant to be billed over, ordered by their start.
+type OracleResource struct {
+	ResourceType string           `json:"resource_type"`
+	ResourceID   string           `json:"resource_id"`
+	Workload     string           `json:"workload"`
+	Intervals    []OracleInterval `json:"intervals"`
+}
+
+// OracleInterval is a half-open span [From, To) over which a resource's state,
+// size and project did not change. Both ends lie inside the month.
+type OracleInterval struct {
+	From      time.Time      `json:"from"`
+	To        time.Time      `json:"to"`
+	State     string         `json:"state"`
+	ProjectID string         `json:"project_id"`
+	Size      map[string]any `json:"size"`
+}
+
+// OracleCount is how many events of one Tally event type the month expects a
+// project to have recorded.
+type OracleCount struct {
+	ProjectID string `json:"project_id"`
+	EventType string `json:"event_type"`
+	Count     int    `json:"count"`
+}
+
+// resourceKey names one resource of the month. The id alone would not do: two
+// services hand out identifiers of their own, and the projection keys a
+// resource by its type and its id together.
+type resourceKey struct {
+	resourceType string
+	resourceID   string
+}
+
+// countKey is what an expected event count is keyed by: the project the event
+// was recorded in and the Tally event type it carries.
+type countKey struct {
+	projectID string
+	eventType string
+}
+
+// buildOracle folds the fact ledger into the oracle of the month [from, to).
+//
+// The facts of one resource are read in the order they happened in. A live fact
+// opens an interval; a live fact that repeats the state, project and size of
+// the open one changes nothing; any other live fact closes the open interval
+// and opens the next; a delete closes the open interval and opens nothing. A
+// closed interval that carries no length is dropped, the way the engine's fold
+// drops one. Two facts of one resource at the same instant are the only thing
+// that would produce such an interval, and they are refused instead: that is a
+// pair the projection cannot order, so no fold may claim to know what it
+// means.
+//
+// Every interval is then clipped to the month: a start before from becomes
+// from, and an end after to, or an interval still open at the last fact,
+// becomes to. Every instant a month emits lies inside the month it was
+// generated for, so the clip changes nothing today. It is written out because
+// the resources that already exist when a month begins start before it.
+//
+// The counts are the events the collector is expected to record: one per booked
+// fact, under the project the request ran in and the Tally event type the
+// mapping gives its oslo type. The transfer of the spare volume therefore
+// counts under the accepting project.
+func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time) (Oracle, error) {
+	grouped := make(map[resourceKey][]fact)
+	counts := make(map[countKey]int)
+
+	for _, f := range facts {
+		billable, ok := billableTypes[f.eventType]
+		if !ok {
+			return Oracle{}, fmt.Errorf("the oracle knows no resource type for %s", f.eventType)
+		}
+		key := resourceKey{resourceType: billable.resourceType, resourceID: f.resourceID}
+		grouped[key] = append(grouped[key], f)
+		counts[countKey{projectID: f.projectID, eventType: billable.eventType}]++
+	}
+
+	resources := make([]OracleResource, 0, len(grouped))
+	for key, group := range grouped {
+		slices.SortStableFunc(group, func(a, b fact) int { return a.at.Compare(b.at) })
+		for i := 1; i < len(group); i++ {
+			if group[i].at.Equal(group[i-1].at) {
+				return Oracle{}, fmt.Errorf(
+					"%s %s reports two billable transitions at %s, which the projection cannot order",
+					key.resourceType, key.resourceID, group[i].at.UTC().Format(time.RFC3339))
+			}
+		}
+
+		intervals := clipIntervals(foldFacts(group), from, to)
+		// A resource that lived entirely outside the month is nothing the month
+		// bills, so it is left out rather than stated with no interval.
+		if len(intervals) == 0 {
+			continue
+		}
+		resources = append(resources, OracleResource{
+			ResourceType: key.resourceType,
+			ResourceID:   key.resourceID,
+			Workload:     group[0].workload,
+			Intervals:    intervals,
+		})
+	}
+	slices.SortFunc(resources, func(a, b OracleResource) int {
+		if c := strings.Compare(a.ResourceType, b.ResourceType); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ResourceID, b.ResourceID)
+	})
+
+	return Oracle{
+		Format:     oracleFormat,
+		Cloud:      cloud,
+		Seed:       seed,
+		PeriodFrom: from,
+		PeriodTo:   to,
+		Resources:  resources,
+		Counts:     sortedCounts(counts),
+	}, nil
+}
+
+// foldFacts turns one resource's facts, ordered by their instant, into the
+// intervals they imply. An interval still open after the last fact comes back
+// with a zero To, which is what the clip reads as "to the end of the month".
+func foldFacts(group []fact) []OracleInterval {
+	var (
+		intervals []OracleInterval
+		open      OracleInterval
+		isOpen    bool
+	)
+
+	for _, f := range group {
+		// A deleted resource accrues nothing, so a delete produces no interval of
+		// its own. A delete with nothing open is a resource that was already gone.
+		if f.effect.ended {
+			if isOpen {
+				intervals = appendClosed(intervals, open, f.at)
+				isOpen = false
+			}
+			continue
+		}
+
+		next := OracleInterval{
+			From:      f.at,
+			State:     f.effect.state,
+			ProjectID: f.projectID,
+			Size:      f.effect.size,
+		}
+		if !isOpen {
+			open, isOpen = next, true
+			continue
+		}
+		// A fact that restates the open interval is passed over: an event that
+		// changed nothing the month is billed by opens no interval of its own,
+		// which is how the engine's fold reads one too.
+		if next.State == open.State && next.ProjectID == open.ProjectID && maps.Equal(next.Size, open.Size) {
+			continue
+		}
+		intervals = appendClosed(intervals, open, f.at)
+		open = next
+	}
+
+	if isOpen {
+		intervals = append(intervals, open)
+	}
+	return intervals
+}
+
+// appendClosed closes an interval at end and keeps it, unless it would carry no
+// length.
+func appendClosed(intervals []OracleInterval, open OracleInterval, end time.Time) []OracleInterval {
+	if !end.After(open.From) {
+		return intervals
+	}
+	open.To = end
+	return append(intervals, open)
+}
+
+// clipIntervals cuts the intervals of one resource down to the part of them
+// that lies in [from, to). An interval left with no length is dropped. The
+// intervals arrive ordered by their start, and cutting a start forward to from
+// keeps them that way, so the result is ordered too.
+func clipIntervals(intervals []OracleInterval, from, to time.Time) []OracleInterval {
+	clipped := make([]OracleInterval, 0, len(intervals))
+	for _, iv := range intervals {
+		if iv.From.Before(from) {
+			iv.From = from
+		}
+		if iv.To.IsZero() || iv.To.After(to) {
+			iv.To = to
+		}
+		if !iv.To.After(iv.From) {
+			continue
+		}
+		clipped = append(clipped, iv)
+	}
+	return clipped
+}
+
+// sortedCounts turns the counted facts into the oracle's counts, ordered by
+// project and then by event type so that two oracles of one month read the
+// same however their maps were walked.
+func sortedCounts(counts map[countKey]int) []OracleCount {
+	stated := make([]OracleCount, 0, len(counts))
+	for key, count := range counts {
+		stated = append(stated, OracleCount{ProjectID: key.projectID, EventType: key.eventType, Count: count})
+	}
+	slices.SortFunc(stated, func(a, b OracleCount) int {
+		if c := strings.Compare(a.ProjectID, b.ProjectID); c != 0 {
+			return c
+		}
+		return strings.Compare(a.EventType, b.EventType)
+	})
+	return stated
 }
