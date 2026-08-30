@@ -161,14 +161,19 @@ func (g *generator) shoot(gp *gardenerProject, s *shoot) {
 func (g *generator) shootDay(s *shoot, d time.Time) {
 	if s.hibernates && !s.awake && workingDay(d) {
 		t := at(d, officeFrom, 0)
+		var last time.Time
 		for range s.baseWorkers {
+			last = t
 			g.bootWorker(s, t)
 			t = t.Add(span(g.shape, 3*time.Second, 10*time.Second))
 		}
 		// The claims outlive the night and are mounted again by the workloads the
-		// new workers run, so cinder reports them in use from the wake-up on.
-		for _, claim := range s.claims {
-			claim.attached = true
+		// new workers run, so cinder reports them in use from the wake-up on. They
+		// go onto the first worker two seconds apart, once the last of the pool is
+		// up.
+		for i, claim := range s.claims {
+			g.attach(s.owner.tenant, claim, s.workers[0],
+				last.Add(attachLag+time.Duration(2*i)*time.Second))
 		}
 		s.awake = true
 	}
@@ -241,8 +246,11 @@ func (g *generator) shootDay(s *shoot, d time.Time) {
 			g.deleteWorker(s, w, t)
 			t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 		}
-		for _, claim := range s.claims {
-			claim.attached = false
+		// The claims are detached rather than deleted: they hold the data over the
+		// night, and cinder reports them available until the next wake-up mounts
+		// them again.
+		for i, claim := range s.claims {
+			g.detach(s.owner.tenant, claim, t.Add(time.Second+time.Duration(2*i)*time.Second))
 		}
 		s.awake = false
 	}
@@ -279,10 +287,12 @@ func (g *generator) bootWorker(s *shoot, t time.Time) *instance {
 			volumeType: rootVolumeType,
 			createdAt:  t.Add(-span(g.shape, 5*time.Second, 15*time.Second)),
 		}
-		g.emit(vol.createdAt, "volume.create.end", volumePublisher, vol.id, tenant,
-			volumeCreatePayload(tenant, vol))
-		vol.attached = true
+		// The worker holds the volume before the attach is rendered, because a
+		// root volume is mounted as the server's first disk and every other
+		// volume as its second.
 		w.bootVolume = vol
+		g.createVolume(tenant, vol, vol.createdAt)
+		g.attach(tenant, vol, w, vol.createdAt.Add(attachLag))
 	} else {
 		w.imageID = tenant.images[0].id
 	}
@@ -302,8 +312,7 @@ func (g *generator) deleteWorker(s *shoot, w *instance, t time.Time) {
 
 	if w.bootVolume != nil {
 		deletedAt := t.Add(span(g.shape, 20*time.Second, 40*time.Second))
-		g.emit(deletedAt, "volume.delete.end", volumePublisher, w.bootVolume.id, tenant,
-			volumeDeletePayload(tenant, w.bootVolume, deletedAt))
+		g.deleteVolume(tenant, w.bootVolume, deletedAt)
 	}
 
 	s.workers = slices.DeleteFunc(s.workers, func(other *instance) bool { return other == w })
@@ -324,8 +333,16 @@ func (g *generator) createClaim(s *shoot, t time.Time) {
 		createdAt:  t,
 	}
 
-	g.emit(t, "volume.create.end", volumePublisher, vol.id, tenant, volumeCreatePayload(tenant, vol))
-	vol.attached = true
+	g.createVolume(tenant, vol, t)
+
+	// The claim is mounted by the first worker of the shoot. A shoot with no
+	// worker at that moment, which the month never produces, attaches it to
+	// nothing rather than reaching into an empty pool.
+	var w *instance
+	if len(s.workers) > 0 {
+		w = s.workers[0]
+	}
+	g.attach(tenant, vol, w, t.Add(attachLag))
 	s.claims = append(s.claims, vol)
 }
 
@@ -363,6 +380,9 @@ func (g *generator) claimActivity(s *shoot, d time.Time) {
 		if len(candidates) > 0 {
 			t := drawInstant(g.shape, lo, hi)
 			vol := candidates[g.shape.IntN(len(candidates))]
+			// The .start half reports the claim at the size it still has.
+			g.noise(t.Add(-stepLead), "volume.resize.start", volumePublisher, vol.id, tenant,
+				volumeStatusPayload(tenant, vol, "extending"))
 			vol.sizeGB *= 2
 			vol.resizes++
 			g.emit(t, "volume.resize.end", volumePublisher, vol.id, tenant,
@@ -381,8 +401,7 @@ func (g *generator) claimActivity(s *shoot, d time.Time) {
 		if len(candidates) > 0 {
 			t := drawInstant(g.shape, lo, hi)
 			vol := candidates[g.shape.IntN(len(candidates))]
-			g.emit(t, "volume.delete.end", volumePublisher, vol.id, tenant,
-				volumeDeletePayload(tenant, vol, t))
+			g.deleteVolume(tenant, vol, t)
 			s.claims = slices.DeleteFunc(s.claims, func(other *volume) bool { return other == vol })
 		}
 	}
@@ -438,7 +457,9 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 // tearDown deletes a shoot in the order Gardener does, which is the order its
 // resources depend on each other in: the services go first, address before
 // balancer, then the workers, then the claims they held. Nothing of the shoot
-// is emitted after the last of them.
+// is emitted after the last of them. A claim is attached unless the shoot
+// hibernated, so its delete carries the detach cinder sends three seconds
+// before it.
 func (g *generator) tearDown(s *shoot) {
 	tenant := s.owner.tenant
 	t := s.deletedAt
@@ -456,8 +477,7 @@ func (g *generator) tearDown(s *shoot) {
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 	}
 	for _, vol := range s.claims {
-		g.emit(t, "volume.delete.end", volumePublisher, vol.id, tenant,
-			volumeDeletePayload(tenant, vol, t))
+		g.deleteVolume(tenant, vol, t)
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 	}
 	s.claims = nil

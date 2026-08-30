@@ -482,6 +482,17 @@ func volumeCreatePayload(p *project, vol *volume) map[string]any {
 	}
 }
 
+// volumeCreateStartPayload describes a volume cinder has accepted and is
+// building. It carries the members of the finished volume with two of them
+// changed: the status is the one a volume has while it is provisioned, and
+// there is no launched_at, because the volume has not been handed out yet.
+func volumeCreateStartPayload(p *project, vol *volume) map[string]any {
+	payload := volumeCreatePayload(p, vol)
+	payload["status"] = "creating"
+	payload["launched_at"] = nil
+	return payload
+}
+
 // volumeDeletePayload describes a removed volume, with the size and type it
 // carried when it went.
 func volumeDeletePayload(p *project, vol *volume, at time.Time) map[string]any {
@@ -502,12 +513,22 @@ func volumeDeletePayload(p *project, vol *volume, at time.Time) map[string]any {
 // volumeStatePayload describes a volume whose size, type, or owner changed.
 // Cinder reports the same members for all three, each already carrying the new
 // value, which is why one builder serves a resize, a retype, and an accepted
-// transfer alike.
+// transfer alike. The status is the one the world holds: a volume a server
+// holds is in use, and a volume attached to nothing is available. The members
+// themselves come from volumeStatusPayload, which the steps around a volume
+// render their own statuses through.
 func volumeStatePayload(p *project, vol *volume) map[string]any {
 	status := "available"
 	if vol.attached {
 		status = "in-use"
 	}
+	return volumeStatusPayload(p, vol, status)
+}
+
+// volumeStatusPayload describes a volume in the status the caller names. Cinder
+// reports the same members whatever the volume is doing, and the status is what
+// tells a creating volume from an attaching, a deleting, or an available one.
+func volumeStatusPayload(p *project, vol *volume, status string) map[string]any {
 	return map[string]any{
 		"volume_id":    vol.id,
 		"tenant_id":    p.id,
@@ -519,6 +540,50 @@ func volumeStatePayload(p *project, vol *volume) map[string]any {
 		"host":         volumeHost,
 		"created_at":   stamp(vol.createdAt.Add(-volumeProvision)),
 	}
+}
+
+// attachmentOf is the record cinder writes when a volume is connected to a
+// server: which server holds it, on which compute, since when, and under which
+// device name. A server's root volume is its first disk and every other volume
+// its second, which is what the two mountpoints stand for.
+//
+// The server may be nil, and the attachment then names neither an instance nor
+// a host: both members are null, the way cinder writes an attachment whose
+// server it does not know.
+func attachmentOf(id string, vol *volume, inst *instance, t time.Time) map[string]any {
+	var instanceID, host any
+	mountpoint := "/dev/vdb"
+	if inst != nil {
+		instanceID, host = inst.id, inst.host
+		if inst.bootVolume == vol {
+			mountpoint = "/dev/vda"
+		}
+	}
+	return map[string]any{
+		"attach_mode":   "rw",
+		"attach_status": "attached",
+		"attach_time":   stamp(t),
+		"attached_host": host,
+		"id":            id,
+		"instance_uuid": instanceID,
+		"mountpoint":    mountpoint,
+		"volume_id":     vol.id,
+	}
+}
+
+// volumeAttachmentPayload describes a volume in the middle of an attach or a
+// detach. Cinder repeats the members of the volume and adds what it is
+// connected to, always as an array: it holds the one attachment of the server
+// behind the volume, and it is empty while the volume is connected to nothing.
+func volumeAttachmentPayload(p *project, vol *volume, status string,
+	attachment map[string]any,
+) map[string]any {
+	payload := volumeStatusPayload(p, vol, status)
+	payload["volume_attachment"] = []any{}
+	if attachment != nil {
+		payload["volume_attachment"] = []any{attachment}
+	}
+	return payload
 }
 
 // listenerSpecs are the listeners a load balancer gets, in the order a shoot
