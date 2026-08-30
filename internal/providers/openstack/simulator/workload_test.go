@@ -105,13 +105,21 @@ func shootNamed(t *testing.T, g *generator, name string) *shoot {
 	return nil
 }
 
-// transitionsOf returns the transitions of one shoot, in schedule order. A
-// transition names no shoot, so every type is matched by what carries the
-// shoot's name: the display_name of a server or a volume, the name of a load
-// balancer, and, for an address, the balancer that holds it.
+// transitionsOf returns the billable transitions of one shoot, in schedule
+// order. A transition names no shoot, so every type is matched by what carries
+// the shoot's name: the display_name of a server or a volume, the name of a
+// load balancer, and, for an address, the balancer that holds it.
 func transitionsOf(schedule Schedule, s *shoot) []Transition {
 	var of []Transition
 	for _, transition := range ofWorkload(schedule, workloadGardener) {
+		// The life of a shoot is read off its billable transitions alone. The
+		// noise around its steps, the audits, the .start halves, the ports and
+		// the attach and detach, is held by noise_test.go, and a daily
+		// compute.instance.exists of a worker that is gone would otherwise be
+		// the last transition of batch.
+		if !transition.Billable {
+			continue
+		}
 		switch {
 		case strings.HasPrefix(transition.EventType, "compute."),
 			strings.HasPrefix(transition.EventType, "volume."):
@@ -308,15 +316,18 @@ func TestGenerateStaysInsideThePeriod(t *testing.T) {
 		last[transition.ResourceID] = transition.At
 	}
 
+	// What is billable is read off the collector's mapping and not off a list
+	// of type names: a transition is billable when the mapping records an event
+	// for it, and the noise of the catalogue is what it records nothing for.
 	var want []Transition
 	for _, transition := range schedule {
-		if transition.EventType != "image.create" {
+		if _, ok := openstack.MapNotification(parse(t, render(t, transition)), testCloud); ok {
 			want = append(want, transition)
 		}
 	}
 	got := schedule.Billable()
 	if len(got) != len(want) {
-		t.Fatalf("Billable() returned %d of %d transitions, want the %d that are not an image.create",
+		t.Fatalf("Billable() returned %d of %d transitions, want the %d the collector's mapping records an event for",
 			len(got), len(schedule), len(want))
 	}
 	for i := range got {
