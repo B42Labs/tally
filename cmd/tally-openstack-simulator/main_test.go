@@ -52,13 +52,13 @@ func nonBillableNotifications(t *testing.T, seed uint64, month, cloud string) in
 	if err != nil {
 		t.Fatalf("period.Parse(%q) error = %v, want nil", month, err)
 	}
-	schedule, err := simulator.Generate(seed, from, to, cloud)
+	generated, err := simulator.GenerateMonth(seed, from, to, cloud)
 	if err != nil {
-		t.Fatalf("Generate() error = %v, want nil", err)
+		t.Fatalf("GenerateMonth() error = %v, want nil", err)
 	}
 
 	count := 0
-	for _, transition := range schedule {
+	for _, transition := range generated.Schedule {
 		if !transition.Billable {
 			count++
 		}
@@ -175,6 +175,25 @@ func TestRunWritesTheMonthInFileMode(t *testing.T) {
 		}
 	}
 
+	oracle, err := simulator.ReadOracle(filepath.Join(dir, "oracle.json"))
+	if err != nil {
+		t.Fatalf("ReadOracle() error = %v, want nil", err)
+	}
+	oracleBytes, _ := readLines(t, filepath.Join(dir, "oracle.json"))
+	from, to, err := period.Parse(endedMonth)
+	if err != nil {
+		t.Fatalf("period.Parse(%q) error = %v, want nil", endedMonth, err)
+	}
+	if oracle.Cloud != simulatedCloud || oracle.Seed != 1 {
+		t.Errorf("oracle.json states seed %d of %q, want seed 1 of %q", oracle.Seed, oracle.Cloud,
+			simulatedCloud)
+	}
+	if !oracle.PeriodFrom.Equal(from) || !oracle.PeriodTo.Equal(to) {
+		t.Errorf("oracle.json covers [%s, %s), want the [%s, %s) the run was given",
+			oracle.PeriodFrom.Format(time.RFC3339), oracle.PeriodTo.Format(time.RFC3339),
+			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+
 	skipped := nonBillableNotifications(t, 1, endedMonth, simulatedCloud)
 	if want := len(eventLines) + skipped; len(notificationLines) != want {
 		t.Errorf("notifications.jsonl has %d lines, want %d: %d events plus the %d non-billable ones",
@@ -191,6 +210,7 @@ func TestRunWritesTheMonthInFileMode(t *testing.T) {
 		for name, first := range map[string][]byte{
 			"notifications.jsonl": notifications,
 			"events.jsonl":        events,
+			"oracle.json":         oracleBytes,
 		} {
 			again, _ := readLines(t, filepath.Join(second, name))
 			if !bytes.Equal(first, again) {

@@ -55,8 +55,8 @@ type RunOptions struct {
 	// Factor is how many virtual seconds pass per wall second. Zero is
 	// unbounded: the month goes out as fast as the broker takes it.
 	Factor float64
-	// Out is the directory notifications.jsonl and events.jsonl are written to.
-	// Empty writes nothing.
+	// Out is the directory notifications.jsonl, events.jsonl and oracle.json are
+	// written to. Empty writes nothing.
 	Out string
 	// WaitForCollector is how long to wait for a consumer on the collector's
 	// queue before the first notification goes out. Zero disables the wait.
@@ -148,8 +148,8 @@ type queued struct {
 // publisher is file mode, where the month is written out and nothing reaches a
 // bus.
 //
-// Both files are complete before the first notification is published, so a run
-// that is interrupted halfway still leaves a whole month on disk to replay.
+// All three files are complete before the first notification is published, so a
+// run that is interrupted halfway still leaves a whole month on disk to replay.
 //
 // A cancelled context is a clean stop: what went out stays out, and Run returns
 // nil, so SIGINT and SIGTERM leave exit status 0 the way they do for the
@@ -169,10 +169,11 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		return errors.New("set " + envAMQPURL + " or pass --out: the run has nowhere to publish")
 	}
 
-	schedule, err := Generate(opts.Seed, from, to, cfg.Cloud)
+	month, err := GenerateMonth(opts.Seed, from, to, cfg.Cloud)
 	if err != nil {
 		return err
 	}
+	schedule := month.Schedule
 
 	logger.Info("starting",
 		"seed", opts.Seed,
@@ -181,6 +182,7 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"factor", opts.Factor,
 		"transitions", len(schedule),
 		"billable", len(schedule.Billable()),
+		"resources", len(month.Oracle.Resources),
 		"broker", publisher != nil,
 		"out", opts.Out)
 
@@ -192,6 +194,9 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 			return err
 		}
 		if err := WriteEvents(filepath.Join(opts.Out, "events.jsonl"), cfg.Cloud, schedule); err != nil {
+			return err
+		}
+		if err := WriteOracle(filepath.Join(opts.Out, "oracle.json"), month.Oracle); err != nil {
 			return err
 		}
 	}

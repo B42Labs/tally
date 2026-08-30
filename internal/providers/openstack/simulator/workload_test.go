@@ -37,11 +37,11 @@ const collectorTopic = "notifications.info"
 func generateMonth(t *testing.T, seed uint64, from time.Time, cloud string) Schedule {
 	t.Helper()
 
-	schedule, err := Generate(seed, from, from.AddDate(0, 1, 0), cloud)
+	month, err := GenerateMonth(seed, from, from.AddDate(0, 1, 0), cloud)
 	if err != nil {
-		t.Fatalf("Generate(%d, %s, %q) error = %v, want nil", seed, from.Format(time.RFC3339), cloud, err)
+		t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed, from.Format(time.RFC3339), cloud, err)
 	}
-	return schedule
+	return month.Schedule
 }
 
 // requireDisjoint fails the test when the two schedules share a value of the
@@ -358,13 +358,13 @@ func TestGenerateRefusesANonMonth(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Generate(1, c.from, c.to, testCloud)
+			_, err := GenerateMonth(1, c.from, c.to, testCloud)
 			if err == nil {
-				t.Fatalf("Generate(1, %s, %s, %q) error = nil, want a refusal",
+				t.Fatalf("GenerateMonth(1, %s, %s, %q) error = nil, want a refusal",
 					c.from.Format(time.RFC3339), c.to.Format(time.RFC3339), testCloud)
 			}
 			if !strings.HasSuffix(err.Error(), " is not a UTC month") {
-				t.Errorf("Generate() error = %q, want it to end with %q", err, " is not a UTC month")
+				t.Errorf("GenerateMonth() error = %q, want it to end with %q", err, " is not a UTC month")
 			}
 		})
 	}

@@ -2,8 +2,10 @@ package simulator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -441,4 +443,120 @@ func sortedCounts(counts map[countKey]int) []OracleCount {
 		return strings.Compare(a.EventType, b.EventType)
 	})
 	return stated
+}
+
+// WriteOracle writes the oracle to path as one indented JSON document,
+// creating the file or truncating what is already there. It is the third file
+// a run in file mode leaves beside notifications.jsonl and events.jsonl:
+// notifications.jsonl says what was published, events.jsonl what the collector
+// has to record, and this file what the month was meant to mean.
+//
+// The oracle of one seed, period and cloud is byte-identical across runs. Its
+// resources and its counts are sorted before they are stated, so what a map was
+// walked in never reaches the file, and two runs of one triple produce two
+// files a diff reports nothing about.
+func WriteOracle(path string, oracle Oracle) (err error) {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	// The close is what reports the write the file system deferred, such as a
+	// full disk, so its error is not dropped. An error already on its way says
+	// more about what went wrong and keeps its place.
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("writing %s: %w", path, closeErr)
+		}
+	}()
+
+	body, err := json.MarshalIndent(oracle, "", "  ")
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if _, err := file.Write(append(body, '\n')); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// ReadOracle reads back the oracle a run wrote, for a comparison that runs
+// without the generator that produced the month.
+//
+// The document is decoded under Decoder.UseNumber, so every number of a size
+// comes back as the json.Number it was written from. A quantity that took the
+// detour through a float64 would no longer carry the digits the engine read
+// from the very same notification.
+//
+// An unknown member fails the read rather than being passed over. An oracle
+// written by another build may state something this one does not know about,
+// and an oracle read in part would report the engine for whatever the part it
+// dropped covered. A member the document lacks is refused for the same reason
+// and needs a check of its own: JSON leaves an absent member at its zero value,
+// so a trimmed document decodes without complaint and states an empty month
+// instead of the one it was written for.
+func ReadOracle(path string) (Oracle, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Oracle{}, fmt.Errorf("reading %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	decoder := json.NewDecoder(file)
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+
+	var oracle Oracle
+	if err := decoder.Decode(&oracle); err != nil {
+		return Oracle{}, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if oracle.Format != oracleFormat {
+		return Oracle{}, fmt.Errorf("%s states format %d and this build writes format %d",
+			path, oracle.Format, oracleFormat)
+	}
+	if len(oracle.Resources) == 0 {
+		return Oracle{}, fmt.Errorf("%s holds no resources", path)
+	}
+	if err := oracle.validate(); err != nil {
+		return Oracle{}, fmt.Errorf("%s %w", path, err)
+	}
+	return oracle, nil
+}
+
+// validate reports the first thing a decoded document leaves unstated. Every
+// member below is one a comparison reads, and one a fold of this build always
+// writes, so a document without it is a trimmed or a truncated file rather than
+// a month that meant it: a missing size alone would turn every time gauge
+// dimension of every priced resource into a difference, because the comparison
+// bills an absent size member at zero the way the engine does.
+func (o Oracle) validate() error {
+	switch {
+	case o.Cloud == "":
+		return errors.New("names no cloud")
+	case o.PeriodFrom.IsZero() || o.PeriodTo.IsZero():
+		return errors.New("names no period")
+	}
+	for _, resource := range o.Resources {
+		if resource.ResourceType == "" || resource.ResourceID == "" {
+			return errors.New("holds a resource without a type or an id")
+		}
+		named := resource.ResourceType + " " + resource.ResourceID
+		if len(resource.Intervals) == 0 {
+			return fmt.Errorf("states no interval for %s", named)
+		}
+		for _, interval := range resource.Intervals {
+			if interval.From.IsZero() || interval.To.IsZero() {
+				return fmt.Errorf("states an interval of %s without bounds", named)
+			}
+			at := interval.From.UTC().Format(time.RFC3339)
+			switch {
+			case interval.State == "":
+				return fmt.Errorf("states no state for %s from %s", named, at)
+			case interval.ProjectID == "":
+				return fmt.Errorf("states no project for %s from %s", named, at)
+			case interval.Size == nil:
+				return fmt.Errorf("states no size for %s from %s", named, at)
+			}
+		}
+	}
+	return nil
 }
