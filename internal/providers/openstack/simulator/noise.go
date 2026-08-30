@@ -206,7 +206,8 @@ func (g *generator) createInstance(p *project, inst *instance, net *network, t t
 // server did on the day up to here, and then tears it down, which is a delete
 // start and the shutdown around it. The audit is the pre-delete existence
 // notification of a real deployment: a server that goes reports what it used
-// before it is gone.
+// before it is gone. Cinder detaches the volumes the server still held once it
+// is gone, so a volume that outlives its server is available from there on.
 func (g *generator) destroyInstance(p *project, inst *instance, t time.Time) {
 	begin := t.Add(-instanceDeleteLead)
 	g.noise(begin, "compute.instance.update", computePublisher(inst), inst.id, p,
@@ -232,5 +233,77 @@ func (g *generator) destroyInstance(p *project, inst *instance, t time.Time) {
 		g.noise(t.Add(portDeleteLag+time.Second), "port.delete.end", networkPublisher, inst.port.id, p,
 			neutronDeletePayload("port", inst.port.id))
 	}
+
+	for _, vol := range inst.volumes {
+		if vol.attached {
+			g.detach(p, vol, t.Add(detachLag))
+		}
+	}
+	if inst.bootVolume != nil && inst.bootVolume.attached {
+		g.detach(p, inst.bootVolume, t.Add(detachLag))
+	}
 	inst.deletedAt = t
+}
+
+// createVolume renders one volume create: the request cinder accepted and the
+// create the collector bills.
+//
+// The start is the created_at the billable payload already reports, eight
+// seconds before the volume is ready. The caller sets vol.createdAt before it
+// calls, because both payloads are dated from it.
+func (g *generator) createVolume(p *project, vol *volume, t time.Time) {
+	g.noise(t.Add(-volumeProvision), "volume.create.start", volumePublisher, vol.id, p,
+		volumeCreateStartPayload(p, vol))
+
+	g.emit(t, "volume.create.end", volumePublisher, vol.id, p, volumeCreatePayload(p, vol))
+}
+
+// attach connects a volume to a server. Cinder announces the attach with the
+// volume connected to nothing yet and reports it in use a second later, holding
+// the attachment record it handed out until the detach gives it back.
+//
+// The volume is attached from here on, which is what puts the in-use status
+// into every billable notification about it: a payload rendered after this
+// point reports the volume the way cinder reports one a server holds.
+//
+// The server may be nil. The attachment then names no instance and no host, and
+// the volume is attached all the same, so a billable payload rendered afterwards
+// reports in-use exactly as it does for a volume a server holds.
+func (g *generator) attach(p *project, vol *volume, inst *instance, t time.Time) {
+	vol.attachment = attachmentOf(g.noiseIDs.nextUUID(), vol, inst, t)
+
+	g.noise(t, "volume.attach.start", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "attaching", nil))
+	g.noise(t.Add(time.Second), "volume.attach.end", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "in-use", vol.attachment))
+
+	vol.attached = true
+}
+
+// detach disconnects a volume from the server that held it. The .start half
+// repeats the attachment of that server one last time and the .end carries
+// none, which is the volume as cinder reports it from here on: available, and
+// connected to nothing.
+func (g *generator) detach(p *project, vol *volume, t time.Time) {
+	g.noise(t, "volume.detach.start", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "detaching", vol.attachment))
+	g.noise(t.Add(time.Second), "volume.detach.end", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "available", nil))
+
+	vol.attached = false
+	vol.attachment = nil
+}
+
+// deleteVolume renders one volume delete: the detach of a volume a server still
+// holds, the delete cinder announces, and the delete the collector bills. A
+// volume whose server is already gone was detached with it and is deleted
+// without a second one.
+func (g *generator) deleteVolume(p *project, vol *volume, t time.Time) {
+	if vol.attached {
+		g.detach(p, vol, t.Add(-volumeDetachLead))
+	}
+	g.noise(t.Add(-volumeDeleteStartLead), "volume.delete.start", volumePublisher, vol.id, p,
+		volumeStatusPayload(p, vol, "deleting"))
+
+	g.emit(t, "volume.delete.end", volumePublisher, vol.id, p, volumeDeletePayload(p, vol, t))
 }

@@ -603,9 +603,10 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 	}
 }
 
-// volumes gives every instance its one or two volumes. The attach itself is not
-// a notification the collector maps, so the world records it and every later
-// notification about the volume reports the in-use status cinder would.
+// volumes gives every instance its one or two volumes. Each of them is attached
+// to the server it was created for, which cinder announces under a type the
+// collector does not map, and the volume reports the in-use status from there
+// on.
 func (g *generator) volumes(p *project) {
 	for index, inst := range p.instances {
 		for i, vol := range inst.volumes {
@@ -613,9 +614,8 @@ func (g *generator) volumes(p *project) {
 			vol.sizeGB = volumeSizesGB[g.shape.IntN(len(volumeSizesGB))]
 			vol.volumeType = volumeTypes[g.shape.IntN(len(volumeTypes))]
 
-			g.emit(vol.createdAt, "volume.create.end", volumePublisher, vol.id, p,
-				volumeCreatePayload(p, vol))
-			vol.attached = true
+			g.createVolume(p, vol, vol.createdAt)
+			g.attach(p, vol, inst, vol.createdAt.Add(attachLag))
 
 			// The first instance's volumes are deleted with it and report nothing
 			// in between, which is the shortest volume life a month holds.
@@ -637,6 +637,10 @@ func (g *generator) changeVolume(p *project, vol *volume, forced bool) {
 	var resizedAt time.Time
 	if resizes {
 		resizedAt = g.from.Add(span(g.shape, 3*day, 20*day))
+		// The .start half of a resize reports the volume as it still is, which is
+		// why it is rendered before the new size is set.
+		g.noise(resizedAt.Add(-stepLead), "volume.resize.start", volumePublisher, vol.id, p,
+			volumeStatusPayload(p, vol, "extending"))
 		vol.sizeGB *= 2
 		g.emit(resizedAt, "volume.resize.end", volumePublisher, vol.id, p, volumeStatePayload(p, vol))
 	}
@@ -676,7 +680,8 @@ func (g *generator) floatingIPs(p *project) {
 
 // deleteFirstInstance tears the first instance down in the order a deployment
 // does: the address is released, the server is destroyed, and the volumes that
-// were attached to it follow one after another.
+// were attached to it follow one after another. Destroying the server detaches
+// them, so no delete here renders a detach of its own.
 func (g *generator) deleteFirstInstance(p *project) {
 	inst := p.instances[0]
 
@@ -686,8 +691,7 @@ func (g *generator) deleteFirstInstance(p *project) {
 
 	for i, vol := range inst.volumes {
 		deletedAt := inst.deletedAt.Add(volumeDeleteLead + time.Duration(i)*volumeDeleteGap)
-		g.emit(deletedAt, "volume.delete.end", volumePublisher, vol.id, p,
-			volumeDeletePayload(p, vol, deletedAt))
+		g.deleteVolume(p, vol, deletedAt)
 	}
 }
 
@@ -699,11 +703,15 @@ func (g *generator) spareVolume(p, accepting *project) {
 	vol.createdAt = g.from.Add(span(g.shape, 2*time.Hour, 6*time.Hour))
 	vol.sizeGB = volumeSizesGB[g.shape.IntN(len(volumeSizesGB))]
 	vol.volumeType = volumeTypes[g.shape.IntN(len(volumeTypes))]
-	g.emit(vol.createdAt, "volume.create.end", volumePublisher, vol.id, p, volumeCreatePayload(p, vol))
+	g.createVolume(p, vol, vol.createdAt)
 
 	// The accepting project makes the request and owns the volume from here on,
 	// so it is the project in the payload as well as in the request context.
 	acceptedAt := g.from.Add(span(g.shape, 10*day, 20*day))
+	// The .start half still reports the volume as the old owner's, because it
+	// moves with the .end.
+	g.noise(acceptedAt.Add(-transferLead), "volume.transfer.accept.start", volumePublisher, vol.id,
+		accepting, volumeStatePayload(p, vol))
 	g.emit(acceptedAt, "volume.transfer.accept.end", volumePublisher, vol.id, accepting,
 		volumeStatePayload(accepting, vol))
 }
