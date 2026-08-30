@@ -250,7 +250,7 @@ func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 
 	for seed := uint64(1); seed <= 5; seed++ {
 		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
-			month, err := GenerateMonth(seed, july2026, to, testCloud)
+			month, err := GenerateMonth(seed, july2026, to, testCloud, Faults{})
 			if err != nil {
 				t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed,
 					july2026.Format(time.RFC3339), testCloud, err)
@@ -892,7 +892,7 @@ const completeOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
 func generatedOracle(t *testing.T, seed uint64) Oracle {
 	t.Helper()
 
-	month, err := GenerateMonth(seed, july2026, july2026.AddDate(0, 1, 0), testCloud)
+	month, err := GenerateMonth(seed, july2026, july2026.AddDate(0, 1, 0), testCloud, Faults{})
 	if err != nil {
 		t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed,
 			july2026.Format(time.RFC3339), testCloud, err)

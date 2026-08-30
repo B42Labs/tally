@@ -61,6 +61,9 @@ type RunOptions struct {
 	// WaitForCollector is how long to wait for a consumer on the collector's
 	// queue before the first notification goes out. Zero disables the wait.
 	WaitForCollector time.Duration
+	// Faults are the switch names of --faults, which ParseFaults reads. Empty is
+	// every switch off.
+	Faults []string
 }
 
 // Validate checks the options and returns the month Period names.
@@ -84,6 +87,9 @@ func (o RunOptions) Validate() (from, to time.Time, err error) {
 	}
 	if err := validatePacing(o.Factor, o.WaitForCollector); err != nil {
 		return time.Time{}, time.Time{}, err
+	}
+	if _, err := ParseFaults(o.Faults); err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--faults: %w", err)
 	}
 	return from, to, nil
 }
@@ -169,7 +175,14 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		return errors.New("set " + envAMQPURL + " or pass --out: the run has nowhere to publish")
 	}
 
-	month, err := GenerateMonth(opts.Seed, from, to, cfg.Cloud)
+	// Validate has read the switches once already; this is the parsed value
+	// itself, which it does not hand back.
+	faults, err := ParseFaults(opts.Faults)
+	if err != nil {
+		return fmt.Errorf("--faults: %w", err)
+	}
+
+	month, err := GenerateMonth(opts.Seed, from, to, cfg.Cloud, faults)
 	if err != nil {
 		return err
 	}
@@ -180,6 +193,7 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"period", opts.Period,
 		"cloud", cfg.Cloud,
 		"factor", opts.Factor,
+		"faults", faults.Names(),
 		"transitions", len(schedule),
 		"billable", len(schedule.Billable()),
 		"resources", len(month.Oracle.Resources),

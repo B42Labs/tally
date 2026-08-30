@@ -208,7 +208,14 @@ type Month struct {
 // down to the message ids: a noise transition takes its own from the third
 // stream, so a catalogue that grows by one transition renumbers nothing the
 // collector bills.
-func GenerateMonth(seed uint64, from, to time.Time, cloud string) (Month, error) {
+//
+// The fault switches (faults.go) draw from streams of their own, one per switch
+// and seeded by the seed together with the switch's name. None of them draws
+// from the shape stream, so a month with every switch off consumes the three
+// streams above exactly as it would without the switches, and missing-create
+// draws from the pre-existing stream, which is what makes the two pick the same
+// instances for one seed.
+func GenerateMonth(seed uint64, from, to time.Time, cloud string, faults Faults) (Month, error) {
 	// A caller that reached here without going through period.Parse is caught
 	// before it produces a month that no billing period covers.
 	start := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -221,6 +228,7 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string) (Month, error)
 
 	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, cloud, start),
 		start, start.AddDate(0, 1, 0), cloud)
+	g.faults = faults
 	g.run()
 	if len(g.schedule) == 0 {
 		return Month{}, errors.New("the generated month holds no transitions")
@@ -307,6 +315,9 @@ type generator struct {
 	from     time.Time
 	to       time.Time
 	cloud    string
+	// faults are the switches this month runs with (faults.go). The zero value
+	// is every switch off.
+	faults Faults
 
 	// networkID is the external network the month's addresses come from. There
 	// is one per month, the way a deployment has one.
@@ -329,6 +340,9 @@ type generator struct {
 	// facts holds one entry per booked transition: what that transition left
 	// behind on its resource. The oracle of the month is folded from them.
 	facts []fact
+	// touched holds the resources a switch touched, keyed the way the oracle
+	// keys a resource.
+	touched touchedResources
 }
 
 // newGenerator draws the identifiers of the world a month starts from and
@@ -357,6 +371,7 @@ func newGenerator(shape *rand.Rand, identifiers, noiseIDs idReader,
 	g := &generator{
 		shape: shape, identifiers: identifiers, noiseIDs: noiseIDs,
 		from: from, to: to, cloud: cloud,
+		touched: make(touchedResources),
 	}
 
 	g.networkID = identifiers.nextUUID()

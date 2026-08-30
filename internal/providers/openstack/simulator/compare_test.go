@@ -454,7 +454,7 @@ func pricedResources(oracle Oracle, model pricing.Model) (priced int, unpriced m
 // billed the way it was meant to be.
 func TestCompareAcceptsWhatTheEngineRates(t *testing.T) {
 	to := july2026.AddDate(0, 1, 0)
-	month, err := GenerateMonth(1, july2026, to, testCloud)
+	month, err := GenerateMonth(1, july2026, to, testCloud, Faults{})
 	if err != nil {
 		t.Fatalf("GenerateMonth(1, %s, %q) error = %v, want nil", july2026.Format(time.RFC3339), testCloud, err)
 	}

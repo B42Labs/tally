@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -90,6 +91,9 @@ func newRunCmd() *cobra.Command {
 		"directory to write notifications.jsonl, events.jsonl and oracle.json to")
 	cmd.Flags().DurationVar(&opts.WaitForCollector, "wait-for-collector", defaultWaitForCollector,
 		"how long to wait for a consumer on the collector's queue before publishing; 0 disables the wait")
+	cmd.Flags().StringSliceVar(&opts.Faults, "faults", nil,
+		"fault switches to turn on, comma-separated: "+strings.Join(simulator.FaultNames, ", ")+
+			"; every switch is off by default")
 	cmd.Flags().BoolVar(&allowRemoteBroker, allowRemoteBrokerFlag, false, allowRemoteBrokerUsage)
 	_ = cmd.MarkFlagRequired("period")
 	return cmd
