@@ -2,7 +2,9 @@ package simulator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,8 +63,12 @@ func sampleFile(eventType string) string {
 func memberShape(payload map[string]any) []string {
 	names := make([]string, 0, len(payload))
 	for name, value := range payload {
+		// An empty object is a member with nothing under it, so flattening it
+		// would leave it out of the shape. Naming it is what lets a member test
+		// catch a builder that drops one: the noise payloads carry an empty
+		// bandwidth and an empty image_meta.
 		nested, ok := value.(map[string]any)
-		if !ok {
+		if !ok || len(nested) == 0 {
 			names = append(names, name)
 			continue
 		}
@@ -121,6 +127,14 @@ func TestRenderedPayloadsCarryTheRecordedMembers(t *testing.T) {
 
 		body, err := os.ReadFile(filepath.Join(sampleDir, sampleFile(transition.EventType)))
 		if err != nil {
+			// The fixtures are the collector's, and the noise types of the
+			// catalogue have none: the collector maps none of them, so a real
+			// deployment never had one recorded here.
+			// TestNoisePayloadsCarryTheirMembers pins those instead.
+			if errors.Is(err, fs.ErrNotExist) && !transition.Billable {
+				t.Logf("no recorded sample for %s, the mapping skips it", transition.EventType)
+				continue
+			}
 			t.Fatalf("reading the recorded %s: %v", transition.EventType, err)
 		}
 		got := memberShape(parse(t, render(t, transition)).Payload)
