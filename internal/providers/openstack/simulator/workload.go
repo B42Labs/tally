@@ -313,6 +313,9 @@ type generator struct {
 	// running when it was generated.
 	workload string
 	schedule Schedule
+	// facts holds one entry per booked transition: what that transition left
+	// behind on its resource. The oracle of the month is folded from them.
+	facts []fact
 }
 
 // newGenerator draws the identifiers of the world a month starts from and
@@ -469,9 +472,11 @@ func (g *generator) run() {
 
 // emit records one transition. The project is the one the request ran in, which
 // is the owner everywhere except on a transfer, where the accepting project
-// makes the request that moves the volume to itself.
+// makes the request that moves the volume to itself. The effect is what the
+// transition leaves behind on its resource, and a booked one goes into the fact
+// ledger beside the transition it belongs to.
 func (g *generator) emit(at time.Time, eventType, publisherID, resourceID string,
-	requester *project, payload map[string]any,
+	requester *project, payload map[string]any, e effect,
 ) {
 	g.schedule = append(g.schedule, Transition{
 		At:          at,
@@ -485,6 +490,16 @@ func (g *generator) emit(at time.Time, eventType, publisherID, resourceID string
 		ResourceID:  resourceID,
 		Payload:     payload,
 	})
+	if e.booked {
+		g.facts = append(g.facts, fact{
+			at:         at,
+			eventType:  eventType,
+			resourceID: resourceID,
+			projectID:  requester.id,
+			workload:   g.workload,
+			effect:     e,
+		})
+	}
 }
 
 // images gives a project its two images and deletes the second one before the
@@ -498,13 +513,14 @@ func (g *generator) images(p *project) {
 		// Every quarter gibibyte from one to four.
 		img.size = int64(4+g.shape.IntN(13)) * quarterGiB
 
-		g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img))
+		g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img),
+			unbooked)
 		g.uploadImage(p, img, uploadedAt)
 
 		if index == len(p.images)-1 {
 			deletedAt := g.to.Add(-span(g.shape, day, 7*day))
 			g.emit(deletedAt, "image.delete", imagePublisher, img.id, p,
-				imageDeletePayload(p, img, deletedAt))
+				imageDeletePayload(p, img, deletedAt), deleted)
 		}
 	}
 }
@@ -563,11 +579,11 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		g.noise(cursor.Add(-stepLead), "compute.instance.power_off.start", computePublisher(inst),
 			inst.id, p, instancePowerPayload(p, inst, "active"))
 		g.emit(cursor, "compute.instance.power_off.end", computePublisher(inst), inst.id, p,
-			instancePowerPayload(p, inst, "stopped"))
+			instancePowerPayload(p, inst, "stopped"), alive(stateShutoff, instanceSizeOf(inst.flavor)))
 		g.noise(poweredOnAt.Add(-stepLead), "compute.instance.power_on.start", computePublisher(inst),
 			inst.id, p, instancePowerPayload(p, inst, "stopped"))
 		g.emit(poweredOnAt, "compute.instance.power_on.end", computePublisher(inst), inst.id, p,
-			instancePowerPayload(p, inst, "active"))
+			instancePowerPayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
 		cursor = poweredOnAt.Add(span(g.shape, time.Hour, 3*day))
 	}
 
@@ -585,11 +601,11 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		// and every notification after them reports it as well.
 		inst.flavor = otherFlavor(g.shape, inst.flavor)
 		g.emit(cursor, "compute.instance.resize.end", computePublisher(inst), inst.id, p,
-			instanceResizePayload(p, inst, "resized"))
+			instanceResizePayload(p, inst, "resized"), alive(stateResized, instanceSizeOf(inst.flavor)))
 		g.noise(finishedAt.Add(-stepLead), "compute.instance.finish_resize.start", computePublisher(inst),
 			inst.id, p, instanceResizePayload(p, inst, "resized"))
 		g.emit(finishedAt, "compute.instance.finish_resize.end", computePublisher(inst), inst.id, p,
-			instanceResizePayload(p, inst, "active"))
+			instanceResizePayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
 		cursor = finishedAt.Add(span(g.shape, time.Hour, 3*day))
 	}
 
@@ -601,11 +617,12 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 		g.noise(cursor.Add(-stepLead), "compute.instance.shelve_offload.start", computePublisher(inst),
 			inst.id, p, instanceShelvePayload(p, inst, "active"))
 		g.emit(cursor, "compute.instance.shelve_offload.end", computePublisher(inst), inst.id, p,
-			instanceShelvePayload(p, inst, "shelved_offloaded"))
+			instanceShelvePayload(p, inst, "shelved_offloaded"),
+			alive(stateShelved, instanceSizeOf(inst.flavor)))
 		g.noise(unshelvedAt.Add(-stepLead), "compute.instance.unshelve.start", computePublisher(inst),
 			inst.id, p, instanceShelvePayload(p, inst, "shelved_offloaded"))
 		g.emit(unshelvedAt, "compute.instance.unshelve.end", computePublisher(inst), inst.id, p,
-			instanceShelvePayload(p, inst, "active"))
+			instanceShelvePayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
 	}
 }
 
@@ -648,7 +665,8 @@ func (g *generator) changeVolume(p *project, vol *volume, forced bool) {
 		g.noise(resizedAt.Add(-stepLead), "volume.resize.start", volumePublisher, vol.id, p,
 			volumeStatusPayload(p, vol, "extending"))
 		vol.sizeGB *= 2
-		g.emit(resizedAt, "volume.resize.end", volumePublisher, vol.id, p, volumeStatePayload(p, vol))
+		g.emit(resizedAt, "volume.resize.end", volumePublisher, vol.id, p, volumeStatePayload(p, vol),
+			alive(volumeStateOf(vol), volumeSizeOf(vol)))
 	}
 	if retypes {
 		retypedAt := g.from.Add(span(g.shape, 3*day, 20*day))
@@ -659,7 +677,8 @@ func (g *generator) changeVolume(p *project, vol *volume, forced bool) {
 			retypedAt = resizedAt.Add(time.Second)
 		}
 		vol.volumeType = otherVolumeType(g.shape, vol.volumeType)
-		g.emit(retypedAt, "volume.retype", volumePublisher, vol.id, p, volumeStatePayload(p, vol))
+		g.emit(retypedAt, "volume.retype", volumePublisher, vol.id, p, volumeStatePayload(p, vol),
+			alive(volumeStateOf(vol), volumeSizeOf(vol)))
 	}
 }
 
@@ -674,12 +693,12 @@ func (g *generator) floatingIPs(p *project) {
 
 		createdAt := inst.createdAt.Add(span(g.shape, 10*time.Second, 60*time.Second))
 		g.emit(createdAt, "floatingip.create.end", networkPublisher, fip.id, p,
-			floatingIPCreatePayload(p, fip, g.networkID))
+			floatingIPCreatePayload(p, fip, g.networkID), alive(stateActive, floatingIPSizeOf()))
 
 		if index == 2 {
 			releasedAt := g.from.Add(span(g.shape, 8*day, 22*day))
 			g.emit(releasedAt, "floatingip.delete.end", networkPublisher, fip.id, p,
-				floatingIPDeletePayload(fip))
+				floatingIPDeletePayload(fip), deleted)
 		}
 	}
 }
@@ -692,7 +711,7 @@ func (g *generator) deleteFirstInstance(p *project) {
 	inst := p.instances[0]
 
 	g.emit(inst.deletedAt.Add(-releaseLead), "floatingip.delete.end", networkPublisher,
-		inst.fip.id, p, floatingIPDeletePayload(inst.fip))
+		inst.fip.id, p, floatingIPDeletePayload(inst.fip), deleted)
 	g.destroyInstance(p, inst, inst.deletedAt)
 
 	for i, vol := range inst.volumes {
@@ -719,7 +738,7 @@ func (g *generator) spareVolume(p, accepting *project) {
 	g.noise(acceptedAt.Add(-transferLead), "volume.transfer.accept.start", volumePublisher, vol.id,
 		accepting, volumeStatePayload(p, vol))
 	g.emit(acceptedAt, "volume.transfer.accept.end", volumePublisher, vol.id, accepting,
-		volumeStatePayload(accepting, vol))
+		volumeStatePayload(accepting, vol), alive(volumeStateOf(vol), volumeSizeOf(vol)))
 }
 
 // span draws a duration from [lo, hi) at whole second granularity. Every
