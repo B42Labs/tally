@@ -192,9 +192,11 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 	}
 	// The period is required by the binary, but the seed and the factor are not:
 	// dropping either leaves a month that is not the one asked for, published at
-	// a pace nobody chose. Without --allow-remote-broker the container refuses
-	// the broker beside it, which is a stack that starts and publishes nothing.
-	for _, flag := range []string{"--period", "--seed", "--factor", "--allow-remote-broker"} {
+	// a pace nobody chose. A dropped --faults leaves SIM_FAULTS with nowhere to
+	// arrive, so a stack asked for a fault switch publishes the month without it.
+	// Without --allow-remote-broker the container refuses the broker beside it,
+	// which is a stack that starts and publishes nothing.
+	for _, flag := range []string{"--period", "--seed", "--factor", "--faults", "--allow-remote-broker"} {
 		if !slices.Contains(svc.Command, flag) {
 			t.Errorf("command = %v, want %s among the arguments", svc.Command, flag)
 		}
