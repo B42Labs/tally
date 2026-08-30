@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math"
 	"net"
@@ -56,7 +57,8 @@ type RunOptions struct {
 	// unbounded: the month goes out as fast as the broker takes it.
 	Factor float64
 	// Out is the directory notifications.jsonl, events.jsonl and oracle.json are
-	// written to. Empty writes nothing.
+	// written to, and held-back.jsonl beside them when a switch holds something
+	// back. Empty writes nothing.
 	Out string
 	// WaitForCollector is how long to wait for a consumer on the collector's
 	// queue before the first notification goes out. Zero disables the wait.
@@ -154,8 +156,10 @@ type queued struct {
 // publisher is file mode, where the month is written out and nothing reaches a
 // bus.
 //
-// All three files are complete before the first notification is published, so a
-// run that is interrupted halfway still leaves a whole month on disk to replay.
+// The files are complete before the first notification is published, so a run
+// that is interrupted halfway still leaves a whole month on disk to replay.
+// There are three of them, and a fourth, held-back.jsonl, when the held-back
+// switch keeps part of the month off the bus.
 //
 // A cancelled context is a clean stop: what went out stays out, and Run returns
 // nil, so SIGINT and SIGTERM leave exit status 0 the way they do for the
@@ -196,6 +200,8 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"faults", faults.Names(),
 		"transitions", len(schedule),
 		"billable", len(schedule.Billable()),
+		"stream", len(month.Stream),
+		"held", len(month.Held),
 		"resources", len(month.Oracle.Resources),
 		"broker", publisher != nil,
 		"out", opts.Out)
@@ -204,7 +210,27 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		if err := os.MkdirAll(opts.Out, outDirMode); err != nil {
 			return fmt.Errorf("creating %s: %w", opts.Out, err)
 		}
-		if err := WriteStream(filepath.Join(opts.Out, "notifications.jsonl"), schedule); err != nil {
+		// The files of an earlier run go first, all four of them and before the
+		// first of this month's is written: written over one by one, whichever
+		// ones a failed write never reached would stay beside this month's, and a
+		// directory reused across runs would carry another month's oracle, events,
+		// or held share into a replay or a drill. A removal that fails does not
+		// stop the others, and every one of them that failed is named, so the
+		// paths a failed run reports are what is left of the earlier month in the
+		// directory.
+		var removeErr error
+		for _, name := range []string{
+			"notifications.jsonl", "events.jsonl", "oracle.json", "held-back.jsonl",
+		} {
+			path := filepath.Join(opts.Out, name)
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				removeErr = errors.Join(removeErr, fmt.Errorf("removing %s: %w", path, err))
+			}
+		}
+		if removeErr != nil {
+			return removeErr
+		}
+		if err := WriteStream(filepath.Join(opts.Out, "notifications.jsonl"), month.Stream); err != nil {
 			return err
 		}
 		if err := WriteEvents(filepath.Join(opts.Out, "events.jsonl"), cfg.Cloud, schedule); err != nil {
@@ -213,18 +239,39 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		if err := WriteOracle(filepath.Join(opts.Out, "oracle.json"), month.Oracle); err != nil {
 			return err
 		}
+		// The fourth file, when the switch holds something back.
+		if len(month.Held) > 0 {
+			if err := WriteStream(filepath.Join(opts.Out, "held-back.jsonl"), month.Held); err != nil {
+				return err
+			}
+		}
 	}
 
 	if publisher == nil {
-		logger.Info("completed", "published", 0, "total", len(schedule))
+		logger.Info("completed", "published", 0, "total", len(month.Stream)+len(month.Held))
 		return nil
 	}
 
+	lines, err := renderQueue(month.Stream)
+	if err != nil {
+		return err
+	}
+	held, err := renderQueue(month.Held)
+	if err != nil {
+		return err
+	}
+	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines, held)
+}
+
+// renderQueue turns a schedule into the notifications the bus carries. The
+// whole of it is rendered before the first one is published, so a rendering
+// error ends the run with nothing published rather than halfway through.
+func renderQueue(schedule Schedule) ([]queued, error) {
 	lines := make([]queued, 0, len(schedule))
 	for _, transition := range schedule {
 		body, err := Render(transition)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		lines = append(lines, queued{
 			exchange:   transition.Exchange,
@@ -235,7 +282,7 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 			body:       body,
 		})
 	}
-	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines)
+	return lines, nil
 }
 
 // Replay publishes a month a run recorded, in the order the file holds it.
@@ -294,30 +341,42 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 		"from", from.Format(time.RFC3339),
 		"to", to.Format(time.RFC3339))
 
-	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines)
+	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines, nil)
 }
 
 // broadcast puts the lines on the bus in the order they stand in, paced by a
-// virtual clock that starts at from, and serves the control endpoint while it
-// does.
+// virtual clock that starts at from, holds the held ones back until a release
+// arrives, and serves the control endpoint through all of it.
 //
-// The endpoint is served for the length of the publishing and no longer,
-// because pacing is the only thing it changes and there is nothing to pace
-// before the first notification or after the last one.
+// The endpoint is served for the length of the run and no longer. It changes
+// when the month goes out, and there is nothing left to decide before the first
+// notification or after the last one, so it comes up with the publishing and
+// stays up through the hold.
 //
-// Lines go out in their own order rather than in timestamp order. One whose
-// instant lies before the previous one is published at once, because SleepUntil
-// returns immediately when the clock has already passed it, so a recorded file
-// that is not perfectly sorted still replays whole.
+// A held share is published after the last regular line, once POST /release
+// asks for it. Every held instant lies before the clock by then, so the
+// notifications go out as fast as the broker confirms them, each under the
+// timestamp inside the month it always carried. A context that ends during the
+// hold is a clean stop with the held share never published.
 func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *slog.Logger,
-	factor float64, wait time.Duration, from, to time.Time, lines []queued,
+	factor float64, wait time.Duration, from, to time.Time, lines, held []queued,
 ) error {
-	if err := publisher.AwaitConsumer(ctx, collectorQueue, wait); err != nil {
-		if ctx.Err() != nil {
-			logger.Info("stopped", "published", 0, "total", len(lines))
-			return nil
+	hb := newHoldback(len(held))
+	total := len(lines) + len(held)
+	var published atomic.Int64
+	// How every end of a run is answered: a cancelled context is a clean stop,
+	// reported as one and answered with nil, and anything else is the error it
+	// is. SIGINT and SIGTERM leave exit status 0 through this.
+	stop := func(err error) error {
+		if ctx.Err() == nil {
+			return err
 		}
-		return err
+		logger.Info("stopped", "published", published.Load(), "total", total, "held", hb.held())
+		return nil
+	}
+
+	if err := publisher.AwaitConsumer(ctx, collectorQueue, wait); err != nil {
+		return stop(err)
 	}
 
 	// The endpoint carries no credential, so it binds the address the
@@ -332,12 +391,15 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 	}
 
 	clock := NewClock(from, factor, time.Now)
-	var published atomic.Int64
 	progress := func() Progress {
-		return Progress{From: from, To: to, Published: int(published.Load()), Total: len(lines)}
+		return Progress{
+			From: from, To: to,
+			Published: int(published.Load()), Total: total,
+			Held: hb.held(), Holding: hb.holding(),
+		}
 	}
 	server := &http.Server{
-		Handler:           NewControlMux(clock, progress),
+		Handler:           NewControlMux(clock, progress, hb.release),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -365,16 +427,57 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 	}
 	logger.Info("listening", "port", port)
 
+	if err := publishLines(ctx, clock, publisher, logger, lines, &published); err != nil {
+		return stop(err)
+	}
+
+	if len(held) > 0 {
+		hb.phase.Store(phaseHolding)
+		logger.Info("holding", "held", len(held), "hint", "POST /release")
+		select {
+		case <-ctx.Done():
+			return stop(ctx.Err())
+		case <-hb.released:
+			logger.Info("releasing", "held", len(held))
+			// A failed publish here is the error it is during the month: what the
+			// operator does about it is rerun the same seed, period and cloud.
+			if err := publishLines(ctx, clock, publisher, logger, held, &published); err != nil {
+				return stop(err)
+			}
+		}
+	}
+
+	// A control endpoint that never came up is reported here rather than while
+	// the month runs: the month is what the operator asked for, and losing the
+	// endpoint is no reason to stop publishing it.
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serving HTTP: %w", err)
+		}
+	default:
+	}
+
+	logger.Info("completed", "published", published.Load(), "total", total)
+	return nil
+}
+
+// publishLines puts the lines on the bus in the order they stand in, paced by
+// the clock, and counts every one the broker confirmed.
+//
+// Lines go out in their own order rather than in timestamp order. One whose
+// instant lies before the previous one is published at once, because SleepUntil
+// returns immediately when the clock has already passed it, so a recorded file
+// that is not perfectly sorted still replays whole.
+func publishLines(ctx context.Context, clock *Clock, publisher *Publisher, logger *slog.Logger,
+	lines []queued, published *atomic.Int64,
+) error {
 	for _, line := range lines {
 		err := clock.SleepUntil(ctx, line.at)
 		if err == nil {
 			err = publisher.Publish(ctx, line.exchange, line.routingKey, line.body)
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				logger.Info("stopped", "published", published.Load(), "total", len(lines))
-				return nil
-			}
 			return err
 		}
 		published.Add(1)
@@ -384,18 +487,5 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 			"message_id", line.messageID,
 			"timestamp", line.at.Format(time.RFC3339))
 	}
-
-	// A control endpoint that never came up is reported here rather than while
-	// the month runs: the month is what the operator asked for, and losing the
-	// pacing endpoint is no reason to stop publishing it.
-	select {
-	case err := <-serveErr:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serving HTTP: %w", err)
-		}
-	default:
-	}
-
-	logger.Info("completed", "published", published.Load(), "total", len(lines))
 	return nil
 }

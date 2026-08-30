@@ -2,10 +2,12 @@ package simulator
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,18 +20,21 @@ var controlProgress = Progress{
 	To:        time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
 	Published: 12,
 	Total:     231,
+	Held:      7,
+	Holding:   true,
 }
 
 // controlServer serves the endpoint over a clock whose wall time is frozen, so
 // the virtual now the document reports is the month's first instant however
 // long the test takes. The clock comes back with the server because what a
-// request did to the factor is asserted on it.
-func controlServer(t *testing.T) (*Clock, *httptest.Server) {
+// request did to the factor is asserted on it. release is what POST /release
+// calls, and a nil one is a run that holds nothing back.
+func controlServer(t *testing.T, release func() error) (*Clock, *httptest.Server) {
 	t.Helper()
 
 	wall := time.Unix(0, 0)
 	clock := NewClock(clockStart, 744, func() time.Time { return wall })
-	server := httptest.NewServer(NewControlMux(clock, func() Progress { return controlProgress }))
+	server := httptest.NewServer(NewControlMux(clock, func() Progress { return controlProgress }, release))
 	t.Cleanup(server.Close)
 	return clock, server
 }
@@ -39,9 +44,31 @@ func controlServer(t *testing.T) (*Clock, *httptest.Server) {
 func request(t *testing.T, server *httptest.Server, method, path, body string) (int, string, string) {
 	t.Helper()
 
+	return requestWithType(t, server, method, path, "", body)
+}
+
+// requestWithType sends one request under a content type of its own. An empty
+// one sends none, the way curl sends none for a request without a body.
+func requestWithType(t *testing.T, server *httptest.Server, method, path, contentType, body string,
+) (int, string, string) {
+	t.Helper()
+
+	return requestWithHeader(t, server, method, path, "Content-Type", contentType, body)
+}
+
+// requestWithHeader sends one request carrying a header of its own, which is
+// how a case sends what a browser puts on a request a page makes. An empty
+// value sends the header not at all.
+func requestWithHeader(t *testing.T, server *httptest.Server, method, path, header, value, body string,
+) (int, string, string) {
+	t.Helper()
+
 	req, err := http.NewRequestWithContext(t.Context(), method, server.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("building %s %s: %v", method, path, err)
+	}
+	if value != "" {
+		req.Header.Set(header, value)
 	}
 	resp, err := server.Client().Do(req)
 	if err != nil {
@@ -68,7 +95,7 @@ func decodeDocument(t *testing.T, body string) clockDocument {
 }
 
 func TestClockEndpointReportsTheState(t *testing.T) {
-	_, server := controlServer(t)
+	_, server := controlServer(t, nil)
 
 	status, contentType, body := request(t, server, http.MethodGet, "/clock", "")
 	if status != http.StatusOK {
@@ -84,6 +111,8 @@ func TestClockEndpointReportsTheState(t *testing.T) {
 		Factor:     744,
 		Published:  12,
 		Total:      231,
+		Held:       7,
+		Holding:    true,
 		PeriodFrom: "2026-07-01T00:00:00Z",
 		PeriodTo:   "2026-08-01T00:00:00Z",
 	}
@@ -107,7 +136,7 @@ func TestClockEndpointReportsTheState(t *testing.T) {
 // value a missing member would otherwise be taken for, and the one an operator
 // reaches for to let a run finish as fast as the broker takes it.
 func TestClockEndpointSetsTheFactor(t *testing.T) {
-	clock, server := controlServer(t)
+	clock, server := controlServer(t, nil)
 
 	status, _, body := request(t, server, http.MethodPut, "/clock", `{"factor": 0}`)
 	if status != http.StatusOK {
@@ -142,7 +171,7 @@ func TestClockEndpointRefusesABadBody(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			clock, server := controlServer(t)
+			clock, server := controlServer(t, nil)
 
 			status, contentType, body := request(t, server, http.MethodPut, "/clock", c.body)
 			if status != http.StatusBadRequest {
@@ -164,11 +193,51 @@ func TestClockEndpointRefusesABadBody(t *testing.T) {
 	}
 }
 
+// TestClockEndpointRefusesARequestABrowserSent covers the guard the release
+// carries too. A cross-origin PUT is stopped by the preflight the mux answers
+// 405, but a page that resolved the endpoint's address itself sends one
+// same-origin, where no preflight stands in the way and the browser still
+// appends the two headers this refuses on.
+func TestClockEndpointRefusesARequestABrowserSent(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "a page's own Origin", header: "Origin", value: "http://127.0.0.1:8091"},
+		{name: "the mark the browser put on it", header: "Sec-Fetch-Site", value: "same-origin"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clock, server := controlServer(t, nil)
+
+			status, contentType, body := requestWithHeader(t, server, http.MethodPut, "/clock",
+				c.header, c.value, `{"factor": 0}`)
+			if status != http.StatusForbidden {
+				t.Fatalf("PUT /clock from a page = %d, want %d (body %q)",
+					status, http.StatusForbidden, body)
+			}
+			if !strings.HasPrefix(contentType, "text/plain") {
+				t.Errorf("PUT /clock Content-Type = %q, want it to start with text/plain", contentType)
+			}
+			if body != badFactorOrigin {
+				t.Errorf("PUT /clock body = %q, want %q", body, badFactorOrigin)
+			}
+			// The refusal leaves the run at the pace it was started with rather
+			// than at the one the page asked for.
+			if got := clock.Factor(); got != 744 {
+				t.Errorf("Factor() after the refusal = %g, want 744", got)
+			}
+		})
+	}
+}
+
 // TestClockEndpointRefusesOtherMethods holds the routes to the method they were
 // registered with: the mux answers 405 itself, so neither handler ever sees a
 // request it was not written for.
 func TestClockEndpointRefusesOtherMethods(t *testing.T) {
-	_, server := controlServer(t)
+	_, server := controlServer(t, nil)
 
 	status, _, body := request(t, server, http.MethodPost, "/clock", `{"factor": 1}`)
 	if status != http.StatusMethodNotAllowed {
@@ -178,6 +247,253 @@ func TestClockEndpointRefusesOtherMethods(t *testing.T) {
 	status, _, body = request(t, server, http.MethodDelete, "/healthz", "")
 	if status != http.StatusMethodNotAllowed {
 		t.Errorf("DELETE /healthz = %d, want %d (body %q)", status, http.StatusMethodNotAllowed, body)
+	}
+}
+
+// TestHoldbackReleasesOnce covers the three answers a release gets and the one
+// state change it makes: the first release closes the channel broadcast waits
+// on, and every release after it finds nothing left to let out.
+func TestHoldbackReleasesOnce(t *testing.T) {
+	if err := newHoldback(0).release(); !errors.Is(err, errNothingHeld) {
+		t.Errorf("release() on a run holding nothing = %v, want %v", err, errNothingHeld)
+	}
+
+	hb := newHoldback(3)
+	if err := hb.release(); !errors.Is(err, errStillPublishing) {
+		t.Errorf("release() while the month publishes = %v, want %v", err, errStillPublishing)
+	}
+	if got := hb.held(); got != 3 {
+		t.Errorf("held() while the month publishes = %d, want 3", got)
+	}
+
+	hb.phase.Store(phaseHolding)
+	if err := hb.release(); err != nil {
+		t.Fatalf("release() while holding = %v, want nil", err)
+	}
+	if got := hb.held(); got != 0 {
+		t.Errorf("held() after the release = %d, want 0", got)
+	}
+	select {
+	case <-hb.released:
+	default:
+		t.Error("the released channel is open after the release, want it closed: it is what the run waits on")
+	}
+
+	if err := hb.release(); !errors.Is(err, errAlreadyReleased) {
+		t.Errorf("a second release() = %v, want %v", err, errAlreadyReleased)
+	}
+}
+
+// TestReleaseEndpointAnswersEachRefusal holds the endpoint to what it says
+// about a release it cannot grant. Each refusal is the whole answer, because
+// what the caller does about it is read off that one line.
+func TestReleaseEndpointAnswersEachRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"a run started without the switch", errNothingHeld},
+		{"a month that is still publishing", errStillPublishing},
+		{"a release that already happened", errAlreadyReleased},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server := controlServer(t, func() error { return tc.err })
+
+			status, contentType, body := request(t, server, http.MethodPost, "/release", "")
+			if status != http.StatusConflict {
+				t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusConflict, body)
+			}
+			if want := "text/plain; charset=utf-8"; contentType != want {
+				t.Errorf("POST /release Content-Type = %q, want %q", contentType, want)
+			}
+			if body != tc.err.Error() {
+				t.Errorf("POST /release body = %q, want %q", body, tc.err.Error())
+			}
+		})
+	}
+
+	t.Run("a run holding notifications back", func(t *testing.T) {
+		_, server := controlServer(t, func() error { return nil })
+
+		status, contentType, body := request(t, server, http.MethodPost, "/release", "")
+		if status != http.StatusOK {
+			t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+		}
+		if !strings.HasPrefix(contentType, "application/json") {
+			t.Errorf("POST /release Content-Type = %q, want it to start with application/json", contentType)
+		}
+		if got := decodeDocument(t, body).Total; got != controlProgress.Total {
+			t.Errorf("POST /release document total = %d, want %d", got, controlProgress.Total)
+		}
+	})
+
+	t.Run("a body a page in a browser could send unasked", func(t *testing.T) {
+		_, server := controlServer(t, func() error {
+			t.Error("the release ran, want the content type to have refused the request first")
+			return nil
+		})
+
+		status, contentType, body := requestWithType(t, server, http.MethodPost, "/release",
+			"application/x-www-form-urlencoded", "release=1")
+		if status != http.StatusUnsupportedMediaType {
+			t.Fatalf("POST /release as a form = %d, want %d (body %q)",
+				status, http.StatusUnsupportedMediaType, body)
+		}
+		if !strings.HasPrefix(contentType, "text/plain") {
+			t.Errorf("POST /release Content-Type = %q, want it to start with text/plain", contentType)
+		}
+		if body != badReleaseType {
+			t.Errorf("POST /release body = %q, want %q", body, badReleaseType)
+		}
+	})
+
+	t.Run("a bodyless request a page in a browser could send unasked", func(t *testing.T) {
+		_, server := controlServer(t, func() error {
+			t.Error("the release ran, want the Origin to have refused the request first")
+			return nil
+		})
+
+		// A fetch without a body sends no content type at all, and needs no
+		// preflight to reach loopback. What is left of it to refuse is the Origin
+		// the browser put on it.
+		status, contentType, body := requestWithHeader(t, server, http.MethodPost, "/release",
+			"Origin", "https://example.invalid", "")
+		if status != http.StatusForbidden {
+			t.Fatalf("POST /release from a page = %d, want %d (body %q)",
+				status, http.StatusForbidden, body)
+		}
+		if !strings.HasPrefix(contentType, "text/plain") {
+			t.Errorf("POST /release Content-Type = %q, want it to start with text/plain", contentType)
+		}
+		if body != badReleaseOrigin {
+			t.Errorf("POST /release body = %q, want %q", body, badReleaseOrigin)
+		}
+	})
+
+	t.Run("a request a browser marked with Sec-Fetch-Site", func(t *testing.T) {
+		_, server := controlServer(t, func() error {
+			t.Error("the release ran, want Sec-Fetch-Site to have refused the request first")
+			return nil
+		})
+
+		status, _, body := requestWithHeader(t, server, http.MethodPost, "/release",
+			"Sec-Fetch-Site", "cross-site", "")
+		if status != http.StatusForbidden {
+			t.Fatalf("POST /release from a page = %d, want %d (body %q)",
+				status, http.StatusForbidden, body)
+		}
+		if body != badReleaseOrigin {
+			t.Errorf("POST /release body = %q, want %q", body, badReleaseOrigin)
+		}
+	})
+
+	t.Run("a JSON body a script sent on purpose", func(t *testing.T) {
+		_, server := controlServer(t, func() error { return nil })
+
+		status, _, body := requestWithType(t, server, http.MethodPost, "/release",
+			"application/json", "{}")
+		if status != http.StatusOK {
+			t.Fatalf("POST /release as JSON = %d, want %d (body %q)", status, http.StatusOK, body)
+		}
+	})
+
+	t.Run("a method the route was not registered with", func(t *testing.T) {
+		_, server := controlServer(t, func() error { return nil })
+
+		status, _, body := request(t, server, http.MethodGet, "/release", "")
+		if status != http.StatusMethodNotAllowed {
+			t.Errorf("GET /release = %d, want %d (body %q)", status, http.StatusMethodNotAllowed, body)
+		}
+	})
+
+	t.Run("a mux built without a release", func(t *testing.T) {
+		_, server := controlServer(t, nil)
+
+		status, _, body := request(t, server, http.MethodPost, "/release", "")
+		if status != http.StatusConflict {
+			t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusConflict, body)
+		}
+		if body != errNothingHeld.Error() {
+			t.Errorf("POST /release body = %q, want %q", body, errNothingHeld.Error())
+		}
+	})
+}
+
+// TestReleaseFollowsTheHoldingTheDocumentReports ties the document a caller
+// polls to the release it sends next. The counts reach their hold values while
+// the run is still on its way into the hold, so holding is the one member a
+// script may act on, and the document the release answers with is the month one
+// release short however fast the run publishes the rest.
+func TestReleaseFollowsTheHoldingTheDocumentReports(t *testing.T) {
+	const total, held = 231, 7
+
+	hb := newHoldback(held)
+	var published atomic.Int64
+	// The last regular notification is on the bus: the count says so before the
+	// run has entered the hold, which is where a caller polling on it is refused.
+	published.Store(total - held)
+
+	wall := time.Unix(0, 0)
+	clock := NewClock(clockStart, 744, func() time.Time { return wall })
+	progress := func() Progress {
+		return Progress{
+			From: clockStart, To: controlProgress.To,
+			Published: int(published.Load()), Total: total,
+			Held: hb.held(), Holding: hb.holding(),
+		}
+	}
+	// A run at factor 0 publishes the held share as fast as the broker confirms
+	// it, which is what a document read after the release would count.
+	release := func() error {
+		err := hb.release()
+		if err == nil {
+			published.Add(held)
+		}
+		return err
+	}
+	server := httptest.NewServer(NewControlMux(clock, progress, release))
+	t.Cleanup(server.Close)
+
+	status, _, body := request(t, server, http.MethodGet, "/clock", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if doc := decodeDocument(t, body); doc.Holding {
+		t.Errorf("GET /clock holding = true with %d of %d published, want false: "+
+			"the run has not entered the hold", doc.Published, doc.Total)
+	}
+	status, _, body = request(t, server, http.MethodPost, "/release", "")
+	if status != http.StatusConflict {
+		t.Fatalf("POST /release before the hold = %d, want %d (body %q)",
+			status, http.StatusConflict, body)
+	}
+
+	// What broadcast does once the last regular line is confirmed.
+	hb.phase.Store(phaseHolding)
+
+	status, _, body = request(t, server, http.MethodGet, "/clock", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if doc := decodeDocument(t, body); !doc.Holding {
+		t.Fatal("GET /clock holding = false while the run holds, want true: " +
+			"it is the signal a release is sent on")
+	}
+
+	status, _, body = request(t, server, http.MethodPost, "/release", "")
+	if status != http.StatusOK {
+		t.Fatalf("POST /release on a reported hold = %d, want %d (body %q)",
+			status, http.StatusOK, body)
+	}
+	doc := decodeDocument(t, body)
+	if doc.Published != total-held {
+		t.Errorf("POST /release document published = %d, want %d: the answer states the month "+
+			"one release short, not however far the release got before it was written",
+			doc.Published, total-held)
+	}
+	if doc.Held != 0 || doc.Holding {
+		t.Errorf("POST /release document held = %d, holding = %t, want 0 and false",
+			doc.Held, doc.Holding)
 	}
 }
 
