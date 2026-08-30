@@ -41,7 +41,7 @@ IMAGES := $(SERVICES) tally-openstack-collector tally-openstack-simulator
 SIM_IMAGES := tally-openstack-collector tally-openstack-simulator
 
 # The simulator stack, deploy/compose/compose.yaml: a broker, the collector, and
-# the simulator, run beside the dev cluster rather than in it. The four SIM_
+# the simulator, run beside the dev cluster rather than in it. The five SIM_
 # values below are what `simulator-up` writes into the .env file compose reads.
 # A factor of 744 puts a 31-day month on the bus in an hour.
 SIM_CLOUD ?= os-sim
@@ -50,6 +50,9 @@ SIM_FACTOR ?= 744
 # No default: the target refuses to run until a month is named, because any
 # month guessed here would be as wrong as another.
 SIM_PERIOD ?=
+# The fault switches to turn on, comma-separated: pre-existing, missing-create,
+# duplicates, reordering, refused-shapes, held-back. Empty is every switch off.
+SIM_FAULTS ?=
 COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
@@ -174,7 +177,7 @@ simulator-up:
 	@echo '==> writing the dev CA to tally-ca.crt'
 	$(MAKE) -s ca > tally-ca.crt
 	@echo '==> issuing an ingest credential for $(SIM_CLOUD)'
-	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-ingest-credential --platform openstack --cloud '$(SIM_CLOUD)' --description 'openstack simulator')"; printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_OSC_TOKEN=%s\n' '$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' "$$token" > deploy/compose/.env
+	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-ingest-credential --platform openstack --cloud '$(SIM_CLOUD)' --description 'openstack simulator')"; printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_SIM_FAULTS=%s\nTALLY_OSC_TOKEN=%s\n' '$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' '$(SIM_FAULTS)' "$$token" > deploy/compose/.env
 	$(COMPOSE) up -d
 	@echo
 	@echo 'Simulator stack is up:'
@@ -185,6 +188,8 @@ simulator-up:
 	@echo
 	@echo "Finish the month at once with:"
 	@echo "  curl -X PUT -d '{\"factor\": 0}' http://127.0.0.1:8091/clock"
+	@echo "Release the held-back notifications of a run with SIM_FAULTS=held-back with:"
+	@echo "  curl -X POST http://127.0.0.1:8091/release"
 
 # Dropping the volumes empties the outbox and the broker's queue, so the next
 # `simulator-up` starts from nothing rather than delivering what the last run
