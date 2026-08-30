@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/b42labs/tally/internal/core/cardinality"
 	"github.com/b42labs/tally/internal/providers/openstack"
 )
 
@@ -43,10 +45,11 @@ const (
 	pollDeadline = 30 * time.Second
 )
 
-// testOutboxMax is the outbox bound the collector runs under here. Nothing
-// drains the outbox during a test, so the bound is far above the few hundred
-// notifications one month produces: a consumer that paused on backpressure
-// would stall the run rather than fail it.
+// testOutboxMax is the outbox bound the collector runs under here. Only the
+// billable notifications reach the outbox at all, about 1800 for a month of
+// seed 1, since the noise is skipped before it. Nothing drains the outbox
+// during a test, so the bound stays far above that: a consumer that paused on
+// backpressure would stall the run rather than fail it.
 const testOutboxMax = 100_000
 
 // startBroker runs a RabbitMQ container for the test and returns the URL it is
@@ -214,6 +217,29 @@ func counterValue(t *testing.T, reg *prometheus.Registry, name, labelName, label
 	return 0
 }
 
+// skippedSum adds up every child of tally_collector_skipped_total, whatever
+// event type it carries, and reads 0 while the family is absent. A test waits
+// on the sum rather than on one type, because the sum is what says the whole
+// month has been handled: a per-type count is only worth comparing once it has.
+func skippedSum(t *testing.T, reg *prometheus.Registry) float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v, want nil", err)
+	}
+	sum := 0.0
+	for _, family := range families {
+		if family.GetName() != "tally_collector_skipped_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			sum += metric.GetCounter().GetValue()
+		}
+	}
+	return sum
+}
+
 // storedEventIDs lists the event ids the outbox holds, sorted so that a test
 // compares sets rather than the order the consumer happened to buffer in.
 func storedEventIDs(t *testing.T, outbox *openstack.Outbox, n int) []string {
@@ -303,7 +329,8 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 
-	want := billableMessageIDs(t, generateMonth(t, 1, july2026, testCloud))
+	month := generateMonth(t, 1, july2026, testCloud)
+	want := billableMessageIDs(t, month)
 	waitFor(t, "every billable notification is buffered", func() bool {
 		return outbox.Depth() == int64(len(want))
 	})
@@ -316,30 +343,66 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 		t.Errorf("the event ids in events.jsonl = %v, want %v", got, want)
 	}
 
+	// What the rest of the month becomes in the collector: every notification the
+	// mapping records nothing for is counted as skipped under the type it arrived
+	// as. That counter is how a deployment sees the types it bills nothing for,
+	// so the month is held to it type by type.
+	expected := map[string]int{}
+	skippedTotal := 0
+	for _, transition := range month {
+		if transition.Billable {
+			continue
+		}
+		expected[transition.EventType]++
+		skippedTotal++
+	}
+	// The consumer counts a skip when it handles the message, and the last
+	// messages of a month may be noise that arrives after the last billable one,
+	// so a full outbox does not yet mean the counters are complete.
+	waitFor(t, "every non-billable notification is counted as skipped", func() bool {
+		return skippedSum(t, reg) == float64(skippedTotal)
+	})
+
 	// The month carries one image.create per image, nine in all: two for each of
 	// the three classic projects, one for each of the two Gardener tenants, and
-	// one for the CI tenant. The mapping skips every one of them because an
-	// announced image has no size yet. Nothing else in the month may go
-	// unrecorded: a notification the collector cannot parse is one the simulator
-	// rendered wrong.
+	// one for the CI tenant. Beside them stands the noise catalogue, and the
+	// mapping records nothing for any of it: an announced image has no size yet,
+	// and no noise type is billable. The counts below hold each of those series
+	// to the month.
 	if got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", "image.create"); got != 9 {
 		t.Errorf("tally_collector_skipped_total{event_type=\"image.create\"} = %v, want 9", got)
 	}
+	for _, eventType := range slices.Sorted(maps.Keys(expected)) {
+		got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", eventType)
+		if got != float64(expected[eventType]) {
+			t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want %d",
+				eventType, got, expected[eventType])
+		}
+	}
+	// The 83 types of the month lie inside the bound the collector holds the
+	// label's values to, so none of them is folded into the overflow value.
+	if got := counterValue(t, reg, "tally_collector_skipped_total",
+		"event_type", cardinality.Overflow); got != 0 {
+		t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want 0", cardinality.Overflow, got)
+	}
+	// And nothing in the month went unrecorded for another reason: a notification
+	// the collector cannot parse is one the simulator rendered wrong.
 	if got := counterValue(t, reg, "tally_collector_unparseable_total", "", ""); got != 0 {
 		t.Errorf("tally_collector_unparseable_total = %v, want 0", got)
 	}
 }
 
-// TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers is what a
-// deployment that runs octavia and left TALLY_OSC_EXCHANGES alone gets. A topic
-// exchange copies a message only to the queues bound to it, so the octavia
-// notifications of the month reach a collector bound to the other four
-// exchanges neither as an event nor as a skip: they are dropped at the broker,
-// and nothing in the collector counts them.
-func TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers(t *testing.T) {
+// TestACollectorAtItsDefaultExchangesMissesTheOtherFourExchanges is what a
+// deployment that left TALLY_OSC_EXCHANGES alone gets. A topic exchange copies
+// a message only to the queues bound to it, so what the month publishes on
+// octavia, keystone, designate and barbican reaches a collector bound to the
+// other four neither as an event nor as a skip: it is dropped at the broker,
+// and nothing in the collector counts it. The noise on the four bound
+// exchanges is what such a collector does see, as skips.
+func TestACollectorAtItsDefaultExchangesMissesTheOtherFourExchanges(t *testing.T) {
 	url, _ := startBroker(t)
-	// The publisher declares all five, so the octavia exchange exists and takes
-	// its messages whether a queue is bound to it or not.
+	// The publisher declares all eight, so the four unbound exchanges exist and
+	// take their messages whether a queue is bound to them or not.
 	publisher := connect(t, url)
 	outbox, reg, _ := startCollector(t, url, defaultCollectorExchanges)
 
@@ -374,6 +437,15 @@ func TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers(t *testing.T) {
 		t.Errorf("buffered event ids = %v, want %v", got, want)
 	}
 
+	// What it does see instead of the four exchanges it is not bound to: nova's
+	// noise, of which the audits are the largest part. The daily audits run to
+	// the end of the month and may be among its last messages, so the counter is
+	// waited for before the skips are read.
+	const audits = "compute.instance.exists"
+	waitFor(t, "the daily audits are counted as skipped", func() bool {
+		return counterValue(t, reg, "tally_collector_skipped_total", "event_type", audits) > 0
+	})
+
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather() error = %v, want nil", err)
@@ -384,7 +456,8 @@ func TestACollectorAtItsDefaultExchangesMissesTheLoadBalancers(t *testing.T) {
 		}
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
-				if label.GetName() != "event_type" || !strings.HasPrefix(label.GetValue(), "octavia.") {
+				if label.GetName() != "event_type" ||
+					slices.Contains(defaultCollectorExchanges, exchangeFor(label.GetValue())) {
 					continue
 				}
 				t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want the type in no counter "+

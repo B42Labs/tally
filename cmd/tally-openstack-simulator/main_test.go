@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
 )
@@ -33,14 +34,37 @@ const closedBroker = "amqp://guest:guest@127.0.0.1:1/"
 // a production URL copied into the simulator's environment.
 const remoteBroker = "amqp://guest:hunter2@rabbit.control-plane.example:5672/"
 
-// nonBillableNotifications is how many notifications of a generated month the
-// collector maps to no event: the ones that are published to describe the
-// month's shape without being billable. They are the unsized image.create of
-// every image: two for each of the three classic projects, one for each of the
-// two Gardener tenants, and one for the CI tenant. notifications.jsonl holds
-// every notification and events.jsonl only the billable ones, so the two files
-// differ by exactly this many lines.
-const nonBillableNotifications = 9
+// nonBillableNotifications is how many notifications of a month the collector
+// maps to no event: the unsized image.create, one per image, and every
+// notification of the noise catalogue (docs/openstack-simulator.md, "The
+// noise"). notifications.jsonl holds every notification and events.jsonl only
+// the billable ones, so the two files differ by exactly this many lines.
+//
+// The count comes from the month the generator renders rather than from a
+// number written down here. A measured one would fail every time the catalogue
+// gains a type or an offset adds a transition, with nothing in the failure to
+// tell a deliberate change from a generator that lost half a month, and
+// re-measuring is the same edit either way.
+func nonBillableNotifications(t *testing.T, seed uint64, month, cloud string) int {
+	t.Helper()
+
+	from, to, err := period.Parse(month)
+	if err != nil {
+		t.Fatalf("period.Parse(%q) error = %v, want nil", month, err)
+	}
+	schedule, err := simulator.Generate(seed, from, to, cloud)
+	if err != nil {
+		t.Fatalf("Generate() error = %v, want nil", err)
+	}
+
+	count := 0
+	for _, transition := range schedule {
+		if !transition.Billable {
+			count++
+		}
+	}
+	return count
+}
 
 func TestHelpNeedsNoEnvironment(t *testing.T) {
 	blankEnvironment(t)
@@ -151,9 +175,10 @@ func TestRunWritesTheMonthInFileMode(t *testing.T) {
 		}
 	}
 
-	if want := len(eventLines) + nonBillableNotifications; len(notificationLines) != want {
+	skipped := nonBillableNotifications(t, 1, endedMonth, simulatedCloud)
+	if want := len(eventLines) + skipped; len(notificationLines) != want {
 		t.Errorf("notifications.jsonl has %d lines, want %d: %d events plus the %d non-billable ones",
-			len(notificationLines), want, len(eventLines), nonBillableNotifications)
+			len(notificationLines), want, len(eventLines), skipped)
 	}
 
 	t.Run("is byte-identical on a second run", func(t *testing.T) {
