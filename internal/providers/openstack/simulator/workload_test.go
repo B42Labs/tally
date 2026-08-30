@@ -84,7 +84,8 @@ func buildMonth(t *testing.T, seed uint64) *generator {
 	shape := rand.New(rand.NewPCG(seed, shapeStream))
 	identifiers := idReader{src: rand.New(rand.NewPCG(seed, identifierSalt(testCloud, july2026)))}
 
-	g := newGenerator(shape, identifiers, july2026, july2026.AddDate(0, 1, 0), testCloud)
+	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, testCloud, july2026),
+		july2026, july2026.AddDate(0, 1, 0), testCloud)
 	g.run()
 	slices.SortStableFunc(g.schedule, func(a, b Transition) int { return a.At.Compare(b.At) })
 	return g
