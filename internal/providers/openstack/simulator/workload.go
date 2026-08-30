@@ -173,8 +173,16 @@ const (
 // constant so that the shape of a month depends on the seed alone.
 const shapeStream = 1
 
-// Generate builds one month of the simulated cloud's lifecycle transitions,
-// sorted by their instant.
+// Month is one generated month: the transitions the simulated cloud publishes
+// and the oracle of what they were meant to mean.
+type Month struct {
+	Schedule Schedule
+	Oracle   Oracle
+}
+
+// GenerateMonth builds one month of the simulated cloud's lifecycle
+// transitions, sorted by their instant, together with the oracle of what the
+// month contained.
 //
 // The month runs on two generators. The shape generator draws everything that
 // decides what happens and when, and it is seeded by the seed alone: the same
@@ -200,22 +208,22 @@ const shapeStream = 1
 // down to the message ids: a noise transition takes its own from the third
 // stream, so a catalogue that grows by one transition renumbers nothing the
 // collector bills.
-func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
+func GenerateMonth(seed uint64, from, to time.Time, cloud string) (Month, error) {
 	// A caller that reached here without going through period.Parse is caught
 	// before it produces a month that no billing period covers.
-	month := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
-	if !from.Equal(month) || !to.Equal(month.AddDate(0, 1, 0)) {
-		return nil, fmt.Errorf("%q is not a UTC month", from.Format(time.RFC3339))
+	start := time.Date(from.UTC().Year(), from.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	if !from.Equal(start) || !to.Equal(start.AddDate(0, 1, 0)) {
+		return Month{}, fmt.Errorf("%q is not a UTC month", from.Format(time.RFC3339))
 	}
 
 	shape := rand.New(rand.NewPCG(seed, shapeStream))
-	identifiers := idReader{src: rand.New(rand.NewPCG(seed, identifierSalt(cloud, month)))}
+	identifiers := idReader{src: rand.New(rand.NewPCG(seed, identifierSalt(cloud, start)))}
 
-	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, cloud, month),
-		month, month.AddDate(0, 1, 0), cloud)
+	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, cloud, start),
+		start, start.AddDate(0, 1, 0), cloud)
 	g.run()
 	if len(g.schedule) == 0 {
-		return nil, errors.New("the generated month holds no transitions")
+		return Month{}, errors.New("the generated month holds no transitions")
 	}
 
 	slices.SortStableFunc(g.schedule, func(a, b Transition) int { return a.At.Compare(b.At) })
@@ -232,7 +240,19 @@ func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
 		}
 		g.schedule[i].MessageID = identifiers.nextUUID()
 	}
-	return g.schedule, nil
+
+	oracle, err := buildOracle(g.facts, seed, cloud, start, start.AddDate(0, 1, 0))
+	if err != nil {
+		return Month{}, err
+	}
+	return Month{Schedule: g.schedule, Oracle: oracle}, nil
+}
+
+// Generate is the schedule of GenerateMonth alone, for a caller that publishes
+// a month without holding it against anything.
+func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
+	month, err := GenerateMonth(seed, from, to, cloud)
+	return month.Schedule, err
 }
 
 // identifierSalt mixes the cloud and the billing month into the identifier
