@@ -248,13 +248,6 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string) (Month, error)
 	return Month{Schedule: g.schedule, Oracle: oracle}, nil
 }
 
-// Generate is the schedule of GenerateMonth alone, for a caller that publishes
-// a month without holding it against anything.
-func Generate(seed uint64, from, to time.Time, cloud string) (Schedule, error) {
-	month, err := GenerateMonth(seed, from, to, cloud)
-	return month.Schedule, err
-}
-
 // identifierSalt mixes the cloud and the billing month into the identifier
 // generator's state. Without it, two clouds fed the same seed would publish
 // notifications carrying the same message ids, and ingestion would take the

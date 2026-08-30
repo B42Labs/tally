@@ -2,11 +2,14 @@ package simulator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -677,10 +680,10 @@ func TestBuildOracleKeepsAFactThatRestatesTheOpenInterval(t *testing.T) {
 	}
 }
 
-// TestBuildOracleRefusesWhatItCannotFold holds the two ledgers the fold refuses
-// rather than guesses at. Both are the generator's own mistakes, and a fold
-// that papered over them would state a month nobody generated.
-func TestBuildOracleRefusesWhatItCannotFold(t *testing.T) {
+// TestBuildOracleRefusesTwoFactsAtOneInstant holds the two ledgers the fold
+// refuses rather than guesses at. Both are the generator's own mistakes, and a
+// fold that papered over them would state a month nobody generated.
+func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 	from := july2026
 	to := from.AddDate(0, 1, 0)
 
@@ -862,6 +865,239 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 
 		if !slices.Equal(booked, want) {
 			t.Errorf("a resource is booked under %v, want %v", booked, want)
+		}
+	})
+}
+
+// emptyOracleDocument is an oracle of a month that states no resource, written
+// out by hand because buildOracle only folds one from a ledger the generator
+// never produces.
+const emptyOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
+	`"period_from":"2026-07-01T00:00:00Z",` +
+	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[]}`
+
+// completeOracleDocument is the smallest document ReadOracle accepts, and
+// oracleIntervalDocument the one interval it holds. The cases that hold the
+// read against a document another build wrote cut one member out of it, so each
+// of them differs from an accepted file in the one member it is about.
+const oracleIntervalDocument = `{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
+	`"state":"available","project_id":"p1","size":{"size_gb":50}}`
+
+const completeOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
+	`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",` +
+	`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",` +
+	`"intervals":[` + oracleIntervalDocument + `]}],"counts":[]}`
+
+// generatedOracle is the oracle of one generated month, or a failed test.
+func generatedOracle(t *testing.T, seed uint64) Oracle {
+	t.Helper()
+
+	month, err := GenerateMonth(seed, july2026, july2026.AddDate(0, 1, 0), testCloud)
+	if err != nil {
+		t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed,
+			july2026.Format(time.RFC3339), testCloud, err)
+	}
+	return month.Oracle
+}
+
+// writeOracleFile writes a document to an oracle file of its own and returns
+// its path. It is how the tests build the files ReadOracle has to refuse, which
+// WriteOracle cannot produce.
+func writeOracleFile(t *testing.T, document string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "oracle.json")
+	if err := os.WriteFile(path, []byte(document), streamFileMode); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+// TestOracleRoundTrips writes the oracle of a generated month out and reads it
+// back. The file is what a comparison works from, and the numbers are what it
+// turns on: a size that came back as a float64 would be held against the digits
+// the engine read from the same notification and lose them.
+func TestOracleRoundTrips(t *testing.T) {
+	oracle := generatedOracle(t, 1)
+	path := filepath.Join(t.TempDir(), "oracle.json")
+
+	if err := WriteOracle(path, oracle); err != nil {
+		t.Fatalf("WriteOracle() error = %v, want nil", err)
+	}
+	read, err := ReadOracle(path)
+	if err != nil {
+		t.Fatalf("ReadOracle() error = %v, want nil", err)
+	}
+
+	if !reflect.DeepEqual(read, oracle) {
+		t.Errorf("ReadOracle() = %+v, want %+v", read, oracle)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	text := string(content)
+	if !strings.HasPrefix(text, "{") {
+		t.Errorf("%s starts with %q, want the object the oracle renders to", path,
+			text[:min(len(text), 20)])
+	}
+	if !strings.HasSuffix(text, "\n") {
+		t.Errorf("%s ends with %q, want a trailing newline", path, text[max(len(text)-20, 0):])
+	}
+}
+
+func TestWriteOracleReportsAnUnwritablePath(t *testing.T) {
+	// A --out whose directory was never created is what an operator hits, and
+	// the error names the file rather than the syscall that refused it.
+	path := filepath.Join(t.TempDir(), "absent", "oracle.json")
+
+	err := WriteOracle(path, generatedOracle(t, 1))
+
+	prefix := "writing " + path + ": "
+	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+		t.Fatalf("WriteOracle() error = %v, want it to start with %q", err, prefix)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s error = %v, want the failed write to have left no file behind", path, err)
+	}
+}
+
+func TestReadOracleReportsAMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oracle.json")
+
+	_, err := ReadOracle(path)
+
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadOracle() error = %v, want it to report a missing file", err)
+	}
+	prefix := "reading " + path + ": "
+	if !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("ReadOracle() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+// TestReadOracleRefusesAnEmptyOracle holds the read against a document that
+// parses and states nothing. A comparison handed one would report every
+// resource of the month as one the engine invented.
+func TestReadOracleRefusesAnEmptyOracle(t *testing.T) {
+	path := writeOracleFile(t, emptyOracleDocument)
+
+	_, err := ReadOracle(path)
+
+	want := path + " holds no resources"
+	if err == nil || err.Error() != want {
+		t.Fatalf("ReadOracle() error = %v, want %q", err, want)
+	}
+}
+
+// TestReadOracleRefusesWhatIsNotAnOracle holds the files the read refuses
+// before it hands anything to a comparison: bytes that are no document at all,
+// an oracle another build wrote that states more than this one reads or was
+// written to another format, and one that leaves a member this build reads
+// unstated. The last of them is the one a decoder says nothing about, because
+// JSON leaves an absent member at its zero value: a document without a size
+// would be compared, and every time gauge dimension of every priced resource
+// would come out as a difference the engine did not cause.
+func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
+	t.Run("the document the cases below cut a member out of", func(t *testing.T) {
+		path := writeOracleFile(t, completeOracleDocument)
+
+		if _, err := ReadOracle(path); err != nil {
+			t.Fatalf("ReadOracle() error = %v, want nil for a complete document", err)
+		}
+	})
+
+	t.Run("an oracle written to another format", func(t *testing.T) {
+		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":1`, `"format":2`, 1))
+
+		_, err := ReadOracle(path)
+
+		want := fmt.Sprintf("%s states format 2 and this build writes format %d", path, oracleFormat)
+		if err == nil || err.Error() != want {
+			t.Fatalf("ReadOracle() error = %v, want %q", err, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		cut  string
+		want string
+	}{
+		{name: "a document without a cloud", cut: `"cloud":"os-test",`, want: "names no cloud"},
+		{
+			name: "a document without a period",
+			cut:  `"period_from":"2026-07-01T00:00:00Z",`,
+			want: "names no period",
+		},
+		{
+			name: "a resource without an id",
+			cut:  `"resource_id":"v",`,
+			want: "holds a resource without a type or an id",
+		},
+		{
+			name: "a resource without an interval",
+			cut:  oracleIntervalDocument,
+			want: "states no interval for volume v",
+		},
+		{
+			name: "an interval without bounds",
+			cut:  `"from":"2026-07-01T00:00:00Z",`,
+			want: "states an interval of volume v without bounds",
+		},
+		{
+			name: "an interval without a state",
+			cut:  `"state":"available",`,
+			want: "states no state for volume v from 2026-07-01T00:00:00Z",
+		},
+		{
+			name: "an interval without a project",
+			cut:  `"project_id":"p1",`,
+			want: "states no project for volume v from 2026-07-01T00:00:00Z",
+		},
+		{
+			name: "an interval without a size",
+			cut:  `,"size":{"size_gb":50}`,
+			want: "states no size for volume v from 2026-07-01T00:00:00Z",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			document := strings.Replace(completeOracleDocument, tc.cut, "", 1)
+			if document == completeOracleDocument {
+				t.Fatalf("the document holds no %q to cut, want the case to name a member of it", tc.cut)
+			}
+			path := writeOracleFile(t, document)
+
+			_, err := ReadOracle(path)
+
+			want := path + " " + tc.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("ReadOracle() error = %v, want %q", err, want)
+			}
+		})
+	}
+
+	t.Run("a file that is not a document", func(t *testing.T) {
+		path := writeOracleFile(t, "not json")
+
+		_, err := ReadOracle(path)
+
+		prefix := "reading " + path + ": "
+		if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+			t.Fatalf("ReadOracle() error = %v, want it to start with %q", err, prefix)
+		}
+	})
+
+	t.Run("a resource that states a member this build does not read", func(t *testing.T) {
+		path := writeOracleFile(t, `{"cloud":"os-test","seed":1,`+
+			`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",`+
+			`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",`+
+			`"faults":[],"intervals":[]}],"counts":[]}`)
+
+		_, err := ReadOracle(path)
+
+		if err == nil || !strings.Contains(err.Error(), "faults") {
+			t.Fatalf("ReadOracle() error = %v, want it to name the unknown member faults", err)
 		}
 	})
 }
