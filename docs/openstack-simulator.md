@@ -10,15 +10,16 @@ deployment behind it. The month is rendered from a small simulated cloud and
 paced by a virtual clock, so a 31-day month goes out in the wall time the
 factor compresses it into.
 
-It has no fault switches, no fake OpenStack API, and no metrics endpoint of its
-own. #65 is the meta issue the simulated workloads belong to, and this document
-describes its first stage. The noise, the notifications the collector does not
-bill, is rendered and described under "The noise" below. The oracle of a month
-and the comparison against an engine export are described under "The oracle"
-below; #88 owns the fault switches and #89 the project registry; #66 the fake
-API and the clock seam; #67 the traffic series and `/metrics`. The drill #51
-cites this simulator as the way a month reaches the Reporting API. The workload
-renders octavia's three load balancer types from the shoots' load balancers.
+It has no fake OpenStack API and no metrics endpoint of its own. #65 is the meta
+issue the simulated workloads belong to, and this document describes its first
+stage. The noise, the notifications the collector does not bill, is rendered and
+described under "The noise" below. The oracle of a month and the comparison
+against an engine export are described under "The oracle" below, and the six
+fault switches under "The fault switches"; #89 owns the project registry; #66
+the fake API and the clock seam; #67 the traffic series and `/metrics`. The
+drill #51 cites this simulator as the way a month reaches the Reporting API. The
+workload renders octavia's three load balancer types from the shoots' load
+balancers.
 
 ## The world and the workload
 
@@ -495,6 +496,14 @@ billable month is the bound of a deleted instance's last lifetime step, which
 lies before the five seconds of nova's pre-delete sequence rather than at the
 delete itself.
 
+The fault switches draw from streams of their own, one per switch, seeded by the
+seed together with the switch's name. A fault stream carries neither the cloud
+nor the month: what it hands out is which resource or notification the switch
+reaches, and the message id of a refused twin, which no collector stores. None
+of them draws from the stream the month's shape comes from, so a run with every
+switch off consumes the three streams above the way a run without the switches
+consumes them.
+
 The same seed, period, and cloud therefore publish byte-identical
 notifications, and a rerun of the same build costs nothing at the far end: the
 collector books the oslo message id as the event's `event_id`, and the
@@ -515,6 +524,15 @@ the reporting database the events landed in, which for the dev cluster is
 `make down` followed by `make up`. Regenerating a period against a database that
 already holds it is therefore a decision, not a repeat.
 
+Two of the fault switches fall under that rule inside one build. `pre-existing`
+and `missing-create` move an instance's create across the period start, which
+reorders the sorted schedule the message ids are drawn over, so every id of the
+month is another one: such a run beside the plain month of the same seed,
+period, and cloud leaves the Reporting API holding the period twice. The other
+four keep every id, because none of them moves a transition in time or adds one
+to the schedule. Publish a month with one of the two under another `SIM_CLOUD`,
+or drop the reporting database before it.
+
 Between two months of the same length the classic tenants' notifications sit at
 the same offsets from the month start. The transitions anchored on the month's
 end (the second image's delete and the first instance's) move with its length.
@@ -531,13 +549,15 @@ make simulator-up SIM_PERIOD=2026-07
 ```
 
 `SIM_CLOUD` defaults to `os-sim`, `SIM_SEED` to 1, and `SIM_FACTOR` to 744. A
-factor of 744 puts a 31-day month on the bus in an hour.
+factor of 744 puts a 31-day month on the bus in an hour. `SIM_FAULTS` is empty,
+which is every fault switch off; it takes the switch names of "The fault
+switches" below, comma-separated, as in `SIM_FAULTS=held-back`.
 
 The target builds the collector and the simulator image, writes the dev CA to
 `tally-ca.crt`, issues an ingest credential for `SIM_CLOUD` with
 `tally-reporting-admin create-ingest-credential`, writes the cloud, the period,
-the seed, the factor, and that token into `deploy/compose/.env`, and starts the
-three containers of
+the seed, the factor, the fault switches as `TALLY_SIM_FAULTS`, and that token
+into `deploy/compose/.env`, and starts the three containers of
 [`../deploy/compose/compose.yaml`](../deploy/compose/compose.yaml): the broker,
 the collector image, and the simulator.
 
@@ -586,6 +606,12 @@ Finish the month at once instead of waiting the factor out:
 
 ```sh
 curl -X PUT -d '{"factor": 0}' http://127.0.0.1:8091/clock
+```
+
+Let the notifications a run with `SIM_FAULTS=held-back` keeps back out:
+
+```sh
+curl -X POST http://127.0.0.1:8091/release
 ```
 
 Build a backlog on the durable queue and drain it again:
@@ -639,7 +665,8 @@ of the other 13915 are the unsized `image.create`, one per image: two per
 classic project, one per Gardener tenant, and one for the CI tenant. The
 remaining 13906 are the noise catalogue. The month carries 83 distinct
 `event_type` values. The shape of a month is the seed's alone, so the counts
-below hold on every cloud.
+below hold on every cloud. They are those of a run with every fault switch off;
+what a month with a switch on carries stands under "The fault switches".
 
 `curl http://127.0.0.1:8090/readyz` answers 200 once the collector holds its
 broker connection and its outbox. On `http://127.0.0.1:8090/metrics`:
@@ -733,9 +760,10 @@ sends before a delete.
 
 ## File mode and replay
 
-`run --out DIR` writes three files, and it writes the whole month before it
-publishes anything, so a run interrupted halfway still leaves a complete month
-on disk. With no broker configured it writes the files and publishes nothing:
+`run --out DIR` writes three files, and a fourth when the held-back switch keeps
+part of the month off the bus. It writes the whole month before it publishes
+anything, so a run interrupted halfway still leaves a complete month on disk.
+With no broker configured it writes the files and publishes nothing:
 
 ```sh
 TALLY_SIM_CLOUD=os-sim tally-openstack-simulator run \
@@ -762,6 +790,14 @@ was meant to meter to: the intervals every billable resource was to be billed
 over and the events the collector has to record per project. "The oracle" below
 describes it.
 
+`held-back.jsonl` is the fourth, in the form of `notifications.jsonl` and
+holding what the held-back switch keeps back. Every run removes all four files
+an earlier one left in the directory before it writes the first of its own, so
+what a directory holds is one month and nothing of another, whether the run
+holds something back, holds nothing, or fails partway through the files. A path
+one of the removals cannot take away ends the run there, with the rest gone,
+and every path that stayed is named.
+
 `replay --in FILE --factor N` publishes a captured file onto a broker, with the
 virtual clock started at the first line's timestamp, so a month needs neither
 the generator nor the seed that produced it. The message ids are the recorded
@@ -772,6 +808,15 @@ what lets a file that is not perfectly sorted replay whole.
 `ReadStream` reads the file before the first message goes out and refuses an
 empty file, a line that is not JSON, and a body without a timestamp. A replay
 that would fail halfway through a month fails with nothing published.
+
+A held-back file is replayed the way any other stream file is:
+`replay --in DIR/held-back.jsonl --factor 0` puts it on the bus at once. The
+factor is what matters there. The replay clock starts at the first line's
+timestamp and the held instants are spread over the whole month, so a replay at
+744 would trickle the file out over an hour. A `pre-existing` month replays from
+its earliest pre-month create rather than from the month start, for the same
+reason: the clock starts at the first line, and the burst a run publishes ahead
+of the month is paced by the lead the switch drew.
 
 ## The oracle
 
@@ -846,10 +891,12 @@ closes it on a delete, keeps two consecutive facts of equal state, size, and
 project in one interval, and drops an interval of no length. Every interval is
 then clipped to the month: a start before the period start moves to it, an open
 end or one past the period end moves to the period end, and a resource whose
-intervals all fall outside the month is left out. Every instant a month emits
-today lies inside the month, so the clip only closes the open interval of a
-resource that outlives it. The general rule is written out because the
-pre-existing resources of #88 rely on it.
+intervals all fall outside the month is left out. A month with every fault
+switch off emits no instant outside the period, so the clip there only closes
+the open interval of a resource that outlives it. The other end of the rule is
+what the `pre-existing` and the `missing-create` switches rely on: the
+transitions they move behind the period start open an interval the clip pulls
+back to it.
 
 The counts are one entry per project and Tally event type, one count per
 billable notification the collector records. The event types are the mapping's:
@@ -978,23 +1025,243 @@ in both directions: a model that prices otherwise than the run rated with is not
 the model to read an export through, whichever of the two names the dimension. A
 `counter` is outside it, because a comparison reads none of them.
 
+## The fault switches
+
+`run --faults <name>[,<name>...]` turns fault switches on, and every one of the
+six is off by default. A switch changes what the bus carries and never what the
+simulated cloud did. The oracle is folded from the generator's own facts, so it
+states the same intervals whichever switches are on; its counts are the events
+the collector has to record, and a switch that keeps a notification off the bus
+for good is the one place they move. A run with a switch on is therefore held
+against the month the cloud lived, and a difference names the resource where the
+collector's picture of it parted from the oracle's.
+
+Every switch draws from a stream of its own, seeded by the seed together with
+the switch's name. None of them draws from the stream the month's shape comes
+from, so a run with every switch off renders byte for byte what the seed, the
+period, and the cloud render on their own, and which resources one switch
+touches does not move when another switch is on beside it. `missing-create`
+draws from the `pre-existing` stream: the two exclude each other, and one stream
+between them means both pick the same instances for one seed. A run that names
+both is refused with `pre-existing and missing-create exclude each other`, and
+one that names something else with `unknown fault switch`, which lists the six.
+
+`oracle.json` states the switches the run was started with under `faults`, and
+every resource carries a `faults` member of its own naming the switches that
+touched it. `compare` reads both: a difference on a touched resource carries
+` (touched by <names>)` behind it, and the line `the month ran with the fault
+switches <names>` stands above the verdict. The verdict and the exit status are
+the ones a month with no switch on prints, so a marked difference is still a
+difference and counts as one. The mark says which switch reached the resource
+and nothing about whether the difference is the one it was turned on for; that
+is what a drill's write-up decides. A difference no mark names is a finding
+about the engine.
+
+The two pre-existing switches work on the classic tenants' instances alone, with
+the volumes and the floating address of a picked instance. The shoots and the CI
+runners are left out of them by decision: their servers are created and deleted
+inside the month, and a classic instance is the one whose life a lead of up to
+30 days moves behind the period start without changing anything else about it.
+
+### pre-existing
+
+One in three of the twelve classic instances starts before the month, between 1
+and 30 days ahead of it, and its volumes and its floating address start with it.
+Every transition of such an instance is published, the ones before the period
+start included: the virtual clock starts at the month start, so they go out in a
+burst ahead of the month's own first notification. The engine holds the whole
+history of the resource and bills it from the month start, and the oracle clips
+its intervals to that same instant, which is the rule "The oracle" states.
+
+No notification is added or dropped, so the collector's counters are the ones a
+month with no switch on shows: 1812 consumed and 13915 skipped for seed 1 over
+`2026-07`, 60 of the consumed events carrying a timestamp before the month. The
+engine writes no warning about them, and the comparison reports no difference.
+What the switch shows is a resource whose life began before the period, billed
+over the part of it the period holds.
+
+Seed 1 over `2026-07` moves 5 instances, their 8 volumes, and their 5 floating
+addresses behind the month start, 18 resources the oracle marks `pre-existing`,
+and renders 176 transitions before the period start, 60 of them billable. The
+month holds the 15727 notifications and the 1812 billable events of the month
+with the switch off.
+
+### missing-create
+
+The switch picks the same instances `pre-existing` picks, with the same leads,
+and drops every transition before the period start from the schedule and from
+the stream. The bus carries a resource whose create it never saw, and the
+collector first hears of one of them through a notification from inside the
+month. The daily `compute.instance.exists` audits stay: the audit pass runs over
+the finished schedule before the drop, so an instance whose create was dropped
+is still reported by the audit of every day it exists on.
+
+The engine warns `history_starts_without_create` once per touched resource it
+sees, which is what a deployment collects when a collector was started
+mid-month. The oracle states every touched resource with its intervals clipped
+to the month start, the way it does with `pre-existing`, and its counts drop the
+events of the notifications the bus never carried. A resource the collector
+first sees mid-month is billed from that notification on, so the comparison
+reports it as a difference, marked ` (touched by missing-create)`. No correction
+closes that gap: the notifications were never delivered, so a later run over the
+same period reads the same history. A difference the mark does not name is a
+finding about the engine.
+
+Seed 1 over `2026-07` drops the 176 pre-month transitions of the same 18
+resources, 60 of them billable: 15551 notifications instead of 15727 and 1752
+billable events instead of 1812. The collector ends the month with 1752 consumed
+and 13799 skipped.
+
+### duplicates
+
+One in 20 of the billable transitions is published a second time, byte for byte
+and under the message id of the original, ten notifications later or behind the
+last one when the month ends before the distance is walked. The copy travels the
+route its original travels and the collector maps both, so
+`tally_collector_consumed_total` counts the repeat. The Reporting API stores one
+event per (`event_id`, `timestamp`) and counts the second under
+`tally_events_deduplicated_total`, which is the deduplication a rerun of a month
+relies on as well. The export and the comparison are those of the month with the
+switch off, and the engine writes no warning.
+
+Seed 1 over `2026-07` adds 86 copies on 85 resources: 15813 notifications
+instead of 15727, with `events.jsonl` and the oracle at the same 1812 events.
+
+### reordering
+
+One in 10 of the resources with at least two billable transitions has its first
+one published directly behind its second. The timestamps do not move: what
+changes is the order the collector consumes them in, the order a requeued
+delivery or a second consumer produces. The projection and the engine sort a
+resource's history by timestamp before they fold it, so the export is the export
+of the month with the switch off, the comparison reports no difference, and no
+counter of the collector moves.
+
+Seed 1 over `2026-07` swaps the first two billable notifications of 87
+resources, in a month of the same 15727 notifications and 1812 events.
+
+### refused-shapes
+
+Per billable transition the switch draws once in 400: one draw puts an oversized
+twin behind it, two a truncated one, and twenty a versioned one, which is drawn
+for nova alone because the versioned format is nova's. A twin follows its
+original directly, on the same exchange and under a fresh message id, and the
+collector refuses all three.
+
+The versioned twin is what a nova configured for versioned notifications would
+have sent: an `instance.*` type name and the payload under `nova_object.data`,
+the format [`openstack-collector.md`](openstack-collector.md) refuses under
+"Required OpenStack service settings". `ParseEnvelope` reads it and the mapping
+table claims nothing for the type, so it is counted as skipped under its
+versioned type name. The truncated twin is an envelope whose inner
+`oslo.message` is cut in half, which the collector's second decode fails on. The
+oversized twin carries a padding member that puts its body past the 1 MiB the
+collector reads a delivery with, so it is counted before anything is parsed.
+Both of them count as unparseable. `events.jsonl`, the oracle, and the
+comparison are those of the month with the switch off, because a twin is
+billable to nobody.
+
+The `notifications.jsonl` of such a month is written like any other and cannot
+be replayed. `ReadStream` bounds a line at 1 MiB, which the oversized twin is
+past, and it runs the collector's `ParseEnvelope` over every body, which the
+truncated twin fails. Either one ends the replay before the first message goes
+out.
+
+Seed 1 over `2026-07` adds 87 twins on 84 resources, 67 versioned, 15 truncated,
+and 5 oversized: 15814 notifications instead of 15727. The collector ends the
+month with `tally_collector_unparseable_total` at 20 and three `instance.*`
+series beside the month's 83 type names, which leaves it inside the bound of 100
+label values its two type-labelled counters share.
+
+### held-back
+
+One in 20 of the billable transitions is kept off the bus and written to
+`held-back.jsonl` instead. The run publishes the rest of the month and then
+holds: `/clock` reports the hold under `holding` and its size under `held`, and
+the notifications go out when `POST /release` arrives. A run stopped while it
+holds exits 0 with the held share never published. What the switch renders is a
+late arrival, the events that reach the Reporting API after the run that bills
+the period read it.
+
+The stack publishes the month with the switch on, and a file-mode run of the
+same seed, period, and cloud writes the oracle of it, the way "The oracle"
+describes:
+
+```sh
+make simulator-up SIM_PERIOD=2026-07 SIM_FAULTS=held-back
+TALLY_SIM_CLOUD=os-sim tally-openstack-simulator run \
+  --period 2026-07 --seed 1 --faults held-back --out /tmp/m
+```
+
+The stack holds once `http://127.0.0.1:8091/clock` reports `holding` true. The
+month as the collector recorded it is metered, closed, and held against the
+oracle:
+
+```sh
+tally-engine run --period 2026-07
+tally-engine finalize --period 2026-07 --run <run id>
+tally-engine export --run <run id> --format csv --out /tmp/export
+tally-openstack-simulator compare --oracle /tmp/m/oracle.json \
+  --export /tmp/export --pricing pricing/2026-03.yaml
+```
+
+That comparison lists the held resources as differences, each marked
+` (touched by held-back)`, because the run rated the month without their
+notifications. Then the held share goes out and the closed month is corrected:
+
+```sh
+curl -X POST http://127.0.0.1:8091/release
+tally-engine detect-late --period 2026-07
+tally-engine correct --period 2026-07
+tally-engine export --run <correction id> --format csv --out /tmp/corrected
+tally-openstack-simulator compare --oracle /tmp/m/oracle.json \
+  --export /tmp/corrected --pricing pricing/2026-03.yaml
+```
+
+`detect-late` names the events the reporting database received after the run
+that bills the period read it, which are the released ones. `correct` meters the
+month again from the full history and books the difference against the finalized
+run as deltas. The comparison of its export matches the oracle over every
+resource, and the line naming the switch stands above that verdict as it stands
+above the other.
+
+The collector's counters carry the hold: 1728 consumed while the month
+publishes, 1812 once the release is through, and 13915 skipped either way. Seed
+1 over `2026-07` holds 84 notifications back on 81 resources, so
+`notifications.jsonl` has 15643 lines, `held-back.jsonl` 84, and the month books
+the 1812 events of the month with the switch off.
+
 ## The control endpoint
 
 Both subcommands serve a control endpoint on `TALLY_SIM_HTTP_ADDR` and
-`TALLY_SIM_HTTP_PORT` while they publish and no longer: pacing is the only thing
-it changes, and there is nothing to pace before the first notification or after
-the last one. It carries no credential, so what keeps it out of reach is the
-address it binds: loopback, unless a deployment names another one. In the
-compose stack it binds `0.0.0.0` inside the container, where loopback would be
-reachable from nothing, and the container's port 8080 is published on the host's
-`127.0.0.1:8091`. Within that reach the worst a caller does is make the run go
-at another speed.
+`TALLY_SIM_HTTP_PORT` while they publish and no longer: what it decides is the
+pace of the month and, for a run with the held-back switch, when the held share
+goes out. Neither of the two is what the month contains, and there is nothing to
+decide before the first notification or after the last one. It carries no
+credential, so what keeps it out of reach is the address it binds: loopback,
+unless a deployment names another one. In the compose stack it binds `0.0.0.0`
+inside the container, where loopback would be reachable from nothing, and the
+container's port 8080 is published on the host's `127.0.0.1:8091`. Within that
+reach the worst a caller does is make the run go at another speed, or end its
+hold early.
 
 `GET /healthz` answers `ok`. `GET /clock` answers the document of that moment:
 
 ```json
-{"virtual_now":"2026-07-09T14:22:00Z","factor":744,"published":52,"total":15727,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+{"virtual_now":"2026-07-09T14:22:00Z","factor":744,"published":52,"total":15727,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
 ```
+
+`held` is how many notifications the held-back switch still keeps off the bus:
+0 for a run started without it, and 0 from the moment a release let them out.
+`total` counts the regular and the held lines together, so `published` reaches
+it only once everything is out.
+
+`holding` is whether the run waits for a release, and it is the one member a
+release may be sent on. It turns true when the last regular notification is on
+the bus and false again when a release lets the held share out. `published`
+equal to `total` minus `held` is the same month a moment earlier: the count is
+raised by the notification that was confirmed, and the run enters the hold
+after it, so a release sent on the count alone can still be refused.
 
 `PUT /clock` with a body of `{"factor": N}`, where N is zero or positive,
 rebases the clock on the virtual instant it has reached and answers the same
@@ -1002,7 +1269,34 @@ document. The month itself does not move: only what comes after the change runs
 at another speed. A body that is not JSON, one without the member, and one with
 a negative factor all answer 400 with
 `factor must be a JSON object with a number member "factor" that is zero or
-positive`. Any other method on either route answers 405. A run in file mode
+positive`. A factor change a page in a browser sent answers 403 with `the factor
+does not take a request a browser sent`.
+
+`POST /release` publishes the share a run with the held-back switch kept back.
+It answers 200 with the clock document as it stood the moment before the
+release, so the document reports the published count of a month one release
+short however fast the run publishes the rest; `held` in it is 0 and `holding`
+false, the two members the release changed. The three refusals answer 409 and
+name the run they arrived at:
+
+- `nothing is held back: the run was started without the held-back switch`
+- `the month is still publishing; release once /clock reports holding true`
+- `the held-back notifications were already released`
+
+A release a page in a browser sent answers 403 with `release does not take a
+request a browser sent`, the way a factor change does. A browser puts `Origin`
+on every request a page makes whose method is neither `GET` nor `HEAD`, the
+same-origin ones included, and `Sec-Fetch-Site` alongside it, whether the page
+submitted a form, called `fetch` without a body, or reached for `sendBeacon`;
+that is what keeps a page an operator happens to visit from ending a hold or
+changing the pace. A cross-origin `PUT` is stopped a step earlier, by the
+preflight the endpoint answers 405, but a page that resolved the endpoint's
+address itself sends one same-origin, where no preflight stands in the way. A
+release with a body of another media type than `application/json` answers 415
+with `release takes application/json or no body`. `curl -X POST` and a script
+send neither header nor a content type and are unaffected.
+
+Any other method on one of the three routes answers 405. A run in file mode
 serves nothing.
 
 ## Configuration
@@ -1034,12 +1328,16 @@ reason, and `--allow-remote-broker` is the confirmation that lets one through.
 The compose stack passes it, because its broker is the container next door.
 
 `run` takes `--period` (required, `YYYY-MM`), `--seed` (1), `--factor` (744),
-`--out` (empty), `--wait-for-collector` (two minutes), and
-`--allow-remote-broker` (off). `replay` takes `--in` (required), `--factor`
-(744), `--wait-for-collector` (two minutes), and `--allow-remote-broker` (off).
-`compare` takes `--oracle`, `--export`, and `--pricing`, all three required, and
-reads no variable of the table at all: it holds three files against each other
-and touches neither a broker nor the Reporting API.
+`--out` (empty), `--wait-for-collector` (two minutes), `--faults` (empty), and
+`--allow-remote-broker` (off). `--faults` takes the six switch names
+`pre-existing`, `missing-create`, `duplicates`, `reordering`, `refused-shapes`,
+and `held-back`, comma-separated; empty is every switch off, and "The fault
+switches" describes what each of them does. `replay` takes `--in` (required),
+`--factor` (744), `--wait-for-collector` (two minutes), and
+`--allow-remote-broker` (off). `compare` takes `--oracle`, `--export`, and
+`--pricing`, all three required, and reads no variable of the table at all: it
+holds three files against each other and touches neither a broker nor the
+Reporting API.
 
 `TALLY_METRICS_ENABLED` is not read: the simulator exports no metrics, and #67
 owns the endpoint that would serve them.

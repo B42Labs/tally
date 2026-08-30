@@ -88,7 +88,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&opts.Factor, "factor", defaultFactor,
 		"virtual seconds per wall second; 0 publishes as fast as the broker confirms")
 	cmd.Flags().StringVar(&opts.Out, "out", "",
-		"directory to write notifications.jsonl, events.jsonl and oracle.json to")
+		"directory to write notifications.jsonl, events.jsonl and oracle.json to, "+
+			"and held-back.jsonl when a switch holds notifications back")
 	cmd.Flags().DurationVar(&opts.WaitForCollector, "wait-for-collector", defaultWaitForCollector,
 		"how long to wait for a consumer on the collector's queue before publishing; 0 disables the wait")
 	cmd.Flags().StringSliceVar(&opts.Faults, "faults", nil,
