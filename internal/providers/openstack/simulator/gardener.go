@@ -77,8 +77,7 @@ func (g *generator) tenantImage(p *project) {
 	img.size = int64(4+g.shape.IntN(13)) * quarterGiB
 
 	g.emit(img.createdAt, imageCreateType, imagePublisher, img.id, p, imageCreatePayload(p, img))
-	g.emit(uploadedAt, "image.upload", imagePublisher, img.id, p,
-		imageUploadPayload(p, img, uploadedAt))
+	g.uploadImage(p, img, uploadedAt)
 }
 
 // shoot creates one cluster and walks it through every day it exists.
