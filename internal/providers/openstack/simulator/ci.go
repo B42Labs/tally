@@ -11,7 +11,8 @@ import "time"
 //
 // A pipeline is started by somebody pushing, so the bursts fall into the
 // working hours of a Monday to Friday of the real calendar and the weekends
-// hold none of them.
+// hold none of them. Every push takes a keystone token, which is one
+// authentication per burst and none per runner.
 //
 // A runner is called runner-<the first eight hex digits of its instance id>,
 // the way a build system names a throwaway machine after the job it was
@@ -37,10 +38,13 @@ const (
 // its own number would push runners past that end unnoticed.
 const longestBurst = (maxBurstRunners - 1) * (runnerGapCeiling - time.Second)
 
-// ci generates the CI tenant's month. The image comes first because every
-// runner boots from it, and it is the one resource of this tenant that outlives
-// a single job.
+// ci generates the CI tenant's month. The tenant is created in keystone at the
+// month start and neutron builds its network there, because the runners hold
+// their addresses on it. The image follows, since every runner boots from it,
+// and it is the one resource of this tenant that outlives a single job.
 func (g *generator) ci() {
+	g.announceTenant(g.ciTenant, g.from)
+	g.buildNetwork(g.ciTenant, g.ciTenant.network, g.from.Add(2*time.Second))
 	g.tenantImage(g.ciTenant)
 
 	for _, d := range workingDays(g.from, g.to) {
@@ -49,6 +53,7 @@ func (g *generator) ci() {
 		// requested seconds apart and run side by side.
 		for range 4 + g.shape.IntN(5) {
 			t := drawInstant(g.shape, at(d, officeFrom, 0), at(d, officeTo, 0).Add(-longestBurst))
+			g.authenticate(g.ciTenant, t.Add(-authenticateLead))
 			for range minBurstRunners + g.shape.IntN(maxBurstRunners-minBurstRunners+1) {
 				g.runner(t)
 				t = t.Add(span(g.shape, minRunnerGap, runnerGapCeiling))

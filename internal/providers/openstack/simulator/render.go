@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -288,6 +289,17 @@ func instanceExistsPayload(base map[string]any, from, to time.Time) map[string]a
 	return payload
 }
 
+// keypairPayload describes the keypair a shoot's workers are reachable under.
+// Nova reports no id for one: a keypair is addressed by the name it was
+// imported under, inside the user that holds it.
+func keypairPayload(p *project, name string) map[string]any {
+	return map[string]any{
+		"key_name":  name,
+		"tenant_id": p.id,
+		"user_id":   p.userID,
+	}
+}
+
 // floatingIPCreatePayload describes an allocated address. Neutron nests the
 // resource one level down, and it reports both the older tenant_id and the
 // newer project_id, which is why the mapping reads the address through a path
@@ -400,6 +412,196 @@ func portBindingPayload(port *port) map[string]any {
 // so the project the resource belonged to comes from the request context.
 func neutronDeletePayload(kind, id string) map[string]any {
 	return map[string]any{kind + "_id": id}
+}
+
+// networkRequestPayload describes the network neutron was asked for. The
+// request carries the name and the state the network is to come up in, because
+// everything else about one is neutron's own.
+func networkRequestPayload(net *network) map[string]any {
+	return map[string]any{
+		"network": map[string]any{
+			"admin_state_up": true,
+			"name":           net.name,
+		},
+	}
+}
+
+// networkPayload describes a network neutron has created. It is a tenant
+// network: it is external to nobody, it is shared with nobody, and its MTU is
+// what an overlay leaves of the underlay's after its encapsulation.
+func networkPayload(p *project, net *network) map[string]any {
+	return map[string]any{
+		"network": map[string]any{
+			"admin_state_up":  true,
+			"description":     "",
+			"id":              net.id,
+			"mtu":             1450,
+			"name":            net.name,
+			"project_id":      p.id,
+			"router:external": false,
+			"shared":          false,
+			"status":          "ACTIVE",
+			"subnets":         []any{net.subnetID},
+			"tenant_id":       p.id,
+		},
+	}
+}
+
+// subnetRequestPayload describes the subnet neutron was asked for: the range it
+// covers and the network it belongs to.
+func subnetRequestPayload(net *network) map[string]any {
+	return map[string]any{
+		"subnet": map[string]any{
+			"cidr":       net.cidr,
+			"ip_version": 4,
+			"name":       net.name,
+			"network_id": net.id,
+		},
+	}
+}
+
+// subnetPayload describes a subnet neutron has created. The gateway is the
+// first address of the range and the pool the ports are served from starts at
+// the tenth, which leaves the addresses in between to the deployment.
+func subnetPayload(p *project, net *network) map[string]any {
+	prefix := net.prefix()
+	return map[string]any{
+		"subnet": map[string]any{
+			"allocation_pools": []any{map[string]any{
+				"start": prefix + ".10",
+				"end":   prefix + ".254",
+			}},
+			"cidr":            net.cidr,
+			"dns_nameservers": []any{},
+			"enable_dhcp":     true,
+			"gateway_ip":      prefix + ".1",
+			"id":              net.subnetID,
+			"ip_version":      4,
+			"name":            net.name,
+			"network_id":      net.id,
+			"project_id":      p.id,
+			"tenant_id":       p.id,
+		},
+	}
+}
+
+// routerRequestPayload describes the router neutron was asked for. The gateway
+// names the external network the tenant leaves through, which is the network
+// the month's floating addresses come from.
+func routerRequestPayload(net *network, externalNetworkID string) map[string]any {
+	return map[string]any{
+		"router": map[string]any{
+			"admin_state_up": true,
+			"external_gateway_info": map[string]any{
+				"network_id": externalNetworkID,
+			},
+			"name": net.name,
+		},
+	}
+}
+
+// routerPayload describes a router neutron has created. Source NAT is on, the
+// way it is on a router a tenant reaches the outside through.
+func routerPayload(p *project, net *network, externalNetworkID string) map[string]any {
+	return map[string]any{
+		"router": map[string]any{
+			"admin_state_up": true,
+			"external_gateway_info": map[string]any{
+				"enable_snat": true,
+				"network_id":  externalNetworkID,
+			},
+			"id":         net.routerID,
+			"name":       net.name,
+			"project_id": p.id,
+			"status":     "ACTIVE",
+			"tenant_id":  p.id,
+		},
+	}
+}
+
+// routerInterfacePayload describes the interface that puts a router on a
+// subnet. The router is the resource the notification is about, so it is
+// reported under id, and the subnet arrives twice: as the one this interface
+// covers, and in the list a router with several of them carries.
+func routerInterfacePayload(p *project, net *network, routerPortID string) map[string]any {
+	return map[string]any{
+		"router_interface": map[string]any{
+			"id":         net.routerID,
+			"network_id": net.id,
+			"port_id":    routerPortID,
+			"subnet_id":  net.subnetID,
+			"subnet_ids": []any{net.subnetID},
+			"tenant_id":  p.id,
+		},
+	}
+}
+
+// securityGroupDescription is what a shoot's group says it is for. Gardener
+// writes one, and the group and its rules repeat it.
+func securityGroupDescription(s *shoot) string {
+	return "Security group for the shoot " + s.technicalID
+}
+
+// securityGroupRequestPayload describes the security group neutron was asked
+// for: the name Gardener gives it and what it is for.
+func securityGroupRequestPayload(s *shoot) map[string]any {
+	return map[string]any{
+		"security_group": map[string]any{
+			"description": securityGroupDescription(s),
+			"name":        s.technicalID,
+		},
+	}
+}
+
+// securityGroupPayload describes a security group neutron has created. It holds
+// no rule yet: a group is created empty and its rules are added to it
+// afterwards, one notification each.
+func securityGroupPayload(p *project, s *shoot) map[string]any {
+	return map[string]any{
+		"security_group": map[string]any{
+			"description":          securityGroupDescription(s),
+			"id":                   s.securityGroupID,
+			"name":                 s.technicalID,
+			"project_id":           p.id,
+			"security_group_rules": []any{},
+			"tenant_id":            p.id,
+		},
+	}
+}
+
+// securityGroupRulePayload describes one rule of a shoot's group. Rule 0 lets
+// SSH in from anywhere and rule 1 lets the members of the group reach each
+// other on every protocol, which is the pair Gardener opens a worker pool with.
+//
+// What a rule does not narrow is null: the second names neither a port range
+// nor a protocol, and the first names no remote group. An empty id is the
+// request neutron was handed, which carries no id because neutron hands that
+// one out with the rule it created.
+func securityGroupRulePayload(p *project, s *shoot, index int, id string) map[string]any {
+	description := "SSH onto the workers"
+	var portRangeMax, portRangeMin, protocol, remoteGroupID, remoteIPPrefix any = 22, 22, "tcp", nil, "0.0.0.0/0"
+	if index == 1 {
+		description = "Every protocol between the members of the group"
+		portRangeMax, portRangeMin, protocol, remoteGroupID, remoteIPPrefix = nil, nil, nil, s.securityGroupID, nil
+	}
+
+	rule := map[string]any{
+		"description":       description,
+		"direction":         "ingress",
+		"ethertype":         "IPv4",
+		"port_range_max":    portRangeMax,
+		"port_range_min":    portRangeMin,
+		"project_id":        p.id,
+		"protocol":          protocol,
+		"remote_group_id":   remoteGroupID,
+		"remote_ip_prefix":  remoteIPPrefix,
+		"security_group_id": s.securityGroupID,
+		"tenant_id":         p.id,
+	}
+	if id != "" {
+		rule["id"] = id
+	}
+	return map[string]any{"security_group_rule": rule}
 }
 
 // imageCreatePayload describes an image glance has accepted but has no bits
@@ -681,4 +883,157 @@ func loadBalancerPayload(p *project, s *shoot, lb *loadBalancer, withMembers boo
 	payload["listeners"] = listeners
 	payload["pools"] = pools
 	return payload
+}
+
+// identityPayload describes a project or a user keystone has created. Keystone
+// names the resource it created and nothing else, so who created it comes from
+// the request context.
+func identityPayload(id string) map[string]any {
+	return map[string]any{"resource_info": id}
+}
+
+// cadfLayout is how a CADF record writes an instant: six fractional digits and
+// the zone written out, which is the one timestamp form of this file that
+// carries an offset rather than none.
+const cadfLayout = "2006-01-02T15:04:05.000000-07:00"
+
+// The members every CADF record of the simulated cloud repeats.
+const (
+	cadfTypeURI = "http://schemas.dmtf.org/cloud/audit/1.0/event"
+	// cadfInitiatorAddress is where the requests come from. It is an address of
+	// the RFC 5737 documentation range, the way the floating addresses are.
+	cadfInitiatorAddress = "198.51.100.200"
+	cadfUserType         = "service/security/account/user"
+	cadfObserverType     = "service/security"
+)
+
+// cadfTime renders an instant the way a CADF record carries it. The record is
+// written in UTC, so the offset it reports is the zero one.
+func cadfTime(t time.Time) string {
+	return t.UTC().Format(cadfLayout)
+}
+
+// authenticatePayload describes one keystone authentication. The user is both
+// who asks and what the record is about, because a token is issued for the user
+// itself.
+//
+// The record's id is the one the transition reports as its resource, so the
+// record and the resource behind it are one thing.
+func authenticatePayload(p *project, recordID string, t time.Time) map[string]any {
+	return map[string]any{
+		"action":    "authenticate",
+		"eventTime": cadfTime(t),
+		"eventType": "activity",
+		"id":        recordID,
+		"initiator": map[string]any{
+			"host":       map[string]any{"address": cadfInitiatorAddress},
+			"id":         p.userID,
+			"project_id": p.id,
+			"typeURI":    cadfUserType,
+		},
+		"observer": map[string]any{
+			"id":      "keystone-01",
+			"typeURI": cadfObserverType,
+		},
+		"outcome": "success",
+		"target": map[string]any{
+			"id":      p.userID,
+			"typeURI": cadfUserType,
+		},
+		"typeURI": cadfTypeURI,
+	}
+}
+
+// auditPayload describes one call against barbican's API as its audit
+// middleware records it. Both records of a call carry the same target and the
+// same action, and they differ in what they say about the call itself: the
+// request is pending and has no status yet, and the response carries the HTTP
+// status under reason. A code of zero is therefore the request, and it reports
+// no reason at all.
+//
+// The method the call was made with is no member of the record. It is what the
+// caller reads the action off, which is what CADF names the operation under.
+func auditPayload(p *project, cloud, recordID, action, outcome, path, targetType, targetID string,
+	code int, t time.Time,
+) map[string]any {
+	payload := map[string]any{
+		"action":    action,
+		"eventTime": cadfTime(t),
+		"eventType": "activity",
+		"id":        recordID,
+		"initiator": map[string]any{
+			"host":       map[string]any{"address": cadfInitiatorAddress},
+			"id":         p.userID,
+			"project_id": p.id,
+			"typeURI":    cadfUserType,
+		},
+		"observer": map[string]any{
+			"id":      "barbican-01",
+			"typeURI": cadfObserverType,
+		},
+		"outcome":     outcome,
+		"requestPath": path,
+		"target": map[string]any{
+			"addresses": []any{map[string]any{
+				"url": fmt.Sprintf("https://barbican.%s.example:%d%s", cloud, barbicanPort, path),
+			}},
+			"id":      targetID,
+			"typeURI": targetType,
+		},
+		"typeURI": cadfTypeURI,
+	}
+	if code > 0 {
+		payload["reason"] = map[string]any{
+			"reasonCode": strconv.Itoa(code),
+			"reasonType": "HTTP",
+		}
+	}
+	return payload
+}
+
+// zonePayload describes the designate zone a Gardener project's records live
+// in. The zone is a primary one: designate holds the data itself rather than
+// pulling it from a master elsewhere, and the serial it starts at is the
+// instant the zone was created.
+func zonePayload(p *project, gp *gardenerProject, t time.Time) map[string]any {
+	return map[string]any{
+		"action":     "CREATE",
+		"created_at": stamp(t),
+		// The zone name carries a trailing dot and a mail address does not.
+		"email":      "hostmaster@" + strings.TrimSuffix(gp.zoneName, "."),
+		"id":         gp.zoneID,
+		"name":       gp.zoneName,
+		"project_id": p.id,
+		"serial":     t.Unix(),
+		"status":     "ACTIVE",
+		"ttl":        3600,
+		"type":       "PRIMARY",
+		"version":    1,
+	}
+}
+
+// recordSetPayload describes one record set of a zone. Designate reports the
+// action the set is in the middle of together with the status it reaches with
+// it, so a delete carries the set one last time rather than its id alone.
+func recordSetPayload(p *project, gp *gardenerProject, rs *recordSet,
+	action string, t time.Time,
+) map[string]any {
+	status := "ACTIVE"
+	if action == "DELETE" {
+		status = "DELETED"
+	}
+	return map[string]any{
+		"action":     action,
+		"created_at": stamp(t),
+		"id":         rs.id,
+		"name":       rs.name,
+		"project_id": p.id,
+		"records":    rs.records,
+		"status":     status,
+		"ttl":        300,
+		"type":       rs.recordType,
+		"version":    1,
+		"zone_id":    gp.zoneID,
+		"zone_name":  gp.zoneName,
+	}
 }

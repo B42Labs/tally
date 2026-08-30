@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/b42labs/tally/internal/providers/openstack"
 )
@@ -315,5 +316,93 @@ func TestRenderReportsAMarshalError(t *testing.T) {
 	const prefix = "rendering compute.instance.create.end: "
 	if !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("Render() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+// TestSecurityGroupRulePayloadNamesTheCreatedRuleAlone covers the two forms a
+// rule of a shoot's group is reported in. The request neutron was handed
+// carries no id, because neutron hands that one out with the rule it created,
+// and the two forms are otherwise the same rule.
+func TestSecurityGroupRulePayloadNamesTheCreatedRuleAlone(t *testing.T) {
+	const ruleID = "0a1b2c3d-4e5f-4061-8273-94a5b6c7d8e9"
+	p := &project{id: "5a7c9e1b3d5f7091a2b4c6d8e0f2a4b6"}
+	s := &shoot{
+		technicalID:     "shoot--beta--batch",
+		securityGroupID: "1b2c3d4e-5f60-4172-8394-a5b6c7d8e9f0",
+	}
+
+	rule := func(index int, id string) map[string]any {
+		payload, ok := securityGroupRulePayload(p, s, index, id)["security_group_rule"].(map[string]any)
+		if !ok {
+			t.Fatalf("rule %d carries no security_group_rule, want the rule neutron nests there", index)
+		}
+		return payload
+	}
+
+	requested, created := rule(0, ""), rule(0, ruleID)
+	if _, ok := requested["id"]; ok {
+		t.Errorf("the requested rule reports id = %v, want no id at all: neutron hands the id out "+
+			"with the rule it created", requested["id"])
+	}
+	if got := created["id"]; got != ruleID {
+		t.Errorf("the created rule reports id = %v, want %s", got, ruleID)
+	}
+	if len(created) != len(requested)+1 {
+		t.Errorf("the requested rule carries %d members and the created one %d, want the id to be "+
+			"the one member between them", len(requested), len(created))
+	}
+
+	// The second rule narrows nothing but the group it comes from, which is
+	// where the nulls of a rule are.
+	group := rule(1, ruleID)
+	if got := group["remote_group_id"]; got != s.securityGroupID {
+		t.Errorf("the second rule reports remote_group_id = %v, want %s, the group itself",
+			got, s.securityGroupID)
+	}
+	for _, member := range []string{"port_range_max", "port_range_min", "protocol", "remote_ip_prefix"} {
+		if got := group[member]; got != nil {
+			t.Errorf("the second rule reports %s = %v, want null: a rule that names neither a port "+
+				"range nor a protocol narrows neither", member, got)
+		}
+	}
+}
+
+// TestAuditPayloadReportsTheStatusOnTheResponse covers the one branch of a CADF
+// record: the request has no HTTP status yet and the response carries it. Both
+// records of a call carry the same target, so the status is where the two are
+// told apart.
+func TestAuditPayloadReportsTheStatusOnTheResponse(t *testing.T) {
+	const (
+		path     = "/v1/secrets"
+		targetID = "2c3d4e5f-6071-4283-94a5-b6c7d8e9f0a1"
+	)
+	p := &project{id: "5a7c9e1b3d5f7091a2b4c6d8e0f2a4b6", userID: "6b8d0a2c4e6f8091b3d5f7a9c1e3f507"}
+	at := time.Date(2026, 7, 7, 19, 2, 41, 0, time.UTC)
+
+	request := auditPayload(p, "os-sim", "3d4e5f60-7182-4394-a5b6-c7d8e9f0a1b2", "create", "pending",
+		path, secretsType, targetID, 0, at)
+	if _, ok := request["reason"]; ok {
+		t.Errorf("the request reports reason = %v, want none: a call that is not answered yet has no "+
+			"HTTP status", request["reason"])
+	}
+
+	response := auditPayload(p, "os-sim", "4e5f6071-8293-44a5-b6c7-d8e9f0a1b2c3", "create", "success",
+		path, secretsType, targetID, 201, at.Add(time.Second))
+	reason, ok := response["reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("the response carries %v under reason, want the HTTP status of the call",
+			response["reason"])
+	}
+	if got := reason["reasonCode"]; got != "201" {
+		t.Errorf("the response reports reasonCode = %v, want \"201\", the status as a string", got)
+	}
+
+	target, _ := response["target"].(map[string]any)
+	addresses, _ := target["addresses"].([]any)
+	address, _ := addresses[0].(map[string]any)
+	want := "https://barbican.os-sim.example:9311" + path
+	if got := address["url"]; got != want {
+		t.Errorf("the record names the endpoint %v, want %s: two clouds' records name two endpoints",
+			got, want)
 	}
 }
