@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -185,6 +187,129 @@ func waitFor(t *testing.T, why string, condition func() bool) {
 		time.Sleep(pollInterval)
 	}
 	t.Fatalf("timed out after %v waiting until %s", pollDeadline, why)
+}
+
+// capturedLogger is the run's logger over a writer that keeps a copy of what it
+// wrote, for the cases that assert on a line the run logged. It logs at info,
+// so the copy holds the run's own lines rather than the debug line of every
+// published notification.
+func capturedLogger(t *testing.T) (*slog.Logger, *captureWriter) {
+	t.Helper()
+
+	writer := &captureWriter{t: t}
+	return slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})), writer
+}
+
+// captureWriter passes the log through to the test and keeps it, so a case that
+// reads one line back still has the whole log under a failure.
+type captureWriter struct {
+	t  *testing.T
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+func (w *captureWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.sb.Write(p)
+	w.mu.Unlock()
+
+	w.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
+}
+
+// String is everything the run has logged so far.
+func (w *captureWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.sb.String()
+}
+
+// reservePort takes a free port off the operating system and hands it straight
+// back, so a case knows the port a run's control endpoint will bind. A run
+// picks its own with a configured port of 0, and that one it never reports
+// anywhere a test reads.
+func reservePort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port: %v", err)
+	}
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("the reserved address is %v, want a TCP one", listener.Addr())
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("giving the reserved port back: %v", err)
+	}
+	return addr.Port
+}
+
+// controlRequest sends one request to the control endpoint of a run on port and
+// returns the status and the body. The bool is false when nothing answered: a
+// run dials the broker and waits for the collector before it binds its port, so
+// a poll can arrive before the endpoint is there.
+func controlRequest(t *testing.T, port int, method, path string) (int, string, bool) {
+	t.Helper()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	req, err := http.NewRequestWithContext(t.Context(), method, url, nil)
+	if err != nil {
+		t.Fatalf("building %s %s: %v", method, url, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, "", false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the answer to %s %s: %v", method, url, err)
+	}
+	return resp.StatusCode, string(body), true
+}
+
+// waitForHold polls the control endpoint until the run reports that it holds
+// the last share of the month back, and returns the document it saw there. It
+// is how a case reaches the hold: the last notifications of a month may be
+// noise nothing else waits for.
+//
+// The wait is on holding rather than on the counts, the way a script driving a
+// drill waits: the published count reaches total minus held while the run is
+// still on its way into the hold, and a release sent on it is refused.
+func waitForHold(t *testing.T, port, held int) clockDocument {
+	t.Helper()
+
+	var doc clockDocument
+	waitFor(t, "the run holds the last share of the month back", func() bool {
+		status, body, answered := controlRequest(t, port, http.MethodGet, "/clock")
+		if !answered {
+			return false
+		}
+		if status != http.StatusOK {
+			t.Fatalf("GET /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+		}
+		doc = decodeDocument(t, body)
+		return doc.Holding && doc.Held == held
+	})
+	return doc
+}
+
+// depthStaysAt fails the test when the outbox moves off depth within a second.
+// It is what tells a run that holds notifications back from one that is merely
+// slow: a held share never arrives on its own.
+func depthStaysAt(t *testing.T, outbox *openstack.Outbox, depth int64) {
+	t.Helper()
+
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if got := outbox.Depth(); got != depth {
+			t.Fatalf("Depth() = %d, want it to stay at %d: the held notifications went out unasked",
+				got, depth)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // counterValue reads one counter out of the collector's registry, through the
@@ -593,5 +718,303 @@ func TestConnectFailsWhenTheBrokerIsGone(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dialing the broker") {
 		t.Errorf("Connect() error = %q, want it to name the dial", err)
+	}
+}
+
+// TestRunHoldsBackUntilReleased is the held-back switch end to end: the month
+// goes out but for the share the switch keeps, the run stays there until
+// somebody asks for it, and what the collector ends up holding is the whole
+// month either way. It is the drill the switch exists for, where a backlog is
+// let go long after the notifications it holds were timestamped.
+func TestRunHoldsBackUntilReleased(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	outbox, _, _ := startCollector(t, url, ServiceExchanges)
+
+	month := faultyMonth(t, 1, Faults{HeldBack: true})
+	want := billableMessageIDs(t, month.Schedule)
+	held := len(month.Held)
+	if held == 0 {
+		t.Fatal("the month holds nothing back, want the switch to have picked notifications")
+	}
+
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(t.Context(), Config{Cloud: testCloud, HTTPPort: port}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultHeldBack},
+			WaitForCollector: pollDeadline,
+		}, publisher, testLogger(t))
+	}()
+
+	onTheBus := int64(len(want) - held)
+	waitFor(t, "every billable notification but the held ones is buffered", func() bool {
+		return outbox.Depth() == onTheBus
+	})
+	doc := waitForHold(t, port, held)
+	if doc.Published != doc.Total-held {
+		t.Errorf("GET /clock reports %d of %d published, want %d: the month is holding",
+			doc.Published, doc.Total, doc.Total-held)
+	}
+	depthStaysAt(t, outbox, onTheBus)
+
+	status, body, answered := controlRequest(t, port, http.MethodPost, "/release")
+	if !answered {
+		t.Fatal("POST /release reached nothing, want the endpoint to serve the hold")
+	}
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if got := decodeDocument(t, body).Held; got != 0 {
+		t.Errorf("POST /release document held = %d, want 0", got)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the release", pollDeadline)
+	}
+
+	waitFor(t, "the released notifications are buffered too", func() bool {
+		return outbox.Depth() == int64(len(want))
+	})
+	if got := storedEventIDs(t, outbox, len(want)); !slices.Equal(got, want) {
+		t.Errorf("buffered event ids = %v, want %v", got, want)
+	}
+}
+
+// TestRunStoppedWhileHoldingKeepsTheHeldNotificationsBack is what SIGINT does
+// to a run that is holding: the process ends with exit status 0, and the share
+// it held never reaches the bus. That is the other half of the drill, where the
+// backlog is thrown away rather than let go.
+func TestRunStoppedWhileHoldingKeepsTheHeldNotificationsBack(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	outbox, _, _ := startCollector(t, url, ServiceExchanges)
+
+	month := faultyMonth(t, 1, Faults{HeldBack: true})
+	want := billableMessageIDs(t, month.Schedule)
+	held := len(month.Held)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	logger, log := capturedLogger(t)
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{Cloud: testCloud, HTTPPort: port}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultHeldBack},
+			WaitForCollector: pollDeadline,
+		}, publisher, logger)
+	}()
+
+	waitForHold(t, port, held)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil: a stop while holding is a clean stop", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the stop", pollDeadline)
+	}
+	if !strings.Contains(log.String(), "stopped") {
+		t.Errorf("the run logged %q, want it to report the stop", log.String())
+	}
+
+	onTheBus := int64(len(want) - held)
+	waitFor(t, "everything the run published is buffered", func() bool {
+		return outbox.Depth() == onTheBus
+	})
+	depthStaysAt(t, outbox, onTheBus)
+}
+
+// TestReleaseFailsWhenTheBrokerIsGone covers the release that cannot publish
+// what it let out. The endpoint answers it, because all a release does is close
+// a channel, and the run reports the failed publish afterwards: a broker that
+// went away during the hold is no clean stop.
+func TestReleaseFailsWhenTheBrokerIsGone(t *testing.T) {
+	url, stopBroker := startBroker(t)
+	// Dialled here rather than through connect: the broker is terminated while
+	// the run holds, and a close of a connection that is already gone is not what
+	// this case is about.
+	publisher, err := Connect(url)
+	if err != nil {
+		t.Fatalf("Connect() error = %v, want nil", err)
+	}
+	defer func() { _ = publisher.Close() }()
+
+	held := len(faultyMonth(t, 1, Faults{HeldBack: true}).Held)
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		// No collector, so the wait for one is disabled: what this case needs of
+		// the broker is that it takes the month and then stops existing.
+		done <- Run(t.Context(), Config{Cloud: testCloud, HTTPPort: port}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultHeldBack},
+			WaitForCollector: 0,
+		}, publisher, testLogger(t))
+	}()
+
+	waitForHold(t, port, held)
+	stopBroker()
+
+	status, body, answered := controlRequest(t, port, http.MethodPost, "/release")
+	if !answered {
+		t.Fatal("POST /release reached nothing, want the endpoint to serve the hold")
+	}
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "publishing to") {
+			t.Fatalf("Run() error = %v, want it to name the publish that failed", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the release", pollDeadline)
+	}
+}
+
+// TestRunPublishesDuplicatesTheCollectorHandsOn is the duplicates switch
+// against the collector: a copy carries the message id of the notification it
+// repeats, so the collector buffers both and the Reporting API books one. What
+// this case holds is the collector's half of that, the depth the outbox reaches
+// with both copies in it.
+func TestRunPublishesDuplicatesTheCollectorHandsOn(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	outbox, reg, _ := startCollector(t, url, ServiceExchanges)
+
+	month := faultyMonth(t, 1, Faults{Duplicates: true})
+	want := billableMessageIDs(t, month.Schedule)
+	duplicates := len(month.Stream) - len(month.Schedule)
+	if duplicates == 0 {
+		t.Fatalf("the stream repeats nothing, want one in %d billable transitions twice", duplicateShare)
+	}
+
+	err := Run(t.Context(), Config{Cloud: testCloud, HTTPPort: 0}, RunOptions{
+		Period:           "2026-07",
+		Seed:             1,
+		Factor:           0,
+		Faults:           []string{FaultDuplicates},
+		WaitForCollector: pollDeadline,
+	}, publisher, testLogger(t))
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	waitFor(t, "both copies of every repeated notification are buffered", func() bool {
+		return outbox.Depth() == int64(len(want)+duplicates)
+	})
+	// A copy is the bytes of its original, so nothing about it is unparseable:
+	// the collector hands it on and ingestion is what drops it.
+	if got := counterValue(t, reg, "tally_collector_unparseable_total", "", ""); got != 0 {
+		t.Errorf("tally_collector_unparseable_total = %v, want 0", got)
+	}
+}
+
+// TestRunPublishesRefusedShapesTheCollectorRefuses is the refused-shapes switch
+// against the collector: the oversized and the truncated twin are counted as
+// unparseable, the versioned one as skipped under the type it arrived as, and
+// the outbox ends up holding the very events a month without the switch
+// produces.
+func TestRunPublishesRefusedShapesTheCollectorRefuses(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	outbox, reg, _ := startCollector(t, url, ServiceExchanges)
+
+	month := faultyMonth(t, 1, Faults{RefusedShapes: true})
+	want := billableMessageIDs(t, month.Schedule)
+
+	// A twin is told by its message id: it stands in the stream and in no
+	// schedule. The three shapes are told apart the way faults.go builds them.
+	scheduled := make(map[string]bool, len(month.Schedule))
+	for _, transition := range month.Schedule {
+		scheduled[transition.MessageID] = true
+	}
+	versioned := make(map[string]int)
+	unparseable := 0
+	for _, twin := range month.Stream {
+		switch {
+		case scheduled[twin.MessageID]:
+		case twin.truncated, twin.Payload["fault_padding"] != nil:
+			unparseable++
+		case strings.HasPrefix(twin.EventType, "instance."):
+			versioned[twin.EventType]++
+		default:
+			t.Fatalf("the stream carries a twin of no known shape: %s", twin.EventType)
+		}
+	}
+	if unparseable == 0 || len(versioned) == 0 {
+		t.Fatalf("the stream carries %d unparseable twins and %d versioned types, want both shapes",
+			unparseable, len(versioned))
+	}
+
+	err := Run(t.Context(), Config{Cloud: testCloud, HTTPPort: 0}, RunOptions{
+		Period:           "2026-07",
+		Seed:             1,
+		Factor:           0,
+		Faults:           []string{FaultRefusedShapes},
+		WaitForCollector: pollDeadline,
+	}, publisher, testLogger(t))
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	waitFor(t, "every twin the collector cannot parse is counted", func() bool {
+		return counterValue(t, reg, "tally_collector_unparseable_total", "", "") == float64(unparseable)
+	})
+
+	// The skips of the month and the versioned twins together, waited for as a
+	// sum before any one type is read: a type is only worth comparing once the
+	// whole month has been handled.
+	skippedTotal := 0
+	for _, transition := range month.Schedule {
+		if !transition.Billable {
+			skippedTotal++
+		}
+	}
+	for _, count := range versioned {
+		skippedTotal += count
+	}
+	waitFor(t, "every skipped notification is counted", func() bool {
+		return skippedSum(t, reg) == float64(skippedTotal)
+	})
+	for _, eventType := range slices.Sorted(maps.Keys(versioned)) {
+		got := counterValue(t, reg, "tally_collector_skipped_total", "event_type", eventType)
+		if got != float64(versioned[eventType]) {
+			t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want %d",
+				eventType, got, versioned[eventType])
+		}
+	}
+	// The versioned names stand beside the month's own and still leave the label
+	// inside the bound the collector admits.
+	if got := counterValue(t, reg, "tally_collector_skipped_total",
+		"event_type", cardinality.Overflow); got != 0 {
+		t.Errorf("tally_collector_skipped_total{event_type=%q} = %v, want 0", cardinality.Overflow, got)
+	}
+
+	// And the events are the ones a month without the switch produces: a refused
+	// twin is refused, not booked.
+	waitFor(t, "every billable notification is buffered", func() bool {
+		return outbox.Depth() == int64(len(want))
+	})
+	if got := storedEventIDs(t, outbox, len(want)); !slices.Equal(got, want) {
+		t.Errorf("buffered event ids = %v, want %v", got, want)
 	}
 }

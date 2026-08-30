@@ -16,7 +16,8 @@
 //
 // The control endpoint on TALLY_SIM_HTTP_PORT changes the factor while a run
 // publishes, so a month that is going out too slowly is sped up without being
-// started over.
+// started over. POST /release on it publishes the notifications a run with the
+// held-back fault switch kept back.
 //
 // SIGINT and SIGTERM stop a run cleanly: what went out stays out, and the
 // process ends with exit status 0. Every other failure exits 1.

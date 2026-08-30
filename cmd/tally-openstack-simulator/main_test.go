@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -222,6 +223,95 @@ func TestRunWritesTheMonthInFileMode(t *testing.T) {
 			again, _ := readLines(t, filepath.Join(second, name))
 			if !bytes.Equal(first, again) {
 				t.Errorf("%s differs between two runs of the same seed, period, and cloud", name)
+			}
+		}
+	})
+}
+
+// TestRunWritesTheHeldBackFileInFileMode covers the fourth file a run writes:
+// the notifications the held-back switch keeps off the bus. They are missing
+// from notifications.jsonl, so the two files together are the month
+// events.jsonl and the noise account for.
+func TestRunWritesTheHeldBackFileInFileMode(t *testing.T) {
+	useCloud(t)
+
+	dir := t.TempDir()
+	if _, stderr, err := runCLI(t, "run", "--period", endedMonth, "--seed", "1",
+		"--faults", "held-back", "--out", dir); err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	heldPath := filepath.Join(dir, "held-back.jsonl")
+	_, heldLines := readLines(t, heldPath)
+	// Through the reader a replay uses, so the file is one the simulator itself
+	// can put on a bus later.
+	held, err := simulator.ReadStream(heldPath)
+	if err != nil {
+		t.Fatalf("ReadStream(%s) error = %v, want nil", heldPath, err)
+	}
+	if len(held) != len(heldLines) {
+		t.Errorf("ReadStream read %d notifications of the %d lines of held-back.jsonl",
+			len(held), len(heldLines))
+	}
+
+	_, notificationLines := readLines(t, filepath.Join(dir, "notifications.jsonl"))
+	_, eventLines := readLines(t, filepath.Join(dir, "events.jsonl"))
+	// The switch leaves the schedule alone, so the non-billable notifications are
+	// the ones a month without it carries.
+	skipped := nonBillableNotifications(t, 1, endedMonth, simulatedCloud)
+	if got, want := len(notificationLines)+len(heldLines), len(eventLines)+skipped; got != want {
+		t.Errorf("notifications.jsonl and held-back.jsonl hold %d lines together, want %d: "+
+			"%d events plus the %d non-billable ones", got, want, len(eventLines), skipped)
+	}
+
+	t.Run("a second run without the switch takes the file away", func(t *testing.T) {
+		if _, stderr, err := runCLI(t,
+			"run", "--period", endedMonth, "--seed", "1", "--out", dir); err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		if _, err := os.Stat(heldPath); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Stat(%s) error = %v, want it to wrap fs.ErrNotExist: a directory reused "+
+				"across runs must not carry the held share of another month", heldPath, err)
+		}
+	})
+
+	t.Run("a rerun that fails partway takes every earlier file away too", func(t *testing.T) {
+		reused := t.TempDir()
+		stale := writeFile(t, reused, "held-back.jsonl", "{}\n")
+		staleOracle := writeFile(t, reused, "oracle.json", "{}\n")
+		// A directory in the way of one of the files is a run that ends partway
+		// through the output directory. Whatever ends it there, no file of the
+		// earlier month may stay behind: a drill would compare this month against
+		// that oracle, and a replay would put that held share on the bus. Each
+		// directory holds a file of its own so the run cannot take it away and
+		// carry on, and there are two of them because what an operator clears out
+		// after such a run is every path the run could not take away, not the
+		// first one it reached.
+		obstructions := []string{
+			filepath.Join(reused, "notifications.jsonl"),
+			filepath.Join(reused, "events.jsonl"),
+		}
+		for _, obstruction := range obstructions {
+			if err := os.Mkdir(obstruction, 0o755); err != nil {
+				t.Fatalf("making the directory that fails the run: %v", err)
+			}
+			writeFile(t, obstruction, "keep", "")
+		}
+
+		_, stderr, err := runCLI(t, "run", "--period", endedMonth, "--seed", "1", "--out", reused)
+		if err == nil {
+			t.Fatalf("run error = nil, want the failure over %v (stderr %q)", obstructions, stderr)
+		}
+		for _, obstruction := range obstructions {
+			if !strings.Contains(err.Error(), obstruction) {
+				t.Errorf("run error = %v, want it to name %s too: a path the run could not take "+
+					"away is a file of the earlier month still in the directory", err, obstruction)
+			}
+		}
+		for _, path := range []string{stale, staleOracle} {
+			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Stat(%s) error = %v, want it to wrap fs.ErrNotExist: a run that fails "+
+					"must not leave a file of another month behind", path, err)
 			}
 		}
 	})
@@ -617,6 +707,50 @@ func TestCompareMatchesAndDiffers(t *testing.T) {
 		}
 	})
 
+	t.Run("a resource a switch touched", func(t *testing.T) {
+		// A month of its own, because a switch names the resources it touched in
+		// the oracle, and the oracle of the plain month above names none.
+		faultyDir := t.TempDir()
+		if _, stderr, err := runCLI(t, "run", "--period", endedMonth, "--seed", "1",
+			"--faults", simulator.FaultMissingCreate, "--out", faultyDir); err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		faultyPath := filepath.Join(faultyDir, "oracle.json")
+		faultyOracle, err := simulator.ReadOracle(faultyPath)
+		if err != nil {
+			t.Fatalf("ReadOracle() error = %v, want nil", err)
+		}
+
+		resourceType, id := firstTouchedResource(t, faultyOracle, simulator.FaultMissingCreate)
+		faultyRows := ratedOf(t, faultyOracle)
+		kept := make([][]string, 0, len(faultyRows))
+		for _, row := range faultyRows {
+			if row[columnResourceID] != id {
+				kept = append(kept, row)
+			}
+		}
+
+		stdout, _, err := runCLI(t, "compare",
+			"--oracle", faultyPath, "--export", writeRated(t, kept), "--pricing", model)
+		if err == nil {
+			t.Fatalf("compare error = nil, want the missing resource reported (stdout %q)", stdout)
+		}
+		if want := "1 resources differ from the oracle"; err.Error() != want {
+			t.Errorf("compare error = %q, want %q", err, want)
+		}
+		// The switch stands beside the difference it explains, and under the
+		// differences stand the switches the month ran with.
+		want := fmt.Sprintf("%s %s: missing from the export (touched by %s)",
+			resourceType, id, simulator.FaultMissingCreate)
+		if !strings.Contains(stdout, want+"\n") {
+			t.Errorf("stdout = %q, want a line %q", stdout, want)
+		}
+		want = "the month ran with the fault switches " + simulator.FaultMissingCreate
+		if !strings.Contains(stdout, want+"\n") {
+			t.Errorf("stdout = %q, want a line %q", stdout, want)
+		}
+	})
+
 	t.Run("an export directory holding no rated.csv", func(t *testing.T) {
 		_, stderr, err := runCLI(t, "compare",
 			"--oracle", oraclePath, "--export", t.TempDir(), "--pricing", model)
@@ -839,6 +973,24 @@ func firstResourceID(t *testing.T, oracle simulator.Oracle, resourceType string)
 	}
 	t.Fatalf("the oracle holds no %s, and the case needs one", resourceType)
 	return ""
+}
+
+// firstTouchedResource is the oracle's first resource of a priced type that the
+// switch touched, by type and id. A resource of an unpriced type carries no row
+// in an export, so dropping one would report no difference at all.
+func firstTouchedResource(t *testing.T, oracle simulator.Oracle, fault string) (resourceType, id string) {
+	t.Helper()
+
+	for _, resource := range oracle.Resources {
+		if _, priced := timeGauges[resource.ResourceType]; !priced {
+			continue
+		}
+		if slices.Contains(resource.Faults, fault) {
+			return resource.ResourceType, resource.ResourceID
+		}
+	}
+	t.Fatalf("the oracle names no resource of a priced type the %s switch touched", fault)
+	return "", ""
 }
 
 // lastLine is the last line of what a command printed, which is the verdict of
