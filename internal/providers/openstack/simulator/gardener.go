@@ -14,12 +14,12 @@ import (
 // persistent volume claim into a cinder volume. Nothing here speaks to a
 // Kubernetes API, and nothing of the cluster itself is rendered.
 //
-// Only the billable side of a shoot is generated: the workers, the volumes, the
-// addresses, the image the workers boot from, and the load balancers. The
-// network, the subnet, the router, and the ports are named in the payloads that
-// refer to them. The security group and the keypair are named by nothing yet:
-// they are held for the issue that adds the neutron and keystone side, which is
-// where the notifications about all of them belong.
+// The billable side of a shoot is the workers, the volumes, the addresses, the
+// image the workers boot from, and the load balancers. Everything a cluster
+// needs besides them is announced by the helpers of noise.go around those
+// transitions and billed for by nothing: the network, the subnet, the router,
+// the security group with its rules, the keypair, the ports, the DNS records,
+// and the certificate the ingress terminates on.
 //
 // The names are the shapes Gardener's OpenStack extension and the
 // machine-controller-manager give the resources they create: a technical id
@@ -56,10 +56,18 @@ func newGardenerProjects() []*gardenerProject {
 	}
 }
 
-// gardener generates one Gardener project's month. The image comes first
-// because every worker of every shoot boots from it.
+// gardener generates one Gardener project's month. The tenant is announced
+// first because nothing in it exists before it does, the image follows because
+// every worker of every shoot boots from it, and the zone follows the image
+// because the shoots publish their records into it.
+//
+// An image drawn at exactly the month start shares its instant with the
+// project's creation. The sort of the month is stable, so the announcement
+// stays where it was emitted: ahead of the tenant's first resource.
 func (g *generator) gardener(gp *gardenerProject) {
+	g.announceTenant(gp.tenant, g.from)
 	g.tenantImage(gp.tenant)
+	g.createZone(gp, g.from.Add(2*time.Second))
 	for _, s := range gp.shoots {
 		g.shoot(gp, s)
 	}
@@ -106,18 +114,10 @@ func (g *generator) shoot(gp *gardenerProject, s *shoot) {
 		s.secondBalancerDay = at(drawWorkingInstant(g.shape, g.from.Add(3*day), g.from.Add(20*day)), 0, 0)
 	}
 
-	// The network the shoot's servers hold their addresses on, built from the
-	// ids the shoot was named with. Its range is the one the shoot's VIP
-	// addresses already lie in, and the notifications about the network itself
-	// are a later package's. Building it draws nothing.
-	s.network = &network{
-		id:              s.networkID,
-		subnetID:        s.subnetID,
-		routerID:        s.routerID,
-		securityGroupID: s.securityGroupID,
-		name:            s.technicalID,
-		cidr:            fmt.Sprintf("10.250.%d.0/24", s.index),
-	}
+	// What Gardener creates before the first worker can boot: the network the
+	// servers hold their addresses on, the security group, the keypair, and the
+	// record the API server answers on.
+	g.shootInfrastructure(s, s.createdAt)
 
 	// The creation sequence: the workers come up seconds apart, the workloads
 	// that claim storage are scheduled once the nodes are ready, and the ingress
@@ -157,9 +157,16 @@ func (g *generator) shoot(gp *gardenerProject, s *shoot) {
 // or hibernating through is a day the autoscaler and the workloads have no full
 // window on, and rendering their steps into a fraction of one would put load on
 // a cluster that was not there yet.
+//
+// Two of the day's steps take a keystone token: the wake-up and the rolling
+// update, each of which is one reconciliation Gardener starts. The autoscaler
+// and the claim activity take none. One record per action somebody or a
+// controller starts is what keeps the month's authentications a number a reader
+// can follow.
 func (g *generator) shootDay(s *shoot, d time.Time) {
 	if s.hibernates && !s.awake && workingDay(d) {
 		t := at(d, officeFrom, 0)
+		g.authenticate(s.owner.tenant, t.Add(-authenticateLead))
 		var last time.Time
 		for range s.baseWorkers {
 			last = t
@@ -194,6 +201,7 @@ func (g *generator) shootDay(s *shoot, d time.Time) {
 	// added today are left alone, because they already run the new version.
 	if d.Equal(s.rollingUpdateDay) {
 		t := drawWorkingInstant(g.shape, at(d, 9, 0), at(d, 15, 0))
+		g.authenticate(s.owner.tenant, t.Add(-authenticateLead))
 		for _, w := range slices.Clone(s.workers) {
 			if slices.Contains(s.added, w) {
 				continue
@@ -406,14 +414,20 @@ func (g *generator) claimActivity(s *shoot, d time.Time) {
 	}
 }
 
-// createLoadBalancer publishes one service of type LoadBalancer: octavia
-// creates the balancer, neutron gives its VIP port a floating address, and the
-// listeners and pools of the service arrive on the update that follows.
+// createLoadBalancer publishes one service of type LoadBalancer: neutron gives
+// the balancer the port it holds its VIP on, octavia creates the balancer, the
+// floating address follows, and the listeners and pools of the service arrive
+// on the update after that.
 //
 // The update is the notification the balancer's size is booked from. Octavia
 // reports the listeners and the pools on an update alone, and the create is
 // sent before the service's ports are attached, so the create carries a
 // balancer of zero listeners and zero pools.
+//
+// The first balancer of a shoot is what its ingress record points at, since
+// that is the address every service of the cluster is reached under. A balancer
+// that terminates TLS holds the certificate for it in barbican, which is four
+// audit records twenty seconds after the create and before the update.
 func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, listeners, pools int) {
 	tenant := s.owner.tenant
 	lb := &loadBalancer{id: g.identifiers.nextUUID(), name: name, vipPortID: g.identifiers.nextUUID()}
@@ -442,11 +456,45 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 	g.assigned++
 	s.loadBalancers = append(s.loadBalancers, lb)
 
+	// The port the balancer holds its VIP on. Octavia is the device behind it,
+	// and it is bound to no host: the VIP lives on the balancer's amphorae and
+	// not on a compute.
+	vipPort := newPort(s.network, lb.vipPortID, lb.vipAddress, "lb-"+lb.id, "Octavia", "")
+	g.noise(t.Add(-vipPortLead), "port.create.start", networkPublisher, lb.vipPortID, tenant,
+		portRequestPayload(tenant, vipPort))
+	g.noise(t.Add(-vipPortLead+time.Second), "port.create.end", networkPublisher, lb.vipPortID, tenant,
+		portPayload(tenant, vipPort, false))
+
 	g.emit(t, "octavia.loadbalancer.create.end", "", lb.id, tenant,
 		loadBalancerPayload(tenant, s, lb, false))
 	allocatedAt := t.Add(span(g.shape, 2*time.Second, 10*time.Second))
 	g.emit(allocatedAt, "floatingip.create.end", networkPublisher, lb.fip.id, tenant,
 		floatingIPCreatePayload(tenant, lb.fip, g.networkID))
+
+	// The ingress record is created with the first balancer of the shoot and
+	// points at its address, which is the wildcard every service of the cluster
+	// is published under.
+	if len(s.loadBalancers) == 1 {
+		s.ingressRecord = &recordSet{
+			id:         g.noiseIDs.nextUUID(),
+			name:       "*.ingress." + s.name + "." + s.owner.zoneName,
+			recordType: "A",
+			records:    []string{lb.fip.address},
+		}
+		g.createRecordSet(s.owner, s.ingressRecord, t.Add(ingressRecordLag))
+	}
+
+	// The https listener is the second of the catalog, so a balancer that gets
+	// two of them is the one that terminates TLS. Its certificate goes into
+	// barbican as a secret with the private key and a container that holds the
+	// two together.
+	if listeners >= 2 {
+		lb.secretID, lb.containerID = g.noiseIDs.nextUUID(), g.noiseIDs.nextUUID()
+		g.barbicanCall(tenant, t.Add(certificateLag), "POST", "/v1/secrets",
+			secretsType, lb.secretID)
+		g.barbicanCall(tenant, t.Add(certificateLag+2*time.Second), "POST", "/v1/containers",
+			containersType, lb.containerID)
+	}
 
 	g.emit(t.Add(span(g.shape, 60*time.Second, 300*time.Second)),
 		"octavia.loadbalancer.update.end", "", lb.id, tenant,
@@ -455,13 +503,16 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 
 // tearDown deletes a shoot in the order Gardener does, which is the order its
 // resources depend on each other in: the services go first, address before
-// balancer, then the workers, then the claims they held. Nothing of the shoot
-// is emitted after the last of them. A claim is attached unless the shoot
-// hibernated, so its delete carries the detach cinder sends three seconds
-// before it.
+// balancer and the VIP port and the certificate after it, then the workers,
+// then the claims they held, and the infrastructure underneath them all last.
+// Nothing of the shoot is emitted after its network is gone. A claim is
+// attached unless the shoot hibernated, so its delete carries the detach cinder
+// sends three seconds before it.
 func (g *generator) tearDown(s *shoot) {
 	tenant := s.owner.tenant
 	t := s.deletedAt
+
+	g.authenticate(tenant, s.deletedAt.Add(-authenticateLead))
 
 	for _, lb := range s.loadBalancers {
 		g.emit(t, "floatingip.delete.end", networkPublisher, lb.fip.id, tenant,
@@ -469,6 +520,20 @@ func (g *generator) tearDown(s *shoot) {
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 		g.emit(t, "octavia.loadbalancer.delete.end", "", lb.id, tenant,
 			loadBalancerPayload(tenant, s, lb, false))
+		// The VIP port goes with the balancer that held it.
+		g.noise(t.Add(time.Second), "port.delete.start", networkPublisher, lb.vipPortID, tenant,
+			neutronDeletePayload("port", lb.vipPortID))
+		g.noise(t.Add(2*time.Second), "port.delete.end", networkPublisher, lb.vipPortID, tenant,
+			neutronDeletePayload("port", lb.vipPortID))
+		// The container goes before the secret it holds, the way a certificate is
+		// given back: the container refers to the secret, and barbican refuses a
+		// secret another resource still names.
+		if lb.containerID != "" {
+			g.barbicanCall(tenant, t.Add(3*time.Second), "DELETE", "/v1/containers/"+lb.containerID,
+				containersType, lb.containerID)
+			g.barbicanCall(tenant, t.Add(5*time.Second), "DELETE", "/v1/secrets/"+lb.secretID,
+				secretsType, lb.secretID)
+		}
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 	}
 	for _, w := range slices.Clone(s.workers) {
@@ -479,5 +544,6 @@ func (g *generator) tearDown(s *shoot) {
 		g.deleteVolume(tenant, vol, t)
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 	}
+	g.tearDownInfrastructure(s, t)
 	s.claims = nil
 }

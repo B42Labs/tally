@@ -1,6 +1,7 @@
 package simulator
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"time"
 )
@@ -94,6 +95,14 @@ const (
 	// certificateLag is where the four barbican records begin, one second
 	// apart.
 	certificateLag = 20 * time.Second
+)
+
+// The CADF target types barbican reports its resources under. A secret holds
+// the private key of a load balancer's certificate, and a container holds the
+// certificate that goes with it.
+const (
+	secretsType    = "service/security/keymanager/secrets"
+	containersType = "service/security/keymanager/containers"
 )
 
 // updateLeads are the distances of the three compute.instance.update of a boot
@@ -324,4 +333,208 @@ func (g *generator) uploadImage(p *project, img *image, uploadedAt time.Time) {
 
 	g.noise(uploadedAt.Add(imageActivateLag), "image.activate", imagePublisher, img.id, p,
 		imageUploadPayload(p, img, uploadedAt))
+}
+
+// buildNetwork renders the network a tenant works on: neutron's network, the
+// subnet inside it, the router out of it, and the interface that puts the
+// router on the subnet.
+//
+// The CI tenant's network at the month start and every shoot's network go
+// through here. The classic tenants' networks pre-exist the month, and neutron
+// announces nothing about a resource that was there before the first
+// transition.
+func (g *generator) buildNetwork(p *project, net *network, t time.Time) {
+	// The port the router holds its interface on. It is kept on the network so
+	// that the delete of the interface names the port the create named.
+	net.routerPortID = g.noiseIDs.nextUUID()
+
+	g.noise(t, "network.create.start", networkPublisher, net.id, p, networkRequestPayload(net))
+	g.noise(t.Add(time.Second), "network.create.end", networkPublisher, net.id, p,
+		networkPayload(p, net))
+	g.noise(t.Add(2*time.Second), "subnet.create.start", networkPublisher, net.subnetID, p,
+		subnetRequestPayload(net))
+	g.noise(t.Add(3*time.Second), "subnet.create.end", networkPublisher, net.subnetID, p,
+		subnetPayload(p, net))
+	g.noise(t.Add(4*time.Second), "router.create.start", networkPublisher, net.routerID, p,
+		routerRequestPayload(net, g.networkID))
+	g.noise(t.Add(5*time.Second), "router.create.end", networkPublisher, net.routerID, p,
+		routerPayload(p, net, g.networkID))
+	g.noise(t.Add(6*time.Second), "router.interface.create", networkPublisher, net.routerID, p,
+		routerInterfacePayload(p, net, net.routerPortID))
+}
+
+// shootInfrastructure renders everything Gardener creates before the first
+// worker of a shoot boots. It is one reconciliation, so it takes one token, and
+// what follows that token runs a second apart.
+//
+// The seventeen transitions of it, from two seconds before the shoot's creation
+// instant to sixteen after it: the authentication, the network, the subnet, the
+// router and its interface, the security group with the two rules of a worker
+// pool, the keypair the workers are reachable under, and the record set the API
+// server answers on.
+func (g *generator) shootInfrastructure(s *shoot, t time.Time) {
+	p := s.owner.tenant
+	// The network the shoot's servers hold their addresses on, built from the
+	// ids the shoot was named with. Its range is the one the shoot's VIP
+	// addresses already lie in.
+	s.network = &network{
+		id:              s.networkID,
+		subnetID:        s.subnetID,
+		routerID:        s.routerID,
+		securityGroupID: s.securityGroupID,
+		name:            s.technicalID,
+		cidr:            fmt.Sprintf("10.250.%d.0/24", s.index),
+	}
+
+	g.authenticate(p, t.Add(-authenticateLead))
+	g.buildNetwork(p, s.network, t.Add(time.Second))
+
+	g.noise(t.Add(8*time.Second), "security_group.create.start", networkPublisher, s.securityGroupID, p,
+		securityGroupRequestPayload(s))
+	g.noise(t.Add(9*time.Second), "security_group.create.end", networkPublisher, s.securityGroupID, p,
+		securityGroupPayload(p, s))
+	for i := range 2 {
+		id := g.noiseIDs.nextUUID()
+		s.securityGroupRuleIDs = append(s.securityGroupRuleIDs, id)
+		g.noise(t.Add(time.Duration(10+2*i)*time.Second), "security_group_rule.create.start",
+			networkPublisher, id, p, securityGroupRulePayload(p, s, i, ""))
+		g.noise(t.Add(time.Duration(11+2*i)*time.Second), "security_group_rule.create.end",
+			networkPublisher, id, p, securityGroupRulePayload(p, s, i, id))
+	}
+
+	// A keypair has no id, so the resource it is reported under is the user that
+	// holds it and the name it was imported under. The user id is salted with
+	// the cloud and the month the way every other identifier is, which keeps two
+	// clouds' keypairs apart.
+	keypair := p.userID + ":" + s.keypairName
+	g.noise(t.Add(14*time.Second), "keypair.import.start", apiPublisher, keypair, p,
+		keypairPayload(p, s.keypairName))
+	g.noise(t.Add(15*time.Second), "keypair.import.end", apiPublisher, keypair, p,
+		keypairPayload(p, s.keypairName))
+
+	// The API server of a shoot runs in Gardener's seed, which this world does
+	// not simulate, so the address the record points at is a placeholder from
+	// the RFC 5737 range beside the one the floating addresses come from.
+	s.apiRecord = &recordSet{
+		id:         g.noiseIDs.nextUUID(),
+		name:       "api." + s.name + "." + s.owner.zoneName,
+		recordType: "A",
+		records:    []string{fmt.Sprintf("198.51.100.%d", s.index)},
+	}
+	g.createRecordSet(s.owner, s.apiRecord, t.Add(16*time.Second))
+}
+
+// tearDownInfrastructure gives back what shootInfrastructure took, in the order
+// the resources depend on each other: the records the cluster was reached
+// under, the keypair, the security group, the router's interface, the router,
+// the subnet, and the network. Nothing of the shoot is emitted after the
+// network.delete.end.
+//
+// The cursor moves a second per transition, which is what keeps the two halves
+// of one delete out of one second.
+func (g *generator) tearDownInfrastructure(s *shoot, t time.Time) {
+	p := s.owner.tenant
+	// The cursor of the sequence. The two record sets advance it themselves,
+	// because designate renders them through a helper of its own.
+	step := func(eventType, publisherID, resourceID string, payload map[string]any) {
+		g.noise(t, eventType, publisherID, resourceID, p, payload)
+		t = t.Add(time.Second)
+	}
+
+	g.deleteRecordSet(s.owner, s.apiRecord, t)
+	t = t.Add(time.Second)
+	// A shoot that never published a service has no ingress record to give back.
+	if s.ingressRecord != nil {
+		g.deleteRecordSet(s.owner, s.ingressRecord, t)
+		t = t.Add(time.Second)
+	}
+
+	keypair := p.userID + ":" + s.keypairName
+	step("keypair.delete.start", apiPublisher, keypair, keypairPayload(p, s.keypairName))
+	step("keypair.delete.end", apiPublisher, keypair, keypairPayload(p, s.keypairName))
+
+	step("security_group.delete.start", networkPublisher, s.securityGroupID,
+		neutronDeletePayload("security_group", s.securityGroupID))
+	step("security_group.delete.end", networkPublisher, s.securityGroupID,
+		neutronDeletePayload("security_group", s.securityGroupID))
+
+	step("router.interface.delete", networkPublisher, s.routerID,
+		routerInterfacePayload(p, s.network, s.network.routerPortID))
+	step("router.delete.start", networkPublisher, s.routerID,
+		neutronDeletePayload("router", s.routerID))
+	step("router.delete.end", networkPublisher, s.routerID,
+		neutronDeletePayload("router", s.routerID))
+
+	step("subnet.delete.start", networkPublisher, s.subnetID,
+		neutronDeletePayload("subnet", s.subnetID))
+	step("subnet.delete.end", networkPublisher, s.subnetID,
+		neutronDeletePayload("subnet", s.subnetID))
+
+	step("network.delete.start", networkPublisher, s.networkID,
+		neutronDeletePayload("network", s.networkID))
+	step("network.delete.end", networkPublisher, s.networkID,
+		neutronDeletePayload("network", s.networkID))
+}
+
+// announceTenant is what keystone sends when a tenant is created: the project
+// and the user that works in it, a second apart.
+func (g *generator) announceTenant(p *project, t time.Time) {
+	g.noise(t, "identity.project.created", identityPublisher, p.id, p, identityPayload(p.id))
+	g.noise(t.Add(time.Second), "identity.user.created", identityPublisher, p.userID, p,
+		identityPayload(p.userID))
+}
+
+// authenticate is the token somebody or a controller takes before it acts.
+//
+// The resource of the transition is the CADF record's own id and not the user
+// it was issued for. A user authenticates several times a day, two of those may
+// fall into one second, and a record id is what keeps the rule that two
+// notifications about one resource are a second apart trivially true.
+func (g *generator) authenticate(p *project, t time.Time) {
+	id := g.noiseIDs.nextUUID()
+	g.noise(t, "identity.authenticate", identityPublisher, id, p, authenticatePayload(p, id, t))
+}
+
+// createZone publishes the designate zone a Gardener project's records live in.
+// The zones are never deleted: a project outlives every shoot it holds, and the
+// zone is what the records of the next one are created under.
+func (g *generator) createZone(gp *gardenerProject, t time.Time) {
+	g.noise(t, "dns.zone.create", dnsPublisher, gp.zoneID, gp.tenant,
+		zonePayload(gp.tenant, gp, t))
+}
+
+// createRecordSet publishes one record set into a project's zone.
+func (g *generator) createRecordSet(gp *gardenerProject, rs *recordSet, t time.Time) {
+	g.noise(t, "dns.recordset.create", dnsPublisher, rs.id, gp.tenant,
+		recordSetPayload(gp.tenant, gp, rs, "CREATE", t))
+}
+
+// deleteRecordSet withdraws one record set from a project's zone.
+func (g *generator) deleteRecordSet(gp *gardenerProject, rs *recordSet, t time.Time) {
+	g.noise(t, "dns.recordset.delete", dnsPublisher, rs.id, gp.tenant,
+		recordSetPayload(gp.tenant, gp, rs, "DELETE", t))
+}
+
+// barbicanCall renders one call against barbican's API as the two records its
+// audit middleware sends: the request when it arrives, and the response a
+// second later. Each of the two is its own resource, because a call is one
+// thing that happened and not two steps of a resource's life.
+//
+// The method is what the action and the status of the response are read off: a
+// POST creates the secret or the container the path names and is answered with
+// a 201, and a DELETE gives it back and is answered with a 204.
+func (g *generator) barbicanCall(p *project, t time.Time,
+	method, path, targetType, targetID string,
+) {
+	reqID, respID := g.noiseIDs.nextUUID(), g.noiseIDs.nextUUID()
+	action, code := "create", 201
+	if method == "DELETE" {
+		action, code = "delete", 204
+	}
+
+	g.noise(t, "audit.http.request", barbicanPublisher, reqID, p,
+		auditPayload(p, g.cloud, reqID, action, "pending", path, targetType, targetID, 0, t))
+	response := t.Add(time.Second)
+	g.noise(response, "audit.http.response", barbicanPublisher, respID, p,
+		auditPayload(p, g.cloud, respID, action, "success", path, targetType, targetID, code, response))
 }
