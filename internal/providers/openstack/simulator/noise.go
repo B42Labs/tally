@@ -2,7 +2,10 @@ package simulator
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -40,8 +43,9 @@ import (
 //
 // The infrastructure of a shoot is the one sequence without a constant of its
 // own: it runs one transition per second, from 1 to 16 seconds after the
-// shoot's creation instant. The audit records of a tenant sit at the midnight
-// itself, which is a lag of zero and needs no constant either.
+// shoot's creation instant. The daily compute.instance.exists audits need no
+// constant either: they sit at the midnight itself, pushed on by whole seconds
+// for as long as the instance already reports a transition at that second.
 //
 // Two distances the billable month already states are reused rather than
 // written again here: volumeProvision (render.go) is how long before its create
@@ -537,4 +541,195 @@ func (g *generator) barbicanCall(p *project, t time.Time,
 	response := t.Add(time.Second)
 	g.noise(response, "audit.http.response", barbicanPublisher, respID, p,
 		auditPayload(p, g.cloud, respID, action, "success", path, targetType, targetID, code, response))
+}
+
+// auditFlavorMembers are the members a resize carries over into the audits that
+// follow it. They are what nova's resize payload reports of the flavor the
+// server moved to, and the disk of an audit is summed from two of them.
+//
+// The flavor's uuid is not among them, because nova's resize payload does not
+// carry one: an audit names the flavor under instance_flavor_id all the same,
+// and nova reads that from its own catalog. flavorByTypeID stands in for that
+// catalog, so an audit after a resize does not report the new flavor's name
+// beside the boot flavor's uuid.
+var auditFlavorMembers = [6]string{
+	"vcpus", "memory_mb", "root_gb", "ephemeral_gb", "instance_type", "instance_type_id",
+}
+
+// auditEntry is one instance under audit: who reports it, which project it runs
+// in, and the payload its audits repeat. base starts as the create and is
+// carried forward from there, because nova audits the server as it stands at
+// the end of the day and not as it was booted.
+type auditEntry struct {
+	id        string
+	publisher string
+	projectID string
+	userID    string
+	workload  string
+	base      map[string]any
+	// deletedAt is when the instance went, and the zero time while it is still
+	// there. The instance is audited once more after it, for the part of the day
+	// it was still running, and is dropped afterwards.
+	deletedAt time.Time
+}
+
+// audits renders nova's periodic existence audit: every instance that existed
+// during a calendar day of the month is reported at the following midnight with
+// a compute.instance.exists over that day.
+//
+// The period is the day, which is what a deployment sets
+// instance_usage_audit_period to when it wants daily records. The default nova
+// ships is the month, and a monthly period would put no audit inside the
+// simulated month at all, because the first one falls on the midnight that ends
+// it. The hour would put twenty-four times as many lines on the bus for the
+// same single type.
+//
+// The audits are the one part of the catalogue that is not rendered where the
+// billable transition is. Which instances existed on a day is known only once
+// every workload has run, so this is a pass over the finished schedule.
+//
+// An audit sits at the midnight itself. When the instance already reports a
+// transition at that second, the audit is pushed on by whole seconds until it
+// finds a free one, which keeps two notifications about one resource a second
+// apart. What the audit repeats is the instance as it stands: a resize moves
+// the flavor over, and every .end moves the state over, so the audits after a
+// resize report the flavor the server runs on from then on. A deleted instance
+// is audited one last time, at the midnight that follows its delete.
+func (g *generator) audits() {
+	sorted := slices.Clone(g.schedule)
+	slices.SortStableFunc(sorted, func(a, b Transition) int { return a.At.Compare(b.At) })
+
+	// Every instant every resource of the month already reports. It is what an
+	// audit is pushed past, and it is built from the whole schedule because the
+	// second a midnight falls on may be taken by any of the transitions there.
+	type reported struct {
+		resourceID string
+		at         time.Time
+	}
+	occupied := make(map[reported]struct{}, len(sorted))
+	for _, tr := range sorted {
+		occupied[reported{tr.ResourceID, tr.At}] = struct{}{}
+	}
+
+	// The instances under audit, in the order they first appeared, and the same
+	// entries by id. The slice is what the flush walks: a map walk would order
+	// the audits of one midnight differently from run to run, and a month whose
+	// order depends on the run is no longer the seed's.
+	var fleet []*auditEntry
+	byID := make(map[string]*auditEntry)
+
+	flush := func(midnight time.Time) {
+		for _, entry := range fleet {
+			// An instance that went before the day this audit covers has nothing
+			// left to report.
+			if !entry.deletedAt.IsZero() && !entry.deletedAt.After(midnight.Add(-day)) {
+				continue
+			}
+			at := midnight
+			for _, taken := occupied[reported{entry.id, at}]; taken; _, taken = occupied[reported{entry.id, at}] {
+				at = at.Add(time.Second)
+			}
+			// The entry carries the ids of the instance and not the project it
+			// runs in, which is why the transition is written out here instead of
+			// through g.noise, which takes a *project.
+			g.schedule = append(g.schedule, Transition{
+				At:          at,
+				EventType:   "compute.instance.exists",
+				Exchange:    exchangeFor("compute.instance.exists"),
+				Billable:    false,
+				noise:       true,
+				Workload:    entry.workload,
+				PublisherID: entry.publisher,
+				ProjectID:   entry.projectID,
+				UserID:      entry.userID,
+				ResourceID:  entry.id,
+				Payload:     instanceExistsPayload(entry.base, midnight.Add(-day), midnight),
+			})
+		}
+
+		// An instance created and deleted between two midnights is audited once,
+		// at the midnight that follows, and is dropped here.
+		fleet = slices.DeleteFunc(fleet, func(entry *auditEntry) bool {
+			if entry.deletedAt.IsZero() {
+				return false
+			}
+			delete(byID, entry.id)
+			return true
+		})
+	}
+
+	midnight := g.from.AddDate(0, 0, 1)
+	for _, tr := range sorted {
+		// Every midnight the transition has passed is audited before the
+		// transition is folded in, so a day reports the instances as they stood
+		// when it ended.
+		for midnight.Before(g.to) && !tr.At.Before(midnight) {
+			flush(midnight)
+			midnight = midnight.Add(day)
+		}
+
+		if tr.EventType == "compute.instance.create.end" {
+			entry := &auditEntry{
+				id:        tr.ResourceID,
+				publisher: tr.PublisherID,
+				projectID: tr.ProjectID,
+				userID:    tr.UserID,
+				workload:  tr.Workload,
+				base:      maps.Clone(tr.Payload),
+			}
+			fleet = append(fleet, entry)
+			byID[entry.id] = entry
+			continue
+		}
+
+		// An id without a create.end behind it is nothing this pass audits: the
+		// resources of every other service, and the halves of a boot nova sends
+		// before the create. Only the .end of a step carries the instance
+		// forward, because that is where a step reports what it left behind.
+		entry, known := byID[tr.ResourceID]
+		if !known || !strings.HasPrefix(tr.EventType, "compute.instance.") ||
+			!strings.HasSuffix(tr.EventType, ".end") {
+			continue
+		}
+
+		switch tr.EventType {
+		case "compute.instance.resize.end", "compute.instance.finish_resize.end":
+			for _, member := range auditFlavorMembers {
+				if value, ok := tr.Payload[member]; ok {
+					entry.base[member] = value
+				}
+			}
+			// The resize payload reports the two disks and not their sum, so the
+			// member an audit carries is summed here. A payload without them
+			// leaves the disk of the audit at what it was.
+			root, rootOK := tr.Payload["root_gb"].(int)
+			ephemeral, ephemeralOK := tr.Payload["ephemeral_gb"].(int)
+			if rootOK && ephemeralOK {
+				entry.base["disk_gb"] = root + ephemeral
+			}
+			// The uuid of the flavor comes from the catalog rather than from the
+			// payload. A type id the catalog does not hold leaves the member at
+			// what it was, which is a resize the month never renders.
+			if typeID, ok := tr.Payload["instance_type_id"].(int); ok {
+				if moved, found := flavorByTypeID(typeID); found {
+					entry.base["instance_flavor_id"] = moved.flavorID
+				}
+			}
+		case "compute.instance.delete.end":
+			entry.deletedAt = tr.At
+			entry.base["state"] = "deleted"
+		default:
+			if state, ok := tr.Payload["state"].(string); ok {
+				entry.base["state"] = state
+			}
+		}
+	}
+
+	// Every midnight left of the month, up to but not including the one that
+	// ends it: an audit at the end of the period would fall into the month that
+	// follows.
+	for midnight.Before(g.to) {
+		flush(midnight)
+		midnight = midnight.Add(day)
+	}
 }

@@ -68,6 +68,22 @@ var bootVolumeFlavor = flavor{
 	typeID: 9, flavorID: "e2d4b6a8-0c1e-4f3a-95b7-6d8f0a2c4e61",
 }
 
+// flavorByTypeID returns the catalog entry a nova instance_type_id names, and
+// false for an id no flavor of this world carries. It is what nova's own
+// flavor table stands for: a notification that reports the type id without the
+// flavor's uuid leaves the uuid to be looked up.
+func flavorByTypeID(typeID int) (flavor, bool) {
+	for _, f := range flavors {
+		if f.typeID == typeID {
+			return f, true
+		}
+	}
+	if bootVolumeFlavor.typeID == typeID {
+		return bootVolumeFlavor, true
+	}
+	return flavor{}, false
+}
+
 // runnerFlavors are the flavors a CI runner is drawn from. A runner holds one
 // job and is gone again, so it runs on the two small flavors of the catalog.
 var runnerFlavors = []flavor{flavors[0], flavors[1]}
