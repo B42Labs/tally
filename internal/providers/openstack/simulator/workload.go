@@ -249,7 +249,7 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string, faults Faults)
 		g.schedule[i].MessageID = identifiers.nextUUID()
 	}
 
-	oracle, err := buildOracle(g.facts, seed, cloud, start, start.AddDate(0, 1, 0))
+	oracle, err := buildOracle(g.facts, seed, cloud, start, start.AddDate(0, 1, 0), faults, g.touched)
 	if err != nil {
 		return Month{}, err
 	}
