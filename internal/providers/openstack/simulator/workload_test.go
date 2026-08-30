@@ -44,6 +44,33 @@ func generateMonth(t *testing.T, seed uint64, from time.Time, cloud string) Sche
 	return month.Schedule
 }
 
+// faultyMonth generates July 2026 over testCloud with the switches on, or fails
+// the test. It hands back the whole month, because a switch is read off the
+// oracle as much as off the schedule.
+func faultyMonth(t *testing.T, seed uint64, faults Faults) Month {
+	t.Helper()
+
+	month, err := GenerateMonth(seed, july2026, july2026.AddDate(0, 1, 0), testCloud, faults)
+	if err != nil {
+		t.Fatalf("GenerateMonth(%d, %s, %q, %v) error = %v, want nil", seed,
+			july2026.Format(time.RFC3339), testCloud, faults.Names(), err)
+	}
+	return month
+}
+
+// touchedResourcesOf returns the resources the oracle names a switch on, keyed
+// the way the oracle keys one.
+func touchedResourcesOf(oracle Oracle) map[resourceKey]OracleResource {
+	touched := make(map[resourceKey]OracleResource)
+	for _, resource := range oracle.Resources {
+		if len(resource.Faults) == 0 {
+			continue
+		}
+		touched[resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}] = resource
+	}
+	return touched
+}
+
 // requireDisjoint fails the test when the two schedules share a value of the
 // field, which is what salting the identifiers is supposed to rule out.
 func requireDisjoint(t *testing.T, field string, first, second Schedule, of func(Transition) string) {
@@ -336,6 +363,250 @@ func TestGenerateStaysInsideThePeriod(t *testing.T) {
 			t.Errorf("Billable()[%d] is %s, want %s", i, got[i].MessageID, want[i].MessageID)
 		}
 	}
+}
+
+// TestPreExistingInstancesStartBeforeTheMonth holds what the pre-existing
+// switch does to a month: a share of the classic tenants' servers, with the
+// volumes and the address that belong to them, is created before the month
+// begins and reports every transition of that history. The month still bills
+// them from its first instant, because the oracle clips an interval that starts
+// before the month to the month.
+func TestPreExistingInstancesStartBeforeTheMonth(t *testing.T) {
+	month := faultyMonth(t, 1, Faults{PreExisting: true})
+	touched := touchedResourcesOf(month.Oracle)
+
+	before := 0
+	for _, transition := range month.Schedule {
+		if !transition.At.Before(july2026) {
+			continue
+		}
+		before++
+		if transition.Workload != workloadClassic {
+			t.Errorf("%s of a %s resource is at %s, want the switch to work on the classic tenants alone",
+				transition.EventType, transition.Workload, transition.At.Format(time.RFC3339))
+		}
+		if !transition.Billable {
+			continue
+		}
+		billable, ok := billableTypes[transition.EventType]
+		if !ok {
+			t.Fatalf("the oracle knows no resource type for the billable %s", transition.EventType)
+		}
+		key := resourceKey{resourceType: billable.resourceType, resourceID: transition.ResourceID}
+		if resource, ok := touched[key]; !ok || !slices.Contains(resource.Faults, FaultPreExisting) {
+			t.Errorf("%s %s reports %s at %s, and the oracle names no switch on it",
+				key.resourceType, key.resourceID, transition.EventType,
+				transition.At.Format(time.RFC3339))
+		}
+	}
+	if before == 0 {
+		t.Fatalf("no transition of the month lies before %s, want the switch to move a share of "+
+			"the classic servers behind it", july2026.Format(time.RFC3339))
+	}
+
+	created := make(map[string]time.Time)
+	for _, transition := range month.Schedule {
+		if transition.EventType == "compute.instance.create.end" {
+			created[transition.ResourceID] = transition.At
+		}
+	}
+
+	for key, resource := range touched {
+		switch key.resourceType {
+		case "instance", "volume", "floating_ip":
+		default:
+			t.Errorf("the switch touched the %s %s, want the servers of the classic tenants with "+
+				"their volumes and their addresses", key.resourceType, key.resourceID)
+		}
+		if resource.Workload != workloadClassic {
+			t.Errorf("the switch touched %s %s of the %s workload, want the classic one",
+				key.resourceType, key.resourceID, resource.Workload)
+		}
+		for i, interval := range resource.Intervals {
+			if interval.From.Before(july2026) {
+				t.Errorf("%s %s interval %d starts at %s, want the clip to hold it at %s",
+					key.resourceType, key.resourceID, i, interval.From.Format(time.RFC3339),
+					july2026.Format(time.RFC3339))
+			}
+		}
+		if from := resource.Intervals[0].From; !from.Equal(july2026) {
+			t.Errorf("%s %s is billed from %s, want it billed from the month's first instant %s",
+				key.resourceType, key.resourceID, from.Format(time.RFC3339),
+				july2026.Format(time.RFC3339))
+		}
+		if key.resourceType != "instance" {
+			continue
+		}
+		at, ok := created[key.resourceID]
+		if !ok {
+			t.Errorf("instance %s reports no create, want the whole history of a server the month "+
+				"inherited", key.resourceID)
+			continue
+		}
+		if at.Before(july2026.Add(-preExistingLeadMax)) || at.After(july2026.Add(-preExistingLeadMin)) {
+			t.Errorf("instance %s was created at %s, want it inside [%s, %s]", key.resourceID,
+				at.Format(time.RFC3339), july2026.Add(-preExistingLeadMax).Format(time.RFC3339),
+				july2026.Add(-preExistingLeadMin).Format(time.RFC3339))
+		}
+	}
+}
+
+// TestMissingCreateDropsWhatLiesBeforeTheMonth holds the other half of the
+// pair: missing-create picks the very same servers and then keeps every
+// transition of theirs that happened before the month off the bus. The oracle
+// still states them, because what the bus carried is not what the cloud did,
+// and the daily audits still report them, because the audits are a pass over
+// the schedule that ran before the drop.
+func TestMissingCreateDropsWhatLiesBeforeTheMonth(t *testing.T) {
+	to := july2026.AddDate(0, 1, 0)
+	month := faultyMonth(t, 1, Faults{MissingCreate: true})
+	touched := touchedResourcesOf(month.Oracle)
+
+	for _, transition := range month.Schedule {
+		if transition.At.Before(july2026) {
+			t.Errorf("%s of %s is at %s, want every transition the bus carries inside the month",
+				transition.EventType, transition.ResourceID, transition.At.Format(time.RFC3339))
+		}
+	}
+
+	t.Run("the two switches pick the same resources", func(t *testing.T) {
+		want := touchedResourcesOf(faultyMonth(t, 1, Faults{PreExisting: true}).Oracle)
+
+		if len(touched) != len(want) {
+			t.Fatalf("missing-create touched %d resources and pre-existing %d, want the same ones "+
+				"for one seed", len(touched), len(want))
+		}
+		for key, resource := range want {
+			if !slices.Equal(resource.Faults, []string{FaultPreExisting}) {
+				t.Errorf("pre-existing names %v on %s %s, want %v alone", resource.Faults,
+					key.resourceType, key.resourceID, []string{FaultPreExisting})
+			}
+			got, ok := touched[key]
+			if !ok {
+				t.Errorf("pre-existing touched %s %s and missing-create touched it not",
+					key.resourceType, key.resourceID)
+				continue
+			}
+			if !slices.Equal(got.Faults, []string{FaultMissingCreate}) {
+				t.Errorf("missing-create names %v on %s %s, want %v alone", got.Faults,
+					key.resourceType, key.resourceID, []string{FaultMissingCreate})
+			}
+		}
+	})
+
+	t.Run("no touched resource reports its create", func(t *testing.T) {
+		for _, transition := range month.Schedule {
+			if !strings.HasSuffix(transition.EventType, ".create.end") {
+				continue
+			}
+			for key := range touched {
+				if key.resourceID == transition.ResourceID {
+					t.Errorf("%s %s reports %s at %s, want its create off the bus", key.resourceType,
+						key.resourceID, transition.EventType, transition.At.Format(time.RFC3339))
+				}
+			}
+		}
+	})
+
+	t.Run("the oracle states every touched resource from the month's first instant", func(t *testing.T) {
+		for key, resource := range touched {
+			if from := resource.Intervals[0].From; !from.Equal(july2026) {
+				t.Errorf("%s %s is billed from %s, want it billed from %s", key.resourceType,
+					key.resourceID, from.Format(time.RFC3339), july2026.Format(time.RFC3339))
+			}
+		}
+	})
+
+	t.Run("the counts state the creates the collector receives", func(t *testing.T) {
+		// A create that never reached the bus is a create the collector records
+		// no event for, so it counts under nothing. The project of a touched
+		// server is read off the oracle, since its create is gone.
+		missing := make(map[string]int)
+		classic := make(map[string]bool)
+		for _, resource := range month.Oracle.Resources {
+			if resource.ResourceType != "instance" || resource.Workload != workloadClassic {
+				continue
+			}
+			project := resource.Intervals[0].ProjectID
+			classic[project] = true
+			if _, ok := touched[resourceKey{resourceType: "instance", resourceID: resource.ResourceID}]; ok {
+				missing[project]++
+			}
+		}
+		if len(classic) != projectCount {
+			t.Fatalf("the oracle states classic servers in %d projects, want %d", len(classic), projectCount)
+		}
+
+		counts := make(map[countKey]int, len(month.Oracle.Counts))
+		for _, count := range month.Oracle.Counts {
+			counts[countKey{projectID: count.ProjectID, eventType: count.EventType}] = count.Count
+		}
+		for project := range classic {
+			key := countKey{projectID: project, eventType: "compute.instance.create.end"}
+			want := instancesPerProject - missing[project]
+			if got := counts[key]; got != want {
+				t.Errorf("project %s is expected to record %d server creates, want the %d of its %d "+
+					"servers whose create the bus carried", project, got, want, instancesPerProject)
+			}
+		}
+	})
+
+	t.Run("the audits report a touched server on every day of the month", func(t *testing.T) {
+		deleted := make(map[string]time.Time)
+		for _, transition := range month.Schedule {
+			if transition.EventType == "compute.instance.delete.end" {
+				deleted[transition.ResourceID] = transition.At
+			}
+		}
+
+		// An audit sits at a midnight or, when the server already reports a
+		// transition in that second, whole seconds after it, so the audits are
+		// counted per day and not per instant. The existence notification a
+		// delete sequence carries (noise.go) is none of the daily audits and is
+		// left out of the count.
+		audited := make(map[string]map[time.Time]int)
+		for _, transition := range month.Schedule {
+			if transition.EventType != "compute.instance.exists" {
+				continue
+			}
+			if at, ok := deleted[transition.ResourceID]; ok &&
+				transition.At.Equal(at.Add(-instanceDeleteLead+time.Second)) {
+				continue
+			}
+			if audited[transition.ResourceID] == nil {
+				audited[transition.ResourceID] = make(map[time.Time]int)
+			}
+			audited[transition.ResourceID][transition.At.UTC().Truncate(day)]++
+		}
+		// The audit pass reports at every midnight of the month a transition
+		// stands at or after, and a deleted server is reported one last time at
+		// the midnight that follows its delete.
+		last := month.Schedule[len(month.Schedule)-1].At
+
+		for key := range touched {
+			if key.resourceType != "instance" {
+				continue
+			}
+			var want []time.Time
+			for midnight := july2026.Add(day); midnight.Before(to) && !midnight.After(last); midnight = midnight.Add(day) {
+				if at, ok := deleted[key.resourceID]; ok && !midnight.Before(at.Add(day)) {
+					break
+				}
+				want = append(want, midnight)
+			}
+
+			if len(audited[key.resourceID]) != len(want) {
+				t.Errorf("instance %s is audited on %d days, want %d", key.resourceID,
+					len(audited[key.resourceID]), len(want))
+			}
+			for _, midnight := range want {
+				if got := audited[key.resourceID][midnight]; got != 1 {
+					t.Errorf("instance %s reports %d audits on %s, want one", key.resourceID, got,
+						midnight.Format(time.RFC3339))
+				}
+			}
+		}
+	})
 }
 
 func TestGenerateRefusesANonMonth(t *testing.T) {

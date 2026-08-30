@@ -20,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/core/timeline"
 	"github.com/b42labs/tally/internal/engine/metering"
 	"github.com/b42labs/tally/internal/engine/rating"
 	"github.com/b42labs/tally/internal/providers/openstack"
@@ -245,64 +246,79 @@ func holdMemberAgainst(t *testing.T, eventType, member string, booked, want any,
 // two folds are written from the same rules and share no code, so a month they
 // disagree on is a bug in one of them rather than a comparison that agrees with
 // itself.
+//
+// The pre-existing switch is folded as well, because it is the one thing that
+// puts an event before the month on the bus. The engine receives that history
+// whole and cuts it at the month's first instant, which is where the oracle's
+// clip puts a resource the month inherited too.
 func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 	to := july2026.AddDate(0, 1, 0)
 
-	for seed := uint64(1); seed <= 5; seed++ {
-		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
-			month, err := GenerateMonth(seed, july2026, to, testCloud, Faults{})
-			if err != nil {
-				t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed,
-					july2026.Format(time.RFC3339), testCloud, err)
-			}
+	cases := []struct {
+		name   string
+		faults Faults
+	}{
+		{name: "no switch at all", faults: Faults{}},
+		{name: "servers the month inherited", faults: Faults{PreExisting: true}},
+	}
 
-			history := make(map[resourceKey][]event.Stored)
-			for _, transition := range month.Schedule.Billable() {
-				mapped, ok := openstack.MapNotification(parse(t, render(t, transition)), testCloud)
-				if !ok {
-					t.Fatalf("the mapping records nothing for %s at %s, want an event per billable transition",
-						transition.EventType, transition.At.Format(time.RFC3339))
-				}
-				key := resourceKey{resourceType: mapped.ResourceType, resourceID: mapped.ResourceID}
-				history[key] = append(history[key], event.Stored{Event: mapped})
-			}
-
-			metered := make(map[resourceKey][]metering.UsageDraft, len(history))
-			for key, events := range history {
-				drafts, err := metering.MeterResource(events, july2026, to)
+	for _, c := range cases {
+		for seed := uint64(1); seed <= 5; seed++ {
+			t.Run(fmt.Sprintf("%s, seed %d", c.name, seed), func(t *testing.T) {
+				month, err := GenerateMonth(seed, july2026, to, testCloud, c.faults)
 				if err != nil {
-					t.Fatalf("MeterResource(%s %s) error = %v, want nil", key.resourceType,
-						key.resourceID, err)
+					t.Fatalf("GenerateMonth(%d, %s, %q, %v) error = %v, want nil", seed,
+						july2026.Format(time.RFC3339), testCloud, c.faults.Names(), err)
 				}
-				// A resource the period bills nothing for is one the oracle leaves
-				// out as well, so it is not held against an interval it has none of.
-				if len(drafts) == 0 {
-					continue
-				}
-				metered[key] = drafts
-			}
 
-			stated := make(map[resourceKey]OracleResource, len(month.Oracle.Resources))
-			for _, resource := range month.Oracle.Resources {
-				stated[resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}] = resource
-			}
+				history := make(map[resourceKey][]event.Stored)
+				for _, transition := range month.Schedule.Billable() {
+					mapped, ok := openstack.MapNotification(parse(t, render(t, transition)), testCloud)
+					if !ok {
+						t.Fatalf("the mapping records nothing for %s at %s, want an event per billable transition",
+							transition.EventType, transition.At.Format(time.RFC3339))
+					}
+					key := resourceKey{resourceType: mapped.ResourceType, resourceID: mapped.ResourceID}
+					history[key] = append(history[key], event.Stored{Event: mapped})
+				}
 
-			for key, drafts := range metered {
-				resource, ok := stated[key]
-				if !ok {
-					t.Errorf("the engine bills %s %s over %d intervals, and the oracle states none",
-						key.resourceType, key.resourceID, len(drafts))
-					continue
+				metered := make(map[resourceKey][]metering.UsageDraft, len(history))
+				for key, events := range history {
+					drafts, err := metering.MeterResource(events, july2026, to)
+					if err != nil {
+						t.Fatalf("MeterResource(%s %s) error = %v, want nil", key.resourceType,
+							key.resourceID, err)
+					}
+					// A resource the period bills nothing for is one the oracle leaves
+					// out as well, so it is not held against an interval it has none of.
+					if len(drafts) == 0 {
+						continue
+					}
+					metered[key] = drafts
 				}
-				holdIntervalsAgainstDrafts(t, resource, drafts)
-			}
-			for key := range stated {
-				if _, ok := metered[key]; !ok {
-					t.Errorf("the oracle states %s %s, and the engine bills nothing for it",
-						key.resourceType, key.resourceID)
+
+				stated := make(map[resourceKey]OracleResource, len(month.Oracle.Resources))
+				for _, resource := range month.Oracle.Resources {
+					stated[resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}] = resource
 				}
-			}
-		})
+
+				for key, drafts := range metered {
+					resource, ok := stated[key]
+					if !ok {
+						t.Errorf("the engine bills %s %s over %d intervals, and the oracle states none",
+							key.resourceType, key.resourceID, len(drafts))
+						continue
+					}
+					holdIntervalsAgainstDrafts(t, resource, drafts)
+				}
+				for key := range stated {
+					if _, ok := metered[key]; !ok {
+						t.Errorf("the oracle states %s %s, and the engine bills nothing for it",
+							key.resourceType, key.resourceID)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -334,6 +350,53 @@ func holdIntervalsAgainstDrafts(t *testing.T, resource OracleResource, drafts []
 		for member, value := range interval.Size {
 			holdMemberAgainst(t, resource.ResourceType, member, value, draft.Usage[member], draft.Usage)
 		}
+	}
+}
+
+// TestMissingCreateStartsTheHistoryWithoutACreate holds the switch against the
+// projection it is written for: a server whose create the bus never carried
+// reaches the collector as a history that begins with something else, and the
+// timeline says so. Nothing else of the month does, so the warning names the
+// touched resources and none besides them.
+func TestMissingCreateStartsTheHistoryWithoutACreate(t *testing.T) {
+	month := faultyMonth(t, 1, Faults{MissingCreate: true})
+	touched := touchedResourcesOf(month.Oracle)
+
+	history := make(map[resourceKey][]event.Stored)
+	for _, transition := range month.Schedule.Billable() {
+		mapped, ok := openstack.MapNotification(parse(t, render(t, transition)), testCloud)
+		if !ok {
+			t.Fatalf("the mapping records nothing for %s at %s, want an event per billable transition",
+				transition.EventType, transition.At.Format(time.RFC3339))
+		}
+		key := resourceKey{resourceType: mapped.ResourceType, resourceID: mapped.ResourceID}
+		history[key] = append(history[key], event.Stored{Event: mapped})
+	}
+
+	// A resource whose every billable transition was dropped reaches the
+	// collector with no event at all, so there is no history of it to fold and
+	// no warning to hold against one.
+	warned := 0
+	for key, events := range history {
+		_, isTouched := touched[key]
+		startsWithoutCreate := slices.Contains(timeline.Build(events).Warnings,
+			timeline.WarningHistoryStartsWithoutCreate)
+
+		switch {
+		case isTouched && !startsWithoutCreate:
+			t.Errorf("the timeline of %s %s carries no %s, want the switch to have taken its create "+
+				"off the bus", key.resourceType, key.resourceID,
+				timeline.WarningHistoryStartsWithoutCreate)
+		case !isTouched && startsWithoutCreate:
+			t.Errorf("the timeline of %s %s carries %s, and no switch touched it", key.resourceType,
+				key.resourceID, timeline.WarningHistoryStartsWithoutCreate)
+		case isTouched:
+			warned++
+		}
+	}
+	if warned == 0 {
+		t.Errorf("no touched resource reports inside the month, want the switch to leave a history " +
+			"the collector receives without its create")
 	}
 }
 

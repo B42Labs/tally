@@ -229,7 +229,16 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string, faults Faults)
 	g := newGenerator(shape, identifiers, noiseIdentifiers(seed, cloud, start),
 		start, start.AddDate(0, 1, 0), cloud)
 	g.faults = faults
+	// missing-create draws from the pre-existing stream on purpose: the two
+	// exclude each other, and one stream between them means both pick the same
+	// instances with the same leads for one seed.
+	if faults.PreExisting || faults.MissingCreate {
+		g.preExisting = faultStream(seed, FaultPreExisting)
+	}
 	g.run()
+	if faults.MissingCreate {
+		g.dropBeforeMonth()
+	}
 	if len(g.schedule) == 0 {
 		return Month{}, errors.New("the generated month holds no transitions")
 	}
@@ -318,6 +327,10 @@ type generator struct {
 	// faults are the switches this month runs with (faults.go). The zero value
 	// is every switch off.
 	faults Faults
+	// preExisting is the stream the two pre-existing switches pick their
+	// instances and their leads from. It is nil unless pre-existing or
+	// missing-create is on.
+	preExisting *rand.Rand
 
 	// networkID is the external network the month's addresses come from. There
 	// is one per month, the way a deployment has one.
@@ -498,6 +511,24 @@ func (g *generator) run() {
 	g.audits()
 }
 
+// dropBeforeMonth takes every transition that lies before the month out of the
+// schedule and marks the fact behind it as dropped. It is the missing-create
+// switch: the simulated cloud did emit these transitions, and the bus never
+// carried them, so the collector first hears of such a resource through a
+// notification from inside the month.
+//
+// The audits stay. They are a pass over the finished schedule (noise.go) and
+// they ran before this one, so an instance whose create was dropped is still
+// reported by the daily compute.instance.exists of the month.
+func (g *generator) dropBeforeMonth() {
+	g.schedule = slices.DeleteFunc(g.schedule, func(t Transition) bool { return t.At.Before(g.from) })
+	for i := range g.facts {
+		if g.facts[i].at.Before(g.from) {
+			g.facts[i].dropped = true
+		}
+	}
+}
+
 // emit records one transition. The project is the one the request ran in, which
 // is the owner everywhere except on a transfer, where the accepting project
 // makes the request that moves the volume to itself. The effect is what the
@@ -564,6 +595,24 @@ func (g *generator) instances(p *project) {
 		}
 		inst.host = computeHosts[g.shape.IntN(len(computeHosts))]
 		inst.createdAt = g.from.Add(span(g.shape, 2*time.Hour, 6*time.Hour))
+		// The two pre-existing switches start a share of the classic tenants'
+		// servers before the month, and the volumes and the address of such a
+		// server follow it there. Both the pick and the lead are drawn from
+		// the fault stream and never from the shape stream, so a month with a
+		// switch on keeps the shape of the month with it off, and a seed whose
+		// stream picks nothing yields the month the switches-off run yields.
+		if g.preExisting != nil && g.preExisting.IntN(preExistingShare) == 0 {
+			inst.createdAt = g.from.Add(-span(g.preExisting, preExistingLeadMin, preExistingLeadMax))
+			name := FaultPreExisting
+			if g.faults.MissingCreate {
+				name = FaultMissingCreate
+			}
+			g.touch("instance", inst.id, name)
+			for _, vol := range inst.volumes {
+				g.touch("volume", vol.id, name)
+			}
+			g.touch("floating_ip", inst.fip.id, name)
+		}
 		inst.imageID = p.images[g.shape.IntN(len(p.images))].id
 
 		g.createInstance(p, inst, p.network, inst.createdAt)
