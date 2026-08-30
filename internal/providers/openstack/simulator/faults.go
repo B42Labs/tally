@@ -172,3 +172,15 @@ func (t touchedResources) names(key resourceKey) []string {
 func (g *generator) touch(resourceType, resourceID, fault string) {
 	g.touched.add(resourceKey{resourceType: resourceType, resourceID: resourceID}, fault)
 }
+
+// What the two pre-existing switches draw: one in preExistingShare of the
+// classic tenants' instances starts before the month, between
+// preExistingLeadMin and preExistingLeadMax before it begins.
+//
+// The share is a package constant rather than a flag, because a drill wants a
+// known effect it can reproduce and not one it dials in.
+const (
+	preExistingShare   = 3
+	preExistingLeadMin = day
+	preExistingLeadMax = 30 * day
+)

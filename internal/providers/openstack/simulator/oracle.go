@@ -149,6 +149,11 @@ type fact struct {
 	projectID  string
 	workload   string
 	effect     effect
+	// dropped marks a transition the bus never carried, which is what the
+	// missing-create switch does to the ones before the month. The collector
+	// records no event for it, so no count states it. The fold still reads it: a
+	// dropped create is still what the cloud did.
+	dropped bool
 }
 
 // billableType is what the collector's mapping makes of one oslo type: the
@@ -303,6 +308,11 @@ type countKey struct {
 // mapping gives its oslo type. The transfer of the spare volume therefore
 // counts under the accepting project.
 //
+// A dropped fact is folded with every other one and counted with none of them.
+// The intervals state what the cloud did, and a create the bus never carried is
+// part of that; the counts state what the collector records, and it records
+// nothing for a notification it never received.
+//
 // The switches the month ran with are stated on the document, and the ones that
 // touched a resource on that resource. A ledger no switch was recorded for
 // takes a nil touched, which names no switch for any resource.
@@ -319,6 +329,9 @@ func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time,
 		}
 		key := resourceKey{resourceType: billable.resourceType, resourceID: f.resourceID}
 		grouped[key] = append(grouped[key], f)
+		if f.dropped {
+			continue
+		}
 		counts[countKey{projectID: f.projectID, eventType: billable.eventType}]++
 	}
 
