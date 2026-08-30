@@ -439,7 +439,8 @@ func newGenerator(shape *rand.Rand, identifiers, noiseIDs idReader,
 // and addresses follow the instances they belong to, and the tear-down comes
 // last. The Gardener projects follow, each shoot walking its own days, and the
 // CI tenant comes last, bursting its runners through the working days of the
-// month.
+// month. The daily existence audits close the month, once every workload has
+// put its instances into the schedule.
 func (g *generator) run() {
 	g.workload = workloadClassic
 	for index, p := range g.projects {
@@ -458,6 +459,12 @@ func (g *generator) run() {
 
 	g.workload = workloadCI
 	g.ci()
+
+	// The audits are a pass over the finished schedule, because which instances
+	// existed on a day is known only once every workload has run. They are the
+	// one block that is not tagged here: every audit carries the workload of the
+	// instance's create.
+	g.audits()
 }
 
 // emit records one transition. The project is the one the request ran in, which
