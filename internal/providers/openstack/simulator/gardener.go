@@ -107,6 +107,19 @@ func (g *generator) shoot(gp *gardenerProject, s *shoot) {
 		s.secondBalancerDay = at(drawWorkingInstant(g.shape, g.from.Add(3*day), g.from.Add(20*day)), 0, 0)
 	}
 
+	// The network the shoot's servers hold their addresses on, built from the
+	// ids the shoot was named with. Its range is the one the shoot's VIP
+	// addresses already lie in, and the notifications about the network itself
+	// are a later package's. Building it draws nothing.
+	s.network = &network{
+		id:              s.networkID,
+		subnetID:        s.subnetID,
+		routerID:        s.routerID,
+		securityGroupID: s.securityGroupID,
+		name:            s.technicalID,
+		cidr:            fmt.Sprintf("10.250.%d.0/24", s.index),
+	}
+
 	// The creation sequence: the workers come up seconds apart, the workloads
 	// that claim storage are scheduled once the nodes are ready, and the ingress
 	// controller's load balancer follows within the hour.
@@ -274,8 +287,7 @@ func (g *generator) bootWorker(s *shoot, t time.Time) *instance {
 		w.imageID = tenant.images[0].id
 	}
 
-	g.emit(t, "compute.instance.create.end", computePublisher(w), w.id, tenant,
-		instanceCreatePayload(tenant, w, g.cloud))
+	g.createInstance(tenant, w, s.network, t)
 	s.workers = append(s.workers, w)
 	return w
 }
@@ -286,8 +298,7 @@ func (g *generator) bootWorker(s *shoot, t time.Time) *instance {
 // here, whether it is scaled down, rolled, hibernated, or torn down.
 func (g *generator) deleteWorker(s *shoot, w *instance, t time.Time) {
 	tenant := s.owner.tenant
-	g.emit(t, "compute.instance.delete.end", computePublisher(w), w.id, tenant,
-		instanceDeletePayload(tenant, w, t))
+	g.destroyInstance(tenant, w, t)
 
 	if w.bootVolume != nil {
 		deletedAt := t.Add(span(g.shape, 20*time.Second, 40*time.Second))
@@ -394,9 +405,12 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 	for range pools {
 		lb.poolIDs = append(lb.poolIDs, g.identifiers.nextUUID())
 	}
-	// The VIP addresses of a shoot come from its own third octet, so two shoots
-	// on one tenant never report the same address.
-	lb.vipAddress = fmt.Sprintf("10.250.%d.%d", s.index, 10+len(s.loadBalancers))
+	// The VIP comes from the counter the shoot's ports already draw from. A
+	// balancer sits on the shoot's own subnet, which is the range of its third
+	// octet, and neutron allocates every address of a subnet once: a second
+	// allocator over the same range would hand a worker's port and a VIP the
+	// same fixed address while both are up.
+	lb.vipAddress = s.network.nextAddress()
 	lb.fip = &floatingIP{
 		id:      g.identifiers.nextUUID(),
 		address: floatingPrefix + strconv.Itoa(1+g.addresses[g.assigned]),

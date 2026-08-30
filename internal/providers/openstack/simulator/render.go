@@ -3,6 +3,7 @@ package simulator
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 )
@@ -82,6 +83,46 @@ func Render(t Transition) ([]byte, error) {
 	return body, nil
 }
 
+// schedulerPayload describes the placement decision a boot begins with. The
+// scheduler reports the request it answered rather than a server, so the
+// flavor arrives as the type that was asked for and the server-to-be as the
+// properties it is going to have.
+func schedulerPayload(p *project, inst *instance) map[string]any {
+	// A server booted from a volume is scheduled without an image, because the
+	// image was written to the volume before the request was made.
+	imageID := inst.imageID
+	if inst.bootVolume != nil {
+		imageID = ""
+	}
+
+	return map[string]any{
+		"request_spec": map[string]any{
+			"image": map[string]any{"id": imageID},
+			"instance_properties": map[string]any{
+				"availability_zone": availabilityZone,
+				"display_name":      inst.name,
+				"ephemeral_gb":      inst.flavor.ephemeralGB,
+				"memory_mb":         inst.flavor.memoryMB,
+				"project_id":        p.id,
+				"root_gb":           inst.flavor.rootGB,
+				"user_id":           p.userID,
+				"uuid":              inst.id,
+				"vcpus":             inst.flavor.vcpus,
+			},
+			"instance_type": map[string]any{
+				"ephemeral_gb": inst.flavor.ephemeralGB,
+				"flavorid":     inst.flavor.flavorID,
+				"id":           inst.flavor.typeID,
+				"memory_mb":    inst.flavor.memoryMB,
+				"name":         inst.flavor.name,
+				"root_gb":      inst.flavor.rootGB,
+				"vcpus":        inst.flavor.vcpus,
+			},
+			"num_instances": 1,
+		},
+	}
+}
+
 // instanceCreatePayload describes a server nova has just booted. It is the
 // widest of the compute payloads: it names the flavor three times over and the
 // image the server was booted from, none of which the later notifications
@@ -115,6 +156,16 @@ func instanceCreatePayload(p *project, inst *instance, cloud string) map[string]
 		"created_at":         stamp(inst.createdAt.Add(-instanceBoot)),
 		"launched_at":        stamp(inst.createdAt),
 	}
+}
+
+// instanceCreateStartPayload describes the server nova is about to boot. It
+// carries the members of the create it precedes: the server is still building
+// and has not been launched, and everything else about it is already decided.
+func instanceCreateStartPayload(p *project, inst *instance, cloud string) map[string]any {
+	payload := instanceCreatePayload(p, inst, cloud)
+	payload["state"] = "building"
+	payload["launched_at"] = nil
+	return payload
 }
 
 // instanceDeletePayload describes a destroyed server. It reports no
@@ -182,6 +233,27 @@ func instancePowerPayload(p *project, inst *instance, state string) map[string]a
 	}
 }
 
+// instanceUpdatePayload describes a server whose state or task changed. Nova
+// sends one on every step of a boot and once more when a delete begins, and it
+// is the payload that carries the audit window: what the server did between
+// from and to, which for an update is the day so far.
+//
+// The task states are typed as any because nova reports a null for a server
+// that is not working on anything, and the old state is the state itself,
+// because an update reports the task a server took up and not a state it left.
+func instanceUpdatePayload(p *project, inst *instance, state string, oldTask, newTask any,
+	from, to time.Time,
+) map[string]any {
+	payload := instancePowerPayload(p, inst, state)
+	payload["audit_period_beginning"] = stamp(from)
+	payload["audit_period_ending"] = stamp(to)
+	payload["bandwidth"] = map[string]any{}
+	payload["new_task_state"] = newTask
+	payload["old_state"] = state
+	payload["old_task_state"] = oldTask
+	return payload
+}
+
 // instanceShelvePayload describes a server that was shelved or brought back. It
 // reports the disk a power change leaves out, since a shelved server keeps its
 // image on disk while it holds no memory.
@@ -200,6 +272,20 @@ func instanceShelvePayload(p *project, inst *instance, state string) map[string]
 		"instance_type":     inst.flavor.name,
 		"host":              inst.host,
 	}
+}
+
+// instanceExistsPayload describes a server nova audits. base is the members of
+// the create, which is what nova repeats in an existence audit, and it is
+// cloned so that the caller's map stays what it was. The audit reports the
+// window it covers, the traffic over it, and the image the server runs, and
+// the simulated cloud meters none of the three.
+func instanceExistsPayload(base map[string]any, from, to time.Time) map[string]any {
+	payload := maps.Clone(base)
+	payload["audit_period_beginning"] = stamp(from)
+	payload["audit_period_ending"] = stamp(to)
+	payload["bandwidth"] = map[string]any{}
+	payload["image_meta"] = map[string]any{}
+	return payload
 }
 
 // floatingIPCreatePayload describes an allocated address. Neutron nests the
@@ -238,6 +324,82 @@ func floatingIPCreatePayload(p *project, fip *floatingIP, networkID string) map[
 // request context.
 func floatingIPDeletePayload(fip *floatingIP) map[string]any {
 	return map[string]any{"floatingip_id": fip.id}
+}
+
+// portRequestPayload describes the port neutron was asked for. The request
+// names the network and the device the port is for and nothing neutron decides
+// itself, so it carries neither an id nor an address yet.
+func portRequestPayload(p *project, port *port) map[string]any {
+	return map[string]any{
+		"port": map[string]any{
+			"admin_state_up": true,
+			"device_id":      port.deviceID,
+			"device_owner":   port.deviceOwner,
+			"name":           "",
+			"network_id":     port.networkID,
+			"project_id":     p.id,
+			"tenant_id":      p.id,
+		},
+	}
+}
+
+// portPayload describes a port neutron has created. A port is unbound while it
+// belongs to no host: it names no host, its interface type is unknown, and it
+// is down until the compute the server runs on binds it, which is what bound
+// tells the two halves of a port's life apart.
+func portPayload(p *project, port *port, bound bool) map[string]any {
+	host, vifType, status := "", "unbound", "DOWN"
+	if bound {
+		host, vifType, status = port.host, "ovs", "ACTIVE"
+	}
+	// The group is a slice even when the network has none, because a null is
+	// not a list of groups.
+	securityGroups := []any{}
+	if port.securityGroupID != "" {
+		securityGroups = append(securityGroups, port.securityGroupID)
+	}
+
+	return map[string]any{
+		"port": map[string]any{
+			"admin_state_up":   true,
+			"binding:host_id":  host,
+			"binding:vif_type": vifType,
+			"device_id":        port.deviceID,
+			"device_owner":     port.deviceOwner,
+			"fixed_ips": []any{map[string]any{
+				"ip_address": port.address,
+				"subnet_id":  port.subnetID,
+			}},
+			"id":              port.id,
+			"mac_address":     port.macAddress,
+			"name":            "",
+			"network_id":      port.networkID,
+			"project_id":      p.id,
+			"security_groups": securityGroups,
+			"status":          status,
+			"tenant_id":       p.id,
+		},
+	}
+}
+
+// portBindingPayload describes the binding a compute asks for. It names the
+// host the port is to be bound to and the device behind it, since those are
+// the members the request changes.
+func portBindingPayload(port *port) map[string]any {
+	return map[string]any{
+		"port": map[string]any{
+			"binding:host_id": port.host,
+			"device_id":       port.deviceID,
+			"device_owner":    port.deviceOwner,
+		},
+	}
+}
+
+// neutronDeletePayload describes a removed neutron resource. Neutron names the
+// kind and the id and nothing else, the way it announces a released address,
+// so the project the resource belonged to comes from the request context.
+func neutronDeletePayload(kind, id string) map[string]any {
+	return map[string]any{kind + "_id": id}
 }
 
 // imageCreatePayload describes an image glance has accepted but has no bits

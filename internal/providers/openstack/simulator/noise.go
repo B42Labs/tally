@@ -101,6 +101,11 @@ const (
 // order.
 var updateLeads = [3]time.Duration{15 * time.Second, 10 * time.Second, 5 * time.Second}
 
+// buildingTasks are the task states a server passes through while it is built.
+// The three updates of a boot each report the move from one of them to the
+// next, which is why the four names yield three notifications.
+var buildingTasks = [4]string{"scheduling", "networking", "block_device_mapping", "spawning"}
+
 // noiseIdentifiers seeds the noise identifier stream, the third generator of a
 // month. It carries the cloud and the billing month the way the identifier
 // stream does, so another cloud or another month renames the announced
@@ -151,4 +156,81 @@ func newPort(net *network, id, address, deviceID, deviceOwner, host string) *por
 		deviceOwner:     deviceOwner,
 		host:            host,
 	}
+}
+
+// createInstance renders one boot: everything nova and neutron put on the bus
+// around the create the collector bills, and the create itself.
+//
+// The order is the one a deployment sends them in. The scheduler picks the host
+// and answers, nova announces the server it is about to build and reports its
+// progress through three updates, and neutron creates the port the server holds
+// its address on and binds it to the host in between. The create the collector
+// books comes last, because it is what the server is billed from.
+//
+// The port is the server's port on the network it is created on: a classic or a
+// CI tenant's own network, and a shoot's network for a worker. It is built here
+// because a server that never existed has none, and it is kept on the instance
+// so the delete can release it.
+func (g *generator) createInstance(p *project, inst *instance, net *network, t time.Time) {
+	inst.port = newPort(net, g.noiseIDs.nextUUID(), net.nextAddress(), inst.id, "compute:nova", inst.host)
+
+	g.noise(t.Add(-schedulerLead), "scheduler.select_destinations.start", schedulerPublisher,
+		inst.id, p, schedulerPayload(p, inst))
+	g.noise(t.Add(-schedulerLead+time.Second), "scheduler.select_destinations.end", schedulerPublisher,
+		inst.id, p, schedulerPayload(p, inst))
+	g.noise(t.Add(-createStartLead), "compute.instance.create.start", computePublisher(inst),
+		inst.id, p, instanceCreateStartPayload(p, inst, g.cloud))
+	for i, lead := range updateLeads {
+		u := t.Add(-lead)
+		g.noise(u, "compute.instance.update", computePublisher(inst), inst.id, p,
+			instanceUpdatePayload(p, inst, "building", buildingTasks[i], buildingTasks[i+1], at(u, 0, 0), u))
+	}
+
+	g.noise(t.Add(-portCreateLead), "port.create.start", networkPublisher, inst.port.id, p,
+		portRequestPayload(p, inst.port))
+	g.noise(t.Add(-portCreateLead+time.Second), "port.create.end", networkPublisher, inst.port.id, p,
+		portPayload(p, inst.port, false))
+	g.noise(t.Add(-portBindLead), "port.update.start", networkPublisher, inst.port.id, p,
+		portBindingPayload(inst.port))
+	g.noise(t.Add(-portBindLead+time.Second), "port.update.end", networkPublisher, inst.port.id, p,
+		portPayload(p, inst.port, true))
+
+	g.emit(t, "compute.instance.create.end", computePublisher(inst), inst.id, p,
+		instanceCreatePayload(p, inst, g.cloud))
+}
+
+// destroyInstance renders one delete: the sequence nova sends before it, the
+// delete the collector bills, and the port neutron releases after it.
+//
+// Nova announces the delete as an update to the deleting task, audits what the
+// server did on the day up to here, and then tears it down, which is a delete
+// start and the shutdown around it. The audit is the pre-delete existence
+// notification of a real deployment: a server that goes reports what it used
+// before it is gone.
+func (g *generator) destroyInstance(p *project, inst *instance, t time.Time) {
+	begin := t.Add(-instanceDeleteLead)
+	g.noise(begin, "compute.instance.update", computePublisher(inst), inst.id, p,
+		instanceUpdatePayload(p, inst, "active", nil, "deleting", at(t, 0, 0), t))
+	g.noise(begin.Add(time.Second), "compute.instance.exists", computePublisher(inst), inst.id, p,
+		instanceExistsPayload(instanceCreatePayload(p, inst, g.cloud), at(t, 0, 0), t))
+	g.noise(begin.Add(2*time.Second), "compute.instance.delete.start", computePublisher(inst),
+		inst.id, p, instanceShelvePayload(p, inst, "active"))
+	g.noise(begin.Add(3*time.Second), "compute.instance.shutdown.start", computePublisher(inst),
+		inst.id, p, instanceShelvePayload(p, inst, "active"))
+	g.noise(begin.Add(4*time.Second), "compute.instance.shutdown.end", computePublisher(inst),
+		inst.id, p, instanceShelvePayload(p, inst, "active"))
+
+	g.emit(t, "compute.instance.delete.end", computePublisher(inst), inst.id, p,
+		instanceDeletePayload(p, inst, t))
+
+	// Nothing in the month creates a server without a port, so the branch is
+	// what keeps the helper from dereferencing a nil rather than a shape a
+	// workload produces.
+	if inst.port != nil {
+		g.noise(t.Add(portDeleteLag), "port.delete.start", networkPublisher, inst.port.id, p,
+			neutronDeletePayload("port", inst.port.id))
+		g.noise(t.Add(portDeleteLag+time.Second), "port.delete.end", networkPublisher, inst.port.id, p,
+			neutronDeletePayload("port", inst.port.id))
+	}
+	inst.deletedAt = t
 }
