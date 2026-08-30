@@ -60,7 +60,7 @@ type Metrics struct {
 func NewMetrics(reg *prometheus.Registry, depth, oldestSeconds func() float64) *Metrics {
 	m := &Metrics{
 		reg:     reg,
-		limiter: cardinality.New(labelValueLimit),
+		limiter: cardinality.New(LabelValueLimit),
 		consumed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tally_collector_consumed_total",
 			Help: "Notifications mapped to an event and buffered.",
@@ -181,11 +181,15 @@ func (m *Metrics) DeliveryError() {
 // of known values.
 const labelEventType = "event_type"
 
-// labelValueLimit is how many distinct event types the series may carry, on the
+// LabelValueLimit is how many distinct event types the series may carry, on the
 // terms internal/core/cardinality bounds them with.
 //
 // It is 100 here and 128 in internal/reporting/metrics on purpose. Each service
 // bounds what its own traffic can mint, and 100 is several times the mapping
 // table, which is the vocabulary a healthy deployment stays inside. The two
 // numbers are not meant to track each other.
-const labelValueLimit = 100
+//
+// It is exported because the simulator is held to it: a generated month has to
+// stay inside the bound, or the series an operator is told to read fold into
+// event_type="other".
+const LabelValueLimit = 100
