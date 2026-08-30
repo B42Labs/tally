@@ -97,6 +97,11 @@ type Difference struct {
 	ResourceID   string
 	Detail       string
 	More         int
+	// Faults holds the fault switches that touched the oracle's resource. A
+	// difference beside its switches is one the drill's write-up explains in a
+	// line, and one without them is a finding about the engine. A resource the
+	// export books that the oracle does not hold carries none.
+	Faults []string
 }
 
 // UnpricedType is a resource type the pricing model does not price and the
@@ -128,18 +133,28 @@ type Report struct {
 	// PricingVersion is the version of the model the comparison read, so that a
 	// report says which prices the unpriced types were unpriced by.
 	PricingVersion string
+	// Faults holds the fault switches the month ran with, as its oracle states
+	// them.
+	Faults []string
 }
 
 // Lines renders the report as the lines a command prints: the differences
 // first, then the types nothing was compared for, then the records of other
-// clouds, and last the verdict. Both slices are printed in the order the
-// comparison sorted them into.
+// clouds, then the switches the month ran with, and last the verdict. Both
+// slices are printed in the order the comparison sorted them into.
+//
+// A difference on a resource a switch touched names that switch. It stays a
+// difference and counts as one: whether it is the one the switch was turned on
+// for is what the drill's write-up decides.
 func (r Report) Lines() []string {
-	lines := make([]string, 0, len(r.Differences)+len(r.Unpriced)+2)
+	lines := make([]string, 0, len(r.Differences)+len(r.Unpriced)+3)
 	for _, difference := range r.Differences {
 		line := fmt.Sprintf("%s %s: %s", difference.ResourceType, difference.ResourceID, difference.Detail)
 		if difference.More > 0 {
 			line += fmt.Sprintf(" (and %d more)", difference.More)
+		}
+		if len(difference.Faults) > 0 {
+			line += fmt.Sprintf(" (touched by %s)", strings.Join(sortedFaultNames(difference.Faults), ", "))
 		}
 		lines = append(lines, line)
 	}
@@ -150,6 +165,10 @@ func (r Report) Lines() []string {
 	}
 	if r.Skipped > 0 {
 		lines = append(lines, fmt.Sprintf("skipped %d rated records of other clouds or platforms", r.Skipped))
+	}
+	if len(r.Faults) > 0 {
+		lines = append(lines, "the month ran with the fault switches "+
+			strings.Join(sortedFaultNames(r.Faults), ", "))
 	}
 	if len(r.Differences) == 0 {
 		return append(lines, fmt.Sprintf("the export matches the oracle over %d resources", r.Compared))
@@ -389,7 +408,7 @@ func (f found) note(key resourceKey, format string, args ...any) {
 // turn every resource of the month into a difference, and a report of that is
 // not a finding about the engine.
 func compare(oracle Oracle, rows []ratedRow, model pricing.Model) (Report, error) {
-	report := Report{PricingVersion: model.Version}
+	report := Report{PricingVersion: model.Version, Faults: oracle.Faults}
 
 	kept := make([]ratedRow, 0, len(rows))
 	for _, row := range rows {
@@ -462,11 +481,11 @@ func compare(oracle Oracle, rows []ratedRow, model pricing.Model) (Report, error
 
 	differences := make(found)
 	unpriced := make(map[string]int)
-	stated := make(map[resourceKey]bool, len(oracle.Resources))
+	faultsOf := make(map[resourceKey][]string, len(oracle.Resources))
 
 	for _, resource := range oracle.Resources {
 		key := resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}
-		stated[key] = true
+		faultsOf[key] = resource.Faults
 
 		entry, ok := entries[resource.ResourceType]
 		if !ok {
@@ -492,7 +511,7 @@ func compare(oracle Oracle, rows []ratedRow, model pricing.Model) (Report, error
 	}
 
 	for key := range exported {
-		if stated[key] {
+		if _, ok := faultsOf[key]; ok {
 			continue
 		}
 		report.Compared++
@@ -505,6 +524,7 @@ func compare(oracle Oracle, rows []ratedRow, model pricing.Model) (Report, error
 			ResourceID:   key.resourceID,
 			Detail:       details[0],
 			More:         len(details) - 1,
+			Faults:       faultsOf[key],
 		})
 	}
 	slices.SortFunc(report.Differences, func(a, b Difference) int {

@@ -214,7 +214,9 @@ var billableTypes = map[string]billableType{
 // The guard runs both ways: ReadOracle refuses a document of another format,
 // and DisallowUnknownFields refuses one that states a member this build does
 // not read.
-const oracleFormat = 1
+//
+// Format 2 added the faults member on the document and on every resource.
+const oracleFormat = 2
 
 // Oracle is the generator's statement of what a month contained: for every
 // billable resource the intervals of constant state, size and project it
@@ -228,6 +230,9 @@ type Oracle struct {
 	PeriodTo   time.Time        `json:"period_to"`
 	Resources  []OracleResource `json:"resources"`
 	Counts     []OracleCount    `json:"counts"`
+	// Faults holds the fault switches the month ran with, in FaultNames order.
+	// A month nobody passed --faults to states an empty list.
+	Faults []string `json:"faults"`
 }
 
 // OracleResource is one billable resource of the month and the intervals it
@@ -237,6 +242,9 @@ type OracleResource struct {
 	ResourceID   string           `json:"resource_id"`
 	Workload     string           `json:"workload"`
 	Intervals    []OracleInterval `json:"intervals"`
+	// Faults holds the fault switches that touched this resource, in FaultNames
+	// order. A resource none of them touched states an empty list.
+	Faults []string `json:"faults"`
 }
 
 // OracleInterval is a half-open span [From, To) over which a resource's state,
@@ -294,7 +302,13 @@ type countKey struct {
 // fact, under the project the request ran in and the Tally event type the
 // mapping gives its oslo type. The transfer of the spare volume therefore
 // counts under the accepting project.
-func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time) (Oracle, error) {
+//
+// The switches the month ran with are stated on the document, and the ones that
+// touched a resource on that resource. A ledger no switch was recorded for
+// takes a nil touched, which names no switch for any resource.
+func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time,
+	faults Faults, touched touchedResources,
+) (Oracle, error) {
 	grouped := make(map[resourceKey][]fact)
 	counts := make(map[countKey]int)
 
@@ -330,6 +344,7 @@ func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time) (O
 			ResourceID:   key.resourceID,
 			Workload:     group[0].workload,
 			Intervals:    intervals,
+			Faults:       touched.names(key),
 		})
 	}
 	slices.SortFunc(resources, func(a, b OracleResource) int {
@@ -347,6 +362,7 @@ func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time) (O
 		PeriodTo:   to,
 		Resources:  resources,
 		Counts:     sortedCounts(counts),
+		Faults:     faults.Names(),
 	}, nil
 }
 

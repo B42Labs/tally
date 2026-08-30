@@ -433,6 +433,27 @@ func reported(report Report) string {
 	return strings.Join(lines, "\n")
 }
 
+// sameDifference reports whether two differences say the same thing about one
+// resource. The switches are held by value, where a difference that names none
+// and one whose list is empty are the same finding.
+func sameDifference(a, b Difference) bool {
+	return a.ResourceType == b.ResourceType && a.ResourceID == b.ResourceID &&
+		a.Detail == b.Detail && a.More == b.More && slices.Equal(a.Faults, b.Faults)
+}
+
+// differenceOf is the report's difference about one resource, or a failed test.
+func differenceOf(t *testing.T, report Report, id string) Difference {
+	t.Helper()
+
+	for _, difference := range report.Differences {
+		if difference.ResourceID == id {
+			return difference
+		}
+	}
+	t.Fatalf("the report holds no difference about %s:\n%s", id, reported(report))
+	return Difference{}
+}
+
 // pricedResources counts the oracle's resources the model prices and the ones
 // it does not, per type.
 func pricedResources(oracle Oracle, model pricing.Model) (priced int, unpriced map[string]int) {
@@ -732,7 +753,7 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 			if len(report.Differences) != 1 {
 				t.Fatalf("Compare() differences = %d, want one:\n%s", len(report.Differences), reported(report))
 			}
-			if report.Differences[0] != tc.want {
+			if !sameDifference(report.Differences[0], tc.want) {
 				t.Errorf("Compare() difference = %+v, want %+v", report.Differences[0], tc.want)
 			}
 
@@ -760,6 +781,131 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 				tc.want.Detail, suffix)
 			if lines[0] != wantFirst {
 				t.Errorf("the first line = %q, want %q", lines[0], wantFirst)
+			}
+		})
+	}
+}
+
+// TestCompareCopiesTheFaultsOntoADifference holds the switches a report
+// carries: the ones the month ran with, and the ones that touched the resource
+// a difference is about. A difference beside its switches is one the drill's
+// write-up explains in a line, and one without them is a finding about the
+// engine.
+func TestCompareCopiesTheFaultsOntoADifference(t *testing.T) {
+	oracle := oracleOf(t)
+	// Stated by hand, because no switch touches a resource of a generated month
+	// yet. The order is the document's rather than FaultNames', which is what a
+	// report keeps and its lines sort.
+	oracle.Faults = []string{FaultHeldBack, FaultDuplicates}
+	touched := pickResource(t, oracle, "volume", 1, "")
+	for i := range oracle.Resources {
+		if oracle.Resources[i].ResourceID == touched.ResourceID {
+			oracle.Resources[i].Faults = []string{FaultMissingCreate}
+		}
+	}
+	instance := pickResource(t, oracle, "instance", 1, stateActive)
+	rows := ratedOf(t, oracle, parseModel(t, testModel))
+
+	t.Run("an export that differs on both sides", func(t *testing.T) {
+		const unknownID = "22222222-2222-2222-2222-222222222222"
+		mutated := copyRows(dropRows(rows, rowsOf(touched.ResourceID)), rowsOf(instance.ResourceID),
+			func(row []string) { row[columnResourceID] = unknownID })
+
+		report := compareRows(t, oracle, mutated, testModel)
+		if len(report.Differences) != 2 {
+			t.Fatalf("Compare() differences = %d, want two:\n%s", len(report.Differences), reported(report))
+		}
+
+		missing := differenceOf(t, report, touched.ResourceID)
+		if want := []string{FaultMissingCreate}; !slices.Equal(missing.Faults, want) {
+			t.Errorf("the difference about %s names the switches %v, want %v",
+				touched.ResourceID, missing.Faults, want)
+		}
+		if invented := differenceOf(t, report, unknownID); len(invented.Faults) != 0 {
+			t.Errorf("the difference about the resource the oracle does not hold names the switches %v, "+
+				"want none", invented.Faults)
+		}
+		if !slices.Equal(report.Faults, oracle.Faults) {
+			t.Errorf("Compare() faults = %v, want the oracle's %v", report.Faults, oracle.Faults)
+		}
+	})
+
+	t.Run("an export the oracle matches", func(t *testing.T) {
+		report := compareRows(t, oracle, rows, testModel)
+		if len(report.Differences) != 0 {
+			t.Errorf("Compare() differences = %d, want none:\n%s", len(report.Differences), reported(report))
+		}
+		line := "the month ran with the fault switches duplicates, held-back"
+		if lines := report.Lines(); !slices.Contains(lines, line) {
+			t.Errorf("Lines() = %v, want a line %q", lines, line)
+		}
+	})
+}
+
+// TestReportLinesNameTheFaultSwitches renders the reports a month with switches
+// on produces. A switch is named on the line of the resource it touched and
+// once for the month, and neither changes the verdict: whether a difference is
+// the one a switch was turned on for is what the drill's write-up decides.
+func TestReportLinesNameTheFaultSwitches(t *testing.T) {
+	const id = "1c38e4d1-42db-4271-bd32-9653e80a3603"
+	const detail = "missing from the export"
+
+	for _, tc := range []struct {
+		name   string
+		report Report
+		want   []string
+	}{
+		{
+			name: "a difference on a resource a switch touched",
+			report: Report{
+				Compared: 4,
+				Differences: []Difference{{
+					ResourceType: "instance", ResourceID: id,
+					Detail: detail, Faults: []string{FaultMissingCreate},
+				}},
+			},
+			want: []string{
+				"instance " + id + ": missing from the export (touched by missing-create)",
+				"1 of 4 resources differ from the oracle",
+			},
+		},
+		{
+			name: "a difference that carries further ones",
+			report: Report{
+				Compared: 4,
+				Differences: []Difference{{
+					ResourceType: "instance", ResourceID: id,
+					Detail: detail, More: 3, Faults: []string{FaultMissingCreate},
+				}},
+			},
+			want: []string{
+				"instance " + id + ": missing from the export (and 3 more) (touched by missing-create)",
+				"1 of 4 resources differ from the oracle",
+			},
+		},
+		{
+			name:   "the switches the month ran with",
+			report: Report{Compared: 4, Faults: []string{FaultHeldBack, FaultDuplicates}},
+			want: []string{
+				"the month ran with the fault switches duplicates, held-back",
+				"the export matches the oracle over 4 resources",
+			},
+		},
+		{
+			name: "a month no switch ran with",
+			report: Report{
+				Compared:    4,
+				Differences: []Difference{{ResourceType: "instance", ResourceID: id, Detail: detail}},
+			},
+			want: []string{
+				"instance " + id + ": missing from the export",
+				"1 of 4 resources differ from the oracle",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if lines := tc.report.Lines(); !slices.Equal(lines, tc.want) {
+				t.Errorf("Lines() = %v, want %v", lines, tc.want)
 			}
 		})
 	}

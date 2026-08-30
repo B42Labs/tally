@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand/v2"
+	"slices"
 	"strings"
 )
 
@@ -84,6 +85,25 @@ func (f Faults) Names() []string {
 		}
 	}
 	return names
+}
+
+// sortedFaultNames returns the names in FaultNames order, with a name outside
+// FaultNames behind every switch and in the order it arrived in. It leaves the
+// slice it was given as it stands.
+//
+// It exists because an oracle read from disk states the switches in whatever
+// order the document spells them, and the lines a comparison prints name them
+// in the one order everything else does.
+func sortedFaultNames(names []string) []string {
+	order := func(name string) int {
+		if i := slices.Index(FaultNames, name); i >= 0 {
+			return i
+		}
+		return len(FaultNames)
+	}
+	sorted := slices.Clone(names)
+	slices.SortStableFunc(sorted, func(a, b string) int { return order(a) - order(b) })
+	return sorted
 }
 
 // faultSalt mixes a switch's name into the state of its stream, the way

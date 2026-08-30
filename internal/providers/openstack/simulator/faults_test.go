@@ -160,6 +160,45 @@ func TestTouchedResourcesNameTheSwitchesInOrder(t *testing.T) {
 	}
 }
 
+// TestSortedFaultNames holds the order the switches are printed in. An oracle
+// read from disk states them in the order the document spells them, and one an
+// older build wrote may name a switch this build knows nothing about.
+func TestSortedFaultNames(t *testing.T) {
+	reversed := slices.Clone(FaultNames)
+	slices.Reverse(reversed)
+
+	for _, tc := range []struct {
+		name  string
+		names []string
+		want  []string
+	}{
+		{name: "no switch at all", names: []string{}, want: []string{}},
+		{
+			name:  "the switches in the order they are named in",
+			names: []string{FaultPreExisting, FaultDuplicates, FaultHeldBack},
+			want:  []string{FaultPreExisting, FaultDuplicates, FaultHeldBack},
+		},
+		{name: "the switches in reverse", names: reversed, want: FaultNames},
+		{
+			name:  "a name this build does not know",
+			names: []string{"bogus", FaultHeldBack, FaultPreExisting},
+			want:  []string{FaultPreExisting, FaultHeldBack, "bogus"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			given := slices.Clone(tc.names)
+
+			if got := sortedFaultNames(given); !slices.Equal(got, tc.want) {
+				t.Errorf("sortedFaultNames(%v) = %v, want %v", tc.names, got, tc.want)
+			}
+			if !slices.Equal(given, tc.names) {
+				t.Errorf("sortedFaultNames(%v) left it as %v, want the list it was given untouched",
+					tc.names, given)
+			}
+		})
+	}
+}
+
 // TestFaultStreamsAreSeededByTheirName holds a switch's stream to the seed and
 // the name together. Two switches drawing one sequence would mean which
 // resources one of them touches follows from the other being on beside it.

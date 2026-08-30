@@ -129,7 +129,7 @@ func TestOracleAgreesWithTheMapping(t *testing.T) {
 		holdFactAgainstEvent(t, f, mapped)
 	}
 
-	oracle, err := buildOracle(g.facts, 1, testCloud, july2026, july2026.AddDate(0, 1, 0))
+	oracle, err := buildOracle(g.facts, 1, testCloud, july2026, july2026.AddDate(0, 1, 0), Faults{}, nil)
 	if err != nil {
 		t.Fatalf("buildOracle() error = %v, want nil", err)
 	}
@@ -379,7 +379,7 @@ func TestOracleUsesNoEngineFold(t *testing.T) {
 func TestOracleIntervalsFollowTheLives(t *testing.T) {
 	g := buildMonth(t, 1)
 
-	oracle, err := buildOracle(g.facts, 1, testCloud, july2026, july2026.AddDate(0, 1, 0))
+	oracle, err := buildOracle(g.facts, 1, testCloud, july2026, july2026.AddDate(0, 1, 0), Faults{}, nil)
 	if err != nil {
 		t.Fatalf("buildOracle() error = %v, want nil", err)
 	}
@@ -553,7 +553,7 @@ func TestBuildOracleClipsToTheMonth(t *testing.T) {
 		},
 	}
 
-	oracle, err := buildOracle(facts, 7, testCloud, from, to)
+	oracle, err := buildOracle(facts, 7, testCloud, from, to, Faults{}, nil)
 	if err != nil {
 		t.Fatalf("buildOracle() error = %v, want nil", err)
 	}
@@ -619,7 +619,7 @@ func TestBuildOracleClipsToTheMonth(t *testing.T) {
 	})
 
 	t.Run("an empty ledger states an empty month", func(t *testing.T) {
-		empty, err := buildOracle(nil, 7, testCloud, from, to)
+		empty, err := buildOracle(nil, 7, testCloud, from, to, Faults{}, nil)
 		if err != nil {
 			t.Fatalf("buildOracle(nil) error = %v, want nil", err)
 		}
@@ -663,7 +663,7 @@ func TestBuildOracleKeepsAFactThatRestatesTheOpenInterval(t *testing.T) {
 		},
 	}
 
-	oracle, err := buildOracle(facts, 1, testCloud, from, to)
+	oracle, err := buildOracle(facts, 1, testCloud, from, to, Faults{}, nil)
 	if err != nil {
 		t.Fatalf("buildOracle() error = %v, want nil", err)
 	}
@@ -701,7 +701,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 			},
 		}
 
-		_, err := buildOracle(facts, 1, testCloud, from, to)
+		_, err := buildOracle(facts, 1, testCloud, from, to, Faults{}, nil)
 		want := fmt.Sprintf("volume vol-1 reports two billable transitions at %s, which the projection "+
 			"cannot order", at.UTC().Format(time.RFC3339))
 		if err == nil || err.Error() != want {
@@ -716,7 +716,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 			effect: alive(stateActive, instanceSizeOf(flavors[0])),
 		}}
 
-		_, err := buildOracle(facts, 1, testCloud, from, to)
+		_, err := buildOracle(facts, 1, testCloud, from, to, Faults{}, nil)
 		want := "the oracle knows no resource type for compute.instance.reboot.end"
 		if err == nil || err.Error() != want {
 			t.Fatalf("buildOracle() error = %v, want %q", err, want)
@@ -743,7 +743,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 	// surface is the format the lists below are stated for. A change to any of
 	// them raises this number and oracleFormat with it.
-	const surface = 1
+	const surface = 2
 
 	if oracleFormat != surface {
 		t.Fatalf("oracleFormat = %d and the surface below is stated for format %d, want the two "+
@@ -826,11 +826,14 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 		}{
 			{
 				named: "Oracle", typ: reflect.TypeFor[Oracle](),
-				want: []string{"format", "cloud", "seed", "period_from", "period_to", "resources", "counts"},
+				want: []string{
+					"format", "cloud", "seed", "period_from", "period_to", "resources", "counts",
+					"faults",
+				},
 			},
 			{
 				named: "OracleResource", typ: reflect.TypeFor[OracleResource](),
-				want: []string{"resource_type", "resource_id", "workload", "intervals"},
+				want: []string{"resource_type", "resource_id", "workload", "intervals", "faults"},
 			},
 			{
 				named: "OracleInterval", typ: reflect.TypeFor[OracleInterval](),
@@ -872,9 +875,9 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 // emptyOracleDocument is an oracle of a month that states no resource, written
 // out by hand because buildOracle only folds one from a ledger the generator
 // never produces.
-const emptyOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
+const emptyOracleDocument = `{"format":2,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z",` +
-	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[]}`
+	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[],"faults":[]}`
 
 // completeOracleDocument is the smallest document ReadOracle accepts, and
 // oracleIntervalDocument the one interval it holds. The cases that hold the
@@ -883,10 +886,10 @@ const emptyOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
 const oracleIntervalDocument = `{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
 	`"state":"available","project_id":"p1","size":{"size_gb":50}}`
 
-const completeOracleDocument = `{"format":1,"cloud":"os-test","seed":1,` +
+const completeOracleDocument = `{"format":2,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",` +
 	`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",` +
-	`"intervals":[` + oracleIntervalDocument + `]}],"counts":[]}`
+	`"intervals":[` + oracleIntervalDocument + `],"faults":[]}],"counts":[],"faults":[]}`
 
 // generatedOracle is the oracle of one generated month, or a failed test.
 func generatedOracle(t *testing.T, seed uint64) Oracle {
@@ -944,6 +947,54 @@ func TestOracleRoundTrips(t *testing.T) {
 	}
 	if !strings.HasSuffix(text, "\n") {
 		t.Errorf("%s ends with %q, want a trailing newline", path, text[max(len(text)-20, 0):])
+	}
+}
+
+// TestOracleRoundTripsTheFaultSwitches holds the two faults members through a
+// write and a read. They are what tells a difference the drill's write-up
+// explains from a finding about the engine, and a resource nothing touched has
+// to come back as the empty list it was written as rather than as null.
+func TestOracleRoundTripsTheFaultSwitches(t *testing.T) {
+	month, err := GenerateMonth(1, july2026, july2026.AddDate(0, 1, 0), testCloud,
+		Faults{RefusedShapes: true, HeldBack: true})
+	if err != nil {
+		t.Fatalf("GenerateMonth() error = %v, want nil", err)
+	}
+	oracle := month.Oracle
+	if want := []string{FaultRefusedShapes, FaultHeldBack}; !slices.Equal(oracle.Faults, want) {
+		t.Fatalf("the oracle states the switches %v, want %v", oracle.Faults, want)
+	}
+	// No switch touches a resource yet, so one is named by hand: a file that
+	// stated the member nowhere would round-trip whatever the read left behind.
+	oracle.Resources[0].Faults = []string{FaultMissingCreate}
+
+	path := filepath.Join(t.TempDir(), "oracle.json")
+	if err := WriteOracle(path, oracle); err != nil {
+		t.Fatalf("WriteOracle() error = %v, want nil", err)
+	}
+	read, err := ReadOracle(path)
+	if err != nil {
+		t.Fatalf("ReadOracle() error = %v, want nil", err)
+	}
+
+	if !reflect.DeepEqual(read.Faults, oracle.Faults) {
+		t.Errorf("ReadOracle().Faults = %v, want %v", read.Faults, oracle.Faults)
+	}
+	if !reflect.DeepEqual(read.Resources[0].Faults, oracle.Resources[0].Faults) {
+		t.Errorf("ReadOracle().Resources[0].Faults = %v, want %v",
+			read.Resources[0].Faults, oracle.Resources[0].Faults)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	text := string(content)
+	if !strings.Contains(text, `"faults": []`) {
+		t.Errorf("%s states no empty switch list, want [] for a resource no switch touched", path)
+	}
+	if strings.Contains(text, `"faults": null`) {
+		t.Errorf("%s states a null switch list, want [] for a resource no switch touched", path)
 	}
 }
 
@@ -1009,11 +1060,11 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 	})
 
 	t.Run("an oracle written to another format", func(t *testing.T) {
-		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":1`, `"format":2`, 1))
+		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":2`, `"format":1`, 1))
 
 		_, err := ReadOracle(path)
 
-		want := fmt.Sprintf("%s states format 2 and this build writes format %d", path, oracleFormat)
+		want := fmt.Sprintf("%s states format 1 and this build writes format %d", path, oracleFormat)
 		if err == nil || err.Error() != want {
 			t.Fatalf("ReadOracle() error = %v, want %q", err, want)
 		}
@@ -1092,12 +1143,12 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 		path := writeOracleFile(t, `{"cloud":"os-test","seed":1,`+
 			`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",`+
 			`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",`+
-			`"faults":[],"intervals":[]}],"counts":[]}`)
+			`"notes":[],"intervals":[]}],"counts":[]}`)
 
 		_, err := ReadOracle(path)
 
-		if err == nil || !strings.Contains(err.Error(), "faults") {
-			t.Fatalf("ReadOracle() error = %v, want it to name the unknown member faults", err)
+		if err == nil || !strings.Contains(err.Error(), "notes") {
+			t.Fatalf("ReadOracle() error = %v, want it to name the unknown member notes", err)
 		}
 	})
 }
