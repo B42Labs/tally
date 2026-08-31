@@ -16,7 +16,9 @@
 # The values interpolated below come from deploy/compose/.env, which
 # `make simulator-up` writes and git ignores. It carries the cloud, the period,
 # the seed, the factor, the fault switches, and the ingest token issued for that
-# cloud.
+# cloud. It also carries the registry switch, the cloud the simulated Gardener
+# projects are registered under, and the admin api token that registers them,
+# which is the empty string unless the switch is on.
 #
 # A named volume of one of these images belongs under /home/nonroot; the
 # collector's outbox below says why.
@@ -99,6 +101,20 @@ services:
       # loopback inside the container is reachable from nothing. The port below
       # is what publishes it, on the host's 127.0.0.1 alone.
       TALLY_SIM_HTTP_ADDR: 0.0.0.0
+      # The three below are read only with --register-projects and ignored
+      # otherwise. The CA is here for the reason the collector's comment gives:
+      # the registrar posts to the Gateway over the same kind of plain
+      # http.Client, so this file is what makes its certificate verify.
+      TALLY_SIM_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:8443
+      TALLY_SIM_API_TOKEN: ${TALLY_SIM_API_TOKEN}
+      TALLY_SIM_GARDEN_CLOUD: ${TALLY_SIM_GARDEN_CLOUD}
+      SSL_CERT_FILE: /etc/tally/tally-ca.crt
+    # Both mirror the collector's above and are there for the reasons given
+    # with them.
+    extra_hosts:
+      - "api.tally.127-0-0-1.nip.io:host-gateway"
+    volumes:
+      - "../../tally-ca.crt:/etc/tally/tally-ca.crt:ro"
     # --faults is empty unless SIM_FAULTS names a switch. An empty value reaches
     # the binary as --faults "", which is an empty list of switch names, and an
     # empty list is the run with every switch off.
@@ -108,7 +124,11 @@ services:
     # container next door, and what it carries is thrown away with the stack; a
     # URL that named a control plane's broker would put a month of invented usage
     # into that deployment's billing data, which is why the flag has to be typed.
-    command: ["run", "--period", "${TALLY_SIM_PERIOD}", "--seed", "${TALLY_SIM_SEED}", "--factor", "${TALLY_SIM_FACTOR}", "--faults", "${TALLY_SIM_FAULTS}", "--allow-remote-broker"]
+    #
+    # --register-projects carries its value in the same argument because that is
+    # where pflag reads a boolean flag's value from. A separate `false` would
+    # reach the binary as a positional argument, and cobra.NoArgs refuses those.
+    command: ["run", "--period", "${TALLY_SIM_PERIOD}", "--seed", "${TALLY_SIM_SEED}", "--factor", "${TALLY_SIM_FACTOR}", "--faults", "${TALLY_SIM_FAULTS}", "--register-projects=${TALLY_SIM_REGISTER_PROJECTS}", "--allow-remote-broker"]
     ports:
       # the control endpoint: GET /clock, PUT /clock, POST /release, GET /healthz
       - "127.0.0.1:8091:8080"

@@ -186,6 +186,24 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 		}
 	}
 
+	ca := mountFrom(t, svc, caSource)
+	if path := svc.Environment["SSL_CERT_FILE"]; path != ca.target {
+		t.Errorf("SSL_CERT_FILE = %q, want %q, where %s is mounted; without it the registrar rejects the Gateway's certificate and the run registers nothing",
+			path, ca.target, caSource)
+	}
+	if ca.options != "ro" {
+		t.Errorf("the %s mount carries the options %q, want %q; the simulator has no reason to write the CA", caSource, ca.options, "ro")
+	}
+
+	if hosts := []string{gatewayHost + ":host-gateway"}; !slices.Equal(svc.ExtraHosts, hosts) {
+		t.Errorf("extra_hosts = %v, want %v; the name is otherwise resolved in the container's network, where the dev cluster is not",
+			svc.ExtraHosts, hosts)
+	}
+	if url := svc.Environment["TALLY_SIM_REPORTING_URL"]; !strings.HasPrefix(url, reportingURL) {
+		t.Errorf("TALLY_SIM_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
+			url, reportingURL)
+	}
+
 	if len(svc.Command) == 0 || svc.Command[0] != "run" {
 		t.Fatalf("command = %v, want it to start with %q; the entrypoint's root command prints its help text and exits zero, which is a container that succeeds without publishing a notification",
 			svc.Command, "run")
@@ -195,11 +213,26 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 	// a pace nobody chose. A dropped --faults leaves SIM_FAULTS with nowhere to
 	// arrive, so a stack asked for a fault switch publishes the month without it.
 	// Without --allow-remote-broker the container refuses the broker beside it,
-	// which is a stack that starts and publishes nothing.
+	// which is a stack that starts and publishes nothing. A dropped
+	// --register-projects costs SIM_REGISTER_PROJECTS the same way, and it is
+	// checked below rather than in this loop.
 	for _, flag := range []string{"--period", "--seed", "--factor", "--faults", "--allow-remote-broker"} {
 		if !slices.Contains(svc.Command, flag) {
 			t.Errorf("command = %v, want %s among the arguments", svc.Command, flag)
 		}
+	}
+	// Checked by prefix because a boolean flag carries its value in the same
+	// argument, and a dropped one leaves SIM_REGISTER_PROJECTS with nowhere to
+	// arrive: the stack publishes the month and registers none of it.
+	registers := false
+	for _, arg := range svc.Command {
+		if strings.HasPrefix(arg, "--register-projects=") {
+			registers = true
+			break
+		}
+	}
+	if !registers {
+		t.Errorf("command = %v, want an argument starting with %q", svc.Command, "--register-projects=")
 	}
 }
 
