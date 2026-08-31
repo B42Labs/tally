@@ -14,11 +14,12 @@ It has no fake OpenStack API and no metrics endpoint of its own. #65 is the meta
 issue the simulated workloads belong to, and this document describes its first
 stage. The noise, the notifications the collector does not bill, is rendered and
 described under "The noise" below. The oracle of a month and the comparison
-against an engine export are described under "The oracle" below, and the six
-fault switches under "The fault switches"; #89 owns the project registry; #66
-the fake API and the clock seam; #67 the traffic series and `/metrics`. The
-drill #51 cites this simulator as the way a month reaches the Reporting API. The
-workload renders octavia's three load balancer types from the shoots' load
+against an engine export are described under "The oracle" below, the six fault
+switches under "The fault switches", and the registration of the month's tenants
+and Gardener projects with the project registry under "The project registry".
+#66 owns the fake API and the clock seam; #67 the traffic series and `/metrics`.
+The drill #51 cites this simulator as the way a month reaches the Reporting API.
+The workload renders octavia's three load balancer types from the shoots' load
 balancers.
 
 ## The world and the workload
@@ -552,14 +553,27 @@ make simulator-up SIM_PERIOD=2026-07
 factor of 744 puts a 31-day month on the bus in an hour. `SIM_FAULTS` is empty,
 which is every fault switch off; it takes the switch names of "The fault
 switches" below, comma-separated, as in `SIM_FAULTS=held-back`.
+`SIM_REGISTER_PROJECTS` is `false`, and `true` registers the month's tenants and
+Gardener projects with the dev registry before the first notification goes out,
+the way "The project registry" describes; any other value is refused with
+`ERROR: SIM_REGISTER_PROJECTS must be true or false` before an image is built.
+`SIM_GARDEN_CLOUD` defaults to `garden-sim` and is the cloud the two Gardener
+rows are registered under.
 
 The target builds the collector and the simulator image, writes the dev CA to
-`tally-ca.crt`, issues an ingest credential for `SIM_CLOUD` with
-`tally-reporting-admin create-ingest-credential`, writes the cloud, the period,
-the seed, the factor, the fault switches as `TALLY_SIM_FAULTS`, and that token
-into `deploy/compose/.env`, and starts the three containers of
-[`../deploy/compose/compose.yaml`](../deploy/compose/compose.yaml): the broker,
-the collector image, and the simulator.
+`tally-ca.crt`, and issues an ingest credential for `SIM_CLOUD` with
+`tally-reporting-admin create-ingest-credential`; with
+`SIM_REGISTER_PROJECTS=true` it issues an admin api token beside it with
+`tally-reporting-admin create-api-token --role admin`. It writes the cloud, the
+period, the seed, the factor, the fault switches as `TALLY_SIM_FAULTS`, the
+switch as `TALLY_SIM_REGISTER_PROJECTS`, the garden cloud as
+`TALLY_SIM_GARDEN_CLOUD`, and the two tokens as `TALLY_OSC_TOKEN` and
+`TALLY_SIM_API_TOKEN` into `deploy/compose/.env`, where the api token is the
+empty string with the switch off. The file is removed and written again under
+`umask 077`, because an admin api token in a world-readable file is one every
+other user of the machine can register with. Then it starts the three containers
+of [`../deploy/compose/compose.yaml`](../deploy/compose/compose.yaml): the
+broker, the collector image, and the simulator.
 
 It does not rebuild what runs in the cluster and applies no migration: loading
 the Reporting API image into kind and applying the migration chain are both
@@ -582,7 +596,9 @@ Every host port is bound to `127.0.0.1` and lies above 1024;
 `deploy/kind/kind.yaml` states why. The collector's container reaches the
 cluster through `extra_hosts`, which maps `api.tally.127-0-0-1.nip.io` to
 `host-gateway`, and `tally-ca.crt` is mounted read-only at the path
-`SSL_CERT_FILE` names, which is what makes the Gateway's certificate verify.
+`SSL_CERT_FILE` names, which is what makes the Gateway's certificate verify. The
+simulator's container carries the same three: a registration posts to the
+Gateway over the same kind of client the collector delivers with.
 
 The collector service of the stack lists all eight exchanges in
 `TALLY_OSC_EXCHANGES`:
@@ -657,6 +673,9 @@ token="$(TALLY_REPORTING_DB_URL='postgres://tally:tally-dev-password@db.tally.12
 curl --cacert tally-ca.crt -H "Authorization: Bearer $token" \
   'https://api.tally.127-0-0-1.nip.io:8443/api/v1/resources?cloud=os-sim'
 ```
+
+A run started with `SIM_REGISTER_PROJECTS=true` carries one already:
+`deploy/compose/.env` holds it as `TALLY_SIM_API_TOKEN`.
 
 ## What the collector shows
 
@@ -1231,6 +1250,186 @@ publishes, 1812 once the release is through, and 13915 skipped either way. Seed
 `notifications.jsonl` has 15643 lines, `held-back.jsonl` 84, and the month books
 the 1812 events of the month with the switch off.
 
+## The project registry
+
+`run --register-projects` registers the month with the project registry of the
+Reporting API, before the first file is written and before the first
+notification goes out. The switch is off by default: a run without it puts a
+month on a bus or into files and reads no registry at all.
+
+Four variables carry what a registration needs, and a run without the switch
+reads them and ignores them. `TALLY_SIM_REPORTING_URL` is the Reporting API the
+rows are posted to. It has to be absolute and carry a host, with no query and
+no fragment, because the registry route is appended to it, and it has to be
+`https`: the api token travels in a header on every request, and that token is
+of role `admin`, so it is not scoped to one `(platform, cloud)` pair the way an
+ingest token is, and whoever reads it off the wire writes the whole registry.
+`TALLY_SIM_REPORTING_INSECURE=true` is how a plaintext one is asked for, the way
+the collector's `TALLY_OSC_REPORTING_INSECURE` is; the compose stack posts to
+the Gateway over `https` and sets neither. `TALLY_SIM_API_TOKEN` is the
+credential, an api token of role `admin`, because `POST /api/v1/projects` and
+`POST /api/v1/projects/{id}/relations` demand that role; it is a secret, so
+`TALLY_SIM_API_TOKEN_FILE` carries it as well, and setting both is an error.
+`TALLY_SIM_GARDEN_CLOUD` is the cloud the two Gardener rows are registered
+under, and it has to differ from `TALLY_SIM_CLOUD`: a cloud is one installation
+of one platform, so a Gardener project keyed under the tenants' cloud would be a
+row of the OpenStack installation, and its relation would then point it at
+itself. A missing or mistyped value ends the subcommand with `checking the
+configuration: ...` before a broker is dialled.
+
+A month registers eight rows and two relations. Six rows are `openstack` rows
+under `TALLY_SIM_CLOUD`, keyed by the keystone project id of the tenant and
+named `tenant-01`, `tenant-02`, `tenant-03`, `ci`,
+`Infrastructure tenant of alpha`, and `Infrastructure tenant of beta`. Nothing
+on the bus carries a tenant name, so the registry is the one place the ids of a
+month are given one. The other two are `gardener` rows under
+`TALLY_SIM_GARDEN_CLOUD`, with the external ids `alpha` and `beta` and the
+names `Gardener project alpha` and `Gardener project beta`. Each Gardener row
+then takes one relation of type `infrastructure_tenant` to the tenant its shoots
+run on, valid from the first instant of the month (`valid_from`
+`2026-07-01T00:00:00Z` for `2026-07`) and with no end. Every row and every
+relation carries `created_by: tally-openstack-simulator` in its metadata, and a
+relation's metadata carries `shoots` beside it: `["api-prod", "api-dev"]` for
+`alpha`, `["batch"]` for `beta`.
+
+A rerun of the same seed, period, cloud, and garden cloud posts the same eight
+rows again. A `409` on a project is a row the registry already holds: it is
+looked up by its `(cloud, external_id)` key, its id is what the relations point
+at, and neither its name nor its metadata is patched. A `409` on a relation is
+one that is already active, and it stays as it stands. The run goes on and logs
+`registered` with `projects_existing` 8 and `relations_existing` 2.
+
+A rerun under another period, seed, or cloud is refused at the first relation.
+The Gardener rows are keyed by `alpha` and `beta` and are the ones the earlier
+run registered, while the tenants are keyed by identifiers the month is salted
+into, so the second run would relate one Gardener project to a second tenant.
+The registry keys an open relation by `(source_id, target_id, relation_type)`,
+which makes that a new relation rather than a `409`, and two relations
+attributing at once put two months of a tenant's cost into one statement. Every
+relation is therefore preceded by two reads of
+`GET /api/v1/projects/{id}/relations?direction=outgoing&relation_type=infrastructure_tenant`,
+one at `at=<the first instant of the month>` and one as the relations stand now,
+and a relation to another tenant in either answer ends the run. What the message
+says is decided by when that relation starts. One that started in an earlier
+month is ended where this month begins, so the message names the
+`PATCH /api/v1/projects/{id}/relations/{relation_id}` that does it and the
+instant it has to end at. One that starts at or after the first instant of this
+month cannot be: `PATCH` answers a `valid_to` that is not after the stored
+`valid_from` with `422`, so there is no such instant, and the message says so
+and leaves registering this month under another garden cloud
+(`TALLY_SIM_GARDEN_CLOUD`) as the way on.
+
+Two reads, because the engine bills a period by the relations that overlap it
+(`valid_from < period_to AND (valid_to IS NULL OR valid_to > period_from)`) and
+not by the ones that are open while it runs. The read at the first instant of
+the month is one instant the period is billed by, and it finds a relation that
+was closed after the month as well: `DELETE /api/v1/projects/{id}/relations/{relation_id}`
+sets `valid_to` to now, which is after every instant of a simulated period, so
+such a relation goes on attributing that period. The read as they stand now
+finds a relation that starts after this month and would attribute beside the new
+one from its own start on. A relation that ends no later than the first instant
+of the month is left alone by both: it attributes nothing of the month being
+registered.
+
+Two reads at two instants are less than that overlap, though, so this check is
+what one run can see and not a rule the registry enforces. A relation that
+starts inside the month and was closed no later than now is valid at neither
+instant, and it attributes the month all the same: such a relation passes the
+check, and a second one is created beside it. Reading the overlap itself would
+need a `from`/`to` filter on the route, which this API does not offer; the
+invariant the check stands in for belongs to the Reporting API, as one open
+attributing relation per `(source_id, relation_type)`, answered `409`. Two
+registrations running at once are past the check for the same reason: both can
+read an answer without the other's relation and both create one.
+
+A registration that fails ends the run with exit status 1, with no file written
+and no notification published. A refused token is the one failure whose fix is
+not in the answer, so its message ends with
+`TALLY_SIM_API_TOKEN has to be an api token of role admin`; an unreachable API
+and any other unexpected status end the run the same way. The rows such a run
+got through stay in the registry, and the rerun finds them. SIGINT while the
+registration runs is the clean stop the rest of a run answers a signal with,
+exit status 0.
+
+File mode registers as well.
+`run --register-projects --period 2026-07 --out /tmp/m` needs no broker and
+registers the month it writes, which is how an operator prepares the registry
+before a `replay` puts that month on a bus. `replay` itself registers nothing,
+because the recorded notifications are all it reads.
+
+The log carries the registration. `starting` says `register=true`, and
+`registered` closes the registration with `reporting_url`, `projects_created`,
+`projects_existing`, `relations_created`, and `relations_existing`. Every step
+ahead of it is one `Info` line of its own: `registered project` or
+`project already registered` per row, `related` or `relation already active`
+per relation. A registration that ends early logs `registration incomplete` with
+the same four counts instead, whether it was refused or stopped: the rows it got
+through stay in the registry, and that line is where the whole of what reached
+it is.
+
+The broker of a run is refused unless it is on this machine, and
+`--allow-remote-broker` is the confirmation that lets one through. The Reporting
+API is guarded by its scheme instead: a plaintext one is refused unless
+`TALLY_SIM_REPORTING_INSECURE=true` is set, because the admin token travels on
+it. Which deployment the rows land in is not guarded beyond that — registering
+needs an api token of role `admin`, and issuing one against a deployment is that
+decision already.
+
+The registry of the compose stack is readable with the admin token
+`simulator-up` wrote into `deploy/compose/.env`. That file is written under
+`umask 077`, because the token in it writes the whole registry; the id it was
+issued under is on the `simulator-up` output, and
+`tally-reporting-admin revoke-api-token <id>` is what ends it, because
+`simulator-down` deletes the file and revokes nothing.
+
+```sh
+curl --cacert tally-ca.crt \
+  -H "Authorization: Bearer $(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)" \
+  'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=os-sim'
+```
+
+The relations hang below the row they start at, so walking alpha's takes its id
+first: the `id` of the `garden-sim`/`alpha` row that
+`GET /api/v1/projects?cloud=garden-sim` lists.
+
+```sh
+curl --cacert tally-ca.crt \
+  -H "Authorization: Bearer $(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)" \
+  'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects/<alpha id>/related?relation_type=infrastructure_tenant'
+```
+
+The rows outlive `make simulator-down`, which drops the containers and the
+outbox volume and touches the dev registry not at all, so a second
+`simulator-up` for a later period is the rerun the registration refuses until
+the relations of the first one end no later than the first instant of the second
+period. No subcommand of `tally-reporting-admin` deletes a project, and a
+relation is never removed: `PATCH /api/v1/projects/{id}/relations/{relation_id}`
+with a `valid_to` is what ends one at a chosen instant, and
+`DELETE /api/v1/projects/{id}/relations/{relation_id}` ends one at now, which is
+after the period a simulated month covers and therefore no way past the check.
+A second `simulator-up` for the same period or an earlier one has no instant to
+end them at either, because they start at or after that period's first instant:
+those runs need a garden cloud of their own, `TALLY_SIM_GARDEN_CLOUD`.
+
+What the rows are for shows once the month is billed. The engine's default
+attributing relation type is `infrastructure_tenant`, so
+
+```sh
+tally-engine run --period 2026-07
+tally-engine export --run <id> --format json --out /tmp/statements
+```
+
+writes `statement-garden-sim%2Falpha.json` and
+`statement-garden-sim%2Fbeta.json`. The two Gardener projects have no usage of
+their own, and a statement is opened for each of them all the same: their
+`related_costs` carry the line items of the tenant the shoots run on, under the
+relation type `infrastructure_tenant`. The two Gardener tenants get no statement
+of their own, and `runs.stats.unregistered_projects` names nothing, because
+every tenant the month books usage for is registered. `rated.csv` does not
+change and neither does `compare`: a rated record carries the tenant that owned
+the resource as `project_id`, the attribution stands in the statements alone,
+and `compare` reads `rated.csv`.
+
 ## The control endpoint
 
 Both subcommands serve a control endpoint on `TALLY_SIM_HTTP_ADDR` and
@@ -1311,12 +1510,16 @@ lists every variable with its default and its meaning.
 | `TALLY_SIM_HTTP_PORT` | `8080` | both, while publishing | port of the control endpoint. |
 | `TALLY_SIM_AMQP_URL` | none | `run` optional, `replay` required | broker the notifications are published to. It carries the broker password, so it also accepts `TALLY_SIM_AMQP_URL_FILE`; setting both is an error. |
 | `TALLY_SIM_CLOUD` | none | `run` | cloud the month belongs to: the salt of every generated identifier and the cloud of `events.jsonl`. |
+| `TALLY_SIM_REPORTING_URL` | none | `run` with `--register-projects` | Reporting API the projects are registered with. It has to be absolute and carry a host, with no query and no fragment, because the registry route is appended to it, and it has to be `https` unless `TALLY_SIM_REPORTING_INSECURE` says otherwise. A run without the switch reads it and ignores it. |
+| `TALLY_SIM_REPORTING_INSECURE` | `false` | `run` with `--register-projects` | allow a plaintext Reporting API. The api token travels in a header on every request and is of role `admin`, so it is not scoped to one cloud the way an ingest token is. |
+| `TALLY_SIM_API_TOKEN` | none | `run` with `--register-projects` | credential of the registration, an api token of role `admin`, which `POST /api/v1/projects` and `POST /api/v1/projects/{id}/relations` demand. It also accepts `TALLY_SIM_API_TOKEN_FILE`; setting both is an error. |
+| `TALLY_SIM_GARDEN_CLOUD` | none | `run` with `--register-projects` | cloud the two Gardener rows are registered under. It has to differ from `TALLY_SIM_CLOUD`: a cloud is one installation of one platform. |
 
 An empty `TALLY_SIM_AMQP_URL` puts `run` in file mode, where `--out` is what it
 writes to instead, and `replay` refuses to start without one.
 
-The broker is the one setting that reaches off this machine, and what a run puts
-on it is not a test message. The exchanges, the declare arguments, and the shape
+The broker reaches off this machine, and what a run puts on it is not a test
+message. The exchanges, the declare arguments, and the shape
 of every notification are the ones a real deployment carries, the wire format
 names no cloud, and a collector books what it consumes under its own
 `TALLY_OSC_CLOUD` whatever `TALLY_SIM_CLOUD` said. A month published onto a
@@ -1328,11 +1531,15 @@ reason, and `--allow-remote-broker` is the confirmation that lets one through.
 The compose stack passes it, because its broker is the container next door.
 
 `run` takes `--period` (required, `YYYY-MM`), `--seed` (1), `--factor` (744),
-`--out` (empty), `--wait-for-collector` (two minutes), `--faults` (empty), and
-`--allow-remote-broker` (off). `--faults` takes the six switch names
-`pre-existing`, `missing-create`, `duplicates`, `reordering`, `refused-shapes`,
-and `held-back`, comma-separated; empty is every switch off, and "The fault
-switches" describes what each of them does. `replay` takes `--in` (required),
+`--out` (empty), `--wait-for-collector` (two minutes), `--faults` (empty),
+`--register-projects` (off), and `--allow-remote-broker` (off). `--faults` takes
+the six switch names `pre-existing`, `missing-create`, `duplicates`,
+`reordering`, `refused-shapes`, and `held-back`, comma-separated; empty is every
+switch off, and "The fault switches" describes what each of them does.
+`--register-projects` registers the month's tenants, the two Gardener projects,
+and their `infrastructure_tenant` relations before anything is written or
+published, which "The project registry" describes. `replay` takes `--in`
+(required),
 `--factor` (744), `--wait-for-collector` (two minutes), and
 `--allow-remote-broker` (off). `compare` takes `--oracle`, `--export`, and
 `--pricing`, all three required, and reads no variable of the table at all: it
