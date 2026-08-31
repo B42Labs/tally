@@ -1,0 +1,20 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-temporal", "external_id": "proj-temporal"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "os-golden-temporal", "external_id": "proj-temporal"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": "2026-03-15T00:00:00Z",
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "discount", "rate": "0.15", "scope": "all"}
+        ]
+      }
+    }
+  ]
+}
