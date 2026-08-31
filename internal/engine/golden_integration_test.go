@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/engine/corrections"
 	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/invariants"
@@ -161,6 +162,98 @@ func TestGoldenExpandBulk(t *testing.T) {
 	})
 }
 
+// TestGoldenAdjustmentExpectations pins the two derivations a commercial case
+// rests on: the adjustment records the statements of an expected.json describe,
+// and the kickbacks a run of it has to settle. Both are read out of the fixture
+// rather than out of the run, so they are what a case holds the engine to. Like
+// the two tests above they need no database.
+func TestGoldenAdjustmentExpectations(t *testing.T) {
+	const (
+		key          = "os-golden-x/proj-x"
+		plainKey     = "os-golden-x/proj-plain"
+		beneficiary  = "partner-corp"
+		relationType = "managed_by"
+	)
+	relation := uuid.New()
+	seeded := seededRegistry{relations: []uuid.UUID{relation}}
+
+	// The pair of adjustments the concept spells for a reseller relation: a
+	// discount off the base cost, and a commission on the net cost it leaves.
+	adjusted := expectedStatement{
+		Key: key,
+		Adjustments: []expectedAdjustment{
+			{
+				Type: adjustment.TypeDiscount, Relation: 0,
+				RelationType: relationType, RelationTarget: beneficiary,
+				Scope: "all", Description: "Reseller end-customer discount",
+				Rate:   decimal.RequireFromString("0.15"),
+				Base:   decimal.RequireFromString("1200.00"),
+				Amount: decimal.RequireFromString("-180.00"),
+			},
+			{
+				Type: adjustment.TypeKickback, Relation: 0,
+				RelationType: relationType, RelationTarget: beneficiary,
+				Scope: "all", Description: "Reseller commission on net revenue",
+				Rate:   decimal.RequireFromString("0.10"),
+				Base:   decimal.RequireFromString("1020.00"),
+				Amount: decimal.RequireFromString("102.00"),
+			},
+		},
+	}
+	plain := expectedStatement{Key: plainKey}
+
+	t.Run("derives one record per adjustment line", func(t *testing.T) {
+		got := expectedRecords([]expectedStatement{adjusted}, seeded)
+		if len(got) != 2 {
+			t.Fatalf("records = %+v, want the two lines of the statement", got)
+		}
+		for i, want := range []storedAdjustment{
+			{
+				projectID: key, relationID: relation.String(),
+				relationType: relationType, relationTarget: beneficiary,
+				typ: adjustment.TypeDiscount, scope: "all",
+				rate: "0.150000", base: "1200.00", amount: "-180.00", currency: currency,
+			},
+			{
+				projectID: key, relationID: relation.String(),
+				relationType: relationType, relationTarget: beneficiary,
+				beneficiary: beneficiary, hasBeneficiary: true,
+				typ: adjustment.TypeKickback, scope: "all",
+				rate: "0.100000", base: "1020.00", amount: "102.00", currency: currency,
+			},
+		} {
+			if got[i] != want {
+				t.Errorf("record %d = %+v, want %+v", i, got[i], want)
+			}
+		}
+	})
+
+	t.Run("derives no record for a statement without lines", func(t *testing.T) {
+		if got := expectedRecords([]expectedStatement{plain}, seeded); len(got) != 0 {
+			t.Errorf("records = %+v, want none", got)
+		}
+	})
+
+	t.Run("accepts the kickback the statement describes", func(t *testing.T) {
+		assertKickbacks(t, []export.Kickback{{
+			Beneficiary:  beneficiary,
+			Currency:     currency,
+			StatementKey: key,
+			Cloud:        "os-golden-x",
+			ProjectID:    "proj-x",
+			RelationID:   relation,
+			Scope:        "all",
+			Rate:         decimal.RequireFromString("0.10"),
+			Base:         decimal.RequireFromString("1020.00"),
+			Amount:       decimal.RequireFromString("102.00"),
+		}}, []expectedStatement{adjusted}, seeded)
+	})
+
+	t.Run("accepts an empty settlement for a statement without lines", func(t *testing.T) {
+		assertKickbacks(t, nil, []expectedStatement{plain}, seeded)
+	})
+}
+
 // TestGolden runs the golden suite. Every case gets its own pair of databases
 // inside the one pair of containers the fixture starts, so the cases share the
 // containers without sharing anything they bill, and the image and the
@@ -203,6 +296,8 @@ func TestGolden(t *testing.T) {
 			}
 			assertRated(t, run.Rated, want.Rated)
 			assertStatements(t, run.Statements, want.Statements, want.AbsentStatements, seeded)
+			assertAdjustmentRecords(t, dbs, result.RunID, want.Statements, seeded)
+			assertKickbacks(t, run.Kickbacks, want.Statements, seeded)
 		})
 	}
 

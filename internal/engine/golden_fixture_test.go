@@ -28,12 +28,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/core/money"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/pricing"
@@ -1390,6 +1392,260 @@ func assertRelatedCosts(
 		}
 		assertLineItems(t, fmt.Sprintf("the related cost %s of %s", w.ProjectID, statement),
 			g.LineItems, w.LineItems)
+	}
+}
+
+// storedAdjustment is one adjustment_records row as the suite reads it back,
+// past the packages that wrote it. The rate, the base and the amount are read
+// as text, which is what keeps the comparison off floats. hasBeneficiary
+// separates a NULL column, which every row that is not a kickback carries, from
+// a beneficiary that is the empty string.
+type storedAdjustment struct {
+	projectID, relationID        string
+	relationType, relationTarget string
+	beneficiary                  string
+	typ, scope                   string
+	rate, base, amount           string
+	currency                     string
+	hasBeneficiary               bool
+}
+
+// readAdjustmentRecords reads the adjustment records of one run, in the order
+// the query fixes. A run that adjusted nothing yields the empty slice rather
+// than nil, so the records of two runs that stored none compare equal.
+func readAdjustmentRecords(t *testing.T, dbs caseDBs, runID uuid.UUID) []storedAdjustment {
+	t.Helper()
+
+	rows, err := dbs.engine.Query(t.Context(),
+		`SELECT project_id, relation_id::text, relation_type, relation_target, beneficiary,
+		        type, scope, rate::text, base::text, amount::text, currency
+		 FROM adjustment_records WHERE run_id = $1
+		 ORDER BY project_id, relation_id, type, scope, rate, amount`, runID)
+	if err != nil {
+		t.Fatalf("reading the adjustment records of run %s: %v", runID, err)
+	}
+	defer rows.Close()
+
+	got := []storedAdjustment{}
+	for rows.Next() {
+		var row storedAdjustment
+		var beneficiary pgtype.Text
+		if err := rows.Scan(&row.projectID, &row.relationID, &row.relationType, &row.relationTarget,
+			&beneficiary, &row.typ, &row.scope, &row.rate, &row.base, &row.amount,
+			&row.currency); err != nil {
+			t.Fatalf("scanning an adjustment record of run %s: %v", runID, err)
+		}
+		row.beneficiary, row.hasBeneficiary = beneficiary.String, beneficiary.Valid
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the adjustment records of run %s: %v", runID, err)
+	}
+	return got
+}
+
+// expectedRecords is the adjustment_records rows the statements of a fixture
+// describe: one per adjustment line, in the shape the run stores it. The three
+// numbers are rendered at the scales the columns carry, so a rate written 0.15
+// in the fixture meets the 0.150000 the column holds.
+//
+// It is pure. A line whose Relation index lies outside the seeded relations is
+// a typo in the fixture, refused by assertAdjustments, which every caller runs
+// first.
+func expectedRecords(want []expectedStatement, seeded seededRegistry) []storedAdjustment {
+	var records []storedAdjustment
+	for _, w := range want {
+		for _, a := range w.Adjustments {
+			record := storedAdjustment{
+				projectID:      w.Key,
+				relationID:     seeded.relations[a.Relation].String(),
+				relationType:   a.RelationType,
+				relationTarget: a.RelationTarget,
+				typ:            a.Type,
+				scope:          a.Scope,
+				rate:           a.Rate.StringFixed(money.RatePlaces),
+				base:           a.Base.StringFixed(money.AmountPlaces),
+				amount:         a.Amount.StringFixed(money.AmountPlaces),
+				currency:       currency,
+			}
+			// The beneficiary is the partner a kickback is paid to, and the
+			// column is NULL on every other type (decision D8).
+			if a.Type == adjustment.TypeKickback {
+				record.beneficiary, record.hasBeneficiary = a.RelationTarget, true
+			}
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// storedAdjustmentKey identifies one adjustment record among a run's: which
+// statement it sits on, which relation it came from, which element of that
+// relation's document produced it, and what that element computed. The money is
+// part of the key because the rest of it is not unique: a document may carry two
+// elements of one type, scope and rate, and the engine stores a record per
+// element. Two such records that keyed the same would collapse onto one another,
+// and a run that stored one of them wrong would be read as the other one twice.
+type storedAdjustmentKey struct{ projectID, relationID, typ, scope, rate, base, amount string }
+
+// assertAdjustmentRecords checks the rows a run stored against the adjustment
+// lines its statements show. What a partner is paid is a sum over these rows
+// rather than over the documents, so the two sides are held against each other
+// rather than one of them taken on trust. A case whose statements list no lines
+// and whose run stored no rows passes.
+func assertAdjustmentRecords(
+	t *testing.T,
+	dbs caseDBs,
+	runID uuid.UUID,
+	want []expectedStatement,
+	seeded seededRegistry,
+) {
+	t.Helper()
+
+	got := readAdjustmentRecords(t, dbs, runID)
+	expected := expectedRecords(want, seeded)
+	if len(got) != len(expected) {
+		t.Fatalf("adjustment records = %d, want %d", len(got), len(expected))
+	}
+
+	key := func(record storedAdjustment) storedAdjustmentKey {
+		return storedAdjustmentKey{
+			projectID: record.projectID, relationID: record.relationID,
+			typ: record.typ, scope: record.scope, rate: record.rate,
+			base: record.base, amount: record.amount,
+		}
+	}
+	byKey := make(map[storedAdjustmentKey]storedAdjustment, len(got))
+	for _, record := range got {
+		byKey[key(record)] = record
+	}
+
+	matched := make(map[storedAdjustmentKey]bool, len(expected))
+	for _, w := range expected {
+		record, found := byKey[key(w)]
+		if !found {
+			t.Errorf("no %s adjustment of relation %s on %s at the rate %s "+
+				"with the base %s and the amount %s",
+				w.typ, w.relationID, w.projectID, w.rate, w.base, w.amount)
+			continue
+		}
+		matched[key(w)] = true
+		adjustmentName := fmt.Sprintf("the %s adjustment of relation %s on %s",
+			w.typ, w.relationID, w.projectID)
+
+		for _, field := range []struct{ name, got, want string }{
+			{"relation_type", record.relationType, w.relationType},
+			{"relation_target", record.relationTarget, w.relationTarget},
+			{"beneficiary", record.beneficiary, w.beneficiary},
+			{"currency", record.currency, w.currency},
+		} {
+			if field.got != field.want {
+				t.Errorf("%s: %s = %q, want %q", adjustmentName, field.name, field.got, field.want)
+			}
+		}
+		if record.hasBeneficiary != w.hasBeneficiary {
+			t.Errorf("%s carries a beneficiary = %t, want %t",
+				adjustmentName, record.hasBeneficiary, w.hasBeneficiary)
+		}
+	}
+
+	for _, record := range got {
+		if !matched[key(record)] {
+			t.Errorf("the run stored a %s adjustment of relation %s on %s at the rate %s "+
+				"with the base %s and the amount %s, which expected.json does not list",
+				record.typ, record.relationID, record.projectID,
+				record.rate, record.base, record.amount)
+		}
+	}
+}
+
+// kickbackKey identifies one kickback among a run's: which statement it was
+// applied to, which relation it came from, which scope of that relation's
+// document produced it, and what it settles. The rate and the money are part of
+// the key for the reason they are part of storedAdjustmentKey: one relation may
+// settle twice in one scope, and a payout read off a settlement that collapsed
+// onto another one is a partner paid what the other one earned.
+type kickbackKey struct{ statementKey, relationID, scope, rate, base, amount string }
+
+// assertKickbacks checks what a run settles for its partners against the
+// kickback lines its statements show. The export is what a payout is made from,
+// so a run whose statements carry no kickback line has to settle nothing rather
+// than settle a list nobody wrote down.
+func assertKickbacks(t *testing.T, got []export.Kickback, want []expectedStatement, seeded seededRegistry) {
+	t.Helper()
+
+	var expected []export.Kickback
+	for _, w := range want {
+		cloud, projectID, err := statements.ParseKey(w.Key)
+		if err != nil {
+			t.Fatalf("the statement key of the expectation: %v", err)
+		}
+		for _, a := range w.Adjustments {
+			if a.Type != adjustment.TypeKickback {
+				continue
+			}
+			expected = append(expected, export.Kickback{
+				Beneficiary:  a.RelationTarget,
+				Currency:     currency,
+				StatementKey: w.Key,
+				Cloud:        cloud,
+				ProjectID:    projectID,
+				RelationID:   seeded.relations[a.Relation],
+				Scope:        a.Scope,
+				Rate:         a.Rate,
+				Base:         a.Base,
+				Amount:       a.Amount,
+			})
+		}
+	}
+
+	if len(got) != len(expected) {
+		t.Fatalf("kickbacks = %d, want %d", len(got), len(expected))
+	}
+
+	key := func(k export.Kickback) kickbackKey {
+		return kickbackKey{
+			statementKey: k.StatementKey, relationID: k.RelationID.String(), scope: k.Scope,
+			rate:   k.Rate.StringFixed(money.RatePlaces),
+			base:   k.Base.StringFixed(money.AmountPlaces),
+			amount: k.Amount.StringFixed(money.AmountPlaces),
+		}
+	}
+	byKey := make(map[kickbackKey]export.Kickback, len(got))
+	for _, k := range got {
+		byKey[key(k)] = k
+	}
+
+	matched := make(map[kickbackKey]bool, len(expected))
+	for _, w := range expected {
+		k, found := byKey[key(w)]
+		if !found {
+			t.Errorf("no kickback of relation %s on %s in the scope %s at the rate %s "+
+				"with the base %s and the amount %s",
+				w.RelationID, w.StatementKey, w.Scope, w.Rate, w.Base, w.Amount)
+			continue
+		}
+		matched[key(w)] = true
+		kickbackName := fmt.Sprintf("the kickback of relation %s on %s", w.RelationID, w.StatementKey)
+
+		for _, field := range []struct{ name, got, want string }{
+			{"beneficiary", k.Beneficiary, w.Beneficiary},
+			{"currency", k.Currency, w.Currency},
+			{"cloud", k.Cloud, w.Cloud},
+			{"project_id", k.ProjectID, w.ProjectID},
+		} {
+			if field.got != field.want {
+				t.Errorf("%s: %s = %q, want %q", kickbackName, field.name, field.got, field.want)
+			}
+		}
+	}
+
+	for _, k := range got {
+		if !matched[key(k)] {
+			t.Errorf("the run settles a kickback of relation %s on %s in the scope %s at the rate %s "+
+				"with the base %s and the amount %s, which expected.json does not list",
+				k.RelationID, k.StatementKey, k.Scope, k.Rate, k.Base, k.Amount)
+		}
 	}
 }
 
