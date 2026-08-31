@@ -2,11 +2,14 @@
 // pair of databases each case gets, the fixtures a case is seeded from, and the
 // assertions its expectations are checked with.
 //
-// Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z).
-// The values in testdata/golden/<case>/expected.json are derived by hand from
-// README section 3.4 ("Metering Output Examples") and pricing/2026-03.yaml.
-// They are never regenerated from what the engine produced: a number the engine
-// wrote says nothing about whether the engine is right.
+// Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z),
+// and the temporal case bills the April after it as well. The values in
+// testdata/golden/<case>/expected.json are derived by hand from README section
+// 3.4 ("Metering Output Examples"), from the WP 5.6 table of
+// roadmap/05-phase-5-commercial-pricing.md (the Phase 5 cases and the
+// adjustments they carry) and from pricing/2026-03.yaml. They are never
+// regenerated from what the engine produced: a number the engine wrote says
+// nothing about whether the engine is right.
 //
 // Events are inserted into the events table and folded into current_resources
 // by projection.Replay, the writer the ingest path folds through, so a case is
@@ -92,6 +95,8 @@ var attributingRelationTypes = []string{"infrastructure_tenant"}
 // walks for every case, the defaults of the deployment. The managed_by and
 // member_of edges of virtual_relations carry no adjustments, so a run of the
 // suite proves that walking them leaves every statement at the Phase 3 bytes.
+// The Phase 5 cases carry their adjustments in the metadata of registry.json,
+// on edges of those two types.
 var adjustmentRelationTypes = []string{"managed_by", "member_of"}
 
 const adjustmentDepth = 3

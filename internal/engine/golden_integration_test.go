@@ -5,11 +5,13 @@
 // down by hand.
 //
 // Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z),
-// which is the period README section 3.4 computes its examples over. The
-// expectations come from that section and from pricing/2026-03.yaml, never from
-// a previous run: a failure here is a report about the engine, so the answer to
-// one is to find what changed in the engine, not to write the engine's new
-// number into expected.json.
+// which is the period README section 3.4 computes its examples over, and the
+// temporal case bills the April after it as well. The expectations come from
+// that section, from WP 5.6 of roadmap/05-phase-5-commercial-pricing.md (the
+// commercial cases) and from pricing/2026-03.yaml, never from a previous run:
+// a failure here is a report about the engine, so the answer to one is to find
+// what changed in the engine, not to write the engine's new number into
+// expected.json.
 package engine_test
 
 import (
@@ -1347,15 +1349,15 @@ func goldenTemporal(t *testing.T, f goldenFixture) {
 	}
 }
 
-// goldenPhase3Regression is the sixth row of the phase's exit criteria: a graph
-// whose relations carry no adjustment leaves every statement at the bytes Phase
-// 3 rendered. "Byte-identical to the Phase 3 goldens" is proven here as byte
-// equality between two runs over the virtual_relations case, whose managed_by
-// and member_of edges hold no pricing_adjustments: one run with the adjustment
-// walk on, the defaults every case of the loop runs with, and one with it off,
-// which is the render path Phase 3 shipped. Without a relation type to walk,
-// runs.produce builds no adjuster and statements.Build renders the document
-// without one.
+// goldenPhase3Regression is the sixth row of WP 5.6, the phase's golden suite
+// table: a graph whose relations carry no adjustment leaves every statement at
+// the bytes Phase 3 rendered. "Byte-identical to the Phase 3 goldens" is proven
+// here as byte equality between two runs over the virtual_relations case, whose
+// managed_by and member_of edges hold no pricing_adjustments: one run with the
+// adjustment walk on, the defaults every case of the loop runs with, and one
+// with it off, which is the render path Phase 3 shipped. Without a relation
+// type to walk, runs.produce builds no adjuster and statements.Build renders
+// the document without one.
 //
 // Two runs that agree with each other and with nothing else would agree on the
 // wrong document, so both are also held to that case's expected.json, which
