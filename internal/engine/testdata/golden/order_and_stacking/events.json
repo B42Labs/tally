@@ -1,0 +1,19 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-i-stacking",
+      "timestamp": "2026-03-11T04:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-stacking",
+      "resource_type": "instance",
+      "resource_id": "i-stacking",
+      "project_id": "proj-stacking",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 50, "ram_gb": 100, "disk_gb": 500, "flavor": "m1.golden"}
+      }
+    }
+  ],
+  "bulk": []
+}

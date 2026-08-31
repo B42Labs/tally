@@ -1,0 +1,22 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-stacking", "external_id": "proj-stacking"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "os-golden-stacking", "external_id": "proj-stacking"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "kickback", "rate": "0.10", "scope": "all"},
+          {"type": "discount", "rate": "0.15", "scope": "all"},
+          {"type": "surcharge", "rate": "0.10", "scope": "all", "description": "Managed-service markup"}
+        ]
+      }
+    }
+  ]
+}

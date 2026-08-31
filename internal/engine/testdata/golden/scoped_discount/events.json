@@ -1,0 +1,33 @@
+{
+  "events": [
+    {
+      "event_id": "ev-create-i-scoped",
+      "timestamp": "2026-03-11T04:00:00Z",
+      "event_type": "compute.instance.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-scoped",
+      "resource_type": "instance",
+      "resource_id": "i-scoped",
+      "project_id": "proj-scoped",
+      "payload": {
+        "state": "active",
+        "size": {"vcpus": 4, "ram_gb": 8, "disk_gb": 80, "flavor": "m1.large"}
+      }
+    },
+    {
+      "event_id": "ev-create-vol-scoped",
+      "timestamp": "2026-03-11T04:00:00Z",
+      "event_type": "volume.create.end",
+      "platform": "openstack",
+      "cloud": "os-golden-scoped",
+      "resource_type": "volume",
+      "resource_id": "vol-scoped",
+      "project_id": "proj-scoped",
+      "payload": {
+        "state": "in-use",
+        "size": {"size_gb": 1000, "type": "ssd"}
+      }
+    }
+  ],
+  "bulk": []
+}

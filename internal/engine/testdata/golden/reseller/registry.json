@@ -1,0 +1,21 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-reseller", "external_id": "customer-proj-1"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "os-golden-reseller", "external_id": "customer-proj-1"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "discount", "description": "Reseller end-customer discount", "rate": "0.15", "scope": "all"},
+          {"type": "kickback", "description": "Reseller commission on net revenue", "rate": "0.10", "scope": "all"}
+        ]
+      }
+    }
+  ]
+}

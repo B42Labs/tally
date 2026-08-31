@@ -1,0 +1,85 @@
+{
+  "clouds": ["os-golden-reseller"],
+  "stats": {"candidates": 1, "usage_records": 1, "rated_records": 4, "statements": 1, "adjustment_records": 2},
+  "usage": [
+    {
+      "cloud": "os-golden-reseller",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-reseller",
+      "project_id": "customer-proj-1",
+      "state": "active",
+      "from": "2026-03-07T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2160000,
+      "usage": {
+        "minutes": "36000",
+        "count": "1",
+        "vcpus": "50",
+        "ram_gb": "100",
+        "disk_gb": "500",
+        "flavor": "m1.golden"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-reseller", "resource_id": "i-reseller", "from": "2026-03-07T00:00:00Z", "dimension": "vcpus", "quantity": "50", "amount": "600.00"},
+    {"cloud": "os-golden-reseller", "resource_id": "i-reseller", "from": "2026-03-07T00:00:00Z", "dimension": "ram_gb", "quantity": "100", "amount": "300.00"},
+    {"cloud": "os-golden-reseller", "resource_id": "i-reseller", "from": "2026-03-07T00:00:00Z", "dimension": "disk_gb", "quantity": "500", "amount": "300.00"},
+    {"cloud": "os-golden-reseller", "resource_id": "i-reseller", "from": "2026-03-07T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-reseller/customer-proj-1",
+      "total": "1020.00",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "customer-proj-1",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-reseller",
+          "total": "1200.00",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "600.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "50", "ram_gb": "100", "disk_gb": "500", "egress_gb": "0"},
+              "cost": {"vcpus": "600.00", "ram_gb": "300.00", "disk_gb": "300.00", "egress_gb": "0.00", "total": "1200.00"}
+            }
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "1200.00",
+      "adjustments": [
+        {
+          "type": "discount",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "description": "Reseller end-customer discount",
+          "rate": "0.15",
+          "base": "1200.00",
+          "amount": "-180.00"
+        },
+        {
+          "type": "kickback",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "description": "Reseller commission on net revenue",
+          "rate": "0.10",
+          "base": "1020.00",
+          "amount": "102.00"
+        }
+      ],
+      "net_cost": "1020.00",
+      "kickback_total": "102.00"
+    }
+  ],
+  "absent_statements": ["partner/partner-corp"]
+}

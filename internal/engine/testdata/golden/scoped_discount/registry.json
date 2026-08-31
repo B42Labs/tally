@@ -1,0 +1,20 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-scoped", "external_id": "proj-scoped"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "os-golden-scoped", "external_id": "proj-scoped"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "discount", "rate": "0.20", "scope": "openstack.instance"}
+        ]
+      }
+    }
+  ]
+}
