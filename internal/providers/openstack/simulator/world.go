@@ -84,6 +84,22 @@ func flavorByTypeID(typeID int) (flavor, bool) {
 	return flavor{}, false
 }
 
+// flavorByName returns the catalog entry of that name, and false for a name no
+// flavor of this world carries. It is the lookup the other direction: a size
+// names the flavor an instance runs on, and the dimensions behind that name are
+// what nova reports about the server.
+func flavorByName(name string) (flavor, bool) {
+	for _, f := range flavors {
+		if f.name == name {
+			return f, true
+		}
+	}
+	if bootVolumeFlavor.name == name {
+		return bootVolumeFlavor, true
+	}
+	return flavor{}, false
+}
+
 // runnerFlavors are the flavors a CI runner is drawn from. A runner holds one
 // job and is gone again, so it runs on the two small flavors of the catalog.
 var runnerFlavors = []flavor{flavors[0], flavors[1]}
