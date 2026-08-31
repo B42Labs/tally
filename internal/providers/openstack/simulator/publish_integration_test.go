@@ -839,6 +839,41 @@ func TestRunStoppedWhileHoldingKeepsTheHeldNotificationsBack(t *testing.T) {
 	depthStaysAt(t, outbox, onTheBus)
 }
 
+// TestRunStoppedWhileRegisteringWritesNothing is what SIGINT does to a run that
+// is registering: the process ends with exit status 0, the log says how far the
+// registration came, and neither a file nor a notification is left behind that
+// the run never got to. The registration is the one step of a run that turns a
+// failure into a clean stop, so the two halves of it are held here.
+func TestRunStoppedWhileRegisteringWritesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	logger, log := capturedLogger(t)
+	out := t.TempDir()
+
+	// https and a closed port: the registration is checked before it is sent, and
+	// the cancelled context ends it before anything is dialled.
+	err := Run(ctx, Config{
+		Cloud:        testCloud,
+		ReportingURL: "https://127.0.0.1:1",
+		APIToken:     "tly_a_secret-of-the-test",
+		GardenCloud:  gardenCloud,
+	}, RunOptions{Period: "2026-07", Seed: 1, Out: out, RegisterProjects: true}, nil, logger)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil: a stop while registering is a clean stop", err)
+	}
+	for _, want := range []string{"registration incomplete", "stopped"} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("the run logged %q, want a %q line: what reached the registry is what an "+
+				"operator has to know after a stop", log.String(), want)
+		}
+	}
+	entries, err := os.ReadDir(out)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("the output directory holds %v (error %v), want nothing: the month is written after "+
+			"the registration", entries, err)
+	}
+}
+
 // TestReleaseFailsWhenTheBrokerIsGone covers the release that cannot publish
 // what it let out. The endpoint answers it, because all a release does is close
 // a channel, and the run reports the failed publish afterwards: a broker that

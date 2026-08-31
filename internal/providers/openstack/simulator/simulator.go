@@ -66,6 +66,12 @@ type RunOptions struct {
 	// Faults are the switch names of --faults, which ParseFaults reads. Empty is
 	// every switch off.
 	Faults []string
+	// RegisterProjects registers the month's tenants, its Gardener projects, and
+	// the infrastructure_tenant relation between each project and its tenant
+	// with the Reporting API before the first file is written or the first
+	// notification published. What it needs is the environment, which Config
+	// checks through ValidateRegistration.
+	RegisterProjects bool
 }
 
 // Validate checks the options and returns the month Period names.
@@ -156,6 +162,10 @@ type queued struct {
 // publisher is file mode, where the month is written out and nothing reaches a
 // bus.
 //
+// With RegisterProjects the month's tenants, its Gardener projects and the
+// relations between them are registered with the Reporting API first, before
+// anything is written or published.
+//
 // The files are complete before the first notification is published, so a run
 // that is interrupted halfway still leaves a whole month on disk to replay.
 // There are three of them, and a fourth, held-back.jsonl, when the held-back
@@ -174,6 +184,13 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 	from, to, err := opts.Validate()
 	if err != nil {
 		return err
+	}
+	// Checked here as well as in the subcommand, because an exported function
+	// cannot rely on its caller having checked.
+	if opts.RegisterProjects {
+		if err := cfg.ValidateRegistration(); err != nil {
+			return fmt.Errorf("checking the configuration: %w", err)
+		}
 	}
 	if publisher == nil && opts.Out == "" {
 		return errors.New("set " + envAMQPURL + " or pass --out: the run has nowhere to publish")
@@ -198,6 +215,7 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"cloud", cfg.Cloud,
 		"factor", opts.Factor,
 		"faults", faults.Names(),
+		"register", opts.RegisterProjects,
 		"transitions", len(schedule),
 		"billable", len(schedule.Billable()),
 		"stream", len(month.Stream),
@@ -205,6 +223,38 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"resources", len(month.Oracle.Resources),
 		"broker", publisher != nil,
 		"out", opts.Out)
+
+	// Between the month and the files: a registration that fails leaves neither
+	// a file nor a notification behind, so what an operator finds afterwards is
+	// the registry the run got as far as, and nothing else of the month. It runs
+	// in file mode too, which is how an operator prepares the registry before a
+	// replay puts the recorded month on a bus. A context that ends here is the
+	// clean stop the rest of the run answers a signal with.
+	if opts.RegisterProjects {
+		regs, err := RegistrationsOf(month, cfg.GardenCloud)
+		if err != nil {
+			return fmt.Errorf("registering the projects: %w", err)
+		}
+		report, err := NewRegistrar(cfg.ReportingURL, cfg.APIToken, logger).Register(ctx, regs)
+		if err != nil {
+			// The rows that got through stay in the registry and the rerun finds
+			// them, so how far the registration came is said whichever way it
+			// ended: the counts of the line below are the only place the whole of
+			// it is, and "stopped" is about the notifications rather than the rows.
+			logger.Info("registration incomplete",
+				"projects_created", report.ProjectsCreated, "projects_existing", report.ProjectsExisting,
+				"relations_created", report.RelationsCreated, "relations_existing", report.RelationsExisting)
+			if ctx.Err() != nil {
+				logger.Info("stopped", "published", 0, "total", len(month.Stream)+len(month.Held))
+				return nil
+			}
+			return fmt.Errorf("registering the projects: %w", err)
+		}
+		logger.Info("registered",
+			"reporting_url", cfg.ReportingURL,
+			"projects_created", report.ProjectsCreated, "projects_existing", report.ProjectsExisting,
+			"relations_created", report.RelationsCreated, "relations_existing", report.RelationsExisting)
+	}
 
 	if opts.Out != "" {
 		if err := os.MkdirAll(opts.Out, outDirMode); err != nil {

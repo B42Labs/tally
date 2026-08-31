@@ -63,6 +63,13 @@ func newRunCmd() *cobra.Command {
 			if _, _, err := opts.Validate(); err != nil {
 				return err
 			}
+			// The switch is checked here too, so a missing token is reported before
+			// a broker is dialled, the way a mistyped period is.
+			if opts.RegisterProjects {
+				if err := cfg.ValidateRegistration(); err != nil {
+					return fmt.Errorf("checking the configuration: %w", err)
+				}
+			}
 
 			logger := newLogger(cmd.OutOrStdout(), cfg)
 
@@ -95,6 +102,9 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&opts.Faults, "faults", nil,
 		"fault switches to turn on, comma-separated: "+strings.Join(simulator.FaultNames, ", ")+
 			"; every switch is off by default")
+	cmd.Flags().BoolVar(&opts.RegisterProjects, "register-projects", false,
+		"register every tenant of the month, the Gardener projects, and their infrastructure_tenant "+
+			"relations with the Reporting API TALLY_SIM_REPORTING_URL names; off by default")
 	cmd.Flags().BoolVar(&allowRemoteBroker, allowRemoteBrokerFlag, false, allowRemoteBrokerUsage)
 	_ = cmd.MarkFlagRequired("period")
 	return cmd

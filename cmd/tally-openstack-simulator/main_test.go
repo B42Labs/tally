@@ -7,13 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/event"
@@ -40,6 +44,33 @@ const closedBroker = "amqp://guest:guest@127.0.0.1:1/"
 // remoteBroker is an AMQP URL of a broker somewhere else, which is the shape of
 // a production URL copied into the simulator's environment.
 const remoteBroker = "amqp://guest:hunter2@rabbit.control-plane.example:5672/"
+
+// closedRegistry is a Reporting API URL nothing listens on. It is a usable URL
+// on loopback, so a registration gets as far as posting the first project and
+// fails there rather than at the check of the environment. https, because the
+// admin api token travels on it and plaintext is refused unless it is asked
+// for.
+const closedRegistry = "https://127.0.0.1:1"
+
+// testAPIToken is the credential a registration authenticates with. The case
+// about a registry nothing listens on searches the failure for it, because a
+// message carrying the token would put it into whatever an operator pastes it
+// into.
+const testAPIToken = "tly_a_test"
+
+// gardenCloud is the cloud the two Gardener projects are registered under. It
+// differs from simulatedCloud because a cloud is one installation of one
+// platform, and the registry keys a row by its cloud.
+const gardenCloud = "garden-sim"
+
+// What seed 1 over endedMonth registers: a row per tenant of the month plus one
+// per Gardener project, and one infrastructure_tenant relation per Gardener
+// project. RegistrationsOf decides them, and these are the numbers that have to
+// reach the registry over the wire.
+const (
+	registeredProjects  = 8
+	registeredRelations = 2
+)
 
 // nonBillableNotifications is how many notifications of a month the collector
 // maps to no event: the unsized image.create, one per image, and every
@@ -317,14 +348,207 @@ func TestRunWritesTheHeldBackFileInFileMode(t *testing.T) {
 	})
 }
 
+// registryStub stands in for the project registry of the Reporting API. It
+// counts the projects and the relations it was posted and keeps every
+// credential it was sent, which is what a case holds a registration against.
+type registryStub struct {
+	*httptest.Server
+	mu             sync.Mutex
+	projects       int
+	relations      int
+	authorizations []string
+}
+
+// newRegistryStub starts a registry that holds nothing yet: every post is a row
+// that did not exist, so every answer is a 201 carrying the id the relations
+// address the row by.
+func newRegistryStub(t *testing.T) *registryStub {
+	t.Helper()
+
+	stub := &registryStub{}
+	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stub.mu.Lock()
+		stub.authorizations = append(stub.authorizations, r.Header.Get("Authorization"))
+		if r.Method == http.MethodPost {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/relations"):
+				stub.relations++
+			case r.URL.Path == "/api/v1/projects":
+				stub.projects++
+			}
+		}
+		stub.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		// The registration reads what a project is already related to before it
+		// creates a relation, and this registry holds none.
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/relations") {
+			if _, err := fmt.Fprint(w, `{"items":[]}`); err != nil {
+				t.Errorf("answering %s %s: %v", r.Method, r.URL.Path, err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		if _, err := fmt.Fprintf(w, `{"id":%q}`, uuid.New()); err != nil {
+			t.Errorf("answering %s %s: %v", r.Method, r.URL.Path, err)
+		}
+	}))
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+// counts is how many projects and relations the stub was posted.
+func (s *registryStub) counts() (projects, relations int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.projects, s.relations
+}
+
+// credentials is the Authorization header of every request the stub was sent.
+func (s *registryStub) credentials() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.authorizations)
+}
+
+// holdCredentialsTo holds every credential the stub was sent against that
+// token. A stub that was sent nothing fails the case rather than passing it: a
+// check over an empty list is a registration that never happened.
+func holdCredentialsTo(t *testing.T, stub *registryStub, token string) {
+	t.Helper()
+
+	credentials := stub.credentials()
+	if len(credentials) == 0 {
+		t.Fatalf("the registry was sent no request at all, want the month registered")
+	}
+	for _, credential := range credentials {
+		if want := "Bearer " + token; credential != want {
+			t.Errorf("the registry was sent the credential %q, want %q", credential, want)
+		}
+	}
+}
+
+// logLine is the JSON log line the run wrote under that message. The run logs
+// through the command's own output, so what a case reads is the stdout runCLI
+// hands back.
+func logLine(t *testing.T, stdout, message string) map[string]any {
+	t.Helper()
+
+	for _, raw := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			continue
+		}
+		if line["msg"] == message {
+			return line
+		}
+	}
+	t.Fatalf("the run logged no %q line, and the case needs one:\n%s", message, stdout)
+	return nil
+}
+
+// TestRunRegistersTheMonthInFileMode covers --register-projects: the tenants of
+// the month, the two Gardener projects, and the relation that attributes a
+// tenant's cost to the project running on it reach the registry before the
+// month is written. File mode registers as well, because that is how an
+// operator prepares the registry for a replay of the recorded month.
+func TestRunRegistersTheMonthInFileMode(t *testing.T) {
+	useCloud(t)
+	stub := newRegistryStub(t)
+	t.Setenv("TALLY_SIM_REPORTING_URL", stub.URL)
+	// The stub serves plaintext on this machine, which is the one place a
+	// registration may carry the admin api token in the clear, and it has to be
+	// asked for the way a deployment asks for it.
+	t.Setenv("TALLY_SIM_REPORTING_INSECURE", "true")
+	t.Setenv("TALLY_SIM_API_TOKEN", testAPIToken)
+	t.Setenv("TALLY_SIM_GARDEN_CLOUD", gardenCloud)
+
+	dir := t.TempDir()
+	stdout, stderr, err := runCLI(t,
+		"run", "--register-projects", "--period", endedMonth, "--seed", "1", "--out", dir)
+	if err != nil {
+		t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+	}
+
+	projects, relations := stub.counts()
+	if projects != registeredProjects || relations != registeredRelations {
+		t.Errorf("the registry was posted %d projects and %d relations, want %d and %d: "+
+			"a row per tenant, a row per Gardener project, and a relation per Gardener project",
+			projects, relations, registeredProjects, registeredRelations)
+	}
+	holdCredentialsTo(t, stub, testAPIToken)
+
+	// The month is written too, and after the registration: a run that registers
+	// leaves the same three files behind as one that does not.
+	for _, name := range []string{"notifications.jsonl", "events.jsonl", "oracle.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("Stat(%s) error = %v, want nil", filepath.Join(dir, name), err)
+		}
+	}
+
+	// The log is what an operator reads the registration off, so it states that
+	// the switch was on and what the registry answered.
+	if starting := logLine(t, stdout, "starting"); starting["register"] != true {
+		t.Errorf("the starting line carries register = %v, want true", starting["register"])
+	}
+	registered := logLine(t, stdout, "registered")
+	if got := registered["reporting_url"]; got != stub.URL {
+		t.Errorf("the registered line carries reporting_url = %v, want %q", got, stub.URL)
+	}
+	for key, want := range map[string]float64{
+		"projects_created":   registeredProjects,
+		"projects_existing":  0,
+		"relations_created":  registeredRelations,
+		"relations_existing": 0,
+	} {
+		if got, ok := registered[key].(float64); !ok || got != want {
+			t.Errorf("the registered line carries %s = %v, want %v", key, registered[key], want)
+		}
+	}
+
+	t.Run("without the flag", func(t *testing.T) {
+		quiet := newRegistryStub(t)
+		t.Setenv("TALLY_SIM_REPORTING_URL", quiet.URL)
+
+		if _, stderr, err := runCLI(t,
+			"run", "--period", endedMonth, "--seed", "1", "--out", t.TempDir()); err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		if projects, relations := quiet.counts(); projects+relations > 0 {
+			t.Errorf("the registry was posted %d projects and %d relations, want nothing at all: "+
+				"a run without --register-projects registers no row", projects, relations)
+		}
+	})
+
+	t.Run("the token comes from a file", func(t *testing.T) {
+		fromFile := newRegistryStub(t)
+		t.Setenv("TALLY_SIM_REPORTING_URL", fromFile.URL)
+		t.Setenv("TALLY_SIM_API_TOKEN", "")
+		t.Setenv("TALLY_SIM_API_TOKEN_FILE", writeFile(t, t.TempDir(), "api-token", "tly_a_x\n"))
+
+		if _, stderr, err := runCLI(t, "run", "--register-projects", "--period", endedMonth,
+			"--seed", "1", "--out", t.TempDir()); err != nil {
+			t.Fatalf("run error = %v, want nil (stderr %q)", err, stderr)
+		}
+		// The trailing newline a Kubernetes Secret volume writes is not part of
+		// the credential.
+		holdCredentialsTo(t, fromFile, "tly_a_x")
+	})
+}
+
 func TestRunRefusesBadInput(t *testing.T) {
 	notADirectory := writeFile(t, t.TempDir(), "notifications.jsonl", "")
 	urlFile := writeFile(t, t.TempDir(), "amqp-url", closedBroker)
 	emptyURLFile := writeFile(t, t.TempDir(), "empty-amqp-url", "")
+	tokenFile := writeFile(t, t.TempDir(), "api-token", "tly_a_x\n")
+	emptyTokenFile := writeFile(t, t.TempDir(), "empty-api-token", "")
 	// The output directory of the case about an unknown fault switch. It is held
 	// outside the case so the body can read it back: a refused switch has to end
 	// the run before the month is written.
 	faultOut := t.TempDir()
+	// The same for the case about a registry nothing listens on: a registration
+	// that fails ends the run before the month is written.
+	registerOut := t.TempDir()
 
 	for _, tc := range []struct {
 		name string
@@ -441,6 +665,83 @@ func TestRunRefusesBadInput(t *testing.T) {
 			},
 			want: "--faults: pre-existing and missing-create exclude each other",
 		},
+		{
+			name: "a registration without a Reporting API",
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: "checking the configuration: TALLY_SIM_REPORTING_URL: " +
+				"must be set when --register-projects is on",
+		},
+		{
+			name: "a registration without a token",
+			env:  map[string]string{"TALLY_SIM_REPORTING_URL": closedRegistry},
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: "checking the configuration: TALLY_SIM_API_TOKEN: " +
+				"must be set when --register-projects is on",
+		},
+		{
+			name: "a registration without a cloud for the Gardener projects",
+			env: map[string]string{
+				"TALLY_SIM_REPORTING_URL": closedRegistry,
+				"TALLY_SIM_API_TOKEN":     testAPIToken,
+			},
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: "checking the configuration: TALLY_SIM_GARDEN_CLOUD: " +
+				"must be set when --register-projects is on",
+		},
+		{
+			name: "the Gardener projects under the tenants' cloud",
+			env: map[string]string{
+				"TALLY_SIM_REPORTING_URL": closedRegistry,
+				"TALLY_SIM_API_TOKEN":     testAPIToken,
+				"TALLY_SIM_GARDEN_CLOUD":  simulatedCloud,
+			},
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: `checking the configuration: TALLY_SIM_GARDEN_CLOUD: "os-sim" must differ from ` +
+				"TALLY_SIM_CLOUD: a cloud is one installation of one platform",
+		},
+		{
+			name: "a Reporting API that is not an HTTP URL",
+			env: map[string]string{
+				"TALLY_SIM_REPORTING_URL": "ftp://api",
+				"TALLY_SIM_API_TOKEN":     testAPIToken,
+				"TALLY_SIM_GARDEN_CLOUD":  gardenCloud,
+			},
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: "checking the configuration: " +
+				`TALLY_SIM_REPORTING_URL: "ftp://api" must be an absolute http(s) URL with no ` +
+				"query or fragment, because the registry route is appended to it",
+		},
+		{
+			name: "a token given twice",
+			env: map[string]string{
+				"TALLY_SIM_API_TOKEN":      testAPIToken,
+				"TALLY_SIM_API_TOKEN_FILE": tokenFile,
+			},
+			args: []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			want: "loading the configuration: set TALLY_SIM_API_TOKEN or TALLY_SIM_API_TOKEN_FILE, not both",
+		},
+		{
+			name:     "a token file nobody filled",
+			env:      map[string]string{"TALLY_SIM_API_TOKEN_FILE": emptyTokenFile},
+			args:     []string{"--register-projects", "--period", endedMonth, "--out", t.TempDir()},
+			contains: fmt.Sprintf("TALLY_SIM_API_TOKEN_FILE: file %s is empty", emptyTokenFile),
+		},
+		{
+			name: "a registry nothing listens on",
+			env: map[string]string{
+				"TALLY_SIM_REPORTING_URL": closedRegistry,
+				"TALLY_SIM_API_TOKEN":     testAPIToken,
+				"TALLY_SIM_GARDEN_CLOUD":  gardenCloud,
+			},
+			args:     []string{"--register-projects", "--period", endedMonth, "--out", registerOut},
+			contains: "registering the projects: POST /api/v1/projects:",
+			// The failure names the route and the dial, and the token stays out of
+			// it: an operator pastes such a message into a ticket.
+			absent: testAPIToken,
+			// The registration runs before the month is written, so a run that
+			// cannot register leaves no file behind either.
+			emptyDir: registerOut,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useCloud(t)
@@ -491,6 +792,23 @@ func TestRunHelpListsTheFaultSwitches(t *testing.T) {
 		if !strings.Contains(stdout, name) {
 			t.Errorf("run --help does not name the fault switch %q, want all of %v listed",
 				name, simulator.FaultNames)
+		}
+	}
+}
+
+// TestRunHelpListsTheRegistrySwitch holds the help of run to the switch that
+// registers the month. A switch the help does not name is one nobody reaches
+// without reading the source.
+func TestRunHelpListsTheRegistrySwitch(t *testing.T) {
+	blankEnvironment(t)
+
+	stdout, stderr, err := runCLI(t, "run", "--help")
+	if err != nil {
+		t.Fatalf("run --help error = %v, want nil (stderr %q)", err, stderr)
+	}
+	for _, want := range []string{"--register-projects", "TALLY_SIM_REPORTING_URL"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("run --help does not name %q, want it in the help of the switch", want)
 		}
 	}
 }

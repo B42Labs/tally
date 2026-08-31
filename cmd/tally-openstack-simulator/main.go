@@ -7,7 +7,10 @@
 // events.jsonl and oracle.json instead, and to held-back.jsonl beside them when
 // a switch holds notifications back; with both it does both. With --faults it
 // turns fault switches on, each of which changes what the bus carries and never
-// the month the oracle states; the run help names the six.
+// the month the oracle states; the run help names the six. With
+// --register-projects the run registers the month's tenants, its two Gardener
+// projects and their infrastructure_tenant relations with the Reporting API
+// TALLY_SIM_REPORTING_URL names before it writes or publishes anything.
 // The replay subcommand publishes a notifications.jsonl an earlier run wrote,
 // which puts the same month on a bus again without the generator behind it. The
 // compare subcommand reads the oracle a run wrote, an engine export of the
