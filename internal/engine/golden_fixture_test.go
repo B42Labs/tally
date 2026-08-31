@@ -115,9 +115,13 @@ func newGoldenFixture(t *testing.T) goldenFixture {
 // caseDBs is the pair of databases one case runs against, and the source handle
 // the engine reads the reporting side through.
 type caseDBs struct {
-	engine    *pgxpool.Pool
+	engine *pgxpool.Pool
+	// reporting is reportingStore.Pool(), the pool the fixtures seed through.
 	reporting *pgxpool.Pool
 	source    *source.DB
+	// reportingStore is the store the registry API of the auditability drill is
+	// built over.
+	reportingStore *reportingstore.Store
 }
 
 // caseDatabases creates, migrates and opens the two databases of one case, and
@@ -169,7 +173,12 @@ func (f goldenFixture) caseDatabases(t *testing.T, name string) caseDBs {
 	}
 	t.Cleanup(src.Close)
 
-	return caseDBs{engine: engineDB.Pool(), reporting: reportingDB.Pool(), source: src}
+	return caseDBs{
+		engine:         engineDB.Pool(),
+		reporting:      reportingDB.Pool(),
+		source:         src,
+		reportingStore: reportingDB,
+	}
 }
 
 // eventsFile is events.json, and late.json, which has the same shape: the
