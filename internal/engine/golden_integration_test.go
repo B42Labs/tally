@@ -316,6 +316,7 @@ func TestGolden(t *testing.T) {
 	t.Run("invariant_violation", func(t *testing.T) { goldenInvariantViolation(t, f) })
 	t.Run("scheduler_drill", func(t *testing.T) { goldenSchedulerDrill(t, f) })
 	t.Run("temporal", func(t *testing.T) { goldenTemporal(t, f) })
+	t.Run("phase3_regression", func(t *testing.T) { goldenPhase3Regression(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -1317,5 +1318,122 @@ func goldenTemporal(t *testing.T, f goldenFixture) {
 	}
 	if len(run.Kickbacks) != 0 {
 		t.Errorf("the April run settles the kickbacks %+v, want none", run.Kickbacks)
+	}
+}
+
+// goldenPhase3Regression is the sixth row of the phase's exit criteria: a graph
+// whose relations carry no adjustment leaves every statement at the bytes Phase
+// 3 rendered. "Byte-identical to the Phase 3 goldens" is proven here as byte
+// equality between two runs over the virtual_relations case, whose managed_by
+// and member_of edges hold no pricing_adjustments: one run with the adjustment
+// walk on, the defaults every case of the loop runs with, and one with it off,
+// which is the render path Phase 3 shipped. Without a relation type to walk,
+// runs.produce builds no adjuster and statements.Build renders the document
+// without one.
+//
+// Two runs that agree with each other and with nothing else would agree on the
+// wrong document, so both are also held to that case's expected.json, which
+// carries the Phase 3 numbers.
+func goldenPhase3Regression(t *testing.T, f goldenFixture) {
+	c := loadCase(t, "virtual_relations")
+	want := loadExpected(t, "virtual_relations")
+	dbs := f.caseDatabases(t, "phase3_regression")
+	ctx := t.Context()
+
+	seeded := seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+	dir := t.TempDir()
+
+	first, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, want.Clouds))
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, first)
+	assertStats(t, first.Stats, want.Stats)
+	assertUsage(t, dbs, first.RunID, want.Usage)
+
+	a, err := export.Load(ctx, dbs.engine, first.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	assertRated(t, a.Rated, want.Rated)
+	// No statement of the file lists base_cost, so this is what says the walk
+	// left the four commercial members off the document it reached.
+	assertStatements(t, a.Statements, want.Statements, want.AbsentStatements, seeded)
+	assertAdjustmentRecords(t, dbs, first.RunID, want.Statements, seeded)
+	assertKickbacks(t, a.Kickbacks, want.Statements, seeded)
+	if first.Stats.AdjustmentRecords != 0 {
+		t.Errorf("Stats.AdjustmentRecords = %d, want none: the edges of the case adjust nothing",
+			first.Stats.AdjustmentRecords)
+	}
+	if records := readAdjustmentRecords(t, dbs, first.RunID); len(records) != 0 {
+		t.Errorf("the walking run stored the adjustment records %+v, want none", records)
+	}
+	if len(a.Kickbacks) != 0 {
+		t.Errorf("the walking run settles the kickbacks %+v, want none", a.Kickbacks)
+	}
+	// The second run supersedes the first, and export.Load refuses a superseded
+	// run, so the first run is read and written out before the second opens.
+	if err := (export.JSONFiles{Dir: filepath.Join(dir, "a")}).Export(ctx, a); err != nil {
+		t.Fatalf("JSONFiles.Export: %v", err)
+	}
+
+	// The same period without a relation type to walk: adjustments are off.
+	opts := c.options(t, want.Clouds)
+	opts.AdjustmentRelationTypes = nil
+	second, err := runs.Execute(ctx, dbs.engine, dbs.source, opts)
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, second)
+	if !slices.Equal(second.Superseded, []uuid.UUID{first.RunID}) {
+		t.Errorf("Superseded = %v, want the first run %s", second.Superseded, first.RunID)
+	}
+
+	b, err := export.Load(ctx, dbs.engine, second.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	if err := (export.JSONFiles{Dir: filepath.Join(dir, "b")}).Export(ctx, b); err != nil {
+		t.Fatalf("JSONFiles.Export: %v", err)
+	}
+
+	if len(b.Statements) != len(a.Statements) {
+		t.Fatalf("the run without the walk billed %d statements, want the %d of the walking one",
+			len(b.Statements), len(a.Statements))
+	}
+	for i, want := range a.Statements {
+		got := b.Statements[i]
+		if got.Key != want.Key {
+			t.Errorf("statement %d: key = %q, want %q", i, got.Key, want.Key)
+		}
+		if !bytes.Equal(got.Document, want.Document) {
+			t.Errorf("the document of %s = %s, want %s", want.Key, got.Document, want.Document)
+		}
+		if !got.Total.Equal(want.Total) {
+			t.Errorf("the total of %s = %s, want %s", want.Key, got.Total, want.Total)
+		}
+		if got.Currency != want.Currency {
+			t.Errorf("the currency of %s = %q, want %q", want.Key, got.Currency, want.Currency)
+		}
+	}
+
+	// The document a customer receives, on disk. kickbacks.json names the run it
+	// was settled from, so it is not the file the two exports are compared on.
+	document := export.DocumentFileName(runs.KindRegular, "gd-golden-virtual/team-alpha")
+	if want := "statement-gd-golden-virtual%2Fteam-alpha.json"; document != want {
+		t.Fatalf("export.DocumentFileName = %q, want %q", document, want)
+	}
+	documentA := readExported(t, filepath.Join(dir, "a", document))
+	documentB := readExported(t, filepath.Join(dir, "b", document))
+	if !bytes.Equal(documentA, documentB) {
+		t.Errorf("the two exports of %s differ:\n%s\n%s", document, documentA, documentB)
+	}
+
+	if len(b.Kickbacks) != 0 {
+		t.Errorf("the run without the walk settles the kickbacks %+v, want none", b.Kickbacks)
+	}
+	if records := readAdjustmentRecords(t, dbs, second.RunID); len(records) != 0 {
+		t.Errorf("the run without the walk stored the adjustment records %+v, want none", records)
 	}
 }
