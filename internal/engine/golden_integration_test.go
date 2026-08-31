@@ -323,6 +323,7 @@ func TestGolden(t *testing.T) {
 	t.Run("phase3_regression", func(t *testing.T) { goldenPhase3Regression(t, f) })
 	t.Run("adjusted_reproducibility", func(t *testing.T) { goldenAdjustedReproducibility(t, f) })
 	t.Run("auditability_drill", func(t *testing.T) { goldenAuditabilityDrill(t, f) })
+	t.Run("adjusted_correction", func(t *testing.T) { goldenAdjustedCorrection(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -1774,5 +1775,465 @@ func goldenAuditabilityDrill(t *testing.T, f goldenFixture) {
 					row.relationID, row.typ, row.scope, row.rate)
 			}
 		}
+	}
+}
+
+// goldenAdjustedCorrection runs the correction chain over an adjusted month. It
+// is the phase's fourth exit criterion. The reseller case is billed, finalized,
+// reached by a power cycle that arrives after the invoice, and corrected: the
+// late events move the base, and the credit note has to carry the discount's and
+// the kickback's share of that move beside the usage deltas, so that the credit
+// note and the partner's settlement follow the corrected usage line for line. A
+// second correction after the first is finalized finds nothing left to credit.
+func goldenAdjustedCorrection(t *testing.T, f goldenFixture) {
+	const (
+		cloud = "os-golden-reseller"
+		key   = cloud + "/customer-proj-1"
+	)
+
+	c := loadCase(t, "reseller")
+	want := loadExpected(t, "reseller")
+	dbs := f.caseDatabases(t, "adjusted_correction")
+	ctx := t.Context()
+
+	seeded := seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+
+	// The month as it was invoiced: the instance from 2026-03-07 at the base
+	// cost 1200.00, the 15 % discount off it, and the partner's 10 % on the net
+	// cost it leaves. The case writes those numbers down, so the run is held to
+	// its expectations whole rather than to totals spelled out again here.
+	regular, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, want.Clouds))
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, regular)
+	assertStats(t, regular.Stats, want.Stats)
+	assertUsage(t, dbs, regular.RunID, want.Usage)
+
+	run, err := export.Load(ctx, dbs.engine, regular.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	assertRated(t, run.Rated, want.Rated)
+	assertStatements(t, run.Statements, want.Statements, want.AbsentStatements, seeded)
+	assertAdjustmentRecords(t, dbs, regular.RunID, want.Statements, seeded)
+	assertKickbacks(t, run.Kickbacks, want.Statements, seeded)
+
+	kind, err := runs.Finalize(ctx, dbs.engine, periodFrom, regular.RunID)
+	if err != nil {
+		t.Fatalf("runs.Finalize: %v", err)
+	}
+	if kind != runs.KindRegular {
+		t.Errorf("runs.Finalize closed a %q, want a %q", kind, runs.KindRegular)
+	}
+	status, finalized := periodRow(t, dbs)
+	if status != "finalized" {
+		t.Errorf("the billing period is %q, want finalized", status)
+	}
+	if finalized != regular.RunID {
+		t.Errorf("the period was closed by %s, want the regular run %s", finalized, regular.RunID)
+	}
+
+	// The power cycle, arriving after the month was closed. Its events are
+	// dated inside the period and reach the reporting database at an instant
+	// past the one the finalized run read it at.
+	seedLate(t, dbs, c)
+
+	late, err := runs.DetectLate(ctx, dbs.engine, dbs.source, periodFrom, periodTo)
+	if err != nil {
+		t.Fatalf("runs.DetectLate: %v", err)
+	}
+	if late.RunID != regular.RunID {
+		t.Errorf("the late events are held against %s, want the finalized run %s", late.RunID, regular.RunID)
+	}
+	if late.Kind != runs.KindRegular {
+		t.Errorf("the run the late events are held against is a %q, want a %q", late.Kind, runs.KindRegular)
+	}
+	if late.Truncated != 0 {
+		t.Errorf("Truncated = %d, want none: the case has one resource", late.Truncated)
+	}
+	if len(late.Resources) != 1 {
+		t.Fatalf("late resources = %v, want the one instance the power cycle reached", late.Resources)
+	}
+	wantResource := source.Resource{
+		Cloud: cloud, Platform: "openstack", ResourceType: "instance", ResourceID: "i-reseller",
+	}
+	if late.Resources[0].Resource != wantResource {
+		t.Errorf("the late resource = %+v, want %+v", late.Resources[0].Resource, wantResource)
+	}
+	if late.Resources[0].Events != 2 {
+		t.Errorf("the late resource carries %d events, want the two of the power cycle",
+			late.Resources[0].Events)
+	}
+
+	first, err := runs.Correct(ctx, dbs.engine, dbs.source, c.correctOptions(t))
+	if err != nil {
+		t.Fatalf("runs.Correct: %v", err)
+	}
+	if first.CorrectsRunID != regular.RunID {
+		t.Errorf("CorrectsRunID = %s, want the finalized run %s", first.CorrectsRunID, regular.RunID)
+	}
+	if first.PricingVersion != pricingVersion {
+		t.Errorf("PricingVersion = %q, want the %q the corrected run rated with",
+			first.PricingVersion, pricingVersion)
+	}
+	assertNoWarnings(t, first.Stats.Stats)
+	for _, count := range []struct {
+		name      string
+		got, want int
+	}{
+		{"deltas", first.Stats.Deltas, 3},
+		{"adjustment_deltas", first.Stats.AdjustmentDeltas, 2},
+		{"adjustment_records", first.Stats.AdjustmentRecords, 2},
+		{"usage_records", first.Stats.UsageRecords, 3},
+		{"rated_records", first.Stats.RatedRecords, 12},
+		{"statements", first.Stats.Statements, 1},
+	} {
+		if count.got != count.want {
+			t.Errorf("correction stats %s = %d, want %d", count.name, count.got, count.want)
+		}
+	}
+
+	credit, err := export.Load(ctx, dbs.engine, first.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	// The instance ran 600 hours from 2026-03-07. The power cycle puts the 120
+	// hours from 2026-03-17 to 2026-03-22 into shutoff, which the model rates at
+	// the modifier 0.5, so the correction rates 540 effective hours: vcpus
+	// 50 x 540 x 0.02 = 540.00, ram_gb 100 x 540 x 0.005 = 270.00, disk_gb
+	// 500 x 540 x 0.001 = 270.00. They come in the order the diff sorts its
+	// keys. The egress both passes rated at zero is no difference, so the
+	// correction writes no delta for it.
+	wantDeltas := []struct{ dimension, old, new, delta string }{
+		{"disk_gb", "300.00", "270.00", "-30.00"},
+		{"ram_gb", "300.00", "270.00", "-30.00"},
+		{"vcpus", "600.00", "540.00", "-60.00"},
+	}
+	if len(credit.Deltas) != len(wantDeltas) {
+		t.Fatalf("deltas = %d, want %d", len(credit.Deltas), len(wantDeltas))
+	}
+	for i, w := range wantDeltas {
+		got := credit.Deltas[i]
+		for _, field := range []struct{ name, got, want string }{
+			{"dimension", got.Dimension, w.dimension},
+			{"cloud", got.Cloud, cloud},
+			{"resource_id", got.ResourceID, "i-reseller"},
+			{"project_id", got.ProjectID, "customer-proj-1"},
+			{"currency", got.Currency, currency},
+		} {
+			if field.got != field.want {
+				t.Errorf("delta %d: %s = %q, want %q", i, field.name, field.got, field.want)
+			}
+		}
+		for _, amount := range []struct {
+			name string
+			got  decimal.Decimal
+			want string
+		}{
+			{"old", got.Old, w.old},
+			{"new", got.New, w.new},
+			// The embedded corrections.Delta carries a field of its own name,
+			// so the difference is one level down from the export record.
+			{"delta", got.Delta.Delta, w.delta},
+		} {
+			if want := decimal.RequireFromString(amount.want); !amount.got.Equal(want) {
+				t.Errorf("delta %d: the %s amount of %s = %s, want %s",
+					i, amount.name, w.dimension, amount.got, want)
+			}
+		}
+	}
+
+	if len(credit.Statements) != 1 {
+		t.Fatalf("credit notes = %d, want the one project of the case", len(credit.Statements))
+	}
+	note := credit.Statements[0]
+	if note.Key != key {
+		t.Errorf("credit note key = %q, want %q", note.Key, key)
+	}
+	// The note settles the net delta, which is what the customer is credited.
+	if want := decimal.RequireFromString("-102.00"); !note.Total.Equal(want) {
+		t.Errorf("the total of the credit note of %s = %s, want %s", key, note.Total, want)
+	}
+	if note.Currency != currency {
+		t.Errorf("the currency of the credit note of %s = %q, want %q", key, note.Currency, currency)
+	}
+	var document corrections.CreditNote
+	if err := json.Unmarshal(note.Document, &document); err != nil {
+		t.Fatalf("decoding the credit note of %s: %v", key, err)
+	}
+	if document.CorrectsRunID != regular.RunID.String() {
+		t.Errorf("the credit note corrects run %s, want the finalized run %s",
+			document.CorrectsRunID, regular.RunID)
+	}
+	assertBillingPeriod(t, "the credit note of "+key, document.BillingPeriod,
+		expectedBillingPeriod{From: "2026-03-01T00:00:00Z", To: "2026-04-01T00:00:00Z"})
+	for _, field := range []struct{ name, got, want string }{
+		{"project", document.ProjectID, "customer-proj-1"},
+		{"platform", document.Platform, "openstack"},
+	} {
+		if field.got != field.want {
+			t.Errorf("the %s of the credit note of %s = %q, want %q",
+				field.name, key, field.got, field.want)
+		}
+	}
+	if len(document.RelatedCosts) != 0 {
+		t.Errorf("the credit note of %s carries the related costs %+v, want none: "+
+			"the case registers the partner beside the customer and relates them, "+
+			"which is not an attributing edge", key, document.RelatedCosts)
+	}
+
+	if len(document.LineItems) != 1 {
+		t.Fatalf("the credit note of %s carries %d line items, want the one instance the power cycle reached",
+			key, len(document.LineItems))
+	}
+	line := document.LineItems[0]
+	for _, field := range []struct{ name, got, want string }{
+		{"resource_type", line.ResourceType, "instance"},
+		{"resource_id", line.ResourceID, "i-reseller"},
+		{"platform", line.Platform, "openstack"},
+	} {
+		if field.got != field.want {
+			t.Errorf("the line of the credit note of %s: %s = %q, want %q",
+				key, field.name, field.got, field.want)
+		}
+	}
+	// The line credits the usage, so its total is the base delta and not the
+	// net one the note settles.
+	if want := decimal.RequireFromString("-120.00"); !line.Total.Equal(want) {
+		t.Errorf("the total of the line of the credit note of %s = %s, want %s", key, line.Total, want)
+	}
+	if len(line.Dimensions) != len(wantDeltas) {
+		t.Errorf("the line of the credit note of %s credits %d dimensions, want %d",
+			key, len(line.Dimensions), len(wantDeltas))
+	}
+	for _, w := range wantDeltas {
+		change, credited := line.Dimensions[w.dimension]
+		if !credited {
+			t.Errorf("the line of the credit note of %s credits no %s", key, w.dimension)
+			continue
+		}
+		for _, amount := range []struct {
+			name string
+			got  decimal.Decimal
+			want string
+		}{
+			{"old", change.Old.Decimal, w.old},
+			{"new", change.New.Decimal, w.new},
+			{"delta", change.Delta.Decimal, w.delta},
+		} {
+			if want := decimal.RequireFromString(amount.want); !amount.got.Equal(want) {
+				t.Errorf("the %s of the %s on the credit note of %s = %s, want %s",
+					amount.name, w.dimension, key, amount.got, want)
+			}
+		}
+	}
+
+	// The commercial part of the note, which a correction of an unadjusted month
+	// leaves off. The base falls from 1200.00 to 1080.00, so the discount off it
+	// goes from -180.00 to 0.15 x 1080.00 = -162.00, the net cost from 1020.00 to
+	// 918.00, and the partner's commission from 102.00 to 0.10 x 918.00 = 91.80.
+	for _, member := range []struct {
+		name    string
+		missing bool
+	}{
+		{"base_delta", document.BaseDelta == nil},
+		{"net_delta", document.NetDelta == nil},
+		{"kickback_delta", document.KickbackDelta == nil},
+	} {
+		if member.missing {
+			t.Fatalf("the credit note of %s carries no %s, want the one the adjustments moved",
+				key, member.name)
+		}
+	}
+	for _, amount := range []struct {
+		name string
+		got  decimal.Decimal
+		want string
+	}{
+		{"base delta", document.BaseDelta.Decimal, "-120.00"},
+		{"net delta", document.NetDelta.Decimal, "-102.00"},
+		{"kickback delta", document.KickbackDelta.Decimal, "-10.20"},
+	} {
+		if want := decimal.RequireFromString(amount.want); !amount.got.Equal(want) {
+			t.Errorf("the %s of the credit note of %s = %s, want %s", amount.name, key, amount.got, want)
+		}
+	}
+
+	if len(document.Adjustments) != 2 {
+		t.Fatalf("the credit note of %s carries %d adjustments, want the discount and the kickback",
+			key, len(document.Adjustments))
+	}
+	for i, w := range []struct {
+		typ, rate, old, new, delta string
+	}{
+		{adjustment.TypeDiscount, "0.15", "-180.00", "-162.00", "18.00"},
+		{adjustment.TypeKickback, "0.10", "102.00", "91.80", "-10.20"},
+	} {
+		got := document.Adjustments[i]
+		for _, field := range []struct{ name, got, want string }{
+			{"type", got.Type, w.typ},
+			{"relation_type", got.RelationType, "managed_by"},
+			{"relation_target", got.RelationTarget, "partner-corp"},
+			{"relation_id", got.RelationID, seeded.relations[0].String()},
+			{"scope", got.Scope, "all"},
+		} {
+			if field.got != field.want {
+				t.Errorf("adjustment %d of the credit note of %s: %s = %q, want %q",
+					i, key, field.name, field.got, field.want)
+			}
+		}
+		for _, amount := range []struct {
+			name string
+			got  decimal.Decimal
+			want string
+		}{
+			{"rate", got.Rate.Decimal, w.rate},
+			{"old", got.Old.Decimal, w.old},
+			{"new", got.New.Decimal, w.new},
+			{"delta", got.Delta.Decimal, w.delta},
+		} {
+			if want := decimal.RequireFromString(amount.want); !amount.got.Equal(want) {
+				t.Errorf("adjustment %d of the credit note of %s: %s = %s, want %s",
+					i, key, amount.name, amount.got, want)
+			}
+		}
+	}
+
+	// What the partner is settled for the correction. A correction's kickbacks
+	// are the differences to the run it corrects, so the base and the amount are
+	// the new ones minus the old.
+	if len(credit.Kickbacks) != 1 {
+		t.Fatalf("kickbacks = %+v, want the one the correction moved", credit.Kickbacks)
+	}
+	paid := credit.Kickbacks[0]
+	for _, field := range []struct{ name, got, want string }{
+		{"beneficiary", paid.Beneficiary, "partner-corp"},
+		{"currency", paid.Currency, currency},
+		{"statement_key", paid.StatementKey, key},
+		{"cloud", paid.Cloud, cloud},
+		{"project_id", paid.ProjectID, "customer-proj-1"},
+		{"scope", paid.Scope, "all"},
+	} {
+		if field.got != field.want {
+			t.Errorf("the settled kickback: %s = %q, want %q", field.name, field.got, field.want)
+		}
+	}
+	if paid.RelationID != seeded.relations[0] {
+		t.Errorf("the settled kickback came off relation %s, want the one of the case %s",
+			paid.RelationID, seeded.relations[0])
+	}
+	for _, amount := range []struct {
+		name string
+		got  decimal.Decimal
+		want string
+	}{
+		{"rate", paid.Rate, "0.10"},
+		{"base", paid.Base, "-102.00"},
+		{"amount", paid.Amount, "-10.20"},
+	} {
+		if want := decimal.RequireFromString(amount.want); !amount.got.Equal(want) {
+			t.Errorf("the settled kickback: %s = %s, want %s", amount.name, amount.got, want)
+		}
+	}
+
+	// The rows behind that settlement. They carry what the correction applied
+	// rather than the differences: the discount off the 1080.00 the month now
+	// costs, and the commission on the 918.00 it leaves. type sorts discount
+	// before kickback under one project and relation, which is the order the
+	// query reads them in.
+	records := readAdjustmentRecords(t, dbs, first.RunID)
+	if len(records) != 2 {
+		t.Fatalf("adjustment records = %+v, want the discount and the kickback of the correction", records)
+	}
+	for i, w := range []struct {
+		typ, base, amount, beneficiary string
+		hasBeneficiary                 bool
+	}{
+		{typ: adjustment.TypeDiscount, base: "1080.00", amount: "-162.00"},
+		{
+			typ: adjustment.TypeKickback, base: "918.00", amount: "91.80",
+			beneficiary: "partner-corp", hasBeneficiary: true,
+		},
+	} {
+		got := records[i]
+		for _, field := range []struct{ name, got, want string }{
+			{"type", got.typ, w.typ},
+			{"project_id", got.projectID, key},
+			{"relation_id", got.relationID, seeded.relations[0].String()},
+			{"beneficiary", got.beneficiary, w.beneficiary},
+		} {
+			if field.got != field.want {
+				t.Errorf("adjustment record %d: %s = %q, want %q", i, field.name, field.got, field.want)
+			}
+		}
+		if got.hasBeneficiary != w.hasBeneficiary {
+			t.Errorf("adjustment record %d carries a beneficiary = %t, want %t",
+				i, got.hasBeneficiary, w.hasBeneficiary)
+		}
+		for _, amount := range []struct{ name, got, want string }{
+			{"base", got.base, w.base},
+			{"amount", got.amount, w.amount},
+		} {
+			stored, err := decimal.NewFromString(amount.got)
+			if err != nil {
+				t.Errorf("the stored %s of adjustment record %d: %v", amount.name, i, err)
+				continue
+			}
+			if want := decimal.RequireFromString(amount.want); !stored.Equal(want) {
+				t.Errorf("adjustment record %d: %s = %s, want %s", i, amount.name, stored, want)
+			}
+		}
+	}
+
+	if kind, err = runs.Finalize(ctx, dbs.engine, periodFrom, first.RunID); err != nil {
+		t.Fatalf("runs.Finalize: %v", err)
+	} else if kind != runs.KindCorrection {
+		t.Errorf("runs.Finalize closed a %q, want a %q", kind, runs.KindCorrection)
+	}
+
+	// The finalized correction is the period's truth now, and the power cycle is
+	// in it, so correcting again finds nothing to credit and nothing to settle.
+	second, err := runs.Correct(ctx, dbs.engine, dbs.source, c.correctOptions(t))
+	if err != nil {
+		t.Fatalf("runs.Correct: %v", err)
+	}
+	assertNoWarnings(t, second.Stats.Stats)
+	if second.CorrectsRunID != first.RunID {
+		t.Errorf("CorrectsRunID = %s, want the finalized correction %s", second.CorrectsRunID, first.RunID)
+	}
+	if second.Stats.Deltas != 0 {
+		t.Errorf("Stats.Deltas = %d, want none: the power cycle has been settled", second.Stats.Deltas)
+	}
+	if second.Stats.AdjustmentDeltas != 0 {
+		t.Errorf("Stats.AdjustmentDeltas = %d, want none: the adjustments come out as they were credited",
+			second.Stats.AdjustmentDeltas)
+	}
+	if second.Stats.Statements != 0 {
+		t.Errorf("Stats.Statements = %d, want none: there is nothing to credit", second.Stats.Statements)
+	}
+	// A correction applies the relation's adjustments to what it rated, whatever
+	// the run before it applied, so it stores its own rows where nothing moved.
+	if second.Stats.AdjustmentRecords != 2 {
+		t.Errorf("Stats.AdjustmentRecords = %d, want the two the correction applied",
+			second.Stats.AdjustmentRecords)
+	}
+	settled, err := export.Load(ctx, dbs.engine, second.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	if len(settled.Deltas) != 0 {
+		t.Errorf("deltas = %+v, want none", settled.Deltas)
+	}
+	if len(settled.Statements) != 0 {
+		t.Errorf("credit notes = %d, want none", len(settled.Statements))
+	}
+	if len(settled.Kickbacks) != 0 {
+		t.Errorf("kickbacks = %+v, want none: the partner was settled by the first correction",
+			settled.Kickbacks)
+	}
+	if got := runStatus(t, dbs, second.RunID); got != "completed" {
+		t.Errorf("status = %q, want completed: a correction that found nothing is a correction", got)
 	}
 }
