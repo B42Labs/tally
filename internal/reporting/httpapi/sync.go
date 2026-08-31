@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -29,13 +31,33 @@ const syncBudget = 45 * time.Second
 // and keeping one run in two places would only let the two drift apart; the
 // package documentation of reconciliation states that deviation from the
 // rebuild next door.
+//
+// The request may carry a body naming the instant the run is at, which the run
+// then stamps its row and its corrections with instead of reading a clock. Only
+// a deployment that set TALLY_REPORTING_SYNC_ALLOW_AT takes one: everywhere
+// else a body carrying "at" is refused, and the refusal comes before the run
+// starts, so no sync_runs row is left behind by a request nothing reconciled
+// for. A request with no body syncs at wall time, and so does one whose body is
+// empty or carries no "at".
 func (s *server) SyncCloud(w http.ResponseWriter, r *http.Request, cloud string) {
 	ctx := r.Context()
+
+	var body SyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		problem.Write(w, http.StatusBadRequest, problem.TypeValidation, "Validation failed",
+			`the request body must be a JSON object whose optional member "at" is an RFC 3339 instant`)
+		return
+	}
+	if body.At != nil && !s.syncAllowAt {
+		problem.Write(w, http.StatusBadRequest, problem.TypeValidation, "Validation failed",
+			"this deployment does not take a sync instant; TALLY_REPORTING_SYNC_ALLOW_AT is off")
+		return
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, syncBudget)
 	defer cancel()
 
-	result, err := s.syncer.Sync(runCtx, cloud, nil)
+	result, err := s.syncer.Sync(runCtx, cloud, body.At)
 	switch {
 	case errors.Is(err, reconciliation.ErrUnknownCloud):
 		problem.Write(w, http.StatusNotFound, problem.TypeNotFound,

@@ -105,6 +105,160 @@ func TestSyncCloudOverHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("takes a body that names no instant the way it takes no body at all", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			cloud string
+			body  []byte
+		}{
+			{name: "an empty body", cloud: "os-http-sync-empty-body", body: []byte{}},
+			{name: "a body with no members", cloud: "os-http-sync-empty-object", body: []byte(`{}`)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fake := &syncFake{observed: []reconciliation.ObservedResource{{
+					ResourceType: syncResourceType,
+					ResourceID:   "vol-untold",
+					ProjectID:    fixtureProject,
+					State:        "available",
+					Size:         map[string]any{"size_gb": 10, "type": "ssd"},
+				}}}
+				a := newSyncAPI(t, db.Store, syncerOver(db.Store, tc.cloud, fake))
+
+				before := time.Now()
+				rec := a.call(t, http.MethodPost, syncRoute(tc.cloud), internalToken, tc.body)
+
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d (body %q)", rec.Code, http.StatusOK, rec.Body)
+				}
+				var got SyncResult
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatalf("decoding the body %q: %v", rec.Body.String(), err)
+				}
+				if want := (SyncStats{Created: 1}); !reflect.DeepEqual(got.Stats, want) {
+					t.Errorf("stats = %+v, want %+v", got.Stats, want)
+				}
+				// The run read the clock, the way one that carries no body does:
+				// a body without the member names no instant to run at.
+				if fake.at.Before(before) || fake.at.After(time.Now()) {
+					t.Errorf("the instant handed to the adapter = %s, want one the request was served in",
+						fake.at.UTC())
+				}
+			})
+		}
+	})
+
+	t.Run("runs at the instant the request names when the deployment allows one", func(t *testing.T) {
+		const cloud = "os-http-sync-told"
+		told := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+		fake := &syncFake{observed: []reconciliation.ObservedResource{{
+			ResourceType: syncResourceType,
+			ResourceID:   "vol-told",
+			ProjectID:    fixtureProject,
+			State:        "available",
+			Size:         map[string]any{"size_gb": 10, "type": "ssd"},
+		}}}
+		a := newSyncAPIWithAt(t, db.Store, syncerOver(db.Store, cloud, fake), true)
+
+		rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken,
+			[]byte(`{"at":"`+told.Format(time.RFC3339)+`"}`))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", rec.Code, http.StatusOK, rec.Body)
+		}
+		var got SyncResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decoding the body %q: %v", rec.Body.String(), err)
+		}
+		if want := (SyncStats{Created: 1}); !reflect.DeepEqual(got.Stats, want) {
+			t.Errorf("stats = %+v, want %+v", got.Stats, want)
+		}
+		// The adapter, the run's row, and the corrections all work from the told
+		// instant, so the record of the run says one thing about when it was.
+		if !fake.at.Equal(told) {
+			t.Errorf("the instant handed to the adapter = %s, want the told %s",
+				fake.at.UTC(), told)
+		}
+		if started := runRow(t, a, got.SyncRunId).StartedAt.Time; !started.Equal(told) {
+			t.Errorf("started at = %s, want the told %s", started.UTC(), told)
+		}
+		instants := correctionInstants(t, a, cloud)
+		if len(instants) != 1 {
+			t.Fatalf("corrections = %d, want the one the run booked", len(instants))
+		}
+		if !instants[0].Equal(told) {
+			t.Errorf("the correction is dated %s, want the told %s", instants[0].UTC(), told)
+		}
+	})
+
+	t.Run("refuses an instant the deployment does not take", func(t *testing.T) {
+		const cloud = "os-http-sync-told-refused"
+		a := newSyncAPI(t, db.Store, syncerOver(db.Store, cloud, &syncFake{}))
+
+		rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken,
+			[]byte(`{"at":"2026-06-01T12:00:00Z"}`))
+
+		assertProblem(t, rec, http.StatusBadRequest, problem.TypeValidation)
+		assertDetail(t, rec,
+			"this deployment does not take a sync instant; TALLY_REPORTING_SYNC_ALLOW_AT is off")
+		// The gate is read before the run takes the lock, so a refused request
+		// leaves nothing behind for an operator to read a run out of.
+		if got := runsOf(t, a, cloud); got != 0 {
+			t.Errorf("sync_runs rows = %d, want none: the refusal comes before the run", got)
+		}
+	})
+
+	t.Run("refuses a body it cannot read as a request", func(t *testing.T) {
+		t.Run("a body that is not JSON", func(t *testing.T) {
+			const cloud = "os-http-sync-body-broken"
+			a := newSyncAPI(t, db.Store, syncerOver(db.Store, cloud, &syncFake{}))
+
+			rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken, []byte("not json"))
+
+			// The contract validator reads the body before the handler does, so
+			// which of the two refuses this is not pinned here. Both answer the
+			// same problem.
+			assertProblem(t, rec, http.StatusBadRequest, problem.TypeValidation)
+			if got := runsOf(t, a, cloud); got != 0 {
+				t.Errorf("sync_runs rows = %d, want none", got)
+			}
+		})
+
+		// The gate is on in both subtests below, so what refuses them is the
+		// instant itself rather than the deployment declining to be told one.
+		t.Run("an instant that is not RFC 3339", func(t *testing.T) {
+			const cloud = "os-http-sync-at-broken"
+			a := newSyncAPIWithAt(t, db.Store, syncerOver(db.Store, cloud, &syncFake{}), true)
+
+			rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken,
+				[]byte(`{"at":"yesterday"}`))
+
+			// The contract's date-time format is what refuses this, so the answer
+			// is the validator's rather than the handler's.
+			assertProblem(t, rec, http.StatusBadRequest, problem.TypeValidation)
+			if got := runsOf(t, a, cloud); got != 0 {
+				t.Errorf("sync_runs rows = %d, want none", got)
+			}
+		})
+
+		// The contract's date-time format is a pattern rather than a calendar: it
+		// takes any day from 01 to 31 in any month, so an instant that never
+		// happened passes the validator and the handler is what refuses it.
+		t.Run("an instant no calendar has", func(t *testing.T) {
+			const cloud = "os-http-sync-at-impossible"
+			a := newSyncAPIWithAt(t, db.Store, syncerOver(db.Store, cloud, &syncFake{}), true)
+
+			rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken,
+				[]byte(`{"at":"2026-02-31T00:00:00Z"}`))
+
+			assertProblem(t, rec, http.StatusBadRequest, problem.TypeValidation)
+			assertDetail(t, rec,
+				`the request body must be a JSON object whose optional member "at" is an RFC 3339 instant`)
+			if got := runsOf(t, a, cloud); got != 0 {
+				t.Errorf("sync_runs rows = %d, want none", got)
+			}
+		})
+	})
+
 	t.Run("refuses a request that does not carry the internal token", func(t *testing.T) {
 		a := newAPI(t, db.Store)
 
@@ -274,10 +428,20 @@ func syncerOver(s *store.Store, cloud string, fake *syncFake) *reconciliation.Sy
 }
 
 // newSyncAPI builds the full router over s with authentication enforced and
-// syncer behind the sync route. The shared harness wires a Syncer over the
-// empty configuration, which answers every cloud 404, so a test that needs a
-// configured cloud builds its router here.
+// syncer behind the sync route, taking no instant from a request body, which is
+// how every deployment but a development one is configured. The shared harness
+// wires a Syncer over the empty configuration, which answers every cloud 404,
+// so a test that needs a configured cloud builds its router here.
 func newSyncAPI(t *testing.T, s *store.Store, syncer *reconciliation.Syncer) api {
+	t.Helper()
+
+	return newSyncAPIWithAt(t, s, syncer, false)
+}
+
+// newSyncAPIWithAt is newSyncAPI with the TALLY_REPORTING_SYNC_ALLOW_AT gate
+// set to allowAt, which is what decides whether the sync route lets a request
+// name the instant the run is at.
+func newSyncAPIWithAt(t *testing.T, s *store.Store, syncer *reconciliation.Syncer, allowAt bool) api {
 	t.Helper()
 
 	q := sqlcgen.New(s.Pool())
@@ -292,6 +456,7 @@ func newSyncAPI(t *testing.T, s *store.Store, syncer *reconciliation.Syncer) api
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer:             syncer,
+		SyncAllowAt:        allowAt,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)
@@ -340,6 +505,48 @@ func runsOf(t *testing.T, a api, cloud string) int {
 		t.Fatalf("counting the sync runs of %s: %v", cloud, err)
 	}
 	return found
+}
+
+// correctionInstants is when the synthetic events of cloud are dated, ordered
+// by that instant. It is what says which clock the run that booked them worked
+// from.
+func correctionInstants(t *testing.T, a api, cloud string) []time.Time {
+	t.Helper()
+
+	rows, err := a.store.Pool().Query(t.Context(),
+		`SELECT timestamp FROM events WHERE cloud = $1 AND source = 'reconciliation'
+		 ORDER BY timestamp`, cloud)
+	if err != nil {
+		t.Fatalf("reading the corrections of %s: %v", cloud, err)
+	}
+	defer rows.Close()
+
+	var found []time.Time
+	for rows.Next() {
+		var at time.Time
+		if err := rows.Scan(&at); err != nil {
+			t.Fatalf("scanning a correction: %v", err)
+		}
+		found = append(found, at)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the corrections of %s: %v", cloud, err)
+	}
+	return found
+}
+
+// assertDetail checks the sentence a problem response explains itself with,
+// which is what tells two refusals of the same type apart.
+func assertDetail(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the body %q: %v", rec.Body.String(), err)
+	}
+	if got := body["detail"]; got != want {
+		t.Errorf("body detail = %v, want %q", got, want)
+	}
 }
 
 // auditCount is how many audit rows exist at all, which is what a handler that

@@ -1464,8 +1464,18 @@ paths:
         does not name is answered 404, and a cloud another run is holding is
         answered 409, because two syncs of one cloud would diff the same
         projection rows against two overlapping observations.
+
+        The request may carry a body naming the instant the run is at. Only a
+        deployment that sets `TALLY_REPORTING_SYNC_ALLOW_AT` accepts it;
+        anywhere else such a body is answered 400 and no run starts.
       security:
         - internalToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncRequest"
       responses:
         "200":
           description: The sync run finished.
@@ -1476,6 +1486,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SyncResult"
+        "400":
+          $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
         "404":
@@ -2514,6 +2526,23 @@ components:
         rebuilt:
           type: integer
           description: How many resources were replayed.
+
+    SyncRequest:
+      type: object
+      description: >-
+        When the run happens. The member is optional, and a request that leaves
+        it out, like one that carries no body at all, syncs at wall time.
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: >-
+            Run the sync at this instant instead of at wall time: the run's
+            `sync_runs` row starts here, and every correction the run books
+            carries this timestamp. The deployment has to set
+            `TALLY_REPORTING_SYNC_ALLOW_AT` for the member to be accepted. It
+            exists for a development deployment reconciling a simulated cloud,
+            whose clock is not the wall clock.
 
     SyncResult:
       type: object

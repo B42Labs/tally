@@ -36,6 +36,7 @@ const (
 	envRequireSizeSchema  = "TALLY_INGEST_REQUIRE_SIZE_SCHEMA"
 	envAttributingTypes   = "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES"
 	envCloudsConfig       = "TALLY_REPORTING_CLOUDS_CONFIG"
+	envSyncAllowAt        = "TALLY_REPORTING_SYNC_ALLOW_AT"
 	envMetricsEnabled     = "TALLY_METRICS_ENABLED"
 	envMetricsRefresh     = "TALLY_REPORTING_METRICS_REFRESH_S"
 )
@@ -57,6 +58,7 @@ var EnvNames = []string{
 	envRequireSizeSchema,
 	envAttributingTypes,
 	envCloudsConfig,
+	envSyncAllowAt,
 	envMetricsEnabled,
 	envMetricsRefresh,
 }
@@ -127,6 +129,13 @@ type Config struct {
 	// answers 404. Whether the file exists and parses is checked by
 	// reconciliation.LoadConfig, not here.
 	CloudsConfigPath string `env:"TALLY_REPORTING_CLOUDS_CONFIG"`
+	// SyncAllowAt lets POST /internal/sync/{cloud} take the instant a run is at
+	// from its request body, which the run then stamps its row and its
+	// corrections with instead of reading a clock. It is for a development
+	// deployment reconciling a simulated cloud, whose clock is not the wall
+	// clock; a production deployment keeps the default, where such a request is
+	// refused before a run starts.
+	SyncAllowAt bool `env:"TALLY_REPORTING_SYNC_ALLOW_AT" envDefault:"false"`
 	// MetricsEnabled exposes the instrumentation: false makes GET /metrics answer
 	// 404 and stops the gauge refresher. The instruments still exist and keep
 	// counting either way, so turning the flag back on costs nothing and loses
