@@ -48,10 +48,9 @@ import (
 // openStack observes one OpenStack cloud. It holds no configuration of its own:
 // a configuration reaches it per call, so one instance serves every configured
 // OpenStack cloud of a deployment. What it does hold is what the process around
-// it decides rather than one cloud: the clock a run measures its windows
-// against, and the log a run writes what it worked around to.
+// it decides rather than one cloud: the log a run writes what it worked around
+// to.
 type openStack struct {
-	now    func() time.Time
 	logger *slog.Logger
 }
 
@@ -59,17 +58,12 @@ type openStack struct {
 // authenticates from the clouds.yaml entry its configuration names, which is
 // what keeps a long-lived process from holding a token past its lifetime.
 //
-// now is where every window a run bounds itself by is measured from. It is
-// injected the way the framework's own poll time is (reconciliation.New), so
-// that a test states the instant a run reads rather than racing the clock of
-// the machine it runs on.
-//
 // logger is where a failure this adapter absorbs rather than reports is
 // written. Stats.Errors is reachable through an EnumerationError alone, and
 // that costs the resource type its completeness, so a fallback that deliberately
 // keeps the run whole has nowhere else to say that it happened.
-func NewOpenStack(now func() time.Time, logger *slog.Logger) reconciliation.Adapter {
-	return &openStack{now: now, logger: logger}
+func NewOpenStack(logger *slog.Logger) reconciliation.Adapter {
+	return &openStack{logger: logger}
 }
 
 // Platform is the platform this adapter observes. It is the same string the
@@ -144,14 +138,15 @@ type service struct {
 // types it attempts.
 //
 // since bounds the deleted listing of the one type that has one, and nothing
-// else. ResourceTypes names the types alone and passes none.
-func (a *openStack) services(cfg openStackConfig, since *time.Time) []service {
+// else; at is the instant that listing's floor is measured from. ResourceTypes
+// names the types alone and passes no bound, so at is never read there.
+func (a *openStack) services(cfg openStackConfig, since *time.Time, at time.Time) []service {
 	// Instances are the one type this cloud will name its deletions for, so the
 	// bound a run carries reaches this listing and no other.
 	instances := func(ctx context.Context, client *gophercloud.ServiceClient,
 		out *observer,
 	) bool {
-		return a.listInstances(ctx, client, out, since)
+		return a.listInstances(ctx, client, out, since, at)
 	}
 
 	list := []service{
@@ -177,7 +172,7 @@ func (a *openStack) ResourceTypes(cfg map[string]any) ([]string, error) {
 		return nil, err
 	}
 
-	services := a.services(parsed, nil)
+	services := a.services(parsed, nil, time.Time{})
 	types := make([]string, 0, len(services))
 	for _, svc := range services {
 		types = append(types, svc.resourceType)
@@ -207,8 +202,10 @@ func (a *openStack) ResourceTypes(cfg map[string]any) ([]string, error) {
 //
 // since bounds the deleted listing alone, never the live one. It is the last
 // completed run of this cloud, so the deleted listing walks exactly the window
-// this sync may have missed.
+// this sync may have missed. at is the instant this run is at, and how far back
+// that window may reach is measured from it.
 func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since *time.Time,
+	at time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
 	return func(yield func(reconciliation.ObservedResource, error) bool) {
 		parsed, err := parseConfig(cfg)
@@ -238,7 +235,7 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			return
 		}
 
-		for _, svc := range a.services(parsed, since) {
+		for _, svc := range a.services(parsed, since, at) {
 			out := observer{resourceType: svc.resourceType, yield: yield}
 
 			// Building the client is what looks the service up in the catalog, so
@@ -389,7 +386,7 @@ const embeddedFlavorMicroversion = "2.47"
 // rather than held by the adapter, which is what bounds it to one run: a flavor
 // the operator edited between two syncs is read again by the next one.
 func (a *openStack) listInstances(ctx context.Context, client *gophercloud.ServiceClient,
-	out *observer, since *time.Time,
+	out *observer, since *time.Time, at time.Time,
 ) bool {
 	// Negotiated rather than demanded: a nova too old for the microversion and an
 	// endpoint that publishes no range at all both answer the listing the way they
@@ -440,7 +437,7 @@ func (a *openStack) listInstances(ctx context.Context, client *gophercloud.Servi
 	if since == nil {
 		return true
 	}
-	return a.listDeletedInstances(ctx, client, out, *since)
+	return a.listDeletedInstances(ctx, client, out, *since, at)
 }
 
 // maxDeletedWindow is how far back a run asks nova for the servers it
@@ -463,37 +460,73 @@ const maxDeletedWindow = 24 * time.Hour
 // (reconciliation/sync.go:377-391), so the window is walked again and the real
 // instants still land.
 func (a *openStack) listDeletedInstances(ctx context.Context, client *gophercloud.ServiceClient,
-	out *observer, since time.Time,
+	out *observer, since, at time.Time,
 ) bool {
+	// The floor is the one thing a run asks the cloud for that the instant the
+	// run is at decides rather than the database. Both clamps end at it, and both
+	// are logged: the deletes a clamp leaves out are booked by the absence pass at
+	// poll time, and a completed run says nothing about which of its delete
+	// corrections carry the platform's own instant, so the log is the one place a
+	// clamped window shows at all.
+	floor := at.Add(-maxDeletedWindow)
+
 	// A cloud that has not completed a run in a week would otherwise ask nova
 	// for a week of churn, inside the same budget the five live listings share,
 	// and time out before it can complete and move the bound. The window would
 	// then be longer on every following run: a ratchet with no way back, and one
 	// nothing but a hand-written sync_runs row recovers from.
-	//
-	// The floor is the one thing a run asks the cloud for that this machine's
-	// clock decides rather than the database. The deletes it leaves out are
-	// booked by the absence pass at poll time, and a completed run says nothing
-	// about which of its delete corrections carry the platform's own instant, so
-	// the clamp is logged: a host whose clock ran away would otherwise silently
-	// ask nova for a window that has not happened yet and observe nothing.
-	if floor := a.now().Add(-maxDeletedWindow); since.Before(floor) {
+	if since.Before(floor) {
 		a.logger.Warn("asking nova only for the newest part of the window this run is "+
 			"responsible for, because the last completed run is older than the window",
 			"bound", since.UTC(), "asking_since", floor.UTC(), "window", maxDeletedWindow)
 		since = floor
 	}
+
+	// A bound after the instant this run is at asks nova for a window that has
+	// not happened yet, and nova answers that with an empty listing rather than
+	// with a refusal: the type would count as enumerated, and every delete inside
+	// the window be booked by the absence pass at poll time instead of at nova's
+	// own terminated_at. The bound is the newest run this cloud completed and
+	// started_at is the instant a run was told it ran at, so a run told an instant
+	// ahead of this one is what puts it there, a host whose clock ran away as
+	// much. The run walks the whole window it may instead, which is the one it is
+	// answerable for either way.
+	if since.After(at) {
+		a.logger.Warn("asking nova for the whole window this run is responsible for, "+
+			"because the last completed run started after the instant this run is at",
+			"bound", since.UTC(), "asking_since", floor.UTC(), "at", at.UTC(),
+			"window", maxDeletedWindow)
+		since = floor
+	}
+
 	opts := deletedServerOpts{ListOpts: servers.ListOpts{
 		AllTenants:   true,
 		ChangesSince: since.UTC().Format(time.RFC3339),
 	}}
-	return enumerate(ctx, out, servers.List(client, opts), servers.ExtractServers,
+	var skipped int
+	var newest time.Time
+	ok := enumerate(ctx, out, servers.List(client, opts), servers.ExtractServers,
 		func(server servers.Server) bool {
 			deletedAt := timestamp(server.TerminatedAt)
 			// A nova that reports no terminated_at has nothing this pass could add:
 			// the absence pass books that delete at poll time, and an instant
 			// invented here would be worse than the approximation it replaces.
 			if deletedAt == nil {
+				return true
+			}
+			// changes-since is a lower bound and the compute API has no upper one,
+			// so the listing runs to nova's own present rather than to the instant
+			// this run is at. A run told an instant behind that present — a replay,
+			// a drill re-run, a bound that clamped the window back to the floor —
+			// would otherwise book a delete dated after the run it belongs to, and
+			// therefore outside the period the run was told it reconciles. The
+			// absence pass books that one at poll time, like every delete this pass
+			// leaves out.
+			if deletedAt.After(at) {
+				skipped++
+				if deletedAt.After(newest) {
+					newest = *deletedAt
+				}
 				return true
 			}
 			// A deleted resource is reported by its key alone. What it was, how big
@@ -504,6 +537,21 @@ func (a *openStack) listDeletedInstances(ctx context.Context, client *gopherclou
 				DeletedAt:  deletedAt,
 			})
 		})
+
+	// The third clamp is logged for the same reason the two window clamps are: a
+	// completed run says nothing about which of its delete corrections carry the
+	// platform's own instant. A nova whose clock runs ahead of this host by more
+	// than one sync interval leaves every delete of every run past the instant the
+	// run is at, so this pass books nothing and the absence pass dates all of them
+	// at poll time, permanently — and nothing but this line tells that apart from
+	// a window in which the cloud destroyed nothing.
+	if skipped > 0 {
+		a.logger.Warn("leaving the instances nova destroyed after the instant this run is at "+
+			"to the absence pass, because a correction dated past that instant falls outside "+
+			"the period this run reconciles",
+			"skipped", skipped, "newest", newest.UTC(), "at", at.UTC())
+	}
+	return ok
 }
 
 // deletedServerOpts asks nova for the servers it destroyed since an instant.

@@ -582,13 +582,13 @@ func assertObserved(t *testing.T, observed []reconciliation.ObservedResource, wa
 }
 
 func TestOpenStackReportsThePlatformItObserves(t *testing.T) {
-	if platform := adapters.NewOpenStack(time.Now, discardLogs).Platform(); platform != "openstack" {
+	if platform := adapters.NewOpenStack(discardLogs).Platform(); platform != "openstack" {
 		t.Errorf("Platform() = %q, want %q", platform, "openstack")
 	}
 }
 
 func TestOpenStackRefusesAnUnusableConfig(t *testing.T) {
-	adapter := adapters.NewOpenStack(time.Now, discardLogs)
+	adapter := adapters.NewOpenStack(discardLogs)
 
 	tests := []struct {
 		name string
@@ -646,7 +646,7 @@ func TestOpenStackRefusesAnUnusableConfig(t *testing.T) {
 
 			// No cloud is reachable from here, and none has to be: a config the
 			// adapter cannot read is refused before it authenticates.
-			observed, errs := drain(t, adapter.ListResources(t.Context(), tt.cfg, nil))
+			observed, errs := drain(t, adapter.ListResources(t.Context(), tt.cfg, nil, time.Now().UTC()))
 			if len(observed) != 0 {
 				t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
 			}
@@ -666,7 +666,7 @@ func TestOpenStackRefusesAnUnusableConfig(t *testing.T) {
 }
 
 func TestOpenStackReportsTheResourceTypesItEnumerates(t *testing.T) {
-	adapter := adapters.NewOpenStack(time.Now, discardLogs)
+	adapter := adapters.NewOpenStack(discardLogs)
 
 	tests := []struct {
 		name string
@@ -709,8 +709,8 @@ func TestOpenStackAbortsWhenKeystoneRefusesTheCredentials(t *testing.T) {
 	t.Cleanup(server.Close)
 	writeCloudsYAML(t, server.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	if len(observed) != 0 {
 		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
@@ -731,8 +731,8 @@ func TestOpenStackAbortsWhenKeystoneRefusesTheCredentials(t *testing.T) {
 func TestOpenStackAbortsWhenTheCloudIsNotInCloudsYAML(t *testing.T) {
 	writeCloudsYAML(t, newCloud(t).URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": "os-prod-eu1"}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": "os-prod-eu1"}, nil, time.Now().UTC()))
 
 	if len(observed) != 0 {
 		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
@@ -761,8 +761,8 @@ func TestOpenStackRefusesAnAccountThatCannotSeeEveryProject(t *testing.T) {
 	cloud.refuseCrossProjectListings()
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
 	// neutron, glance and octavia would each have answered 200 with the account's
 	// own project, and nothing downstream can tell that from the whole cloud: the
@@ -807,8 +807,8 @@ func TestOpenStackRefusesACloudThatPublishesNoComputeEndpoint(t *testing.T) {
 	cloud.serve(t, imagesPath, "images.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	// Nova is where the scope is established, so a cloud that publishes none
 	// leaves the run with no way to establish it at all. That ends the run rather
@@ -848,8 +848,8 @@ func TestOpenStackObservesACloudThatGrantsTheScopeUnderAnotherRoleName(t *testin
 	// Nothing in adapter_config says so, and nothing has to. The run asks the
 	// cloud whether it may list across every project, and the cloud is the only
 	// thing that knows what name its policy grants that to.
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(
-		t.Context(), map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(
+		t.Context(), map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -873,8 +873,8 @@ func TestOpenStackAsksNovaForTheFlavorItEmbeds(t *testing.T) {
 	cloud.serve(t, serversPath, "servers_page1.json", "servers_page2.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -917,8 +917,8 @@ func TestOpenStackListsAtNovasOwnMicroversionWhenItSpeaksNoNewerOne(t *testing.T
 	writeCloudsYAML(t, cloud.URL)
 
 	logger, written := recordLogs()
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, logger).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(logger).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -965,8 +965,8 @@ func TestOpenStackBoundsTheReasonItLogsForAFailedNegotiation(t *testing.T) {
 	writeCloudsYAML(t, cloud.URL)
 
 	logger, written := recordLogs()
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, logger).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(logger).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -993,8 +993,8 @@ func TestOpenStackBoundsTheReasonItLogsForAFailedNegotiation(t *testing.T) {
 func TestOpenStackHoldsBackOnlyTheServiceTheCloudDoesNotPublish(t *testing.T) {
 	writeCloudsYAML(t, newCloud(t, "load-balancer").URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
 	if len(observed) != 0 {
 		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
@@ -1017,8 +1017,8 @@ func TestOpenStackHoldsBackOnlyTheServiceTheCloudDoesNotPublish(t *testing.T) {
 func TestOpenStackReachesEveryServiceItEnumerates(t *testing.T) {
 	writeCloudsYAML(t, newCloud(t).URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
@@ -1033,8 +1033,8 @@ func TestOpenStackObservesEveryProjectsInstances(t *testing.T) {
 	cloud.serve(t, serversPath, "servers_page1.json", "servers_page2.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1082,8 +1082,8 @@ func TestOpenStackReadsTheFlavorsOfOneRunOnlyOnce(t *testing.T) {
 	cloud.serve(t, flavorsPath, "flavors.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1122,8 +1122,8 @@ func TestOpenStackReportsAFailedFlavorListingForInstancesAlone(t *testing.T) {
 	cloud.serve(t, flavorsPath)
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	if len(errs) != 1 {
 		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
@@ -1155,8 +1155,8 @@ func TestOpenStackObservesEveryProjectsVolumes(t *testing.T) {
 	cloud.serve(t, volumesPath, "volumes.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1186,8 +1186,8 @@ func TestOpenStackObservesEveryProjectsFloatingIPs(t *testing.T) {
 	cloud.serve(t, floatingIPsPath, "floatingips.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1220,8 +1220,8 @@ func TestOpenStackObservesEveryProjectsImages(t *testing.T) {
 	cloud.serve(t, imagesPath, "images.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1252,8 +1252,8 @@ func TestOpenStackHoldsBackImagesGlanceNamesNoOwnerFor(t *testing.T) {
 	cloud.serve(t, loadBalancersPath, "loadbalancers.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
 	// The collector books such an image to the project of whoever registered it,
 	// so it is a live projection row this run cannot match to an owner. The whole
@@ -1300,8 +1300,8 @@ func TestOpenStackWalksTheImageListingPastTheOneItCannotPlace(t *testing.T) {
 	cloud.serve(t, imagesPath, "images_ownerless_first.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	// The type is held back, which is what keeps the missed-delete pass off its
 	// rows for this run.
@@ -1334,8 +1334,8 @@ func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
 		cloud.serve(t, loadBalancersPath, "loadbalancers.json")
 		writeCloudsYAML(t, cloud.URL)
 
-		observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-			map[string]any{"os_cloud": testCloud}, nil))
+		observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+			map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 		if len(errs) != 0 {
 			t.Fatalf("ListResources() errors = %v, want none", errs)
@@ -1356,8 +1356,8 @@ func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
 		cloud.serve(t, loadBalancersPath, "loadbalancers.json")
 		writeCloudsYAML(t, cloud.URL)
 
-		observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-			map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+		observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+			map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 		if len(errs) != 0 {
 			t.Fatalf("ListResources() errors = %v, want none", errs)
 		}
@@ -1386,8 +1386,8 @@ func TestOpenStackObservesNothingOfAnEmptyCloud(t *testing.T) {
 	}
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
 	// A cloud that holds nothing is not a cloud that failed. Every type has to
 	// come back empty and complete, or the missed-delete pass would skip the one
@@ -1413,8 +1413,8 @@ func TestOpenStackHoldsBackOnlyTheTypeWhoseListingBreaks(t *testing.T) {
 	cloud.serve(t, volumesPath, "volumes.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	if len(errs) != 1 {
 		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
@@ -1450,8 +1450,8 @@ func TestOpenStackReportsWhatTheCloudAnsweredOnTheTypeThatFailed(t *testing.T) {
 	cloud.serve(t, imagesPath, "images.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 	if len(errs) != 1 {
 		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
@@ -1501,8 +1501,8 @@ func TestOpenStackObservesTheInstancesDeletedSinceTheLastRun(t *testing.T) {
 	since := time.Now().Add(-2 * time.Hour).Truncate(time.Second).
 		In(time.FixedZone("+02:00", 2*60*60))
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, &since))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1552,13 +1552,13 @@ func TestOpenStackBoundsHowFarBackItAsksNovaForDeletions(t *testing.T) {
 	// A cloud whose last run completed a week ago, which is what one outage or
 	// one type of correction the pipeline keeps refusing leaves behind: a failed
 	// run does not move the bound.
-	now := time.Date(2026, 8, 17, 9, 15, 0, 0, time.UTC)
-	since := now.Add(-7 * 24 * time.Hour)
-	floor := now.Add(-24 * time.Hour)
+	at := time.Date(2026, 8, 17, 9, 15, 0, 0, time.UTC)
+	since := at.Add(-7 * 24 * time.Hour)
+	floor := at.Add(-24 * time.Hour)
 
 	logger, written := recordLogs()
-	if _, errs := drain(t, adapters.NewOpenStack(func() time.Time { return now }, logger).
-		ListResources(t.Context(), map[string]any{"os_cloud": testCloud}, &since)); len(errs) != 0 {
+	if _, errs := drain(t, adapters.NewOpenStack(logger).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, at)); len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
 
@@ -1573,9 +1573,10 @@ func TestOpenStackBoundsHowFarBackItAsksNovaForDeletions(t *testing.T) {
 	// ratchet: the deletes it leaves out are booked by the absence pass at poll
 	// time, which is what the concept accepts for every other resource type.
 	//
-	// It is the injected clock the floor is measured from rather than the clock of
-	// whatever machine the run happens on, so the window a stale bound is clamped
-	// to is a stated instant here rather than a tolerance around the wall clock.
+	// The floor is measured from the instant the run is at rather than from the
+	// clock of whatever machine the run happens on, so the window a stale bound is
+	// clamped to is a stated instant here rather than a tolerance around the wall
+	// clock.
 	got := requests[1].query.Get("changes-since")
 	if want := floor.Format(time.RFC3339); got != want {
 		t.Errorf("the deleted listing asked for changes-since=%q, want %q", got, want)
@@ -1591,14 +1592,110 @@ func TestOpenStackBoundsHowFarBackItAsksNovaForDeletions(t *testing.T) {
 	}
 }
 
+// TestOpenStackAsksNovaForTheWholeWindowWhenTheBoundIsAheadOfTheRun is the
+// other side of the clamp. started_at is the instant a run was told it ran at,
+// so the newest completed run of a cloud can have started after the instant this
+// one is at, and the window between them is one that has not happened yet.
+func TestOpenStackAsksNovaForTheWholeWindowWhenTheBoundIsAheadOfTheRun(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, serversPath, "servers_empty.json")
+	cloud.serveDeleted(t, "servers_deleted.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	// A cloud whose newest completed run was told an instant two weeks ahead of
+	// this one, which is what one sync of a drill's virtual clock leaves behind
+	// for the next sync at wall time.
+	at := time.Date(2026, 8, 17, 9, 15, 0, 0, time.UTC)
+	since := at.Add(14 * 24 * time.Hour)
+	floor := at.Add(-24 * time.Hour)
+
+	logger, written := recordLogs()
+	if _, errs := drain(t, adapters.NewOpenStack(logger).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, at)); len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	requests := cloud.requestsTo(serversPath)
+	if len(requests) != 2 {
+		t.Fatalf("the cloud answered %d requests for %s, want 2: the live listing and the deleted one",
+			len(requests), serversPath)
+	}
+	// A window that has not happened yet is answered with an empty listing rather
+	// than refused, so the instance type would count as enumerated and every
+	// delete of it be booked by the absence pass at poll time, for as long as the
+	// bound stays ahead. The run asks for the whole window it may instead.
+	got := requests[1].query.Get("changes-since")
+	if want := floor.Format(time.RFC3339); got != want {
+		t.Errorf("the deleted listing asked for changes-since=%q, want %q", got, want)
+	}
+
+	// The bound is in the log because nothing else says it was there: a run that
+	// walked the whole window completes like any other and moves the bound onto
+	// its own instant.
+	logged := written()
+	if !strings.Contains(logged, since.Format(time.RFC3339)) {
+		t.Errorf("the run logged %q, want it to name the bound that lies ahead of it", logged)
+	}
+	if !strings.Contains(logged, floor.Format(time.RFC3339)) {
+		t.Errorf("the run logged %q, want it to name the window it asked for instead", logged)
+	}
+}
+
+// TestOpenStackSkipsADeletedInstanceNovaDestroyedAfterTheRun holds the deleted
+// listing to the window the run is answerable for. changes-since is a lower
+// bound and the compute API has no upper one, so a run told an instant behind
+// nova's own present is answered with deletes that happened after it, and
+// booking one of those would date a correction outside the period the run was
+// told it reconciles.
+func TestOpenStackSkipsADeletedInstanceNovaDestroyedAfterTheRun(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, serversPath, "servers_empty.json")
+	cloud.serveDeleted(t, "servers_deleted.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	// An instant between the two deletions the fixture holds, and a bound inside
+	// the window it may ask for. A replay, a drill re-run, and a bound the floor
+	// clamped back all leave a run at an instant nova has already run past.
+	at := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	since := time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
+
+	logger, written := recordLogs()
+	observed, errs := drain(t, adapters.NewOpenStack(logger).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, at))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	// The instance nova destroyed after the run is not observed at all rather
+	// than observed at an instant this run cannot answer for: the absence pass
+	// books it at poll time, the way it books every delete this pass leaves out.
+	assertObserved(t, observed,
+		`type=instance id=3a9e5c07-2b81-4d6f-9a34-5c7e1b0d8f26 `+
+			`project= state= size=none created=none deleted=2026-08-14T10:31:07Z UTC`)
+
+	// A clock on the nova host that runs ahead of this one by more than a sync
+	// interval puts every delete of every run past the instant the run is at, so
+	// this pass books nothing for as long as the skew lasts and the absence pass
+	// dates all of them at poll time. A run in that state completes clean and its
+	// corrections look like any other run's, so the log is the one place it shows
+	// at all — as it is for the two window clamps.
+	logged := written()
+	if !strings.Contains(logged, at.Format(time.RFC3339)) {
+		t.Errorf("the run logged %q, want it to name the instant it is at", logged)
+	}
+	if !strings.Contains(logged, "2026-08-15T22:03:41.5Z") {
+		t.Errorf("the run logged %q, want it to name the newest delete it left out", logged)
+	}
+}
+
 func TestOpenStackAsksForNoDeletesOnTheFirstRunOfACloud(t *testing.T) {
 	cloud := newCloud(t)
 	cloud.serve(t, serversPath, "servers_page1.json", "servers_page2.json")
 	cloud.serveDeleted(t, "servers_deleted.json")
 	writeCloudsYAML(t, cloud.URL)
 
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, nil))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1630,8 +1727,8 @@ func TestOpenStackSkipsADeletedInstanceNovaDidNotDate(t *testing.T) {
 	writeCloudsYAML(t, cloud.URL)
 
 	since := time.Date(2026, 8, 1, 4, 30, 0, 0, time.UTC)
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, &since))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, time.Now().UTC()))
 	if len(errs) != 0 {
 		t.Fatalf("ListResources() errors = %v, want none", errs)
 	}
@@ -1655,8 +1752,8 @@ func TestOpenStackHoldsBackInstancesWhenTheDeletedListingFails(t *testing.T) {
 	writeCloudsYAML(t, cloud.URL)
 
 	since := time.Date(2026, 8, 1, 4, 30, 0, 0, time.UTC)
-	observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(t.Context(),
-		map[string]any{"os_cloud": testCloud}, &since))
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, &since, time.Now().UTC()))
 
 	if len(errs) != 1 {
 		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
@@ -1735,8 +1832,8 @@ func TestOpenStackEndsTheStreamWhenTheRunIsCancelled(t *testing.T) {
 		})
 		writeCloudsYAML(t, cloud.URL)
 
-		observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(ctx,
-			map[string]any{"os_cloud": testCloud}, nil))
+		observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(ctx,
+			map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 		assertRunEnded(t, errs)
 
@@ -1767,8 +1864,8 @@ func TestOpenStackEndsTheStreamWhenTheRunIsCancelled(t *testing.T) {
 		cloud.cancelDuring(cancel, func(seen request) bool { return seen.path == flavorsPath })
 		writeCloudsYAML(t, cloud.URL)
 
-		observed, errs := drain(t, adapters.NewOpenStack(time.Now, discardLogs).ListResources(ctx,
-			map[string]any{"os_cloud": testCloud}, nil))
+		observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(ctx,
+			map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
 
 		assertRunEnded(t, errs)
 

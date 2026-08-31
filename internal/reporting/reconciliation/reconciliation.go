@@ -79,7 +79,12 @@ type Adapter interface {
 	// recently deleted resources (DeletedAt set) when the platform exposes
 	// them. since bounds only that optional deleted listing, never the live
 	// one: the diff treats the live stream as complete.
-	ListResources(ctx context.Context, cfg map[string]any, since *time.Time,
+	//
+	// at is the instant the run is at. The framework passes the run-local now
+	// it dates everything else by, so at is never zero, and how far back the
+	// deleted listing reaches is measured from it rather than from a clock the
+	// adapter reads for itself.
+	ListResources(ctx context.Context, cfg map[string]any, since *time.Time, at time.Time,
 	) iter.Seq2[ObservedResource, error]
 }
 

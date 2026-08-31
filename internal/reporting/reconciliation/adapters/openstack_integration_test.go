@@ -396,7 +396,7 @@ func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 		Cloud: cloud, Platform: platform, Adapter: adapterName, AdapterConfig: adapterConfig,
 	}}}
 	return reconciliation.New(db.Store, pipeline, cfg,
-		map[string]reconciliation.Adapter{adapterName: adapters.NewOpenStack(time.Now, discardLogs)},
+		map[string]reconciliation.Adapter{adapterName: adapters.NewOpenStack(discardLogs)},
 		func() time.Time { return pollTime }, nil)
 }
 

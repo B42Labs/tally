@@ -215,6 +215,9 @@ type syncFake struct {
 	observed []reconciliation.ObservedResource
 	err      error
 
+	// at is the instant the last listing was told the run is at.
+	at time.Time
+
 	// entered is closed when a blocking listing starts and released is what
 	// holds it there. Both are nil for a fake that does not block.
 	entered  chan struct{}
@@ -234,7 +237,9 @@ func (f *syncFake) ResourceTypes(map[string]any) ([]string, error) {
 }
 
 func (f *syncFake) ListResources(ctx context.Context, _ map[string]any, _ *time.Time,
+	at time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
+	f.at = at
 	return func(yield func(reconciliation.ObservedResource, error) bool) {
 		if f.released != nil {
 			close(f.entered)

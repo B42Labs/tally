@@ -204,7 +204,8 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 		return abort(err)
 	}
 
-	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, &stats)
+	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, s.now().UTC(),
+		&stats)
 	if err != nil {
 		return abort(fmt.Errorf("listing the resources of %s: %w", cloud, err))
 	}
@@ -394,6 +395,10 @@ func lastCompleted(ctx context.Context, q *sqlcgen.Queries, cloud string) (*time
 // A later report of a resource replaces an earlier one, so an adapter that
 // lists a resource twice states its final word rather than two facts.
 //
+// at is the instant this run is at, and it is the run's own clock rather than
+// the adapter's: a window the adapter bounds itself by is measured from the
+// same instant the run dates its corrections at.
+//
 // The second result is the set of resource types that stayed incomplete, which
 // the missed-delete pass leaves alone. An error the stream yields is either an
 // EnumerationError, which costs its type and nothing else, or an error about
@@ -401,12 +406,12 @@ func lastCompleted(ctx context.Context, q *sqlcgen.Queries, cloud string) (*time
 // nothing about what it holds, and reading that as an empty inventory would
 // delete a fleet.
 func collect(ctx context.Context, adapter Adapter, cfg map[string]any, since *time.Time,
-	stats *Stats,
+	at time.Time, stats *Stats,
 ) (map[resourceKey]ObservedResource, map[string]bool, error) {
 	observed := map[resourceKey]ObservedResource{}
 	incomplete := map[string]bool{}
 
-	for obs, err := range adapter.ListResources(ctx, cfg, since) {
+	for obs, err := range adapter.ListResources(ctx, cfg, since, at) {
 		if err != nil {
 			var enumErr *EnumerationError
 			if !errors.As(err, &enumErr) {
