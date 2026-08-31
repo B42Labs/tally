@@ -305,12 +305,13 @@ type expectedFile struct {
 	AbsentStatements []string            `json:"absent_statements"`
 }
 
-// expectedStats is the four counts a run reports.
+// expectedStats is the five counts a run reports.
 type expectedStats struct {
-	Candidates   int `json:"candidates"`
-	UsageRecords int `json:"usage_records"`
-	RatedRecords int `json:"rated_records"`
-	Statements   int `json:"statements"`
+	Candidates        int `json:"candidates"`
+	UsageRecords      int `json:"usage_records"`
+	RatedRecords      int `json:"rated_records"`
+	Statements        int `json:"statements"`
+	AdjustmentRecords int `json:"adjustment_records"`
 }
 
 // expectedUsage is one usage_records row. Usage maps every key of the stored
@@ -350,6 +351,30 @@ type expectedStatement struct {
 	Platform      string                `json:"platform"`
 	LineItems     []expectedLineItem    `json:"line_items"`
 	RelatedCosts  []expectedRelatedCost `json:"related_costs"`
+	// BaseCost, Adjustments, NetCost and KickbackTotal are the commercial part
+	// of the document. A nil BaseCost is a statement no adjustment reached, and
+	// the document must then carry none of the four members, so a fixture that
+	// leaves it out while listing one of the others is a typo.
+	BaseCost      *decimal.Decimal     `json:"base_cost"`
+	Adjustments   []expectedAdjustment `json:"adjustments"`
+	NetCost       *decimal.Decimal     `json:"net_cost"`
+	KickbackTotal *decimal.Decimal     `json:"kickback_total"`
+}
+
+// expectedAdjustment is one line of a document's adjustments, in the order they
+// were applied. Relation is the index of the relation the line came from in the
+// relations array of registry.json, because the id of that relation is assigned
+// at seeding time and nothing can write it down beforehand.
+type expectedAdjustment struct {
+	Type           string          `json:"type"`
+	Relation       int             `json:"relation"`
+	RelationType   string          `json:"relation_type"`
+	RelationTarget string          `json:"relation_target"`
+	Scope          string          `json:"scope"`
+	Description    string          `json:"description"`
+	Rate           decimal.Decimal `json:"rate"`
+	Base           decimal.Decimal `json:"base"`
+	Amount         decimal.Decimal `json:"amount"`
 }
 
 // expectedBillingPeriod is the interval a document says it bills, written the
@@ -389,14 +414,23 @@ type expectedRelatedCost struct {
 	LineItems    []expectedLineItem `json:"line_items"`
 }
 
+// loadExpectedFile reads one expectations file of a case, named by the file it
+// sits in. The file is required: an absent or undecodable one fails the case
+// naming the path.
+func loadExpectedFile(t *testing.T, name, file string) expectedFile {
+	t.Helper()
+
+	path := filepath.Join(goldenDir, name, file)
+	var want expectedFile
+	decodeJSON(t, path, readRequired(t, path), &want)
+	return want
+}
+
 // loadExpected reads one case's expectations, which every case carries.
 func loadExpected(t *testing.T, name string) expectedFile {
 	t.Helper()
 
-	path := filepath.Join(goldenDir, name, "expected.json")
-	var want expectedFile
-	decodeJSON(t, path, readRequired(t, path), &want)
-	return want
+	return loadExpectedFile(t, name, "expected.json")
 }
 
 // readRequired reads a fixture file every case must carry. The error names the
@@ -843,7 +877,7 @@ func assertNoWarnings(t *testing.T, stats runs.Stats) {
 	}
 }
 
-// assertStats checks the four counts the run reported.
+// assertStats checks the five counts the run reported.
 func assertStats(t *testing.T, got runs.Stats, want expectedStats) {
 	t.Helper()
 
@@ -855,6 +889,7 @@ func assertStats(t *testing.T, got runs.Stats, want expectedStats) {
 		{"usage_records", got.UsageRecords, want.UsageRecords},
 		{"rated_records", got.RatedRecords, want.RatedRecords},
 		{"statements", got.Statements, want.Statements},
+		{"adjustment_records", got.AdjustmentRecords, want.AdjustmentRecords},
 	} {
 		if count.got != count.want {
 			t.Errorf("stats %s = %d, want %d", count.name, count.got, count.want)
@@ -1045,6 +1080,7 @@ func assertStatements(
 	got []statements.Statement,
 	want []expectedStatement,
 	absent []string,
+	seeded seededRegistry,
 ) {
 	t.Helper()
 
@@ -1091,6 +1127,137 @@ func assertStatements(
 		}
 		assertLineItems(t, w.Key, doc.LineItems, w.LineItems)
 		assertRelatedCosts(t, w.Key, doc.RelatedCosts, w.RelatedCosts)
+		assertAdjustments(t, w.Key, doc, w, seeded)
+	}
+}
+
+// assertAdjustments checks the commercial part of one statement document: the
+// base cost the adjustments were applied to, the lines they produced, the net
+// cost the customer pays and the kickback total a partner is owed beside it.
+//
+// A fixture statement without base_cost is a statement no adjustment reached,
+// and its document carries none of the four members. That is what a Phase 3
+// case of the suite asserts about a graph whose edges adjust nothing: the walk
+// leaves its bytes where they were.
+func assertAdjustments(
+	t *testing.T,
+	key string,
+	doc statements.Document,
+	w expectedStatement,
+	seeded seededRegistry,
+) {
+	t.Helper()
+
+	if w.BaseCost == nil {
+		// One of the other three without base_cost is a typo in the fixture:
+		// there is no statement it describes.
+		for _, member := range []struct {
+			name   string
+			listed bool
+		}{
+			{"net_cost", w.NetCost != nil},
+			{"kickback_total", w.KickbackTotal != nil},
+			{"adjustments", len(w.Adjustments) > 0},
+		} {
+			if member.listed {
+				t.Fatalf("the expectation of %s lists %s without base_cost", key, member.name)
+			}
+		}
+		if doc.BaseCost != nil || doc.NetCost != nil || doc.KickbackTotal != nil ||
+			len(doc.Adjustments) > 0 {
+			t.Errorf("the document of %s carries adjustment members, which expected.json does not list", key)
+		}
+		return
+	}
+
+	if w.NetCost == nil || w.KickbackTotal == nil {
+		t.Fatalf("the expectation of %s lists base_cost without net_cost and kickback_total", key)
+	}
+	for _, member := range []struct {
+		name    string
+		missing bool
+	}{
+		{"base_cost", doc.BaseCost == nil},
+		{"net_cost", doc.NetCost == nil},
+		{"kickback_total", doc.KickbackTotal == nil},
+	} {
+		if member.missing {
+			t.Fatalf("the document of %s carries no %s, which expected.json lists", key, member.name)
+		}
+	}
+	for _, amount := range []struct {
+		name      string
+		got, want decimal.Decimal
+	}{
+		{"base cost", doc.BaseCost.Decimal, *w.BaseCost},
+		{"net cost", doc.NetCost.Decimal, *w.NetCost},
+		{"kickback total", doc.KickbackTotal.Decimal, *w.KickbackTotal},
+	} {
+		if !amount.got.Equal(amount.want) {
+			t.Errorf("the %s of %s = %s, want %s", amount.name, key, amount.got, amount.want)
+		}
+	}
+	// A kickback is settled beside the invoice rather than added to it, so what
+	// the customer pays is the net cost and nothing a partner is owed reaches
+	// the total.
+	if !doc.Total.Equal(doc.NetCost.Decimal) {
+		t.Errorf("the total of %s = %s, want the net cost %s", key, doc.Total, doc.NetCost)
+	}
+
+	if len(doc.Adjustments) != len(w.Adjustments) {
+		t.Fatalf("the adjustments of %s = %d, want %d", key, len(doc.Adjustments), len(w.Adjustments))
+	}
+	for i, a := range w.Adjustments {
+		if a.Relation < 0 || a.Relation >= len(seeded.relations) {
+			t.Fatalf("adjustment %d of %s names the relation %d, which registry.json does not hold",
+				i, key, a.Relation)
+		}
+		g := doc.Adjustments[i]
+		for _, field := range []struct{ name, got, want string }{
+			{"type", g.Type, a.Type},
+			{"relation_type", g.RelationType, a.RelationType},
+			{"relation_target", g.RelationTarget, a.RelationTarget},
+			{"relation_id", g.RelationID, seeded.relations[a.Relation].String()},
+			{"scope", g.Scope, a.Scope},
+			{"description", g.Description, a.Description},
+		} {
+			if field.got != field.want {
+				t.Errorf("adjustment %d of %s: %s = %q, want %q", i, key, field.name, field.got, field.want)
+			}
+		}
+		for _, amount := range []struct {
+			name      string
+			got, want decimal.Decimal
+		}{
+			{"rate", g.Rate.Decimal, a.Rate},
+			{"base", g.Base.Decimal, a.Base},
+			{"amount", g.Amount.Decimal, a.Amount},
+		} {
+			if !amount.got.Equal(amount.want) {
+				t.Errorf("adjustment %d of %s: %s = %s, want %s",
+					i, key, amount.name, amount.got, amount.want)
+			}
+		}
+	}
+
+	// Decision D7 of the roadmap: every total a document shows is the sum of
+	// the lines it shows, so a reader can add the lines up and arrive at it.
+	net := doc.BaseCost.Decimal
+	kickbacks := decimal.Zero
+	for _, line := range doc.Adjustments {
+		if line.Type == adjustment.TypeKickback {
+			kickbacks = kickbacks.Add(line.Amount.Decimal)
+			continue
+		}
+		net = net.Add(line.Amount.Decimal)
+	}
+	if !net.Equal(doc.NetCost.Decimal) {
+		t.Errorf("the base cost of %s and its adjustments add up to %s, want the net cost %s",
+			key, net, doc.NetCost)
+	}
+	if !kickbacks.Equal(doc.KickbackTotal.Decimal) {
+		t.Errorf("the kickbacks of %s add up to %s, want the kickback total %s",
+			key, kickbacks, doc.KickbackTotal)
 	}
 }
 
