@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -639,6 +641,126 @@ func TestGenerateRefusesANonMonth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// keystoneID is the form keystone hands out project ids in. The registry keys a
+// row by that id, so a tenant the month names with anything else is a row no
+// usage of the month is ever booked against.
+var keystoneID = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// namedMonth generates one month or fails the test and hands back the whole
+// month. It stands beside generateMonth because the tenants are read off the
+// month rather than off its schedule.
+func namedMonth(t *testing.T, seed uint64, from time.Time, cloud string) Month {
+	t.Helper()
+
+	month, err := GenerateMonth(seed, from, from.AddDate(0, 1, 0), cloud, Faults{})
+	if err != nil {
+		t.Fatalf("GenerateMonth(%d, %s, %q) error = %v, want nil", seed, from.Format(time.RFC3339), cloud, err)
+	}
+	return month
+}
+
+// TestMonthNamesItsTenants covers what a month states about the projects it ran
+// in. Nothing on the bus carries a tenant's name, so the registry can be fed
+// from Month alone: a tenant the month leaves out is a row the registry never
+// grows, and a project id the oracle bills but the month does not name is usage
+// that arrives under an id nobody can put a name to.
+func TestMonthNamesItsTenants(t *testing.T) {
+	month := namedMonth(t, 1, july2026, testCloud)
+
+	want := []struct {
+		name     string
+		workload string
+	}{
+		{name: "tenant-01", workload: workloadClassic},
+		{name: "tenant-02", workload: workloadClassic},
+		{name: "tenant-03", workload: workloadClassic},
+		{name: "ci", workload: workloadCI},
+		{name: "Infrastructure tenant of alpha", workload: workloadGardener},
+		{name: "Infrastructure tenant of beta", workload: workloadGardener},
+	}
+	if len(month.Tenants) != len(want) {
+		t.Fatalf("the month names %d tenants, want %d: the three classic tenants, the CI tenant, and the "+
+			"two Gardener tenants", len(month.Tenants), len(want))
+	}
+	for i, w := range want {
+		if got := month.Tenants[i]; got.Name != w.name || got.Workload != w.workload {
+			t.Errorf("tenant %d is %q of workload %q, want %q of %q: the registry is fed in this order",
+				i, got.Name, got.Workload, w.name, w.workload)
+		}
+	}
+
+	named := make(map[string]int, len(month.Tenants))
+	for i, tenant := range month.Tenants {
+		if !keystoneID.MatchString(tenant.ID) {
+			t.Errorf("the tenant %q carries the id %q, want the 32 character hex form of keystone: the "+
+				"registry keys its row by the id the notifications carry", tenant.Name, tenant.ID)
+		}
+		if first, ok := named[tenant.ID]; ok {
+			t.Errorf("tenant %d and tenant %d both carry the id %s, want six distinct ids: two tenants on "+
+				"one id are one row the registry never grows", first, i, tenant.ID)
+		}
+		named[tenant.ID] = i
+	}
+
+	wantProjects := []GardenerProject{
+		{Name: "alpha", TenantID: month.Tenants[4].ID, Shoots: []string{"api-prod", "api-dev"}},
+		{Name: "beta", TenantID: month.Tenants[5].ID, Shoots: []string{"batch"}},
+	}
+	if !reflect.DeepEqual(month.GardenerProjects, wantProjects) {
+		t.Errorf("the month states the Gardener projects %+v, want %+v: a project is the name an operator "+
+			"knows its shoots under, on the tenant Gardener bills them to",
+			month.GardenerProjects, wantProjects)
+	}
+
+	// One report per unnamed id rather than one per interval, because a tenant
+	// the month forgets to name carries hundreds of them.
+	unnamed := make(map[string]string)
+	for _, resource := range month.Oracle.Resources {
+		for _, interval := range resource.Intervals {
+			if _, ok := named[interval.ProjectID]; !ok {
+				unnamed[interval.ProjectID] = resource.ResourceType + " " + resource.ResourceID
+			}
+		}
+	}
+	for id, resource := range unnamed {
+		t.Errorf("the oracle bills the %s to the project %s, which the month names no tenant for, want "+
+			"every project of the month named: usage under an unnamed id reaches the registry as a "+
+			"stranger", resource, id)
+	}
+
+	t.Run("one seed, period, and cloud name one set of tenants", func(t *testing.T) {
+		again := namedMonth(t, 1, july2026, testCloud)
+
+		if !reflect.DeepEqual(again.Tenants, month.Tenants) {
+			t.Errorf("two runs of one seed name %+v and %+v, want the same tenants twice: a run that "+
+				"renames a tenant grows a second row for it", month.Tenants, again.Tenants)
+		}
+		if !reflect.DeepEqual(again.GardenerProjects, month.GardenerProjects) {
+			t.Errorf("two runs of one seed state the Gardener projects %+v and %+v, want the same two "+
+				"twice", month.GardenerProjects, again.GardenerProjects)
+		}
+	})
+
+	t.Run("another cloud keeps the names and renames the ids", func(t *testing.T) {
+		first, second := namedMonth(t, 1, july2026, "os-a"), namedMonth(t, 1, july2026, "os-b")
+
+		if len(first.Tenants) != len(second.Tenants) {
+			t.Fatalf("two clouds name %d and %d tenants, want the world to be the seed's alone",
+				len(first.Tenants), len(second.Tenants))
+		}
+		for i := range first.Tenants {
+			if first.Tenants[i].Name != second.Tenants[i].Name {
+				t.Errorf("tenant %d is %q on os-a and %q on os-b, want the name to come from the world, "+
+					"which the cloud does not salt", i, first.Tenants[i].Name, second.Tenants[i].Name)
+			}
+			if first.Tenants[i].ID == second.Tenants[i].ID {
+				t.Errorf("tenant %d carries the id %s on both os-a and os-b, want the ids salted by the "+
+					"cloud: one row would otherwise hold two clouds' usage", i, first.Tenants[i].ID)
+			}
+		}
+	})
 }
 
 // sizeOf maps one transition the way the collector does and returns the size

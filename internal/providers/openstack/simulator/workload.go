@@ -191,8 +191,37 @@ type Month struct {
 	Stream Schedule
 	// Held holds the transitions the held-back switch keeps off the bus until a
 	// run releases them, in instant order. It is empty unless that switch is on.
-	Held   Schedule
-	Oracle Oracle
+	Held Schedule
+	// Tenants is every keystone project of the month, the classic tenants first
+	// in index order, then the CI tenant, then the Gardener tenants in project
+	// order. It is built from the world alone: nothing on the bus carries a
+	// tenant's name, and no stream is consulted, so a month with the registry
+	// switch off renders exactly the files it rendered before.
+	Tenants []Tenant
+	// GardenerProjects is the two Gardener projects and the tenant each runs
+	// on, in the order newGardenerProjects lists them.
+	GardenerProjects []GardenerProject
+	Oracle           Oracle
+}
+
+// Tenant is one keystone project of the month as the registry keys it.
+type Tenant struct {
+	// ID is the keystone project id, the external id of the registry row.
+	ID string
+	// Name is what the registry row is called; nothing on the bus carries it.
+	Name string
+	// Workload is workloadClassic, workloadGardener, or workloadCI.
+	Workload string
+}
+
+// GardenerProject is one Gardener project and the tenant its shoots run on.
+type GardenerProject struct {
+	// Name is alpha or beta, the external id of the gardener row.
+	Name string
+	// TenantID is the ID of the Tenant the shoots run on.
+	TenantID string
+	// Shoots holds the shoot names, in the order newGardenerProjects lists them.
+	Shoots []string
 }
 
 // GenerateMonth builds one month of the simulated cloud's lifecycle
@@ -281,7 +310,12 @@ func GenerateMonth(seed uint64, from, to time.Time, cloud string, faults Faults)
 	if err != nil {
 		return Month{}, err
 	}
-	return Month{Schedule: g.schedule, Stream: stream, Held: held, Oracle: oracle}, nil
+	tenants, gardenerProjects := g.tenants()
+	return Month{
+		Schedule: g.schedule, Stream: stream, Held: held,
+		Tenants: tenants, GardenerProjects: gardenerProjects,
+		Oracle: oracle,
+	}, nil
 }
 
 // identifierSalt mixes the cloud and the billing month into the identifier
@@ -492,6 +526,48 @@ func newGenerator(shape *rand.Rand, identifiers, noiseIDs idReader,
 		gp.zoneName = gp.name + "." + cloud + ".example."
 	}
 	return g
+}
+
+// tenants returns the keystone projects the month ran in and the Gardener
+// projects beside them, in the order the registry is meant to hold them:
+// the classic tenants by their index, the CI tenant, then the Gardener tenants
+// by their project.
+//
+// A tenant's name is only ever known here. Nothing on the bus carries one, so
+// the world is the one place the registry can be told what a project id is
+// called. The method draws from no stream and changes nothing on the generator,
+// which is what keeps the month it is called on the month it would have been.
+func (g *generator) tenants() ([]Tenant, []GardenerProject) {
+	tenants := make([]Tenant, 0, len(g.projects)+1+len(g.gardenerProjects))
+	for _, p := range g.projects {
+		// The name the tenant's network already carries, so that a registry row
+		// and a dumped month call one tenant the same thing.
+		tenants = append(tenants, Tenant{
+			ID:       p.id,
+			Name:     p.network.name,
+			Workload: workloadClassic,
+		})
+	}
+	tenants = append(tenants, Tenant{ID: g.ciTenant.id, Name: "ci", Workload: workloadCI})
+
+	projects := make([]GardenerProject, 0, len(g.gardenerProjects))
+	for _, gp := range g.gardenerProjects {
+		tenants = append(tenants, Tenant{
+			ID:       gp.tenant.id,
+			Name:     "Infrastructure tenant of " + gp.name,
+			Workload: workloadGardener,
+		})
+		shoots := make([]string, 0, len(gp.shoots))
+		for _, s := range gp.shoots {
+			shoots = append(shoots, s.name)
+		}
+		projects = append(projects, GardenerProject{
+			Name:     gp.name,
+			TenantID: gp.tenant.id,
+			Shoots:   shoots,
+		})
+	}
+	return tenants, projects
 }
 
 // run generates the month of every workload, one block after another, and tags
