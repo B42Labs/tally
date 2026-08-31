@@ -171,6 +171,12 @@ type queued struct {
 // There are three of them, and a fourth, held-back.jsonl, when the held-back
 // switch keeps part of the month off the bus.
 //
+// While the month goes out, the run serves it as a fake OpenStack API as well,
+// on the control endpoint's listener and for exactly as long, the hold
+// included. A reconciliation sync reads the cloud the notifications describe
+// while they are published. File mode serves neither of the two: nothing is in
+// flight there.
+//
 // A cancelled context is a clean stop: what went out stays out, and Run returns
 // nil, so SIGINT and SIGTERM leave exit status 0 the way they do for the
 // collector. A failed publish is an error instead, and what an operator does
@@ -310,7 +316,27 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 	if err != nil {
 		return err
 	}
-	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines, held)
+
+	// The wait comes before the clock is built, because virtual time starts
+	// running the moment it is: a clock built first would have run through part
+	// of the month while the collector was still connecting, and the run would
+	// publish that part in one burst.
+	if err := publisher.AwaitConsumer(ctx, collectorQueue, opts.WaitForCollector); err != nil {
+		// A context that ends here is the clean stop the rest of the run answers
+		// a signal with, at the one point where nothing has gone out yet.
+		if ctx.Err() != nil {
+			logger.Info("stopped", "published", 0, "total", len(lines)+len(held), "held", len(held))
+			return nil
+		}
+		return err
+	}
+	clock := NewClock(from, opts.Factor, time.Now)
+	api, err := NewCloudAPI(clock, month.Oracle)
+	if err != nil {
+		return fmt.Errorf("building the fake OpenStack API: %w", err)
+	}
+
+	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, held, api)
 }
 
 // renderQueue turns a schedule into the notifications the bus carries. The
@@ -340,6 +366,10 @@ func renderQueue(schedule Schedule) ([]queued, error) {
 // The publisher is dialled by the caller, as it is for Run, and for the same
 // reason. A replay has no file mode: the month already exists as a file, so a
 // nil publisher leaves it nothing to do.
+//
+// It serves the control endpoint the way a run does, and no fake OpenStack API:
+// the recorded file holds the notifications of a month, not the oracle a
+// listing is answered out of.
 //
 // A cancelled context is a clean stop and a failed publish is an error, the way
 // Run treats them: the recorded message ids are the ones the run published, so
@@ -391,11 +421,21 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 		"from", from.Format(time.RFC3339),
 		"to", to.Format(time.RFC3339))
 
-	return broadcast(ctx, cfg, publisher, logger, opts.Factor, opts.WaitForCollector, from, to, lines, nil)
+	// Before the clock, for the reason Run states.
+	if err := publisher.AwaitConsumer(ctx, collectorQueue, opts.WaitForCollector); err != nil {
+		if ctx.Err() != nil {
+			logger.Info("stopped", "published", 0, "total", len(lines), "held", 0)
+			return nil
+		}
+		return err
+	}
+	clock := NewClock(from, opts.Factor, time.Now)
+
+	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, nil, nil)
 }
 
-// broadcast puts the lines on the bus in the order they stand in, paced by a
-// virtual clock that starts at from, holds the held ones back until a release
+// broadcast puts the lines on the bus in the order they stand in, paced by the
+// clock the caller started at from, holds the held ones back until a release
 // arrives, and serves the control endpoint through all of it.
 //
 // The endpoint is served for the length of the run and no longer. It changes
@@ -403,13 +443,18 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 // notification or after the last one, so it comes up with the publishing and
 // stays up through the hold.
 //
+// An api is mounted on the same listener, under every path the control routes
+// leave: those are method-qualified and beat the catch-all, so the fake
+// OpenStack API answers the rest and lives exactly as long as the endpoint. A
+// nil api mounts nothing, which is what a replay passes.
+//
 // A held share is published after the last regular line, once POST /release
 // asks for it. Every held instant lies before the clock by then, so the
 // notifications go out as fast as the broker confirms them, each under the
 // timestamp inside the month it always carried. A context that ends during the
 // hold is a clean stop with the held share never published.
 func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *slog.Logger,
-	factor float64, wait time.Duration, from, to time.Time, lines, held []queued,
+	clock *Clock, from, to time.Time, lines, held []queued, api http.Handler,
 ) error {
 	hb := newHoldback(len(held))
 	total := len(lines) + len(held)
@@ -425,10 +470,6 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		return nil
 	}
 
-	if err := publisher.AwaitConsumer(ctx, collectorQueue, wait); err != nil {
-		return stop(err)
-	}
-
 	// The endpoint carries no credential, so it binds the address the
 	// configuration names rather than every interface the machine has: on
 	// loopback by default, and on 0.0.0.0 where a deployment publishes the port
@@ -440,7 +481,6 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		return fmt.Errorf("serving HTTP: %w", err)
 	}
 
-	clock := NewClock(from, factor, time.Now)
 	progress := func() Progress {
 		return Progress{
 			From: from, To: to,
@@ -448,8 +488,12 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 			Held: hb.held(), Holding: hb.holding(),
 		}
 	}
+	mux := NewControlMux(clock, progress, hb.release)
+	if api != nil {
+		mux.Handle("/", api)
+	}
 	server := &http.Server{
-		Handler:           NewControlMux(clock, progress, hb.release),
+		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

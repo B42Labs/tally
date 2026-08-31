@@ -789,6 +789,135 @@ func TestRunHoldsBackUntilReleased(t *testing.T) {
 	}
 }
 
+// cloudRequest sends one request to the fake OpenStack API a run serves on port,
+// under the token a caller holds. controlRequest beside it sends neither a body
+// nor a credential, which is every request the control routes take.
+func cloudRequest(t *testing.T, port int, method, path, token, body string,
+) (int, http.Header, string) {
+	t.Helper()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("building %s %s: %v", method, url, err)
+	}
+	if token != "" {
+		req.Header.Set("X-Auth-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	answer, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the answer to %s %s: %v", method, url, err)
+	}
+	return resp.StatusCode, resp.Header, string(answer)
+}
+
+// instancesAtPeriodStart are the instances the oracle holds at the first instant
+// of its month, by the intervals alone: an interval that begins there contains
+// it, and a resource whose first one begins later does not exist yet. The
+// pre-existing switch is what puts instances there, because the oracle clips a
+// life that began before the period to its first instant.
+func instancesAtPeriodStart(oracle Oracle) []string {
+	var ids []string
+	for _, resource := range oracle.Resources {
+		if resource.ResourceType != typeInstance {
+			continue
+		}
+		if resource.Intervals[0].From.Equal(oracle.PeriodFrom) {
+			ids = append(ids, resource.ResourceID)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestRunServesTheFakeAPIOnTheControlListener is the mount a run composes: the
+// OpenStack API of the month it publishes is answered on the very port the
+// control routes are on, so a sync reaching the simulator authenticates against
+// the run and reads the cloud the notifications came from. What the fake API
+// answers with is held in api_test.go against a handler built there; what only a
+// run puts together is that the handler is on the listener at all.
+func TestRunServesTheFakeAPIOnTheControlListener(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	startCollector(t, url, ServiceExchanges)
+
+	// A factor of 0 stops virtual time at the first instant of the month, so the
+	// cloud holds the pre-existing instances for as long as the run is up, and
+	// held-back is what keeps it up: the run waits in the hold until it is asked
+	// to release, and the fake API goes down with the run.
+	month := faultyMonth(t, 1, Faults{PreExisting: true, HeldBack: true})
+	held := len(month.Held)
+	if held == 0 {
+		t.Fatal("the month holds nothing back, want the switch to have picked notifications")
+	}
+	want := instancesAtPeriodStart(month.Oracle)
+	if len(want) == 0 {
+		t.Fatal("the month holds no instance at its first instant, want the pre-existing ones")
+	}
+
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(t.Context(), Config{Cloud: testCloud, HTTPPort: port}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultPreExisting, FaultHeldBack},
+			WaitForCollector: pollDeadline,
+		}, publisher, testLogger(t))
+	}()
+	waitForHold(t, port, held)
+
+	credentials := fmt.Sprintf(`{"auth": {"identity": {"methods": ["password"], "password": `+
+		`{"user": {"name": %q, "password": %q, "domain": {"name": "Default"}}}}}}`,
+		cloudUsername, cloudPassword)
+	status, header, answer := cloudRequest(t, port, http.MethodPost, "/v3/auth/tokens", "", credentials)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /v3/auth/tokens on the run's listener = %d, want %d (body %q)",
+			status, http.StatusCreated, answer)
+	}
+	token := header.Get("X-Subject-Token")
+	if token == "" {
+		t.Fatal("the answer carries no X-Subject-Token, want the token this run issued")
+	}
+
+	status, _, answer = cloudRequest(t, port, http.MethodGet, serversPath, token, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET %s on the run's listener = %d, want %d (body %q)",
+			serversPath, status, http.StatusOK, answer)
+	}
+	served := servedIDs(t, answer, "servers")
+	slices.Sort(served)
+	if !slices.Equal(served, want) {
+		t.Errorf("the live listing answered with %v, want the instances the month holds at its "+
+			"first instant %v", served, want)
+	}
+
+	// The hold is let go the way the case above lets it go, so the run ends before
+	// the broker it publishes to does.
+	status, body, answered := controlRequest(t, port, http.MethodPost, "/release")
+	if !answered {
+		t.Fatal("POST /release reached nothing, want the endpoint to serve the hold")
+	}
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the release", pollDeadline)
+	}
+}
+
 // TestRunStoppedWhileHoldingKeepsTheHeldNotificationsBack is what SIGINT does
 // to a run that is holding: the process ends with exit status 0, and the share
 // it held never reaches the bus. That is the other half of the drill, where the
