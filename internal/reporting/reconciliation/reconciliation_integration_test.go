@@ -1237,6 +1237,9 @@ type fakeAdapter struct {
 	// incremental-window assertions read.
 	since *time.Time
 
+	// at is the instant the last listing was told the run is at.
+	at time.Time
+
 	// entered is closed when a blocking stream starts and released is what holds
 	// it there, so a test can compete with a run it knows is in flight. Both are
 	// nil for a fake that does not block.
@@ -1264,8 +1267,10 @@ func (a *fakeAdapter) ResourceTypes(map[string]any) ([]string, error) {
 }
 
 func (a *fakeAdapter) ListResources(ctx context.Context, _ map[string]any, since *time.Time,
+	at time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
 	a.since = since
+	a.at = at
 	return func(yield func(reconciliation.ObservedResource, error) bool) {
 		if a.released != nil {
 			close(a.entered)

@@ -115,7 +115,7 @@ func run(ctx context.Context) error {
 	// different platform than the cloud declares, stops the process before it
 	// listens.
 	adapterRegistry := map[string]reconciliation.Adapter{
-		"openstack": adapters.NewOpenStack(time.Now, logger),
+		"openstack": adapters.NewOpenStack(logger),
 	}
 	cloudsCfg, err := reconciliation.LoadConfig(cfg.CloudsConfigPath, adapterRegistry)
 	if err != nil {

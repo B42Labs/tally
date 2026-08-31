@@ -24,7 +24,7 @@ func (a stubAdapter) Platform() string { return a.platform }
 
 func (a stubAdapter) ResourceTypes(map[string]any) ([]string, error) { return nil, nil }
 
-func (a stubAdapter) ListResources(context.Context, map[string]any, *time.Time,
+func (a stubAdapter) ListResources(context.Context, map[string]any, *time.Time, time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
 	return nil
 }
