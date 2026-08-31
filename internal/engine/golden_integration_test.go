@@ -317,6 +317,7 @@ func TestGolden(t *testing.T) {
 	t.Run("scheduler_drill", func(t *testing.T) { goldenSchedulerDrill(t, f) })
 	t.Run("temporal", func(t *testing.T) { goldenTemporal(t, f) })
 	t.Run("phase3_regression", func(t *testing.T) { goldenPhase3Regression(t, f) })
+	t.Run("adjusted_reproducibility", func(t *testing.T) { goldenAdjustedReproducibility(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -716,25 +717,7 @@ func goldenReproducibility(t *testing.T, f goldenFixture) {
 		t.Fatalf("JSONFiles.Export: %v", err)
 	}
 
-	if len(b.Statements) != len(a.Statements) {
-		t.Fatalf("the second run billed %d statements, want the %d of the first",
-			len(b.Statements), len(a.Statements))
-	}
-	for i, want := range a.Statements {
-		got := b.Statements[i]
-		if got.Key != want.Key {
-			t.Errorf("statement %d: key = %q, want %q", i, got.Key, want.Key)
-		}
-		if !bytes.Equal(got.Document, want.Document) {
-			t.Errorf("the document of %s = %s, want %s", want.Key, got.Document, want.Document)
-		}
-		if !got.Total.Equal(want.Total) {
-			t.Errorf("the total of %s = %s, want %s", want.Key, got.Total, want.Total)
-		}
-		if got.Currency != want.Currency {
-			t.Errorf("the currency of %s = %q, want %q", want.Key, got.Currency, want.Currency)
-		}
-	}
+	assertSameStatements(t, b.Statements, a.Statements, "the second run")
 
 	if len(b.Rated) != len(a.Rated) {
 		t.Fatalf("the second run rated %d records, want the %d of the first", len(b.Rated), len(a.Rated))
@@ -820,6 +803,33 @@ func goldenReproducibility(t *testing.T, f goldenFixture) {
 	}
 }
 
+// assertSameStatements checks that two runs of one period billed the same
+// statements: the same keys, the same documents byte for byte, the same totals
+// and the same currency. what names the run the statements in got came from, so
+// a failure says which of the two runs of a drill differs.
+func assertSameStatements(t *testing.T, got, want []statements.Statement, what string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("%s billed %d statements, want %d", what, len(got), len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.Key != w.Key {
+			t.Errorf("statement %d: key = %q, want %q", i, g.Key, w.Key)
+		}
+		if !bytes.Equal(g.Document, w.Document) {
+			t.Errorf("the document of %s = %s, want %s", w.Key, g.Document, w.Document)
+		}
+		if !g.Total.Equal(w.Total) {
+			t.Errorf("the total of %s = %s, want %s", w.Key, g.Total, w.Total)
+		}
+		if g.Currency != w.Currency {
+			t.Errorf("the currency of %s = %q, want %q", w.Key, g.Currency, w.Currency)
+		}
+	}
+}
+
 // exportedRun is the part of an exported run.json two runs of one period have
 // to agree on: the version they rated with, and the documents they wrote beside
 // the projects those bill.
@@ -835,6 +845,16 @@ type exportedDocument struct {
 	ProjectID string          `json:"project_id"`
 	Total     decimal.Decimal `json:"total"`
 	Currency  string          `json:"currency"`
+}
+
+// settlement is the part of a kickbacks.json a drill reads: what each partner
+// is owed for the month, and over how many projects that total was summed.
+type settlement struct {
+	Beneficiaries []struct {
+		Beneficiary   string          `json:"beneficiary"`
+		KickbackTotal decimal.Decimal `json:"kickback_total"`
+		Projects      int             `json:"projects"`
+	} `json:"beneficiaries"`
 }
 
 // readRunIndex reads the run.json one export wrote.
@@ -1398,25 +1418,7 @@ func goldenPhase3Regression(t *testing.T, f goldenFixture) {
 		t.Fatalf("JSONFiles.Export: %v", err)
 	}
 
-	if len(b.Statements) != len(a.Statements) {
-		t.Fatalf("the run without the walk billed %d statements, want the %d of the walking one",
-			len(b.Statements), len(a.Statements))
-	}
-	for i, want := range a.Statements {
-		got := b.Statements[i]
-		if got.Key != want.Key {
-			t.Errorf("statement %d: key = %q, want %q", i, got.Key, want.Key)
-		}
-		if !bytes.Equal(got.Document, want.Document) {
-			t.Errorf("the document of %s = %s, want %s", want.Key, got.Document, want.Document)
-		}
-		if !got.Total.Equal(want.Total) {
-			t.Errorf("the total of %s = %s, want %s", want.Key, got.Total, want.Total)
-		}
-		if got.Currency != want.Currency {
-			t.Errorf("the currency of %s = %q, want %q", want.Key, got.Currency, want.Currency)
-		}
-	}
+	assertSameStatements(t, b.Statements, a.Statements, "the run without the walk")
 
 	// The document a customer receives, on disk. kickbacks.json names the run it
 	// was settled from, so it is not the file the two exports are compared on.
@@ -1435,5 +1437,196 @@ func goldenPhase3Regression(t *testing.T, f goldenFixture) {
 	}
 	if records := readAdjustmentRecords(t, dbs, second.RunID); len(records) != 0 {
 		t.Errorf("the run without the walk stored the adjustment records %+v, want none", records)
+	}
+}
+
+// goldenAdjustedReproducibility meters one adjusted period twice from the same
+// events and checks that the two runs bill and settle the same thing. It is the
+// phase's second exit criterion: a rerun of a month is what an operator does
+// after a failed pass, and with adjustments in play a rerun that settled a
+// partner differently would pay that partner twice or at another amount. So the
+// drill compares the invoice, the rows a payout is summed from and the
+// settlement documents.
+//
+// The case it meters is the inherited member discount of the loop above, in
+// databases of its own. Two runs that agree with each other and with nothing
+// else would be reproducibly wrong, so the first of them is held against that
+// case's expectations whole rather than against a total written out again here.
+func goldenAdjustedReproducibility(t *testing.T, f goldenFixture) {
+	c := loadCase(t, "inherited_member_discount")
+	want := loadExpected(t, "inherited_member_discount")
+	dbs := f.caseDatabases(t, "adjusted_reproducibility")
+	ctx := t.Context()
+
+	seeded := seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+	dir := t.TempDir()
+
+	first, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, want.Clouds))
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, first)
+	assertStats(t, first.Stats, want.Stats)
+	assertUsage(t, dbs, first.RunID, want.Usage)
+
+	a, err := export.Load(ctx, dbs.engine, first.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	assertRated(t, a.Rated, want.Rated)
+	assertStatements(t, a.Statements, want.Statements, want.AbsentStatements, seeded)
+	assertAdjustmentRecords(t, dbs, first.RunID, want.Statements, seeded)
+	assertKickbacks(t, a.Kickbacks, want.Statements, seeded)
+	// The second run supersedes the first, and export.Load refuses a superseded
+	// run, so the first run is read and written out before the second opens.
+	if err := (export.JSONFiles{Dir: filepath.Join(dir, "a")}).Export(ctx, a); err != nil {
+		t.Fatalf("JSONFiles.Export: %v", err)
+	}
+
+	second, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, want.Clouds))
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, second)
+	if !slices.Equal(second.Superseded, []uuid.UUID{first.RunID}) {
+		t.Errorf("Superseded = %v, want the first run %s", second.Superseded, first.RunID)
+	}
+
+	b, err := export.Load(ctx, dbs.engine, second.RunID)
+	if err != nil {
+		t.Fatalf("export.Load: %v", err)
+	}
+	if err := (export.JSONFiles{Dir: filepath.Join(dir, "b")}).Export(ctx, b); err != nil {
+		t.Fatalf("JSONFiles.Export: %v", err)
+	}
+
+	assertSameStatements(t, b.Statements, a.Statements, "the second run")
+
+	// The rows a payout is summed from, compared whole. DeepEqual is sound over
+	// these two slices: the query orders both, it reads back every column but id
+	// and run_id, and the relation ids are the registry's, which both runs read
+	// the same. So the two slices are equal exactly where the two runs adjusted
+	// the same.
+	recordsA := readAdjustmentRecords(t, dbs, first.RunID)
+	recordsB := readAdjustmentRecords(t, dbs, second.RunID)
+	if !reflect.DeepEqual(recordsA, recordsB) {
+		t.Errorf("the second run stored the adjustment records %+v, want the %+v of the first",
+			recordsB, recordsA)
+	}
+
+	if len(b.Kickbacks) != len(a.Kickbacks) {
+		t.Fatalf("the second run settles %d kickbacks, want the %d of the first",
+			len(b.Kickbacks), len(a.Kickbacks))
+	}
+	for i, want := range a.Kickbacks {
+		got := b.Kickbacks[i]
+		for _, field := range []struct{ name, got, want string }{
+			{"beneficiary", got.Beneficiary, want.Beneficiary},
+			{"currency", got.Currency, want.Currency},
+			{"statement_key", got.StatementKey, want.StatementKey},
+			{"cloud", got.Cloud, want.Cloud},
+			{"project_id", got.ProjectID, want.ProjectID},
+			{"scope", got.Scope, want.Scope},
+		} {
+			if field.got != field.want {
+				t.Errorf("kickback %d: %s = %q, want %q", i, field.name, field.got, field.want)
+			}
+		}
+		if got.RelationID != want.RelationID {
+			t.Errorf("kickback %d: relation_id = %s, want %s", i, got.RelationID, want.RelationID)
+		}
+		for _, amount := range []struct {
+			name      string
+			got, want decimal.Decimal
+		}{
+			{"rate", got.Rate, want.Rate},
+			{"base", got.Base, want.Base},
+			{"amount", got.Amount, want.Amount},
+		} {
+			if !amount.got.Equal(amount.want) {
+				t.Errorf("kickback %d: %s = %s, want %s", i, amount.name, amount.got, amount.want)
+			}
+		}
+	}
+
+	// The three documents the customers receive, on disk.
+	for _, statement := range []struct{ key, file string }{
+		{"os-golden-member/proj-alpha-1", "statement-os-golden-member%2Fproj-alpha-1.json"},
+		{"os-golden-member/proj-alpha-2", "statement-os-golden-member%2Fproj-alpha-2.json"},
+		{"os-golden-member/proj-beta", "statement-os-golden-member%2Fproj-beta.json"},
+	} {
+		document := export.DocumentFileName(runs.KindRegular, statement.key)
+		if document != statement.file {
+			t.Fatalf("export.DocumentFileName = %q, want %q", document, statement.file)
+		}
+		documentA := readExported(t, filepath.Join(dir, "a", document))
+		documentB := readExported(t, filepath.Join(dir, "b", document))
+		if !bytes.Equal(documentA, documentB) {
+			t.Errorf("the two exports of %s differ:\n%s\n%s", document, documentA, documentB)
+		}
+	}
+
+	// The documents the partner is paid from. Both name the run they belong to,
+	// and nothing else in them differs between two runs of one period, so each
+	// is compared with its own run id replaced by one placeholder.
+	jsonA, err := export.KickbacksJSON(a)
+	if err != nil {
+		t.Fatalf("export.KickbacksJSON: %v", err)
+	}
+	jsonB, err := export.KickbacksJSON(b)
+	if err != nil {
+		t.Fatalf("export.KickbacksJSON: %v", err)
+	}
+	csvA, err := export.KickbacksCSV(a)
+	if err != nil {
+		t.Fatalf("export.KickbacksCSV: %v", err)
+	}
+	csvB, err := export.KickbacksCSV(b)
+	if err != nil {
+		t.Fatalf("export.KickbacksCSV: %v", err)
+	}
+	anonymize := func(document []byte, run export.Run) []byte {
+		return bytes.ReplaceAll(document, []byte(run.ID.String()), []byte("<run>"))
+	}
+	for _, settled := range []struct {
+		name string
+		a, b []byte
+	}{
+		{"kickbacks.json", anonymize(jsonA, a), anonymize(jsonB, b)},
+		{"kickbacks.csv", anonymize(csvA, a), anonymize(csvB, b)},
+	} {
+		if !bytes.Equal(settled.a, settled.b) {
+			t.Errorf("the two settlements in %s differ:\n%s\n%s", settled.name, settled.a, settled.b)
+		}
+	}
+
+	// What the partner is owed for the month, read off both settlements: one
+	// beneficiary, the 14.14 of proj-alpha-1 and the 7.07 of proj-alpha-2, over
+	// the two projects those came off.
+	for _, document := range []struct {
+		name string
+		data []byte
+	}{
+		{"kickbacks.json of a", jsonA},
+		{"kickbacks.json of b", jsonB},
+	} {
+		var got settlement
+		decodeJSON(t, document.name, document.data, &got)
+		if len(got.Beneficiaries) != 1 {
+			t.Fatalf("the %s settles %d beneficiaries, want the one partner of the case",
+				document.name, len(got.Beneficiaries))
+		}
+		entry := got.Beneficiaries[0]
+		if entry.Beneficiary != "partner-corp" {
+			t.Errorf("the %s settles %q, want %q", document.name, entry.Beneficiary, "partner-corp")
+		}
+		if want := decimal.RequireFromString("21.21"); !entry.KickbackTotal.Equal(want) {
+			t.Errorf("the kickback total of %s = %s, want %s", document.name, entry.KickbackTotal, want)
+		}
+		if entry.Projects != 2 {
+			t.Errorf("the kickback total of %s came off %d projects, want the two of the group",
+				document.name, entry.Projects)
+		}
 	}
 }
