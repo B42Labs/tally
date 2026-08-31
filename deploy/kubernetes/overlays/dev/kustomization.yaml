@@ -54,6 +54,24 @@ secretGenerator:
   - name: tally-vm-admin
     literals:
       - delete-auth-key=tally-dev-vm-delete-key
+  # How the Reporting API authenticates against the cloud it reconciles. The file
+  # carries a cloud password, so it is generated here rather than into the
+  # ConfigMap the rest of the reconciliation config goes to: a ConfigMap is
+  # readable by everything the built-in view role is bound to, and the drill of
+  # another cloud edits this file in place.
+  - name: tally-reconciliation-auth
+    files:
+      - reconciliation/clouds.yaml
+
+# What the Reporting API reconciles here. The file is mounted by the patch at the
+# end of this file, beside the clouds.yaml of the Secret above. Generating the
+# ConfigMap from it means editing it re-rolls the pod through the generated name
+# hash, rather than leaving it syncing by a config that no longer matches the
+# tree.
+configMapGenerator:
+  - name: tally-reconciliation
+    files:
+      - reconciliation/clouds-config.yaml
 
 patches:
   # Route every service to its nip.io hostname.
@@ -179,7 +197,7 @@ patches:
         path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
         value: Never
 
-  # The three strategic merge patches in this file. They merge env entries by
+  # The four strategic merge patches in this file. They merge env entries by
   # name, so each names only the variables it sets instead of indexing into the
   # base env list, where a reorder in the base would move the values onto the
   # wrong variables.
@@ -236,3 +254,47 @@ patches:
                 env:
                   - name: ALERTMANAGER_EXTERNAL_URL
                     value: https://alertmanager.tally.127-0-0-1.nip.io:8443
+
+  # The simulated cloud the compose stack serves, mounted read-only from the two
+  # generators above: the clouds config out of the ConfigMap and the clouds.yaml
+  # out of the Secret, projected into the one directory the two variables point
+  # at. Each source names its generator by its unsuffixed name; the name
+  # reference transformer rewrites both to the generated ones, so the hash a file
+  # edit changes reaches the pod.
+  #
+  # The clouds.yaml the pod authenticates with points at
+  # host.docker.internal:8091, which is where a pod in the kind node reaches the
+  # simulator the compose stack publishes on the host.
+  #
+  # TALLY_REPORTING_SYNC_ALLOW_AT lets a sync request name the instant it
+  # reconciles at. The simulated cloud runs on a generated month rather than on
+  # the wall clock, so a sync at wall time would observe it outside its period.
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: reporting-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: reporting-api
+                env:
+                  - name: TALLY_REPORTING_CLOUDS_CONFIG
+                    value: /etc/tally/clouds/clouds-config.yaml
+                  - name: OS_CLIENT_CONFIG_FILE
+                    value: /etc/tally/clouds/clouds.yaml
+                  - name: TALLY_REPORTING_SYNC_ALLOW_AT
+                    value: "true"
+                volumeMounts:
+                  - name: clouds
+                    mountPath: /etc/tally/clouds
+                    readOnly: true
+            volumes:
+              - name: clouds
+                projected:
+                  sources:
+                    - configMap:
+                        name: tally-reconciliation
+                    - secret:
+                        name: tally-reconciliation-auth
