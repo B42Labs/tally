@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,7 +29,8 @@ import (
 
 // fileSuffix names the companion variable of a secret: the value of
 // TALLY_SIM_AMQP_URL is read from the file at TALLY_SIM_AMQP_URL_FILE when that
-// variable holds a path.
+// variable holds a path, and TALLY_SIM_API_TOKEN from TALLY_SIM_API_TOKEN_FILE
+// the same way.
 const fileSuffix = "_FILE"
 
 // The variables this package reads. They are named here because the errors
@@ -39,11 +41,16 @@ const (
 	envHTTPPort = "TALLY_SIM_HTTP_PORT"
 	envAMQPURL  = "TALLY_SIM_AMQP_URL"
 	envCloud    = "TALLY_SIM_CLOUD"
+
+	envReportingURL      = "TALLY_SIM_REPORTING_URL"
+	envReportingInsecure = "TALLY_SIM_REPORTING_INSECURE"
+	envAPIToken          = "TALLY_SIM_API_TOKEN"
+	envGardenCloud       = "TALLY_SIM_GARDEN_CLOUD"
 )
 
-// EnvNames is every variable this package reads, including the *_FILE companion
-// of the secret. Tests blank all of them, so a value in the developer's shell
-// never reaches the code under test.
+// EnvNames is every variable this package reads, including the *_FILE
+// companions of the secrets. Tests blank all of them, so a value in the
+// developer's shell never reaches the code under test.
 var EnvNames = []string{
 	envLogLevel,
 	envHTTPAddr,
@@ -51,6 +58,11 @@ var EnvNames = []string{
 	envAMQPURL,
 	envAMQPURL + fileSuffix,
 	envCloud,
+	envReportingURL,
+	envReportingInsecure,
+	envAPIToken,
+	envAPIToken + fileSuffix,
+	envGardenCloud,
 }
 
 // loopback is the address the control endpoint binds unless a deployment names
@@ -93,12 +105,28 @@ type Config struct {
 	// and the cloud of events.jsonl. It has no default because a guessed cloud
 	// silently books usage to the wrong one.
 	Cloud string `env:"TALLY_SIM_CLOUD"`
+	// ReportingURL is the Reporting API the projects are registered with. run
+	// reads it when --register-projects is on and ignores it otherwise. It must
+	// be an absolute https URL, because the api token travels on it;
+	// ReportingInsecure is what allows a plaintext one.
+	ReportingURL string `env:"TALLY_SIM_REPORTING_URL"`
+	// ReportingInsecure allows an http Reporting API. It exists for a simulator
+	// and an API on the same machine, and for development; anywhere else it puts
+	// an api token of role admin on the wire in cleartext.
+	ReportingInsecure bool `env:"TALLY_SIM_REPORTING_INSECURE" envDefault:"false"`
+	// APIToken is an api token of role admin, which POST /api/v1/projects and
+	// POST /api/v1/projects/{id}/relations demand. It supports the *_FILE
+	// convention.
+	APIToken string `env:"TALLY_SIM_API_TOKEN"`
+	// GardenCloud is the cloud the two Gardener projects are registered under.
+	// It has no default, for the reason Cloud has none.
+	GardenCloud string `env:"TALLY_SIM_GARDEN_CLOUD"`
 }
 
-// Load reads the environment, resolves the file-backed broker URL, and checks
-// the log level. It does not check whether the required values are present:
-// which ones are required depends on the subcommand, which is what ValidateRun
-// and ValidateReplay decide.
+// Load reads the environment, resolves the file-backed secrets, and checks the
+// log level. It does not check whether the required values are present: which
+// ones are required depends on the subcommand and on its switches, which is
+// what ValidateRun, ValidateReplay, and ValidateRegistration decide.
 func Load() (Config, error) {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
@@ -106,6 +134,9 @@ func Load() (Config, error) {
 	}
 
 	if cfg.AMQPURL, err = resolveFileSecret(envAMQPURL, cfg.AMQPURL); err != nil {
+		return Config{}, err
+	}
+	if cfg.APIToken, err = resolveFileSecret(envAPIToken, cfg.APIToken); err != nil {
 		return Config{}, err
 	}
 
@@ -158,6 +189,67 @@ func (c Config) ValidateRun() error {
 func (c Config) ValidateReplay() error {
 	if c.AMQPURL == "" {
 		return fmt.Errorf("%s: must be set", envAMQPURL)
+	}
+	return nil
+}
+
+// ValidateRegistration is the gate of run --register-projects. It asks for the
+// Reporting API, an api token for it, and the cloud the Gardener projects are
+// registered under, none of which a run without the switch reads.
+//
+// The two clouds have to differ because a cloud is one installation of one
+// platform: a Gardener project registered under the tenants' cloud would key a
+// row of the OpenStack installation, and the relation would then point the
+// project at itself.
+func (c Config) ValidateRegistration() error {
+	if c.ReportingURL == "" {
+		return fmt.Errorf("%s: must be set when --register-projects is on", envReportingURL)
+	}
+	if err := c.validateReportingURL(); err != nil {
+		return err
+	}
+	// The token is named and never quoted: an error an operator pastes into a
+	// ticket must not carry the credential it is about.
+	if c.APIToken == "" {
+		return fmt.Errorf("%s: must be set when --register-projects is on", envAPIToken)
+	}
+	if c.GardenCloud == "" {
+		return fmt.Errorf("%s: must be set when --register-projects is on", envGardenCloud)
+	}
+	if c.GardenCloud == c.Cloud {
+		return fmt.Errorf("%s: %q must differ from %s: a cloud is one installation of one platform",
+			envGardenCloud, c.GardenCloud, envCloud)
+	}
+	return nil
+}
+
+// validateReportingURL holds the destination of a registration to what the
+// registrar does with it. The URL carries no credential, unlike the broker URL,
+// so the refusals quote it: what an operator mistyped is what they need to see.
+//
+// The scheme is checked for the reason the collector's is, in
+// internal/providers/openstack/config.go, and with more at stake: the token
+// travels in a header on every request, and it is of role admin, so it is not
+// scoped to one (platform, cloud) pair the way an ingest token is. Anybody on
+// the path of a plaintext registration reads a credential that writes the whole
+// project registry.
+func (c Config) validateReportingURL() error {
+	parsed, err := url.Parse(c.ReportingURL)
+	// The query and the fragment are looked for in the value itself rather than
+	// in the parsed URL, because an empty one of either does not survive the
+	// parse: a trailing "?" is recorded in ForceQuery and leaves RawQuery empty,
+	// and a "#" with nothing behind it parses to an empty Fragment. Both would
+	// pass a check on the parsed fields and then swallow the appended route —
+	// https://host# becomes https://host#/api/v1/projects, which posts the token
+	// and the row to / instead.
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") ||
+		strings.ContainsAny(c.ReportingURL, "?#") {
+		return fmt.Errorf("%s: %q must be an absolute http(s) URL with no query or fragment, "+
+			"because the registry route is appended to it", envReportingURL, c.ReportingURL)
+	}
+	if parsed.Scheme != "https" && !c.ReportingInsecure {
+		return fmt.Errorf("%s: %q must use https, because the admin api token travels on it; "+
+			"set %s=true to allow plaintext", envReportingURL, c.ReportingURL, envReportingInsecure)
 	}
 	return nil
 }
