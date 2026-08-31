@@ -1,0 +1,73 @@
+{
+  "clouds": ["os-golden-temporal"],
+  "stats": {"candidates": 1, "usage_records": 1, "rated_records": 4, "statements": 1, "adjustment_records": 1},
+  "usage": [
+    {
+      "cloud": "os-golden-temporal",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-temporal",
+      "project_id": "proj-temporal",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {
+        "minutes": "44640",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "59.52"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "29.76"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "59.52"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-temporal/proj-temporal",
+      "total": "126.48",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-temporal",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-temporal",
+          "total": "148.80",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "744.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "0"},
+              "cost": {"vcpus": "59.52", "ram_gb": "29.76", "disk_gb": "59.52", "egress_gb": "0.00", "total": "148.80"}
+            }
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "148.80",
+      "adjustments": [
+        {
+          "type": "discount",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "rate": "0.15",
+          "base": "148.80",
+          "amount": "-22.32"
+        }
+      ],
+      "net_cost": "126.48",
+      "kickback_total": "0.00"
+    }
+  ],
+  "absent_statements": ["partner/partner-corp"]
+}

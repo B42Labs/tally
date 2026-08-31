@@ -315,6 +315,7 @@ func TestGolden(t *testing.T) {
 	t.Run("reproducibility", func(t *testing.T) { goldenReproducibility(t, f) })
 	t.Run("invariant_violation", func(t *testing.T) { goldenInvariantViolation(t, f) })
 	t.Run("scheduler_drill", func(t *testing.T) { goldenSchedulerDrill(t, f) })
+	t.Run("temporal", func(t *testing.T) { goldenTemporal(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -1248,5 +1249,73 @@ func goldenSchedulerDrill(t *testing.T, f goldenFixture) {
 	}
 	if status, _ := periodRow(t, dbs); status != "finalized" {
 		t.Errorf("the billing period is %q, want finalized", status)
+	}
+}
+
+// goldenTemporal bills one instance over two months across a relation that
+// closes inside the first of them. Decision D4 of
+// roadmap/03-phase-3-metering-rating.md holds a relation to a period iff
+// valid_from < period_to AND (valid_to IS NULL OR valid_to > period_from), so
+// the edge that ends on 2026-03-15 applies to March whole and to April not at
+// all: the day it closed on does not prorate the month it lies in.
+//
+// It is a case of its own because the loop above meters the March the period
+// constants name, and this one bills April on top of it in the same databases.
+// Both months rate with the model the suite imports: PricingModelForPeriod
+// (internal/engine/store/queries.sql) takes the latest model whose valid_from
+// is at or before the start of the period, so the April run reports the 2026-03
+// that assertClean holds every run of the suite to. The two are regular runs of
+// different periods, so the second supersedes nothing the first billed.
+func goldenTemporal(t *testing.T, f goldenFixture) {
+	c := loadCase(t, "temporal")
+	march := loadExpectedFile(t, "temporal", "expected.json")
+	april := loadExpectedFile(t, "temporal", "expected_april.json")
+	dbs := f.caseDatabases(t, "temporal")
+	ctx := t.Context()
+
+	seeded := seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+
+	// One month billed and held to the file that carries its numbers.
+	check := func(opts runs.Options, want expectedFile) (runs.Result, export.Run) {
+		result, err := runs.Execute(ctx, dbs.engine, dbs.source, opts)
+		if err != nil {
+			t.Fatalf("runs.Execute: %v", err)
+		}
+		assertClean(t, result)
+		assertStats(t, result.Stats, want.Stats)
+		assertUsage(t, dbs, result.RunID, want.Usage)
+
+		run, err := export.Load(ctx, dbs.engine, result.RunID)
+		if err != nil {
+			t.Fatalf("export.Load: %v", err)
+		}
+		assertRated(t, run.Rated, want.Rated)
+		assertStatements(t, run.Statements, want.Statements, want.AbsentStatements, seeded)
+		assertAdjustmentRecords(t, dbs, result.RunID, want.Statements, seeded)
+		assertKickbacks(t, run.Kickbacks, want.Statements, seeded)
+		return result, run
+	}
+
+	// March, the month the relation's last day lies in: the discount is applied
+	// to the whole of it, and the invoice is the net cost it leaves.
+	check(c.options(t, march.Clouds), march)
+
+	// April, the month after the relation closed. The same events, the same
+	// model, and a statement at the base cost.
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	opts := c.options(t, april.Clouds)
+	opts.PeriodFrom, opts.PeriodTo = from, to
+	result, run := check(opts, april)
+	if result.Stats.AdjustmentRecords != 0 {
+		t.Errorf("Stats.AdjustmentRecords = %d, want none: the relation closed before April",
+			result.Stats.AdjustmentRecords)
+	}
+	if records := readAdjustmentRecords(t, dbs, result.RunID); len(records) != 0 {
+		t.Errorf("the April run stored the adjustment records %+v, want none", records)
+	}
+	if len(run.Kickbacks) != 0 {
+		t.Errorf("the April run settles the kickbacks %+v, want none", run.Kickbacks)
 	}
 }

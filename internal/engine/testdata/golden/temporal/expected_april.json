@@ -1,0 +1,58 @@
+{
+  "clouds": ["os-golden-temporal"],
+  "stats": {"candidates": 1, "usage_records": 1, "rated_records": 4, "statements": 1, "adjustment_records": 0},
+  "usage": [
+    {
+      "cloud": "os-golden-temporal",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-temporal",
+      "project_id": "proj-temporal",
+      "state": "active",
+      "from": "2026-04-01T00:00:00Z",
+      "to": "2026-05-01T00:00:00Z",
+      "seconds": 2592000,
+      "usage": {
+        "minutes": "43200",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-04-01T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "57.60"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-04-01T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "28.80"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-04-01T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "57.60"},
+    {"cloud": "os-golden-temporal", "resource_id": "i-temporal", "from": "2026-04-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-temporal/proj-temporal",
+      "total": "144.00",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-04-01T00:00:00Z", "to": "2026-05-01T00:00:00Z"},
+      "project_id": "proj-temporal",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-temporal",
+          "total": "144.00",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "720.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "0"},
+              "cost": {"vcpus": "57.60", "ram_gb": "28.80", "disk_gb": "57.60", "egress_gb": "0.00", "total": "144.00"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": ["partner/partner-corp"]
+}
