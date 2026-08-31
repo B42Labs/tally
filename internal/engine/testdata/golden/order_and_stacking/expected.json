@@ -1,0 +1,94 @@
+{
+  "clouds": ["os-golden-stacking"],
+  "stats": {"candidates": 1, "usage_records": 1, "rated_records": 4, "statements": 1, "adjustment_records": 3},
+  "usage": [
+    {
+      "cloud": "os-golden-stacking",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-stacking",
+      "project_id": "proj-stacking",
+      "state": "active",
+      "from": "2026-03-11T04:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1800000,
+      "usage": {
+        "minutes": "30000",
+        "count": "1",
+        "vcpus": "50",
+        "ram_gb": "100",
+        "disk_gb": "500",
+        "flavor": "m1.golden"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-stacking", "resource_id": "i-stacking", "from": "2026-03-11T04:00:00Z", "dimension": "vcpus", "quantity": "50", "amount": "500.00"},
+    {"cloud": "os-golden-stacking", "resource_id": "i-stacking", "from": "2026-03-11T04:00:00Z", "dimension": "ram_gb", "quantity": "100", "amount": "250.00"},
+    {"cloud": "os-golden-stacking", "resource_id": "i-stacking", "from": "2026-03-11T04:00:00Z", "dimension": "disk_gb", "quantity": "500", "amount": "250.00"},
+    {"cloud": "os-golden-stacking", "resource_id": "i-stacking", "from": "2026-03-11T04:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-stacking/proj-stacking",
+      "total": "935.00",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-stacking",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-stacking",
+          "total": "1000.00",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "500.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "50", "ram_gb": "100", "disk_gb": "500", "egress_gb": "0"},
+              "cost": {"vcpus": "500.00", "ram_gb": "250.00", "disk_gb": "250.00", "egress_gb": "0.00", "total": "1000.00"}
+            }
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "1000.00",
+      "adjustments": [
+        {
+          "type": "surcharge",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "description": "Managed-service markup",
+          "rate": "0.10",
+          "base": "1000.00",
+          "amount": "100.00"
+        },
+        {
+          "type": "discount",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "rate": "0.15",
+          "base": "1100.00",
+          "amount": "-165.00"
+        },
+        {
+          "type": "kickback",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "rate": "0.10",
+          "base": "935.00",
+          "amount": "93.50"
+        }
+      ],
+      "net_cost": "935.00",
+      "kickback_total": "93.50"
+    }
+  ],
+  "absent_statements": ["partner/partner-corp"]
+}

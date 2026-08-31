@@ -1,0 +1,93 @@
+{
+  "clouds": ["os-golden-scoped"],
+  "stats": {"candidates": 2, "usage_records": 2, "rated_records": 5, "statements": 1, "adjustment_records": 1},
+  "usage": [
+    {
+      "cloud": "os-golden-scoped",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-scoped",
+      "project_id": "proj-scoped",
+      "state": "active",
+      "from": "2026-03-11T04:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1800000,
+      "usage": {
+        "minutes": "30000",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large"
+      }
+    },
+    {
+      "cloud": "os-golden-scoped",
+      "platform": "openstack",
+      "resource_type": "volume",
+      "resource_id": "vol-scoped",
+      "project_id": "proj-scoped",
+      "state": "in-use",
+      "from": "2026-03-11T04:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 1800000,
+      "usage": {"minutes": "30000", "count": "1", "size_gb": "1000", "type": "ssd"}
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-scoped", "resource_id": "i-scoped", "from": "2026-03-11T04:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "40.00"},
+    {"cloud": "os-golden-scoped", "resource_id": "i-scoped", "from": "2026-03-11T04:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "20.00"},
+    {"cloud": "os-golden-scoped", "resource_id": "i-scoped", "from": "2026-03-11T04:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "40.00"},
+    {"cloud": "os-golden-scoped", "resource_id": "i-scoped", "from": "2026-03-11T04:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"},
+    {"cloud": "os-golden-scoped", "resource_id": "vol-scoped", "from": "2026-03-11T04:00:00Z", "dimension": "size_gb", "quantity": "1000", "amount": "50.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-scoped/proj-scoped",
+      "total": "130.00",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-scoped",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-scoped",
+          "total": "100.00",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "500.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "0"},
+              "cost": {"vcpus": "40.00", "ram_gb": "20.00", "disk_gb": "40.00", "egress_gb": "0.00", "total": "100.00"}
+            }
+          ]
+        },
+        {
+          "resource_id": "vol-scoped",
+          "total": "50.00",
+          "periods": [
+            {"state": "in-use", "hours": "500.00", "state_modifier": "1", "usage": {"size_gb": "1000"}, "cost": {"size_gb": "50.00", "total": "50.00"}}
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "150.00",
+      "adjustments": [
+        {
+          "type": "discount",
+          "relation": 0,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "openstack.instance",
+          "rate": "0.20",
+          "base": "100.00",
+          "amount": "-20.00"
+        }
+      ],
+      "net_cost": "130.00",
+      "kickback_total": "0.00"
+    }
+  ],
+  "absent_statements": ["partner/partner-corp"]
+}

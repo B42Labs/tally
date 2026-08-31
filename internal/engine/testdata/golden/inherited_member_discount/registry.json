@@ -1,0 +1,47 @@
+{
+  "projects": [
+    {"platform": "openstack", "cloud": "os-golden-member", "external_id": "proj-alpha-1"},
+    {"platform": "openstack", "cloud": "os-golden-member", "external_id": "proj-alpha-2"},
+    {"platform": "openstack", "cloud": "os-golden-member", "external_id": "proj-beta"},
+    {"platform": "meta", "cloud": "meta", "external_id": "customer-alpha"},
+    {"platform": "partner", "cloud": "partner", "external_id": "partner-corp"}
+  ],
+  "relations": [
+    {
+      "source": {"cloud": "os-golden-member", "external_id": "proj-alpha-1"},
+      "target": {"cloud": "meta", "external_id": "customer-alpha"},
+      "relation_type": "member_of",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "project_discount", "rate": "0.05", "scope": "all", "description": "Customer Alpha group discount"}
+        ]
+      }
+    },
+    {
+      "source": {"cloud": "os-golden-member", "external_id": "proj-alpha-2"},
+      "target": {"cloud": "meta", "external_id": "customer-alpha"},
+      "relation_type": "member_of",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "project_discount", "rate": "0.05", "scope": "all", "description": "Customer Alpha group discount"}
+        ]
+      }
+    },
+    {
+      "source": {"cloud": "meta", "external_id": "customer-alpha"},
+      "target": {"cloud": "partner", "external_id": "partner-corp"},
+      "relation_type": "managed_by",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_to": null,
+      "metadata": {
+        "pricing_adjustments": [
+          {"type": "kickback", "rate": "0.10", "scope": "all", "description": "Partner commission on the Customer Alpha group"}
+        ]
+      }
+    }
+  ]
+}

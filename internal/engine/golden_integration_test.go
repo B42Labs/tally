@@ -273,6 +273,16 @@ func TestGolden(t *testing.T) {
 		"e2e_power_cycle",
 		"related_costs",
 		"virtual_relations",
+		"reseller",
+		"scoped_discount",
+		"inherited_member_discount",
+		// registry.json lists the three adjustments of this case kickback
+		// first, against the surcharge → discount → kickback order
+		// expected.json chains the bases in. The reversed input is what proves
+		// the engine applies its canonical order rather than the order of the
+		// document, so tidying the fixture to match expected.json would leave
+		// the case passing without testing what it is named after.
+		"order_and_stacking",
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := loadCase(t, name)

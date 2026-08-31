@@ -1,0 +1,206 @@
+{
+  "clouds": ["os-golden-member"],
+  "stats": {"candidates": 3, "usage_records": 3, "rated_records": 12, "statements": 3, "adjustment_records": 4},
+  "usage": [
+    {
+      "cloud": "os-golden-member",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-alpha-1",
+      "project_id": "proj-alpha-1",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {
+        "minutes": "44640",
+        "count": "1",
+        "vcpus": "4",
+        "ram_gb": "8",
+        "disk_gb": "80",
+        "flavor": "m1.large"
+      }
+    },
+    {
+      "cloud": "os-golden-member",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-alpha-2",
+      "project_id": "proj-alpha-2",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {
+        "minutes": "44640",
+        "count": "1",
+        "vcpus": "2",
+        "ram_gb": "4",
+        "disk_gb": "40",
+        "flavor": "m1.medium"
+      }
+    },
+    {
+      "cloud": "os-golden-member",
+      "platform": "openstack",
+      "resource_type": "instance",
+      "resource_id": "i-beta",
+      "project_id": "proj-beta",
+      "state": "active",
+      "from": "2026-03-01T00:00:00Z",
+      "to": "2026-04-01T00:00:00Z",
+      "seconds": 2678400,
+      "usage": {
+        "minutes": "44640",
+        "count": "1",
+        "vcpus": "1",
+        "ram_gb": "2",
+        "disk_gb": "20",
+        "flavor": "m1.small"
+      }
+    }
+  ],
+  "rated": [
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-1", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "4", "amount": "59.52"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-1", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "8", "amount": "29.76"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-1", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "80", "amount": "59.52"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-1", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-2", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "2", "amount": "29.76"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-2", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "4", "amount": "14.88"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-2", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "40", "amount": "29.76"},
+    {"cloud": "os-golden-member", "resource_id": "i-alpha-2", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"},
+    {"cloud": "os-golden-member", "resource_id": "i-beta", "from": "2026-03-01T00:00:00Z", "dimension": "vcpus", "quantity": "1", "amount": "14.88"},
+    {"cloud": "os-golden-member", "resource_id": "i-beta", "from": "2026-03-01T00:00:00Z", "dimension": "ram_gb", "quantity": "2", "amount": "7.44"},
+    {"cloud": "os-golden-member", "resource_id": "i-beta", "from": "2026-03-01T00:00:00Z", "dimension": "disk_gb", "quantity": "20", "amount": "14.88"},
+    {"cloud": "os-golden-member", "resource_id": "i-beta", "from": "2026-03-01T00:00:00Z", "dimension": "egress_gb", "quantity": "0", "amount": "0.00"}
+  ],
+  "statements": [
+    {
+      "key": "os-golden-member/proj-alpha-1",
+      "total": "141.36",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-alpha-1",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-alpha-1",
+          "total": "148.80",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "744.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "4", "ram_gb": "8", "disk_gb": "80", "egress_gb": "0"},
+              "cost": {"vcpus": "59.52", "ram_gb": "29.76", "disk_gb": "59.52", "egress_gb": "0.00", "total": "148.80"}
+            }
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "148.80",
+      "adjustments": [
+        {
+          "type": "project_discount",
+          "relation": 0,
+          "relation_type": "member_of",
+          "relation_target": "customer-alpha",
+          "scope": "all",
+          "description": "Customer Alpha group discount",
+          "rate": "0.05",
+          "base": "148.80",
+          "amount": "-7.44"
+        },
+        {
+          "type": "kickback",
+          "relation": 2,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "description": "Partner commission on the Customer Alpha group",
+          "rate": "0.10",
+          "base": "141.36",
+          "amount": "14.14"
+        }
+      ],
+      "net_cost": "141.36",
+      "kickback_total": "14.14"
+    },
+    {
+      "key": "os-golden-member/proj-alpha-2",
+      "total": "70.68",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-alpha-2",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-alpha-2",
+          "total": "74.40",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "744.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "2", "ram_gb": "4", "disk_gb": "40", "egress_gb": "0"},
+              "cost": {"vcpus": "29.76", "ram_gb": "14.88", "disk_gb": "29.76", "egress_gb": "0.00", "total": "74.40"}
+            }
+          ]
+        }
+      ],
+      "related_costs": [],
+      "base_cost": "74.40",
+      "adjustments": [
+        {
+          "type": "project_discount",
+          "relation": 1,
+          "relation_type": "member_of",
+          "relation_target": "customer-alpha",
+          "scope": "all",
+          "description": "Customer Alpha group discount",
+          "rate": "0.05",
+          "base": "74.40",
+          "amount": "-3.72"
+        },
+        {
+          "type": "kickback",
+          "relation": 2,
+          "relation_type": "managed_by",
+          "relation_target": "partner-corp",
+          "scope": "all",
+          "description": "Partner commission on the Customer Alpha group",
+          "rate": "0.10",
+          "base": "70.68",
+          "amount": "7.07"
+        }
+      ],
+      "net_cost": "70.68",
+      "kickback_total": "7.07"
+    },
+    {
+      "key": "os-golden-member/proj-beta",
+      "total": "37.20",
+      "currency": "EUR",
+      "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+      "project_id": "proj-beta",
+      "platform": "openstack",
+      "line_items": [
+        {
+          "resource_id": "i-beta",
+          "total": "37.20",
+          "periods": [
+            {
+              "state": "active",
+              "hours": "744.00",
+              "state_modifier": "1",
+              "usage": {"vcpus": "1", "ram_gb": "2", "disk_gb": "20", "egress_gb": "0"},
+              "cost": {"vcpus": "14.88", "ram_gb": "7.44", "disk_gb": "14.88", "egress_gb": "0.00", "total": "37.20"}
+            }
+          ]
+        }
+      ],
+      "related_costs": []
+    }
+  ],
+  "absent_statements": ["meta/customer-alpha", "partner/partner-corp"]
+}
