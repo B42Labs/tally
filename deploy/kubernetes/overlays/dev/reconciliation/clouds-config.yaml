@@ -1,0 +1,13 @@
+# The clouds this dev cluster can reconcile: the one the compose stack's
+# simulator serves. The name matches the cloud the simulated month's events are
+# booked under, so the sync endpoint and the metering rows meet under os-sim.
+clouds:
+  - cloud: os-sim
+    platform: openstack
+    adapter: openstack
+    adapter_config:
+      # Which entry of the mounted clouds.yaml the adapter authenticates with.
+      os_cloud: os-sim
+      # The simulator serves Octavia, so the load balancers it reports are part
+      # of what a drill compares against the oracle.
+      include_octavia: true
