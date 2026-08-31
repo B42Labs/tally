@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/b42labs/tally/internal/core/event"
@@ -142,13 +143,23 @@ func New(db *store.Store, pipeline *ingest.Pipeline, cfg Config, adapters map[st
 // that against the projection, and ingests the difference as synthetic events
 // through the ordinary pipeline.
 //
+// at is the instant the run is told it happens at. A nil at leaves the run on
+// the clock the Syncer was built with, which is what every run does by default.
+// A non-nil at is the run's one instant instead: every poll-time correction is
+// dated at it, the sync_runs row is started at it, and the adapter is told the
+// run is at it, so the window the adapter bounds itself by and the instants the
+// corrections carry come from the same clock. The row's started_at has to carry
+// it because that column is where the next run of this cloud starts its window,
+// which is also why the instants told to the runs of one cloud must not go
+// backwards.
+//
 // A run that recorded anything in Stats.Errors is 'failed' in sync_runs and
 // comes back with a non-nil error, whether that error ended the run or only
 // spoiled part of it. The Result is returned in either case, so that a caller
 // can report the run id and the tally of a run that went badly. What such a run
 // did observe is kept: an enumeration failure is missing information, and the
 // corrections it did not keep the run from are facts either way.
-func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
+func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result, error) {
 	entry, ok := s.clouds[cloud]
 	if !ok {
 		return Result{}, fmt.Errorf("syncing %s: %w", cloud, ErrUnknownCloud)
@@ -156,6 +167,15 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 	adapter, ok := s.adapters[entry.Adapter]
 	if !ok {
 		return Result{}, fmt.Errorf("syncing %s: no adapter named %q is registered", cloud, entry.Adapter)
+	}
+
+	// The run's own clock. A told instant is read once and answered for the rest
+	// of the run, so that every stamp the run writes says the same thing however
+	// long the run takes.
+	now := s.now
+	if at != nil {
+		instant := at.UTC()
+		now = func() time.Time { return instant }
 	}
 
 	// The lock lives for the session rather than for a transaction, so the run
@@ -178,7 +198,16 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 	q := sqlcgen.New(s.db.Pool())
 	// The run row is written outside a transaction, so that a run in flight can
 	// be seen at 'running' while it works rather than appearing when it ends.
-	id, err := q.InsertSyncRun(ctx, cloud)
+	//
+	// A told run states its started_at rather than leaving the column to now():
+	// the next run of this cloud starts its window at that value, so a told run
+	// whose row said now() would leave the window open from the wall clock rather
+	// than from the instant it reconciled at.
+	var startedAt pgtype.Timestamptz
+	if at != nil {
+		startedAt = pgtype.Timestamptz{Time: now(), Valid: true}
+	}
+	id, err := q.InsertSyncRun(ctx, sqlcgen.InsertSyncRunParams{Cloud: cloud, StartedAt: startedAt})
 	if err != nil {
 		return Result{}, fmt.Errorf("recording the sync run of %s: %w", cloud, err)
 	}
@@ -204,7 +233,7 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 		return abort(err)
 	}
 
-	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, s.now().UTC(),
+	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, now().UTC(),
 		&stats)
 	if err != nil {
 		return abort(fmt.Errorf("listing the resources of %s: %w", cloud, err))
@@ -237,7 +266,7 @@ func (s *Syncer) Sync(ctx context.Context, cloud string) (Result, error) {
 		return abort(fmt.Errorf("loading the projection of %s: %w", cloud, err))
 	}
 
-	events, err := s.diff(runID, entry, observed, rows, enumerated)
+	events, err := diff(runID, entry, observed, rows, enumerated, now)
 	if err != nil {
 		return abort(err)
 	}
@@ -510,8 +539,12 @@ type resourceKey struct {
 //
 // enumerated is the set of resource types the run reached the end of. A row of
 // any other type is left alone, however absent it was from the observation.
-func (s *Syncer) diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedResource,
+//
+// now is the run's clock, which is where a correction the platform gave no
+// instant for is dated.
+func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedResource,
 	rows []sqlcgen.ListCurrentResourcesByCloudRow, enumerated map[string]bool,
+	now func() time.Time,
 ) ([]event.Event, error) {
 	stored := make(map[resourceKey]sqlcgen.ListCurrentResourcesByCloudRow, len(rows))
 	for _, row := range rows {
@@ -550,7 +583,7 @@ func (s *Syncer) diff(runID string, entry CloudConfig, observed map[resourceKey]
 			// lifecycle event, which is then still that delete, so the correction
 			// would land, count, and change nothing, and every later run would
 			// write another one.
-			ts := s.now().UTC()
+			ts := now().UTC()
 			if obs.CreatedAt != nil && !known {
 				ts = *obs.CreatedAt
 			}
@@ -581,7 +614,7 @@ func (s *Syncer) diff(runID string, entry CloudConfig, observed map[resourceKey]
 		// A resource that changed hands drifted like one that changed size, so
 		// the correction names the owner the platform reports.
 		update := syntheticEvent(runID, entry, key, kindUpdate,
-			correctedAt(s.now().UTC(), row), obs.ProjectID)
+			correctedAt(now().UTC(), row), obs.ProjectID)
 		// A size the adapter did not report is a size that did not change, and an
 		// event without one leaves the projection the size it holds.
 		update.Payload = event.PayloadEnvelope{State: &state, Size: obs.Size}
@@ -601,7 +634,7 @@ func (s *Syncer) diff(runID string, entry CloudConfig, observed map[resourceKey]
 			continue
 		}
 		events = append(events,
-			syntheticEvent(runID, entry, key, kindDelete, correctedAt(s.now().UTC(), row), row.ProjectID))
+			syntheticEvent(runID, entry, key, kindDelete, correctedAt(now().UTC(), row), row.ProjectID))
 	}
 	return events, nil
 }

@@ -317,7 +317,7 @@ func TestOpenStackSync(t *testing.T) {
 		// one service it hit, never a fleet that was deleted.
 		openstack.reload(t, serversPath, "servers_empty.json")
 		openstack.reload(t, volumesPath)
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the listing it could not read")
@@ -404,7 +404,7 @@ func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 func mustSync(t *testing.T, syncer *reconciliation.Syncer, cloud string) reconciliation.Result {
 	t.Helper()
 
-	res, err := syncer.Sync(t.Context(), cloud)
+	res, err := syncer.Sync(t.Context(), cloud, nil)
 	if err != nil {
 		t.Fatalf("Sync() error = %v, want nil", err)
 	}

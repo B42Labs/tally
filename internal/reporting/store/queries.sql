@@ -347,9 +347,15 @@ SELECT pg_advisory_xact_lock(hashtextextended('project_relations:attributing', 0
 -- The run row is written before the adapter is called, so that a run in flight
 -- can be seen while it works: status defaults to 'running' in the schema, and
 -- the row is left at that value until the run finishes.
+--
+-- started_at is stated by a run that was told which instant it is at, and left
+-- to now() otherwise. The told instant has to reach the column because it is
+-- the bound the next run of this cloud starts from: a told run whose row said
+-- now() would open the next window at the wall clock instead of at the instant
+-- the run reconciled.
 -- name: InsertSyncRun :one
-INSERT INTO sync_runs (cloud)
-VALUES ($1)
+INSERT INTO sync_runs (cloud, started_at)
+VALUES ($1, COALESCE(sqlc.narg(started_at)::TIMESTAMPTZ, now()))
 RETURNING id;
 
 -- name: CompleteSyncRun :exec

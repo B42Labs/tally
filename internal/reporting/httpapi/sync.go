@@ -35,7 +35,7 @@ func (s *server) SyncCloud(w http.ResponseWriter, r *http.Request, cloud string)
 	runCtx, cancel := context.WithTimeout(ctx, syncBudget)
 	defer cancel()
 
-	result, err := s.syncer.Sync(runCtx, cloud)
+	result, err := s.syncer.Sync(runCtx, cloud, nil)
 	switch {
 	case errors.Is(err, reconciliation.ErrUnknownCloud):
 		problem.Write(w, http.StatusNotFound, problem.TypeNotFound,
