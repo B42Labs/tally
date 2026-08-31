@@ -186,7 +186,7 @@ func TestGolden(t *testing.T) {
 			want := loadExpected(t, name)
 			dbs := f.caseDatabases(t, name)
 
-			seedRegistry(t, dbs, c.Registry)
+			seeded := seedRegistry(t, dbs, c.Registry)
 			seedEvents(t, dbs, c.Events)
 
 			result, err := runs.Execute(t.Context(), dbs.engine, dbs.source, c.options(t, want.Clouds))
@@ -202,7 +202,7 @@ func TestGolden(t *testing.T) {
 				t.Fatalf("export.Load: %v", err)
 			}
 			assertRated(t, run.Rated, want.Rated)
-			assertStatements(t, run.Statements, want.Statements, want.AbsentStatements)
+			assertStatements(t, run.Statements, want.Statements, want.AbsentStatements, seeded)
 		})
 	}
 
@@ -568,7 +568,7 @@ func goldenReproducibility(t *testing.T, f goldenFixture) {
 	dbs := f.caseDatabases(t, "reproducibility")
 	ctx := t.Context()
 
-	seedRegistry(t, dbs, c.Registry)
+	seeded := seedRegistry(t, dbs, c.Registry)
 	seedEvents(t, dbs, c.Events)
 	dir := t.TempDir()
 
@@ -587,7 +587,7 @@ func goldenReproducibility(t *testing.T, f goldenFixture) {
 		t.Fatalf("export.Load: %v", err)
 	}
 	assertRated(t, a.Rated, want.Rated)
-	assertStatements(t, a.Statements, want.Statements, want.AbsentStatements)
+	assertStatements(t, a.Statements, want.Statements, want.AbsentStatements, seeded)
 	if err := (export.JSONFiles{Dir: filepath.Join(dir, "a")}).Export(ctx, a); err != nil {
 		t.Fatalf("JSONFiles.Export: %v", err)
 	}
