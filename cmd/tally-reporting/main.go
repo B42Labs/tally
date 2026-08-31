@@ -135,6 +135,7 @@ func run(ctx context.Context) error {
 		Pipeline:                 pipeline,
 		AttributingRelationTypes: cfg.AttributingRelationTypes,
 		Syncer:                   syncer,
+		SyncAllowAt:              cfg.SyncAllowAt,
 		Metrics:                  m,
 		MetricsEnabled:           cfg.MetricsEnabled,
 	})

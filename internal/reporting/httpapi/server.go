@@ -34,6 +34,9 @@ type server struct {
 	// syncer runs the reconciliation of one cloud the internal sync route asks
 	// for.
 	syncer *reconciliation.Syncer
+	// syncAllowAt is whether the sync route takes an instant to run at from the
+	// request body. It is off outside a development deployment.
+	syncAllowAt bool
 	// metrics holds the instruments the scrape route serves. A nil value is a
 	// build without instrumentation, which that route answers 404.
 	metrics *metrics.Metrics

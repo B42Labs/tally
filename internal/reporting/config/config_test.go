@@ -87,6 +87,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.CloudsConfigPath != "" {
 		t.Errorf("CloudsConfigPath = %q, want empty", cfg.CloudsConfigPath)
 	}
+	if cfg.SyncAllowAt {
+		t.Error("SyncAllowAt = true, want false")
+	}
 	if !cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = false, want true")
 	}
@@ -109,6 +112,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_INGEST_REQUIRE_SIZE_SCHEMA":           "true",
 		"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,same_owner",
 		"TALLY_REPORTING_CLOUDS_CONFIG":              "/etc/tally/clouds.yaml",
+		"TALLY_REPORTING_SYNC_ALLOW_AT":              "true",
 		"TALLY_METRICS_ENABLED":                      "false",
 		"TALLY_REPORTING_METRICS_REFRESH_S":          "15",
 	})
@@ -142,6 +146,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if want := "/etc/tally/clouds.yaml"; cfg.CloudsConfigPath != want {
 		t.Errorf("CloudsConfigPath = %q, want %q", cfg.CloudsConfigPath, want)
+	}
+	if !cfg.SyncAllowAt {
+		t.Error("SyncAllowAt = false, want true")
 	}
 	if cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = true, want false")
@@ -185,6 +192,21 @@ func TestLoadRejectsUnparsableMetricsEnabled(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_METRICS_ENABLED":  "maybe",
 		"TALLY_REPORTING_DB_URL": "postgres://tally@localhost/tally",
+	})
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsUnparsableSyncAllowAt(t *testing.T) {
+	setEnv(t, map[string]string{
+		"TALLY_REPORTING_SYNC_ALLOW_AT": "sometimes",
+		"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
 	})
 
 	_, err := config.Load()

@@ -79,6 +79,11 @@ type Options struct {
 	// over the empty configuration, which answers every cloud 404, so the
 	// handler behind the route needs no nil check.
 	Syncer *reconciliation.Syncer
+	// SyncAllowAt comes from TALLY_REPORTING_SYNC_ALLOW_AT and lets
+	// POST /internal/sync/{cloud} accept a request body naming the instant the
+	// run is at. It is off everywhere but a development deployment, where the
+	// cloud a sync reconciles is a simulated one.
+	SyncAllowAt bool
 	// Metrics holds the instruments GET /metrics serves. A nil value leaves the
 	// route answering 404, the way a disabled scrape route does.
 	Metrics *metrics.Metrics
@@ -141,6 +146,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 		pipeline:         opts.Pipeline,
 		attributingTypes: opts.AttributingRelationTypes,
 		syncer:           opts.Syncer,
+		syncAllowAt:      opts.SyncAllowAt,
 		metrics:          opts.Metrics,
 		metricsEnabled:   opts.MetricsEnabled,
 		now:              now,

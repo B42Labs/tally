@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -156,6 +157,22 @@ func TestRunRefusesToStart(t *testing.T) {
 
 		assertRunFails(t, "loading the clouds config")
 	})
+}
+
+// TestEnvExampleListsEveryVariable keeps the example file complete: a variable
+// the server reads but nobody documents is one an operator finds out about from
+// a failure.
+func TestEnvExampleListsEveryVariable(t *testing.T) {
+	example, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatalf("reading .env.example: %v", err)
+	}
+
+	for _, name := range config.EnvNames {
+		if !strings.Contains(string(example), name) {
+			t.Errorf(".env.example does not mention %s", name)
+		}
+	}
 }
 
 // assertRunFails checks that run refuses this configuration before it listens,
