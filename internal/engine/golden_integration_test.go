@@ -17,6 +17,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +37,8 @@ import (
 	"github.com/b42labs/tally/internal/engine/runs"
 	"github.com/b42labs/tally/internal/engine/scheduler"
 	"github.com/b42labs/tally/internal/engine/source"
+	"github.com/b42labs/tally/internal/engine/statements"
+	"github.com/b42labs/tally/internal/reporting/httpapi"
 )
 
 // TestGoldenStubQuerier pins the stub the metricsql sources of the suite are
@@ -318,6 +322,7 @@ func TestGolden(t *testing.T) {
 	t.Run("temporal", func(t *testing.T) { goldenTemporal(t, f) })
 	t.Run("phase3_regression", func(t *testing.T) { goldenPhase3Regression(t, f) })
 	t.Run("adjusted_reproducibility", func(t *testing.T) { goldenAdjustedReproducibility(t, f) })
+	t.Run("auditability_drill", func(t *testing.T) { goldenAuditabilityDrill(t, f) })
 }
 
 // goldenCorrectionCredit runs the correction chain of the concept over the
@@ -1627,6 +1632,147 @@ func goldenAdjustedReproducibility(t *testing.T, f goldenFixture) {
 		if entry.Projects != 2 {
 			t.Errorf("the kickback total of %s came off %d projects, want the two of the group",
 				document.name, entry.Projects)
+		}
+	}
+}
+
+// goldenAuditabilityDrill answers the question an operator is asked about an
+// invoice, "why does this project get 15 % off?", out of stored data alone. It
+// is the phase's third exit criterion. Every adjustment_records row names the
+// relation it came from by id, so the walk starts at a row of an adjusted
+// statement, resolves that statement's project through
+// GET /api/v1/projects?cloud=&external_id=, and finds the relation by that id in
+// GET /api/v1/projects/{id}/relations?direction=outgoing&at=<period start>.
+//
+// The contract defines no GET on a single relation: api/reporting/openapi.yaml
+// carries a patch and a delete under that path and nothing else, so the drill
+// walks the two list endpoints instead (author's decision of 2026-08-31, named
+// here per guardrail 10 of roadmap/00-conventions.md).
+//
+// The at is the start of the period the row was billed in, because a relation
+// closed inside the month is no longer valid at now. The relation of the reseller
+// case is open, so the drill also reads it without at and holds that walk to the
+// same relation.
+//
+// The answer then stands on what the served relation carries: a managed_by edge
+// to partner-corp whose metadata spells the "Reseller end-customer discount" the
+// row was computed from.
+func goldenAuditabilityDrill(t *testing.T, f goldenFixture) {
+	c := loadCase(t, "reseller")
+	want := loadExpected(t, "reseller")
+	dbs := f.caseDatabases(t, "auditability_drill")
+	ctx := t.Context()
+
+	seedRegistry(t, dbs, c.Registry)
+	seedEvents(t, dbs, c.Events)
+
+	result, err := runs.Execute(ctx, dbs.engine, dbs.source, c.options(t, want.Clouds))
+	if err != nil {
+		t.Fatalf("runs.Execute: %v", err)
+	}
+	assertClean(t, result)
+
+	api := newRegistryAPI(t, dbs)
+
+	// The rows the invoice's adjustment lines were stored as: the discount off
+	// the base cost, and the kickback the partner is paid on what it leaves.
+	rows := readAdjustmentRecords(t, dbs, result.RunID)
+	if len(rows) != 2 {
+		t.Fatalf("adjustment records = %+v, want the discount and the kickback of the case", rows)
+	}
+
+	// The partner both relations reach, resolved once by the pair that keys the
+	// registry.
+	var partners httpapi.ProjectList
+	api.get(t, "/api/v1/projects?cloud=partner&external_id=partner-corp", &partners)
+	if len(partners.Items) != 1 {
+		t.Fatalf("the registry serves %d projects for partner/partner-corp, want the one the case registers",
+			len(partners.Items))
+	}
+
+	// The metadata the case seeded, re-encoded the way the served one is. The
+	// served Relation.Metadata is a map[string]interface{}, so marshalling both
+	// sides yields objects with their keys sorted, and every value of this
+	// fixture's metadata is a string, so no number passes through a float.
+	var seededMetadata any
+	if err := json.Unmarshal(c.Registry.Relations[0].Metadata, &seededMetadata); err != nil {
+		t.Fatalf("decoding the metadata of the relation of the case: %v", err)
+	}
+	wantMetadata, err := json.Marshal(seededMetadata)
+	if err != nil {
+		t.Fatalf("encoding the metadata of the relation of the case: %v", err)
+	}
+
+	for _, row := range rows {
+		cloud, externalID, err := statements.ParseKey(row.projectID)
+		if err != nil {
+			t.Fatalf("the project of the %s record: %v", row.typ, err)
+		}
+		var projects httpapi.ProjectList
+		api.get(t, "/api/v1/projects?cloud="+url.QueryEscape(cloud)+
+			"&external_id="+url.QueryEscape(externalID), &projects)
+		if len(projects.Items) != 1 {
+			t.Fatalf("the registry serves %d projects for %s, want the one the record names",
+				len(projects.Items), row.projectID)
+		}
+		project := projects.Items[0]
+
+		for _, walk := range []struct{ target, when string }{
+			{
+				target: fmt.Sprintf("/api/v1/projects/%s/relations?direction=outgoing&at=%s",
+					project.Id, url.QueryEscape("2026-03-01T00:00:00Z")),
+				when: "at the period start",
+			},
+			{
+				target: fmt.Sprintf("/api/v1/projects/%s/relations?direction=outgoing", project.Id),
+				when:   "at now",
+			},
+		} {
+			var relations httpapi.RelationList
+			api.get(t, walk.target, &relations)
+			at := slices.IndexFunc(relations.Items, func(r httpapi.Relation) bool {
+				return r.Id.String() == row.relationID
+			})
+			if at < 0 {
+				t.Fatalf("the registry serves no relation %s for %s %s",
+					row.relationID, row.projectID, walk.when)
+			}
+			relation := relations.Items[at]
+
+			if relation.RelationType != row.relationType {
+				t.Errorf("the served relation %s is a %q, want the %q the record names",
+					row.relationID, relation.RelationType, row.relationType)
+			}
+			if relation.TargetId != partners.Items[0].Id {
+				t.Errorf("the served relation %s reaches the project %s, want the partner %s",
+					row.relationID, relation.TargetId, partners.Items[0].Id)
+			}
+			served, err := json.Marshal(relation.Metadata)
+			if err != nil {
+				t.Fatalf("encoding the metadata of the served relation %s: %v", row.relationID, err)
+			}
+			if !bytes.Equal(served, wantMetadata) {
+				t.Errorf("the metadata of the served relation %s = %s, want %s",
+					row.relationID, served, wantMetadata)
+			}
+
+			// The element of that metadata the row was computed from, read by the
+			// schema the rating engine reads it by.
+			member, err := json.Marshal(relation.Metadata[adjustment.MetadataKey])
+			if err != nil {
+				t.Fatalf("encoding the adjustments of the served relation %s: %v", row.relationID, err)
+			}
+			parsed, err := adjustment.Parse(member)
+			if err != nil {
+				t.Fatalf("reading the adjustments of the served relation %s: %v", row.relationID, err)
+			}
+			if !slices.ContainsFunc(parsed, func(a adjustment.Adjustment) bool {
+				return a.Type == row.typ && a.Scope == row.scope &&
+					a.Rate.Equal(decimal.RequireFromString(row.rate))
+			}) {
+				t.Errorf("the served relation %s carries no %s adjustment of scope %s at the rate %s",
+					row.relationID, row.typ, row.scope, row.rate)
+			}
 		}
 	}
 }
