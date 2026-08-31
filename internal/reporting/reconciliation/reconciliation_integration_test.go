@@ -61,6 +61,11 @@ var (
 	// pollTime is what the injected clock answers. It is what a correction the
 	// platform gave no instant for is dated at.
 	pollTime = time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	// toldTime is the instant a told run is at. It falls past pollTime, so a
+	// correction dated at it lands past the rows a seeding run left behind and
+	// carries the told instant verbatim rather than the bump correctedAt puts on
+	// one the fold would order too early.
+	toldTime = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 )
 
 // errManilaDown stands in for whatever a platform client returns when one of
@@ -533,7 +538,7 @@ func TestSync(t *testing.T) {
 			{err: &reconciliation.EnumerationError{ResourceType: typeShare, Err: errManilaDown}},
 			{resource: fresh},
 		}
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting that it did not finish clean")
@@ -564,7 +569,7 @@ func TestSync(t *testing.T) {
 		}}
 		syncer := newSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if !errors.Is(err, errManilaDown) {
 			t.Fatalf("Sync() error = %v, want it wrapping %v", err, errManilaDown)
@@ -594,7 +599,7 @@ func TestSync(t *testing.T) {
 		fake.steps, fake.truncates = stream(share), true
 		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 		defer cancel()
-		res, err := syncer.Sync(ctx, cloud)
+		res, err := syncer.Sync(ctx, cloud, nil)
 
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Sync() error = %v, want it wrapping %v", err, context.DeadlineExceeded)
@@ -619,7 +624,7 @@ func TestSync(t *testing.T) {
 		}
 		syncer := newSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if !errors.Is(err, errManilaDown) {
 			t.Fatalf("Sync() error = %v, want it wrapping %v", err, errManilaDown)
@@ -663,7 +668,7 @@ func TestSync(t *testing.T) {
 				before := len(corrections(t, db, tc.cloud))
 
 				fake.steps = stream(tc.broken)
-				res, err := syncer.Sync(t.Context(), tc.cloud)
+				res, err := syncer.Sync(t.Context(), tc.cloud, nil)
 
 				if err == nil {
 					t.Fatal("Sync() error = nil, want the run reporting the broken observation")
@@ -695,7 +700,7 @@ func TestSync(t *testing.T) {
 		// as a whole rather than about one type of it: there is no type to hold
 		// the missed-delete pass back for, so no type may conclude a deletion.
 		fake.steps = stream(share, seen("", "orphan", projectA, "available", nil))
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the broken observation")
@@ -727,7 +732,7 @@ func TestSync(t *testing.T) {
 		}
 		syncer := newSyncer(t, db, strict, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the refused correction")
@@ -765,7 +770,7 @@ func TestSync(t *testing.T) {
 		}}}
 		syncer := newSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the enumeration failure")
@@ -798,7 +803,7 @@ func TestSync(t *testing.T) {
 		}}}
 		syncer := newSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the enumeration failure")
@@ -838,7 +843,7 @@ func TestSync(t *testing.T) {
 		fake := &fakeAdapter{types: []string{typeShare}, steps: steps}
 		syncer := newSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the enumeration failures")
@@ -889,7 +894,7 @@ func TestSync(t *testing.T) {
 		syncer := reconciliation.New(db.Store, pipeline, cfg,
 			map[string]reconciliation.Adapter{}, func() time.Time { return pollTime }, nil)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil || !strings.Contains(err.Error(), "absent") {
 			t.Errorf("Sync() error = %v, want it naming the adapter that is missing", err)
@@ -960,7 +965,7 @@ func TestSync(t *testing.T) {
 		// exactly what it may have missed, so the next run walks that window
 		// again from where the last completed run started.
 		fake.steps = []step{{err: errManilaDown}}
-		if _, err := syncer.Sync(t.Context(), cloud); err == nil {
+		if _, err := syncer.Sync(t.Context(), cloud, nil); err == nil {
 			t.Fatal("Sync() error = nil, want the failing run to fail")
 		}
 		fake.steps = stream(share)
@@ -973,6 +978,89 @@ func TestSync(t *testing.T) {
 		}
 	})
 
+	t.Run("dates the corrections of a told run at the instant it was told", func(t *testing.T) {
+		const cloud = "os-sync-told-corrections"
+		drifting := seen(typeShare, "share-drift", projectA, "available", map[string]any{"size_gb": 10})
+		missed := seen(typeShare, "share-missed", projectB, "available", map[string]any{"size_gb": 20})
+		fake, syncer := seedFleet(t, db, pipeline, cloud, drifting, missed)
+
+		// One resource whose state drifted, one the platform no longer lists, and
+		// one the projection does not hold. The platform exposes the new share's
+		// own creation time, which a create carries whatever clock the run is on.
+		fresh := seen(typeShare, "share-new", projectA, "available", map[string]any{"size_gb": 30})
+		fresh.CreatedAt = &createTime
+		fake.steps = stream(
+			seen(typeShare, "share-drift", projectA, "in-use", map[string]any{"size_gb": 10}),
+			fresh)
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		assertStats(t, res.Stats, tally(1, 1, 1))
+		// Every correction the platform gave no instant for is dated at the told
+		// one rather than at the clock the Syncer was built with.
+		assertCorrections(t, db, cloud, []correction{
+			{
+				eventType: "sync.create", resourceType: typeShare, resourceID: "share-drift",
+				projectID: projectA, at: rfc(pollTime), state: "available",
+				size: map[string]any{"size_gb": 10.0},
+			},
+			{
+				eventType: "sync.update", resourceType: typeShare, resourceID: "share-drift",
+				projectID: projectA, at: rfc(told), state: "in-use",
+				size: map[string]any{"size_gb": 10.0},
+			},
+			{
+				eventType: "sync.create", resourceType: typeShare, resourceID: "share-missed",
+				projectID: projectB, at: rfc(pollTime), state: "available",
+				size: map[string]any{"size_gb": 20.0},
+			},
+			{
+				eventType: "sync.delete", resourceType: typeShare, resourceID: "share-missed",
+				projectID: projectB, at: rfc(told),
+			},
+			{
+				// The platform's own instant, which the told one does not replace.
+				eventType: "sync.create", resourceType: typeShare, resourceID: "share-new",
+				projectID: projectA, at: rfc(createTime), state: "available",
+				size: map[string]any{"size_gb": 30.0},
+			},
+		})
+	})
+
+	t.Run("starts a told run at the instant it was told", func(t *testing.T) {
+		const cloud = "os-sync-told-instant"
+		share := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(share)}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		first := toldTime
+		res := mustSyncAt(t, syncer, cloud, &first)
+
+		// The adapter works from the same instant the run dates its corrections
+		// at, so a window it bounds itself by and the corrections that come out of
+		// it are measured from one clock.
+		if !fake.at.Equal(first) {
+			t.Errorf("the instant handed to the adapter = %s, want the told %s",
+				rfc(fake.at), rfc(first))
+		}
+		if started := runRow(t, db, res.RunID).StartedAt.Time; !started.Equal(first) {
+			t.Errorf("started at = %s, want the told %s", rfc(started), rfc(first))
+		}
+
+		// The window of the run that follows opens where the last completed run
+		// started, which for a told run is the instant it was told.
+		second := first.Add(time.Hour)
+		mustSyncAt(t, syncer, cloud, &second)
+
+		if fake.since == nil || !fake.since.Equal(first) {
+			t.Fatalf("since = %v, want the first told run's instant, %s", fake.since, rfc(first))
+		}
+		if !fake.at.Equal(second) {
+			t.Errorf("the instant handed to the adapter = %s, want the told %s",
+				rfc(fake.at), rfc(second))
+		}
+	})
+
 	t.Run("refuses a second sync of a cloud a run is holding", func(t *testing.T) {
 		const cloud = "os-sync-lock"
 		held := blockingAdapter()
@@ -982,14 +1070,14 @@ func TestSync(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := holder.Sync(context.Background(), cloud); err != nil {
+			if _, err := holder.Sync(context.Background(), cloud, nil); err != nil {
 				t.Errorf("the holding Sync() error = %v, want nil", err)
 			}
 		}()
 		<-held.entered
 
 		refused := newSyncer(t, db, pipeline, cloud, &fakeAdapter{types: []string{typeShare}})
-		res, err := refused.Sync(t.Context(), cloud)
+		res, err := refused.Sync(t.Context(), cloud, nil)
 
 		if !errors.Is(err, reconciliation.ErrAlreadyRunning) {
 			t.Errorf("Sync() error = %v, want %v", err, reconciliation.ErrAlreadyRunning)
@@ -1015,7 +1103,7 @@ func TestSync(t *testing.T) {
 		mustSync(t, syncer, cloud)
 
 		fake.steps = []step{{err: errManilaDown}}
-		if _, err := syncer.Sync(t.Context(), cloud); err == nil {
+		if _, err := syncer.Sync(t.Context(), cloud, nil); err == nil {
 			t.Fatal("Sync() error = nil, want the failing run to fail")
 		}
 
@@ -1026,13 +1114,13 @@ func TestSync(t *testing.T) {
 					t.Error("Sync() returned, want the adapter's panic to reach the caller")
 				}
 			}()
-			_, _ = syncer.Sync(t.Context(), cloud)
+			_, _ = syncer.Sync(t.Context(), cloud, nil)
 		}()
 
 		// The lock is session-scoped, so a run that ended any of those three ways
 		// has to have given it back before the next one asks.
 		fake.steps = stream(share)
-		if _, err := syncer.Sync(t.Context(), cloud); err != nil {
+		if _, err := syncer.Sync(t.Context(), cloud, nil); err != nil {
 			t.Fatalf("Sync() error = %v, want the lock free again", err)
 		}
 	})
@@ -1044,7 +1132,7 @@ func TestSync(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
 		defer cancel()
-		res, err := syncer.Sync(ctx, cloud)
+		res, err := syncer.Sync(ctx, cloud, nil)
 
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Sync() error = %v, want it wrapping %v", err, context.DeadlineExceeded)
@@ -1054,7 +1142,7 @@ func TestSync(t *testing.T) {
 		assertRun(t, db, res, statusFailed)
 
 		free := newSyncer(t, db, pipeline, cloud, &fakeAdapter{types: []string{typeShare}})
-		if _, err := free.Sync(t.Context(), cloud); err != nil {
+		if _, err := free.Sync(t.Context(), cloud, nil); err != nil {
 			t.Errorf("Sync() error = %v, want the lock free again", err)
 		}
 	})
@@ -1062,7 +1150,7 @@ func TestSync(t *testing.T) {
 	t.Run("refuses a cloud the configuration does not name", func(t *testing.T) {
 		syncer := newSyncer(t, db, pipeline, "os-sync-configured", &fakeAdapter{})
 
-		res, err := syncer.Sync(t.Context(), "os-sync-unconfigured")
+		res, err := syncer.Sync(t.Context(), "os-sync-unconfigured", nil)
 
 		if !errors.Is(err, reconciliation.ErrUnknownCloud) {
 			t.Errorf("Sync() error = %v, want %v", err, reconciliation.ErrUnknownCloud)
@@ -1140,7 +1228,7 @@ func TestSyncCounts(t *testing.T) {
 		}}
 		syncer, reg := meteredSyncer(t, db, pipeline, cloud, fake)
 
-		res, err := syncer.Sync(t.Context(), cloud)
+		res, err := syncer.Sync(t.Context(), cloud, nil)
 
 		if err == nil {
 			t.Fatal("Sync() error = nil, want the run reporting the enumeration failure")
@@ -1172,7 +1260,7 @@ func TestSyncCounts(t *testing.T) {
 	t.Run("counts nothing for a cloud the configuration does not name", func(t *testing.T) {
 		syncer, reg := meteredSyncer(t, db, pipeline, "os-sync-count-configured", &fakeAdapter{})
 
-		_, err := syncer.Sync(t.Context(), "os-sync-count-unconfigured")
+		_, err := syncer.Sync(t.Context(), "os-sync-count-unconfigured", nil)
 
 		if !errors.Is(err, reconciliation.ErrUnknownCloud) {
 			t.Fatalf("Sync() error = %v, want %v", err, reconciliation.ErrUnknownCloud)
@@ -1189,14 +1277,14 @@ func TestSyncCounts(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := holder.Sync(context.Background(), cloud); err != nil {
+			if _, err := holder.Sync(context.Background(), cloud, nil); err != nil {
 				t.Errorf("the holding Sync() error = %v, want nil", err)
 			}
 		}()
 		<-held.entered
 
 		refused, reg := meteredSyncer(t, db, pipeline, cloud, &fakeAdapter{types: []string{typeShare}})
-		_, err := refused.Sync(t.Context(), cloud)
+		_, err := refused.Sync(t.Context(), cloud, nil)
 
 		if !errors.Is(err, reconciliation.ErrAlreadyRunning) {
 			t.Errorf("Sync() error = %v, want %v", err, reconciliation.ErrAlreadyRunning)
@@ -1375,11 +1463,22 @@ func seedFleet(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 	return fake, syncer
 }
 
-// mustSync runs one sync and fails the test unless it finished clean.
+// mustSync runs one sync on the injected clock and fails the test unless it
+// finished clean.
 func mustSync(t *testing.T, syncer *reconciliation.Syncer, cloud string) reconciliation.Result {
 	t.Helper()
 
-	res, err := syncer.Sync(t.Context(), cloud)
+	return mustSyncAt(t, syncer, cloud, nil)
+}
+
+// mustSyncAt runs one sync told which instant it is at and fails the test
+// unless it finished clean.
+func mustSyncAt(t *testing.T, syncer *reconciliation.Syncer, cloud string,
+	at *time.Time,
+) reconciliation.Result {
+	t.Helper()
+
+	res, err := syncer.Sync(t.Context(), cloud, at)
 	if err != nil {
 		t.Fatalf("Sync() error = %v, want nil", err)
 	}

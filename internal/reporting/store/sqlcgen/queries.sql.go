@@ -926,16 +926,27 @@ func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEve
 }
 
 const insertSyncRun = `-- name: InsertSyncRun :one
-INSERT INTO sync_runs (cloud)
-VALUES ($1)
+INSERT INTO sync_runs (cloud, started_at)
+VALUES ($1, COALESCE($2::TIMESTAMPTZ, now()))
 RETURNING id
 `
+
+type InsertSyncRunParams struct {
+	Cloud     string
+	StartedAt pgtype.Timestamptz
+}
 
 // The run row is written before the adapter is called, so that a run in flight
 // can be seen while it works: status defaults to 'running' in the schema, and
 // the row is left at that value until the run finishes.
-func (q *Queries) InsertSyncRun(ctx context.Context, cloud string) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, insertSyncRun, cloud)
+//
+// started_at is stated by a run that was told which instant it is at, and left
+// to now() otherwise. The told instant has to reach the column because it is
+// the bound the next run of this cloud starts from: a told run whose row said
+// now() would open the next window at the wall clock instead of at the instant
+// the run reconciled.
+func (q *Queries) InsertSyncRun(ctx context.Context, arg InsertSyncRunParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, insertSyncRun, arg.Cloud, arg.StartedAt)
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
