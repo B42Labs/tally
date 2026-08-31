@@ -60,6 +60,31 @@ func cloudServer(t *testing.T, at time.Time, resources ...OracleResource) (*http
 	return server, tokenOf(t, server)
 }
 
+// runServer serves one month the way a run serves it: the control routes, and
+// the fake API of the same clock mounted under the catch-all beneath them, the
+// way broadcast mounts the two on the run's one listener. The wall clock is
+// frozen, so the document the endpoint answers with and the inventory a listing
+// reports are both the ones of at.
+func runServer(t *testing.T, at time.Time, resources ...OracleResource) *httptest.Server {
+	t.Helper()
+
+	wall := time.Unix(0, 0)
+	clock := NewClock(at, 744, func() time.Time { return wall })
+	api, err := NewCloudAPI(clock, Oracle{
+		Cloud: "os-sim", PeriodFrom: cloudFrom, PeriodTo: cloudTo, Resources: resources,
+	})
+	if err != nil {
+		t.Fatalf("NewCloudAPI() error = %v, want nil", err)
+	}
+
+	mux := NewControlMux(clock, func() Progress { return controlProgress }, func() error { return nil })
+	mux.Handle("/", api)
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
 // oneResource is a resource that lived over a single interval. Everything a
 // listing decides is decided per interval, so one is enough for most of these
 // tests, and the sizes are the ones the generator's own builders write.
@@ -409,6 +434,90 @@ func TestFakeAPIAnswersNothingOnAPathNoRouteClaims(t *testing.T) {
 	status, body := askCloud(t, server, token, "/v3/projects")
 	if status != http.StatusNotFound {
 		t.Errorf("GET /v3/projects = %d, want %d (body %q)", status, http.StatusNotFound, body)
+	}
+}
+
+// TestFakeAPISharesTheListenerWithTheControlRoutes covers what a run composes
+// out of the two handlers. The control routes are method-qualified and beat the
+// catch-all the fake API is mounted under, so each of them answers what it
+// answered before the mount, and every path they leave reaches the month.
+func TestFakeAPISharesTheListenerWithTheControlRoutes(t *testing.T) {
+	server := runServer(t, cloudDay(10), oneInstance("web-01", cloudDay(2), cloudTo))
+
+	status, contentType, body := request(t, server, http.MethodGet, "/healthz", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /healthz = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if body != "ok" {
+		t.Errorf("GET /healthz body = %q, want %q", body, "ok")
+	}
+	if !strings.HasPrefix(contentType, "text/plain") {
+		t.Errorf("GET /healthz Content-Type = %q, want it to start with text/plain", contentType)
+	}
+
+	status, _, body = request(t, server, http.MethodGet, "/clock", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	want := clockDocument{
+		VirtualNow: cloudDay(10).Format(time.RFC3339),
+		Factor:     744,
+		Published:  controlProgress.Published,
+		Total:      controlProgress.Total,
+		Held:       controlProgress.Held,
+		Holding:    controlProgress.Holding,
+		PeriodFrom: cloudFrom.Format(time.RFC3339),
+		PeriodTo:   cloudTo.Format(time.RFC3339),
+	}
+	if doc := decodeDocument(t, body); doc != want {
+		t.Errorf("GET /clock document = %+v, want %+v", doc, want)
+	}
+
+	status, _, body = request(t, server, http.MethodPut, "/clock", `{"factor": 0}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if got := decodeDocument(t, body).Factor; got != 0 {
+		t.Errorf("PUT /clock document factor = %g, want 0", got)
+	}
+
+	status, contentType, body = request(t, server, http.MethodPost, "/release", "")
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if !strings.HasPrefix(contentType, "application/json") {
+		t.Errorf("POST /release Content-Type = %q, want it to start with application/json", contentType)
+	}
+
+	// The token request is one of the paths the control routes leave, so a sync
+	// authenticates on the very listener the endpoint answers on, and reads the
+	// month from there.
+	status, body = askCloud(t, server, tokenOf(t, server), serversPath)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d (body %q)", serversPath, status, http.StatusOK, body)
+	}
+	if got := servedIDs(t, body, "servers"); !slices.Equal(got, []string{"web-01"}) {
+		t.Errorf("the live listing answered with %v, want the instance the month holds at day 10", got)
+	}
+}
+
+// TestAReplayMountsNoFakeAPI holds the bare control mux to what a replay
+// serves. A recorded file holds the notifications of a month and no oracle, so
+// there is nothing to answer a listing out of, and the paths of the fake API
+// are paths no route of a replay claims.
+func TestAReplayMountsNoFakeAPI(t *testing.T) {
+	_, server := controlServer(t, nil)
+
+	status, _, body := request(t, server, http.MethodPost, "/v3/auth/tokens", "")
+	if status != http.StatusNotFound {
+		t.Errorf("POST /v3/auth/tokens on the mux of a replay = %d, want %d (body %q)",
+			status, http.StatusNotFound, body)
+	}
+
+	status, _, body = request(t, server, http.MethodGet, serversPath, "")
+	if status != http.StatusNotFound {
+		t.Errorf("GET %s on the mux of a replay = %d, want %d (body %q)",
+			serversPath, status, http.StatusNotFound, body)
 	}
 }
 
