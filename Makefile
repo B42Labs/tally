@@ -217,6 +217,7 @@ simulator-up:
 	@echo "  curl -X POST http://127.0.0.1:8091/release"
 	@echo "Inspect the registry with the admin token in deploy/compose/.env:"
 	@echo "  curl --cacert tally-ca.crt -H \"Authorization: Bearer \$$(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)\" 'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=$(SIM_CLOUD)'"
+	@echo 'Reconcile the cloud the run serves: "The fake OpenStack API" in docs/openstack-simulator.md'
 
 # Dropping the volumes empties the outbox and the broker's queue, so the next
 # `simulator-up` starts from nothing rather than delivering what the last run

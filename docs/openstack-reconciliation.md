@@ -227,6 +227,64 @@ that budget has to cover does not grow with the outage: the deleted-servers
 listing is the one part of a run bounded by how long the cloud has gone without
 a completed one, and it is clamped at 24 hours.
 
+## Telling a sync the instant it runs at
+
+The call may name the instant the run happens at, in a JSON body whose one
+optional member is an RFC 3339 timestamp:
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $TALLY_REPORTING_INTERNAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"at": "2026-07-09T14:22:00Z"}' \
+  https://tally-reporting.internal/internal/sync/os-prod-eu1
+```
+
+A call with no body, one whose body is empty, and one whose body carries no `at`
+are the call the section above shows: the run reads the wall clock.
+
+The member is taken only where the deployment sets
+`TALLY_REPORTING_SYNC_ALLOW_AT`, and it is `false` by default. A deployment that
+sets nothing answers a body carrying `at` with 400 and the detail `this
+deployment does not take a sync instant; TALLY_REPORTING_SYNC_ALLOW_AT is off`.
+That refusal comes before the syncer runs, so a request nothing reconciled for
+leaves no `sync_runs` row behind. A body that is not a JSON object of that shape
+is refused in the same place and with the same status.
+
+A told instant is the run's one clock. It is read once and answered for the rest
+of the run, so every correction the run books at poll time carries it however
+long the run takes, and the 24 hours the deleted-servers window is clamped to
+are measured back from it rather than from the wall clock. The run's
+`sync_runs.started_at` is it as well, because that column is where the next run
+of this cloud opens its window: a told run whose row said `now()` would send the
+next one back to the wall clock. `completed_at` is not told. The row of a told
+run therefore carries a virtual `started_at` beside the wall instant the run
+finished at.
+
+The instants told to the runs of one cloud must not go backwards, and nothing
+refuses one that does. The bound a run starts from is the newest `started_at` of
+the cloud's completed runs, so a run told an earlier instant leaves that bound
+where it is, ahead of the instant the run is at. Nova answers a window that has
+not happened yet with an empty listing rather than with a refusal, so the run
+asks it for the whole 24 hours behind its own instant instead, and logs at warn
+level that it did. The deletes older than that window are the ones the absence
+pass dates at poll time, the same as after an outage. So are the deletes newer
+than the instant the run is at: `changes-since` is a lower bound and nova has no
+upper one, so a listing runs to the cloud's own present, and an instance the
+cloud destroyed after the run was told it ran would otherwise carry a correction
+dated outside the period the run reconciled. What it corrects still lands: a
+correction dated behind the newest event of the row it corrects is dated one
+microsecond past that event instead, because a correction the fold does not
+order last decides nothing. Such a correction carries the instant the row forced
+rather than the one the request named.
+
+The seam is there for the development deployment that reconciles the simulated
+cloud. That cloud lives in a generated month on a virtual clock, so a sync at
+wall time would observe it outside its period.
+[`openstack-simulator.md`](openstack-simulator.md) describes the fake OpenStack
+API a sync reads it through and the loop that tells each sync where the month
+stands.
+
 ## What a partial outage does to a run
 
 A service that stops answering must never read as a cloud that holds nothing.

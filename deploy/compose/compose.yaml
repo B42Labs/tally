@@ -130,7 +130,8 @@ services:
     # reach the binary as a positional argument, and cobra.NoArgs refuses those.
     command: ["run", "--period", "${TALLY_SIM_PERIOD}", "--seed", "${TALLY_SIM_SEED}", "--factor", "${TALLY_SIM_FACTOR}", "--faults", "${TALLY_SIM_FAULTS}", "--register-projects=${TALLY_SIM_REGISTER_PROJECTS}", "--allow-remote-broker"]
     ports:
-      # the control endpoint: GET /clock, PUT /clock, POST /release, GET /healthz
+      # the control endpoint: GET /clock, PUT /clock, POST /release, GET /healthz,
+      # and the fake OpenStack API a run serves on the same listener
       - "127.0.0.1:8091:8080"
 
 volumes:

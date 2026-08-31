@@ -10,14 +10,16 @@ deployment behind it. The month is rendered from a small simulated cloud and
 paced by a virtual clock, so a 31-day month goes out in the wall time the
 factor compresses it into.
 
-It has no fake OpenStack API and no metrics endpoint of its own. #65 is the meta
-issue the simulated workloads belong to, and this document describes its first
-stage. The noise, the notifications the collector does not bill, is rendered and
-described under "The noise" below. The oracle of a month and the comparison
-against an engine export are described under "The oracle" below, the six fault
-switches under "The fault switches", and the registration of the month's tenants
-and Gardener projects with the project registry under "The project registry".
-#66 owns the fake API and the clock seam; #67 the traffic series and `/metrics`.
+A `run` serves the month it publishes as a fake OpenStack API on the control
+listener, which "The fake OpenStack API" below describes. The simulator has no
+metrics endpoint of its own. #65 is the meta issue the simulated workloads
+belong to, and this document describes its first stage. The noise, the
+notifications the collector does not bill, is rendered and described under "The
+noise" below. The oracle of a month and the comparison against an engine export
+are described under "The oracle" below, the six fault switches under "The fault
+switches", and the registration of the month's tenants and Gardener projects
+with the project registry under "The project registry". #67 owns the traffic
+series and `/metrics`.
 The drill #51 cites this simulator as the way a month reaches the Reporting API.
 The workload renders octavia's three load balancer types from the shoots' load
 balancers.
@@ -1497,6 +1499,120 @@ send neither header nor a content type and are unaffected.
 
 Any other method on one of the three routes answers 405. A run in file mode
 serves nothing.
+
+## The fake OpenStack API
+
+Reconciliation is the one path a stream of notifications cannot reach. A sync
+asks the cloud what it holds right now, diffs that against the projection the
+notifications built, and books the difference as corrections, which
+[`openstack-reconciliation.md`](openstack-reconciliation.md) describes. A `run`
+therefore serves the month it publishes as an OpenStack API beside the bus, out
+of the same oracle a comparison holds an export to. The two faces state one
+world, so the only drift a sync finds is the drift a fault switch caused.
+
+`POST /v3/auth/tokens` is the keystone v3 password request, and the credentials
+are the fixed pair `tally-sync` and `tally-dev-sync-password`. Whatever
+authenticates here is configured from a clouds.yaml this repository carries, and
+a drawn password would be one nobody can write into that file. Every run
+issues one token of its own, which every other route demands in `X-Auth-Token`,
+so a client holding the token of a run that has ended is told so rather than
+served the month that came after it. The catalog the token carries is built from
+the Host header of the request that asked for it, so a pod reaching the API
+under `host.docker.internal:8091` and a test reaching it under a local address
+each read a catalog pointing back at the address they used.
+
+The listings are the ones the reconciliation adapter reads: nova's servers,
+cinder's volumes, neutron's floating addresses, glance's images, and octavia's
+load balancers. Nova's path serves two of them. A request carrying
+`deleted=true` with a `changes-since` instant is answered with the instances the
+month destroyed inside that window, which is the listing that dates a missed
+delete at the instant the platform performed it; everything else is the live
+listing, the admin-scope probe a run sends before it observes anything included.
+The flavor catalog stands beside them and goes unread where a client negotiates
+the microversion that carries a server's flavor in the server: nova publishes
+2.96 here, past the 2.47 that microversion arrived in.
+Every document is answered from the oracle at the instant the run's virtual
+clock stands at, clamped to the end of the month, so a clock that ran past the
+month still serves the resources that outlived it.
+
+The API is up for exactly as long as the control endpoint and on the same
+listener: while a `run` publishes or holds, at `TALLY_SIM_HTTP_ADDR` and
+`TALLY_SIM_HTTP_PORT`, which the compose stack publishes on the host's
+`127.0.0.1:8091`. The control routes are method-qualified and are matched first,
+so each of them answers what it answered before and every path they leave
+reaches the month. A run in file mode serves neither of the two. A replay serves
+the control routes alone, because a recorded file holds the notifications of a
+month and no oracle to answer a listing out of: `POST /v3/auth/tokens` on a
+replay is a path no route claims and is answered 404.
+
+What a sync finds follows from the switches the run was started with.
+`pre-existing` publishes every transition of the instances it moves behind the
+month start, so the projection holds them and a sync corrects nothing about
+them; what it gives a drill is a resource whose life began before the period,
+served as created at the period's first instant, because that is where the
+oracle clips it. `missing-create` drops those pre-month transitions, so the
+projection holds nothing of a touched resource until a notification from inside
+the month names one, and a sync that runs before that books a `sync.create` for
+it at the period's first instant. `held-back` keeps one in 20 of the billable
+transitions off the bus until `POST /release`, so the projection lags the cloud
+for as long as the run holds: a resource the projection does not hold yet is
+created, a size or a state that changed without a notification is updated, and
+an instance the month deleted is booked at the `terminated_at` nova reports, as
+long as that instant is inside the 24 hours the deleted window is clamped to. A
+held delete of a volume, an address, an image, or a load balancer is found by
+absence and dated at the instant the sync was told it runs at.
+
+`pre-existing` and `missing-create` exclude each other, so a fault list carries
+at most one of them: `pre-existing,held-back` is a month with lives that began
+before the period and a projection that lags, and `missing-create,held-back` one
+whose pre-month creates never arrive.
+
+The dev Kubernetes overlay wires the Reporting API to the fake API.
+`deploy/kubernetes/overlays/dev/reconciliation/` holds the clouds config and the
+clouds.yaml the pod reads. The clouds config is generated into a ConfigMap and
+the clouds.yaml into a Secret, because that one carries the cloud's password,
+and the two are projected together at `/etc/tally/clouds`. The overlay sets
+`TALLY_REPORTING_SYNC_ALLOW_AT` to true. The cloud is `os-sim`, the `SIM_CLOUD`
+default, reached from the pod in the kind node at
+`http://host.docker.internal:8091/v3`. A drill under another cloud name edits
+both files of that directory.
+
+The internal sync route is not published through the Gateway, so a drill reaches
+it over a port-forward, and what it tells each sync is where the month stands,
+which `GET /clock` answers under `virtual_now`, held at the `period_to` of the
+same document:
+
+```sh
+kubectl -n tally port-forward svc/reporting-api 8082:80 &
+while true; do
+  doc="$(curl -s http://127.0.0.1:8091/clock)"
+  at="$(jq -r 'if .virtual_now > .period_to then .period_to else .virtual_now end' <<<"$doc")"
+  curl -sS -X POST -H "Authorization: Bearer tally-dev-internal-token" \
+    -H 'Content-Type: application/json' -d "{\"at\": \"$at\"}" \
+    http://127.0.0.1:8082/internal/sync/os-sim
+  echo
+  sleep 60
+done
+```
+
+`tally-dev-internal-token` is the internal token of the dev overlay. Sixty wall
+seconds are about 12.4 virtual hours at the default factor of 744, which keeps
+two consecutive instants inside the day the deleted-servers window is clamped
+to, so a delete the run held back is booked at nova's own `terminated_at` rather
+than at the instant the sync was told.
+
+The clock is held at the end of the month because the listings are: a clock past
+`period_to` is answered with the inventory of the month's last instant, and an
+`at` past it would date every correction that inventory causes outside the period
+a drill compares. The hold of `held-back` is where that happens by itself — the
+run waits for `POST /release` while virtual time keeps running at the factor, so
+five wall minutes spent looking at the hold are about 62 virtual hours past the
+end of the month.
+
+The loop belongs inside the publishing month: the fake API goes down with the
+run, and the instants told to the runs of one cloud must not go backwards.
+Nothing schedules it here and no target starts it; the drill of #51 folds it
+into its procedure.
 
 ## Configuration
 
