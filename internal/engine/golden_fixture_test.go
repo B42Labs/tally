@@ -32,6 +32,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/core/adjustment"
 	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/engine/export"
@@ -215,6 +216,10 @@ type registryRelation struct {
 	RelationType string     `json:"relation_type"`
 	ValidFrom    time.Time  `json:"valid_from"`
 	ValidTo      *time.Time `json:"valid_to"`
+	// Metadata is the relation's metadata document, which is where the pricing
+	// adjustments of a commercial case sit. An absent or empty member seeds the
+	// empty document {}, the one the column defaults to.
+	Metadata json.RawMessage `json:"metadata"`
 }
 
 // projectRef names a registered project the way a resource does, by cloud and
@@ -618,10 +623,19 @@ func replay(t *testing.T, dbs caseDBs, events []event.Event) {
 	}
 }
 
-// seedRegistry registers the projects of a case and the relations between them.
-// A project the registry does not hold gets no statement of its own, so every
-// project a case's resources name belongs here.
-func seedRegistry(t *testing.T, dbs caseDBs, reg registryFile) {
+// seededRegistry is the ids one case's registry assigned. relations holds them
+// in the order of the relations array of registry.json, so seeded.relations[0]
+// is the id of the first relation of the file: an expected.json names a
+// relation by that index, because the id itself is assigned at seeding time.
+type seededRegistry struct {
+	projects  map[projectRef]uuid.UUID
+	relations []uuid.UUID
+}
+
+// seedRegistry registers the projects of a case and the relations between them,
+// and reports the ids it assigned. A project the registry does not hold gets no
+// statement of its own, so every project a case's resources name belongs here.
+func seedRegistry(t *testing.T, dbs caseDBs, reg registryFile) seededRegistry {
 	t.Helper()
 
 	ctx := t.Context()
@@ -636,6 +650,7 @@ func seedRegistry(t *testing.T, dbs caseDBs, reg registryFile) {
 		ids[projectRef{Cloud: p.Cloud, ExternalID: p.ExternalID}] = id
 	}
 
+	relationIDs := make([]uuid.UUID, 0, len(reg.Relations))
 	for _, r := range reg.Relations {
 		edge := fmt.Sprintf("%s/%s -> %s/%s",
 			r.Source.Cloud, r.Source.ExternalID, r.Target.Cloud, r.Target.ExternalID)
@@ -648,13 +663,32 @@ func seedRegistry(t *testing.T, dbs caseDBs, reg registryFile) {
 			}
 			return id
 		}
-		if _, err := dbs.reporting.Exec(ctx,
-			`INSERT INTO project_relations (source_id, target_id, relation_type, valid_from, valid_to)
-			 VALUES ($1, $2, $3, $4, $5)`,
-			resolve(r.Source), resolve(r.Target), r.RelationType, r.ValidFrom, r.ValidTo); err != nil {
+		// The Reporting API validates the adjustments of a relation before it
+		// writes them (internal/reporting/httpapi/projectrelations.go), so a
+		// fixture that goes around the API by raw SQL is held to the same
+		// schema, the way checkSize holds a fixture event to the size schema. A
+		// document the API would refuse is refused here, before the insert.
+		if len(r.Metadata) > 0 {
+			if err := adjustment.ValidateMetadata(r.Metadata); err != nil {
+				t.Fatalf("relation %s: metadata: %v", edge, err)
+			}
+		}
+		metadata := []byte(r.Metadata)
+		if len(metadata) == 0 {
+			metadata = []byte("{}")
+		}
+		var id uuid.UUID
+		if err := dbs.reporting.QueryRow(ctx,
+			`INSERT INTO project_relations (source_id, target_id, relation_type, valid_from, valid_to, metadata)
+			 VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING id`,
+			resolve(r.Source), resolve(r.Target), r.RelationType,
+			r.ValidFrom, r.ValidTo, metadata).Scan(&id); err != nil {
 			t.Fatalf("relating %s: %v", edge, err)
 		}
+		relationIDs = append(relationIDs, id)
 	}
+
+	return seededRegistry{projects: ids, relations: relationIDs}
 }
 
 // seedLate writes the events of late.json, which arrive after a case's first
