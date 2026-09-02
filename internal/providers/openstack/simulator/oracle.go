@@ -221,7 +221,8 @@ var billableTypes = map[string]billableType{
 // not read.
 //
 // Format 2 added the faults member on the document and on every resource.
-const oracleFormat = 2
+// Format 3 added the traffic member on the document.
+const oracleFormat = 3
 
 // Oracle is the generator's statement of what a month contained: for every
 // billable resource the intervals of constant state, size and project it
@@ -238,6 +239,15 @@ type Oracle struct {
 	// Faults holds the fault switches the month ran with, in FaultNames order.
 	// A month nobody passed --faults to states an empty list.
 	Faults []string `json:"faults"`
+	// Traffic holds one row per instance and per interval of that instance,
+	// ordered by resource id and then by From. Run fills it from the metric
+	// samples once the month is generated, so buildOracle states an empty list.
+	//
+	// The rows lie outside OracleInterval on purpose: foldFacts merges two
+	// adjacent facts that repeat the state, project and size, and a traffic
+	// figure inside the interval would make two mergeable intervals compare
+	// unequal and split that fold.
+	Traffic []OracleTraffic `json:"traffic"`
 }
 
 // OracleResource is one billable resource of the month and the intervals it
@@ -268,6 +278,16 @@ type OracleCount struct {
 	ProjectID string `json:"project_id"`
 	EventType string `json:"event_type"`
 	Count     int    `json:"count"`
+}
+
+// OracleTraffic is the network traffic one instance was given over one of its
+// intervals: the exact sum of the grid steps the generator placed inside it.
+type OracleTraffic struct {
+	ResourceID   string    `json:"resource_id"`
+	From         time.Time `json:"from"`
+	To           time.Time `json:"to"`
+	EgressBytes  int64     `json:"egress_bytes"`
+	IngressBytes int64     `json:"ingress_bytes"`
 }
 
 // resourceKey names one resource of the month. The id alone would not do: two
@@ -376,6 +396,7 @@ func buildOracle(facts []fact, seed uint64, cloud string, from, to time.Time,
 		Resources:  resources,
 		Counts:     sortedCounts(counts),
 		Faults:     faults.Names(),
+		Traffic:    []OracleTraffic{},
 	}, nil
 }
 
@@ -556,7 +577,9 @@ func ReadOracle(path string) (Oracle, error) {
 // writes, so a document without it is a trimmed or a truncated file rather than
 // a month that meant it: a missing size alone would turn every time gauge
 // dimension of every priced resource into a difference, because the comparison
-// bills an absent size member at zero the way the engine does.
+// bills an absent size member at zero the way the engine does. The traffic
+// rows are read the same way, and an empty list of them is a month nothing
+// pushed a counter for.
 func (o Oracle) validate() error {
 	switch {
 	case o.Cloud == "":
@@ -585,6 +608,14 @@ func (o Oracle) validate() error {
 			case interval.Size == nil:
 				return fmt.Errorf("states no size for %s from %s", named, at)
 			}
+		}
+	}
+	for _, row := range o.Traffic {
+		if row.ResourceID == "" {
+			return errors.New("states a traffic row without a resource")
+		}
+		if row.From.IsZero() || row.To.IsZero() {
+			return fmt.Errorf("states a traffic row of instance %s without bounds", row.ResourceID)
 		}
 	}
 	return nil
