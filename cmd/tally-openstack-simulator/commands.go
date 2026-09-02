@@ -18,6 +18,12 @@ import (
 // through.
 const defaultFactor = 744
 
+// defaultMetricsInterval is the grid a run samples its traffic counters and its
+// inventory on. It is the polling interval Ceilometer runs at out of the box,
+// which README section 4.1 names, so a simulated month carries as many points
+// per series as a real one.
+const defaultMetricsInterval = 300 * time.Second
+
 // defaultWaitForCollector is how long a run waits for the collector to appear
 // on its queue before it publishes. A topic exchange drops what no queue is
 // bound to, so a month published into an empty broker is a month lost; two
@@ -63,6 +69,11 @@ func newRunCmd() *cobra.Command {
 			if _, _, err := opts.Validate(); err != nil {
 				return err
 			}
+			// The push is checked before the broker is dialled too, the way the
+			// flags are: a whole month is posted to that endpoint.
+			if err := cfg.ValidateMetrics(); err != nil {
+				return fmt.Errorf("checking the configuration: %w", err)
+			}
 			// The switch is checked here too, so a missing token is reported before
 			// a broker is dialled, the way a mistyped period is.
 			if opts.RegisterProjects {
@@ -99,6 +110,9 @@ func newRunCmd() *cobra.Command {
 			"and held-back.jsonl when a switch holds notifications back")
 	cmd.Flags().DurationVar(&opts.WaitForCollector, "wait-for-collector", defaultWaitForCollector,
 		"how long to wait for a consumer on the collector's queue before publishing; 0 disables the wait")
+	cmd.Flags().DurationVar(&opts.MetricsInterval, "metrics-interval", defaultMetricsInterval,
+		"grid the traffic and inventory samples lie on, counted from the period start; "+
+			"whole seconds, at least 30s and at most 24h; 300s is the interval Ceilometer polls at")
 	cmd.Flags().StringSliceVar(&opts.Faults, "faults", nil,
 		"fault switches to turn on, comma-separated: "+strings.Join(simulator.FaultNames, ", ")+
 			"; every switch is off by default")

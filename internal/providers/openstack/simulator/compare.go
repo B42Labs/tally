@@ -31,8 +31,11 @@ import (
 // not compared is what the pricing model decides. An amount is what the model
 // charges for a quantity, so a comparison that recomputed one would hold the
 // model against itself. A counter dimension is left out for a reason of its
-// own: no transition of a simulated month meters egress, so the quantity an
-// export carries for one is read from nothing the oracle states.
+// own: increase() extrapolates a counter over the edges of the window it is
+// asked about, so the quantity an export carries differs from the exact
+// integral the generator placed in the interval, and a comparison that held the
+// two equal would report the extrapolation as an engine difference. The
+// oracle's traffic rows are what a drill reads the intended figure off.
 //
 // A resource type the model does not price reaches no rated record at all,
 // because rating.Rate skips it, so its resources are counted per type instead
