@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -516,5 +517,134 @@ func TestControlAddrBindsLoopbackUnlessAskedOtherwise(t *testing.T) {
 				t.Errorf("ControlAddr() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// runMux is the mux a run serves: the control routes, the inventory endpoint,
+// and the fake OpenStack API beneath the two. The wall clock is frozen, so
+// every document the endpoint answers with is the one the test picked however
+// long the test takes. A nil exporter is a run with metrics turned off.
+func runMux(t *testing.T, month Month, withExporter bool) *httptest.Server {
+	t.Helper()
+
+	wall := time.Unix(0, 0)
+	clock := NewClock(cloudDay(10), 744, func() time.Time { return wall })
+	api, err := NewCloudAPI(clock, month.Oracle)
+	if err != nil {
+		t.Fatalf("NewCloudAPI() error = %v, want nil", err)
+	}
+
+	var exporter http.Handler
+	if withExporter {
+		exporter = NewExporter(month, clock)
+	}
+	mux := NewControlMux(clock, func() Progress { return controlProgress }, func() error { return nil })
+	mountRun(mux, api, exporter)
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// servedMonth is one month a run serves: one tenant, and one instance of it
+// that outlives the month, so both the scrape and the listing hold something.
+func servedMonth() Month {
+	return Month{
+		Tenants: []Tenant{{ID: cloudTenant, Name: "tenant-a", Workload: workloadClassic}},
+		Oracle:  testOracle(oneInstance("web-01", cloudDay(2), cloudTo)),
+	}
+}
+
+func TestMetricsRouteIsMatchedAheadOfTheFakeAPI(t *testing.T) {
+	server := runMux(t, servedMonth(), true)
+
+	status, contentType, body := request(t, server, http.MethodGet, "/metrics", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /metrics = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if !strings.HasPrefix(contentType, "text/plain") {
+		t.Errorf("GET /metrics Content-Type = %q, want it to start with text/plain", contentType)
+	}
+	if !strings.Contains(body, seriesNovaTotalVMs) {
+		t.Errorf("GET /metrics states no %s, want the scrape and not the fake API's 404",
+			seriesNovaTotalVMs)
+	}
+
+	status, _, body = request(t, server, http.MethodGet, "/healthz", "")
+	if status != http.StatusOK || body != "ok" {
+		t.Errorf("GET /healthz = %d with body %q, want %d and %q", status, body, http.StatusOK, "ok")
+	}
+
+	status, _, body = request(t, server, http.MethodGet, "/clock", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	want := clockDocument{
+		VirtualNow: cloudDay(10).Format(time.RFC3339),
+		Factor:     744,
+		Published:  controlProgress.Published,
+		Total:      controlProgress.Total,
+		Held:       controlProgress.Held,
+		Holding:    controlProgress.Holding,
+		PeriodFrom: cloudFrom.Format(time.RFC3339),
+		PeriodTo:   cloudTo.Format(time.RFC3339),
+	}
+	if doc := decodeDocument(t, body); doc != want {
+		t.Errorf("GET /clock document = %+v, want %+v", doc, want)
+	}
+
+	status, _, body = request(t, server, http.MethodPut, "/clock", `{"factor": 0}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT /clock = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if got := decodeDocument(t, body).Factor; got != 0 {
+		t.Errorf("PUT /clock document factor = %g, want 0", got)
+	}
+
+	status, contentType, body = request(t, server, http.MethodPost, "/release", "")
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	if !strings.HasPrefix(contentType, "application/json") {
+		t.Errorf("POST /release Content-Type = %q, want it to start with application/json", contentType)
+	}
+
+	// Everything the two patterns above leave is still the fake API's, so a sync
+	// reads the month off the very listener a scrape reads the inventory off.
+	status, body = askCloud(t, server, tokenOf(t, server), serversPath)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d (body %q)", serversPath, status, http.StatusOK, body)
+	}
+	if got := servedIDs(t, body, "servers"); !slices.Equal(got, []string{"web-01"}) {
+		t.Errorf("the live listing answered with %v, want the instance the month holds at day 10", got)
+	}
+}
+
+func TestMetricsRouteIsAbsentWhenMetricsAreOff(t *testing.T) {
+	server := runMux(t, servedMonth(), false)
+
+	status, _, body := request(t, server, http.MethodGet, "/metrics", "")
+	if status != http.StatusNotFound {
+		t.Errorf("GET /metrics with metrics off = %d, want %d from the fake API's catch-all (body %q)",
+			status, http.StatusNotFound, body)
+	}
+	status, _, body = request(t, server, http.MethodGet, "/healthz", "")
+	if status != http.StatusOK || body != "ok" {
+		t.Errorf("GET /healthz with metrics off = %d with body %q, want %d and %q",
+			status, body, http.StatusOK, "ok")
+	}
+
+	// A replay mounts neither: it holds the notifications of a month and no
+	// oracle, so there is nothing to scrape and nothing to list.
+	replayMux := NewControlMux(NewClock(cloudDay(10), 0, time.Now),
+		func() Progress { return controlProgress }, nil)
+	mountRun(replayMux, nil, nil)
+	replay := httptest.NewServer(replayMux)
+	t.Cleanup(replay.Close)
+
+	status, _, body = request(t, replay, http.MethodGet, "/metrics", "")
+	if status != http.StatusNotFound {
+		t.Errorf("GET /metrics on the mux of a replay = %d, want %d (body %q)",
+			status, http.StatusNotFound, body)
 	}
 }
