@@ -30,7 +30,7 @@ import (
 // fileSuffix names the companion variable of a secret: the value of
 // TALLY_SIM_AMQP_URL is read from the file at TALLY_SIM_AMQP_URL_FILE when that
 // variable holds a path, and TALLY_SIM_API_TOKEN from TALLY_SIM_API_TOKEN_FILE
-// the same way.
+// and TALLY_SIM_OTLP_PASSWORD from TALLY_SIM_OTLP_PASSWORD_FILE the same way.
 const fileSuffix = "_FILE"
 
 // The variables this package reads. They are named here because the errors
@@ -46,6 +46,12 @@ const (
 	envReportingInsecure = "TALLY_SIM_REPORTING_INSECURE"
 	envAPIToken          = "TALLY_SIM_API_TOKEN"
 	envGardenCloud       = "TALLY_SIM_GARDEN_CLOUD"
+
+	envOTLPURL        = "TALLY_SIM_OTLP_URL"
+	envOTLPUser       = "TALLY_SIM_OTLP_USER"
+	envOTLPPassword   = "TALLY_SIM_OTLP_PASSWORD"
+	envOTLPInsecure   = "TALLY_SIM_OTLP_INSECURE"
+	envMetricsEnabled = "TALLY_METRICS_ENABLED"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -63,6 +69,12 @@ var EnvNames = []string{
 	envAPIToken,
 	envAPIToken + fileSuffix,
 	envGardenCloud,
+	envOTLPURL,
+	envOTLPUser,
+	envOTLPPassword,
+	envOTLPPassword + fileSuffix,
+	envOTLPInsecure,
+	envMetricsEnabled,
 }
 
 // loopback is the address the control endpoint binds unless a deployment names
@@ -121,12 +133,36 @@ type Config struct {
 	// GardenCloud is the cloud the two Gardener projects are registered under.
 	// It has no default, for the reason Cloud has none.
 	GardenCloud string `env:"TALLY_SIM_GARDEN_CLOUD"`
+	// OTLPURL is the OTLP/HTTP endpoint the traffic and inventory series of a run
+	// are pushed to. Empty is a run without a push. It has to be absolute and
+	// carry a host, and to be https unless OTLPInsecure allows a plaintext one,
+	// because the Basic password travels on it. run reads it alone.
+	OTLPURL string `env:"TALLY_SIM_OTLP_URL"`
+	// OTLPUser is the Basic user of the push. The endpoint in front of the
+	// collector takes Basic auth, so a URL without a user reaches nothing.
+	OTLPUser string `env:"TALLY_SIM_OTLP_USER"`
+	// OTLPPassword is the Basic password of the push. It supports the *_FILE
+	// convention.
+	OTLPPassword string `env:"TALLY_SIM_OTLP_PASSWORD"`
+	// OTLPInsecure allows an http endpoint. It exists for a simulator and a
+	// collector on the same machine, and for development; anywhere else it puts
+	// the Basic password on the wire in cleartext.
+	OTLPInsecure bool `env:"TALLY_SIM_OTLP_INSECURE" envDefault:"false"`
+	// MetricsEnabled serves the inventory on GET /metrics of the control listener
+	// while a run publishes, where it stands in for the OpenStack database
+	// exporter a deployment scrapes. False registers no route, and the fake
+	// OpenStack API then answers that path with its own 404. A Config that never
+	// went through Load carries false, which is why a test that needs the
+	// endpoint sets it. The variable has no SIM infix because roadmap section 8
+	// lists it among the common variables every service reads.
+	MetricsEnabled bool `env:"TALLY_METRICS_ENABLED" envDefault:"true"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
 // log level. It does not check whether the required values are present: which
 // ones are required depends on the subcommand and on its switches, which is
-// what ValidateRun, ValidateReplay, and ValidateRegistration decide.
+// what ValidateRun, ValidateReplay, ValidateRegistration, and ValidateMetrics
+// decide.
 func Load() (Config, error) {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
@@ -137,6 +173,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.APIToken, err = resolveFileSecret(envAPIToken, cfg.APIToken); err != nil {
+		return Config{}, err
+	}
+	if cfg.OTLPPassword, err = resolveFileSecret(envOTLPPassword, cfg.OTLPPassword); err != nil {
 		return Config{}, err
 	}
 
@@ -250,6 +289,47 @@ func (c Config) validateReportingURL() error {
 	if parsed.Scheme != "https" && !c.ReportingInsecure {
 		return fmt.Errorf("%s: %q must use https, because the admin api token travels on it; "+
 			"set %s=true to allow plaintext", envReportingURL, c.ReportingURL, envReportingInsecure)
+	}
+	return nil
+}
+
+// ValidateMetrics is the gate of the push side of the metrics, checked before a
+// run dials the broker. An empty TALLY_SIM_OTLP_URL is a run without a push and
+// passes: the month is generated and published, and the samples it places stay
+// in the process.
+//
+// A URL that is set is one a whole month is posted to, so what it needs is
+// asked for now rather than at the first flush, an hour into a paced run.
+func (c Config) ValidateMetrics() error {
+	if c.OTLPURL == "" {
+		return nil
+	}
+	if c.OTLPUser == "" {
+		return fmt.Errorf("%s: must be set when %s is set", envOTLPUser, envOTLPURL)
+	}
+	if c.OTLPPassword == "" {
+		return fmt.Errorf("%s: must be set when %s is set", envOTLPPassword, envOTLPURL)
+	}
+	// The value is named and not quoted, unlike the Reporting API's: a mistyped
+	// endpoint may carry userinfo, and an error an operator pastes into a ticket
+	// must not carry a credential.
+	parsed, err := url.Parse(c.OTLPURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return fmt.Errorf("%s: must be an absolute http(s) URL with a host", envOTLPURL)
+	}
+	// The credential of a push is the Basic one, and the URL is where it must
+	// not be. A token carried as the userinfo or as a query parameter is one no
+	// message can be trusted to keep out: an http client redacts the password
+	// half of a userinfo before it wraps a transport error and leaves the user
+	// and the query standing, and that error is logged as JSON and shipped from
+	// there. So the shape is refused rather than redacted afterwards.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s: must carry no userinfo, query or fragment; the credential of a push "+
+			"belongs in %s and %s", envOTLPURL, envOTLPUser, envOTLPPassword)
+	}
+	if parsed.Scheme != "https" && !c.OTLPInsecure {
+		return fmt.Errorf("%s: must use https, because the Basic password travels on it; "+
+			"set %s=true to allow plaintext", envOTLPURL, envOTLPInsecure)
 	}
 	return nil
 }
