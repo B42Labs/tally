@@ -18,6 +18,13 @@
 // whose metered intervals or quantities differ from the oracle; it exits 1 when
 // anything differs.
 //
+// A run pushes the month's traffic counters and inventory gauges to the
+// OTLP/HTTP endpoint TALLY_SIM_OTLP_URL names when it is set, on the same clock
+// the notifications go out under and on the --metrics-interval grid, and it
+// serves the inventory on GET /metrics of the control listener unless
+// TALLY_METRICS_ENABLED is false. A replay does neither: a recorded file holds
+// notifications and no oracle to read a metric off.
+//
 // The control endpoint on TALLY_SIM_HTTP_PORT changes the factor while a run
 // publishes, so a month that is going out too slowly is sped up without being
 // started over. POST /release on it publishes the notifications a run with the

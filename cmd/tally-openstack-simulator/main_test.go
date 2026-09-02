@@ -58,6 +58,11 @@ const closedRegistry = "https://127.0.0.1:1"
 // into.
 const testAPIToken = "tly_a_test"
 
+// testOTLPPassword is the Basic password of the push. The cases about the OTLP
+// configuration search their failure for it, for the reason the api token's
+// cases give: a message an operator pastes into a ticket carries no credential.
+const testOTLPPassword = "s3cret-of-the-test"
+
 // gardenCloud is the cloud the two Gardener projects are registered under. It
 // differs from simulatedCloud because a cloud is one installation of one
 // platform, and the registry keys a row by its cloud.
@@ -231,6 +236,33 @@ func TestRunWritesTheMonthInFileMode(t *testing.T) {
 		t.Errorf("oracle.json covers [%s, %s), want the [%s, %s) the run was given",
 			oracle.PeriodFrom.Format(time.RFC3339), oracle.PeriodTo.Format(time.RFC3339),
 			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+
+	// The traffic a file-mode run records although it pushes nothing: one row
+	// per interval of every instance, ordered by resource id and then by from,
+	// which is the order the oracle states its rows in.
+	if len(oracle.Traffic) == 0 {
+		t.Error("oracle.json states no traffic row, want one per interval of every instance")
+	}
+	if !slices.IsSortedFunc(oracle.Traffic, func(a, b simulator.OracleTraffic) int {
+		if c := strings.Compare(a.ResourceID, b.ResourceID); c != 0 {
+			return c
+		}
+		return a.From.Compare(b.From)
+	}) {
+		t.Error("oracle.json states its traffic rows out of order, want them by resource id and then by from")
+	}
+	instances := make(map[string]bool)
+	for _, resource := range oracle.Resources {
+		if resource.ResourceType == "instance" {
+			instances[resource.ResourceID] = true
+		}
+	}
+	for _, row := range oracle.Traffic {
+		if !instances[row.ResourceID] {
+			t.Errorf("oracle.json states traffic for %q, want every row to name an instance it holds",
+				row.ResourceID)
+		}
 	}
 
 	skipped := nonBillableNotifications(t, 1, endedMonth, simulatedCloud)
@@ -542,6 +574,8 @@ func TestRunRefusesBadInput(t *testing.T) {
 	emptyURLFile := writeFile(t, t.TempDir(), "empty-amqp-url", "")
 	tokenFile := writeFile(t, t.TempDir(), "api-token", "tly_a_x\n")
 	emptyTokenFile := writeFile(t, t.TempDir(), "empty-api-token", "")
+	passwordFile := writeFile(t, t.TempDir(), "otlp-password", "pw\n")
+	emptyPasswordFile := writeFile(t, t.TempDir(), "empty-otlp-password", "")
 	// The output directory of the case about an unknown fault switch. It is held
 	// outside the case so the body can read it back: a refused switch has to end
 	// the run before the month is written.
@@ -549,6 +583,11 @@ func TestRunRefusesBadInput(t *testing.T) {
 	// The same for the case about a registry nothing listens on: a registration
 	// that fails ends the run before the month is written.
 	registerOut := t.TempDir()
+	// And for the two the metrics are refused by: the grid is checked with the
+	// other flags and the endpoint before the broker is dialled, so neither
+	// reaches the month either.
+	intervalOut := t.TempDir()
+	pushOut := t.TempDir()
 
 	for _, tc := range []struct {
 		name string
@@ -664,6 +703,83 @@ func TestRunRefusesBadInput(t *testing.T) {
 				"--out", t.TempDir(),
 			},
 			want: "--faults: pre-existing and missing-create exclude each other",
+		},
+		{
+			name: "a metrics interval of zero",
+			// The value is attached with =, for the reason the negative factor's
+			// case gives.
+			args:     []string{"--period", endedMonth, "--metrics-interval=0", "--out", intervalOut},
+			want:     "--metrics-interval: 0s must be a whole number of seconds between 30s and 24h0m0s",
+			emptyDir: intervalOut,
+		},
+		{
+			name: "a negative metrics interval",
+			args: []string{"--period", endedMonth, "--metrics-interval=-5m", "--out", t.TempDir()},
+			want: "--metrics-interval: -5m0s must be a whole number of seconds between 30s and 24h0m0s",
+		},
+		{
+			name: "a metrics interval that is not whole seconds",
+			args: []string{"--period", endedMonth, "--metrics-interval=1500ms", "--out", t.TempDir()},
+			want: "--metrics-interval: 1.5s must be a whole number of seconds between 30s and 24h0m0s",
+		},
+		{
+			// A month is placed whole before it is published, and a grid an order
+			// of magnitude below Ceilometer's is where that stops fitting into
+			// memory, so it is refused rather than started and killed.
+			name: "a metrics interval finer than the grid a month is placed on",
+			args: []string{"--period", endedMonth, "--metrics-interval=1s", "--out", t.TempDir()},
+			want: "--metrics-interval: 1s must be a whole number of seconds between 30s and 24h0m0s",
+		},
+		{
+			name: "a metrics interval longer than a day",
+			args: []string{"--period", endedMonth, "--metrics-interval=25h", "--out", t.TempDir()},
+			want: "--metrics-interval: 25h0m0s must be a whole number of seconds between 30s and 24h0m0s",
+		},
+		{
+			name: "a push without a user",
+			env:  map[string]string{"TALLY_SIM_OTLP_URL": "https://127.0.0.1:1/v1/metrics"},
+			args: []string{"--period", endedMonth, "--out", pushOut},
+			want: "checking the configuration: TALLY_SIM_OTLP_USER: " +
+				"must be set when TALLY_SIM_OTLP_URL is set",
+			emptyDir: pushOut,
+		},
+		{
+			name: "a push without a password",
+			env: map[string]string{
+				"TALLY_SIM_OTLP_URL":  "https://127.0.0.1:1/v1/metrics",
+				"TALLY_SIM_OTLP_USER": "tally",
+			},
+			args: []string{"--period", endedMonth, "--out", t.TempDir()},
+			want: "checking the configuration: TALLY_SIM_OTLP_PASSWORD: " +
+				"must be set when TALLY_SIM_OTLP_URL is set",
+		},
+		{
+			name: "a plaintext push nobody allowed",
+			env: map[string]string{
+				"TALLY_SIM_OTLP_URL":      "http://127.0.0.1:1/v1/metrics",
+				"TALLY_SIM_OTLP_USER":     "tally",
+				"TALLY_SIM_OTLP_PASSWORD": testOTLPPassword,
+			},
+			args:     []string{"--period", endedMonth, "--out", t.TempDir()},
+			contains: "TALLY_SIM_OTLP_INSECURE",
+			absent:   testOTLPPassword,
+		},
+		{
+			name: "an OTLP password given twice",
+			env: map[string]string{
+				"TALLY_SIM_OTLP_PASSWORD":      testOTLPPassword,
+				"TALLY_SIM_OTLP_PASSWORD_FILE": passwordFile,
+			},
+			args: []string{"--period", endedMonth, "--out", t.TempDir()},
+			want: "loading the configuration: set TALLY_SIM_OTLP_PASSWORD or " +
+				"TALLY_SIM_OTLP_PASSWORD_FILE, not both",
+			absent: testOTLPPassword,
+		},
+		{
+			name:     "an OTLP password file nobody filled",
+			env:      map[string]string{"TALLY_SIM_OTLP_PASSWORD_FILE": emptyPasswordFile},
+			args:     []string{"--period", endedMonth, "--out", t.TempDir()},
+			contains: fmt.Sprintf("TALLY_SIM_OTLP_PASSWORD_FILE: file %s is empty", emptyPasswordFile),
 		},
 		{
 			name: "a registration without a Reporting API",
@@ -792,6 +908,24 @@ func TestRunHelpListsTheFaultSwitches(t *testing.T) {
 		if !strings.Contains(stdout, name) {
 			t.Errorf("run --help does not name the fault switch %q, want all of %v listed",
 				name, simulator.FaultNames)
+		}
+	}
+}
+
+// TestRunHelpListsTheMetricsInterval holds the help of run to the grid the
+// metrics lie on and to the interval it takes when nobody names one. How many
+// points a month is pushed as follows from that grid, so an operator who has to
+// change it has to find it.
+func TestRunHelpListsTheMetricsInterval(t *testing.T) {
+	blankEnvironment(t)
+
+	stdout, stderr, err := runCLI(t, "run", "--help")
+	if err != nil {
+		t.Fatalf("run --help error = %v, want nil (stderr %q)", err, stderr)
+	}
+	for _, want := range []string{"--metrics-interval", "300s"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("run --help does not name %q, want it in the help of the flag", want)
 		}
 	}
 }

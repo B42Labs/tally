@@ -72,6 +72,11 @@ type RunOptions struct {
 	// notification published. What it needs is the environment, which Config
 	// checks through ValidateRegistration.
 	RegisterProjects bool
+	// MetricsInterval is the grid the traffic counters and the inventory are
+	// sampled on, counted from the period's start. It is a whole number of
+	// seconds, at least 30s and at most 24h; the flag defaults to Ceilometer's
+	// polling interval of 300s.
+	MetricsInterval time.Duration
 }
 
 // Validate checks the options and returns the month Period names.
@@ -95,6 +100,20 @@ func (o RunOptions) Validate() (from, to time.Time, err error) {
 	}
 	if err := validatePacing(o.Factor, o.WaitForCollector); err != nil {
 		return time.Time{}, time.Time{}, err
+	}
+	// Both bounds are stated in metrics.go. The upper one is the byte
+	// arithmetic's: the numerator of stepBytes is an int64, and
+	// maxMetricsInterval is the longest step it holds. The lower one is the
+	// month's own size: the traffic of the whole period is placed before the
+	// first notification goes out, and a grid an order of magnitude below
+	// Ceilometer's is where that stops fitting into memory. Whole seconds
+	// because stepBytes counts a step in seconds, so a grid of half seconds
+	// would drop that half out of every step it places.
+	if o.MetricsInterval < minMetricsInterval || o.MetricsInterval > maxMetricsInterval ||
+		o.MetricsInterval%time.Second != 0 {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"--metrics-interval: %s must be a whole number of seconds between %s and %s",
+			o.MetricsInterval, minMetricsInterval, maxMetricsInterval)
 	}
 	if _, err := ParseFaults(o.Faults); err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("--faults: %w", err)
@@ -177,6 +196,14 @@ type queued struct {
 // while they are published. File mode serves neither of the two: nothing is in
 // flight there.
 //
+// The second face of the month goes out beside the notifications: the traffic
+// counters and the inventory gauges are pushed to the OTLP endpoint the
+// configuration names, on the clock the notifications are paced by, and the
+// inventory is served on GET /metrics of the same listener. A run without an
+// OTLP URL pushes nothing, and file mode pushes nothing either, but both write
+// the traffic rows into the oracle. A push that failed is reported once the
+// month has gone out whole, because the month is what the operator asked for.
+//
 // A cancelled context is a clean stop: what went out stays out, and Run returns
 // nil, so SIGINT and SIGTERM leave exit status 0 the way they do for the
 // collector. A failed publish is an error instead, and what an operator does
@@ -190,6 +217,11 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 	from, to, err := opts.Validate()
 	if err != nil {
 		return err
+	}
+	// Checked here as well as in the subcommand, for the reason the gate below
+	// gives.
+	if err := cfg.ValidateMetrics(); err != nil {
+		return fmt.Errorf("checking the configuration: %w", err)
 	}
 	// Checked here as well as in the subcommand, because an exported function
 	// cannot rely on its caller having checked.
@@ -213,6 +245,14 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 	if err != nil {
 		return err
 	}
+	// The traffic is placed before anything is written, and its rows go into the
+	// oracle: a run that pushes nothing still records what an instance moved, and
+	// the file it writes is what a drill reads the intended figure off.
+	traffic, rows, err := TrafficOf(month.Oracle, opts.Seed, opts.MetricsInterval)
+	if err != nil {
+		return fmt.Errorf("placing the traffic of the month: %w", err)
+	}
+	month.Oracle.Traffic = rows
 	schedule := month.Schedule
 
 	logger.Info("starting",
@@ -227,6 +267,11 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 		"stream", len(month.Stream),
 		"held", len(month.Held),
 		"resources", len(month.Oracle.Resources),
+		"metrics_interval", opts.MetricsInterval,
+		"traffic_samples", len(traffic),
+		// The bool and never the URL: a mistyped endpoint may carry userinfo, and
+		// a log line is read by whoever the log reaches.
+		"otlp", cfg.OTLPURL != "",
 		"broker", publisher != nil,
 		"out", opts.Out)
 
@@ -335,8 +380,24 @@ func Run(ctx context.Context, cfg Config, opts RunOptions, publisher *Publisher,
 	if err != nil {
 		return fmt.Errorf("building the fake OpenStack API: %w", err)
 	}
+	// The scraped face of the month and the pushed one, both off the month that
+	// is going out. A configuration without an OTLP URL is a run without a push,
+	// and the samples it placed stay in the process.
+	var exporter http.Handler
+	if cfg.MetricsEnabled {
+		exporter = NewExporter(month, clock)
+	}
+	var metrics *metricsRun
+	if cfg.OTLPURL != "" {
+		metrics = &metricsRun{
+			pusher:   NewPusher(cfg.OTLPURL, cfg.OTLPUser, cfg.OTLPPassword, cfg.Cloud, nil),
+			month:    month,
+			traffic:  traffic,
+			interval: opts.MetricsInterval,
+		}
+	}
 
-	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, held, api)
+	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, held, api, exporter, metrics)
 }
 
 // renderQueue turns a schedule into the notifications the bus carries. The
@@ -431,7 +492,18 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 	}
 	clock := NewClock(from, opts.Factor, time.Now)
 
-	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, nil, nil)
+	return broadcast(ctx, cfg, publisher, logger, clock, from, to, lines, nil, nil, nil, nil)
+}
+
+// metricsRun is what a run pushes: the pusher it posts through, the month the
+// samples are read off, the traffic samples the generator placed, and the grid
+// they lie on. The inventory is not held here, because it is folded per grid
+// step out of the month.
+type metricsRun struct {
+	pusher   *Pusher
+	month    Month
+	traffic  []Sample
+	interval time.Duration
 }
 
 // broadcast puts the lines on the bus in the order they stand in, paced by the
@@ -455,12 +527,19 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 // notifications go out as fast as the broker confirms them, each under the
 // timestamp inside the month it always carried. A context that ends during the
 // hold is a clean stop with the held share never published.
+//
+// The pusher runs beside the publishing loop and on the same clock, so the
+// metrics of a grid step leave while the notifications of that step do. Its
+// failure is reported once the last notification is on the bus, the way the
+// endpoint's is. A nil metrics is a run without a push, which is what a replay
+// and a run with no OTLP URL pass.
 func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *slog.Logger,
-	clock *Clock, from, to time.Time, lines, held []queued, api http.Handler,
+	clock *Clock, from, to time.Time, lines, held []queued, api, exporter http.Handler,
+	metrics *metricsRun,
 ) error {
 	hb := newHoldback(len(held))
 	total := len(lines) + len(held)
-	var published atomic.Int64
+	var published, pushed atomic.Int64
 	// How every end of a run is answered: a cancelled context is a clean stop,
 	// reported as one and answered with nil, and anything else is the error it
 	// is. SIGINT and SIGTERM leave exit status 0 through this.
@@ -468,7 +547,8 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		if ctx.Err() == nil {
 			return err
 		}
-		logger.Info("stopped", "published", published.Load(), "total", total, "held", hb.held())
+		logger.Info("stopped", "published", published.Load(), "total", total, "held", hb.held(),
+			"pushed", pushed.Load())
 		return nil
 	}
 
@@ -491,7 +571,7 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		}
 	}
 	mux := NewControlMux(clock, progress, hb.release)
-	mountRun(mux, api, nil)
+	mountRun(mux, api, exporter)
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -521,6 +601,33 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 	}
 	logger.Info("listening", "port", port)
 
+	pushCtx, cancelPush := context.WithCancel(ctx)
+	var pushErr error
+	pushDone := make(chan struct{})
+	if metrics != nil {
+		go func() {
+			defer close(pushDone)
+			pushErr = pushSamples(pushCtx, clock, metrics, logger, &pushed)
+			// Said here as well as at the end of the run: the exit status waits
+			// for the month, because the month is what the operator asked for,
+			// but a drill paced over an hour would otherwise publish for the rest
+			// of it with the dashboards empty and the log saying nothing.
+			if pushErr != nil && pushCtx.Err() == nil {
+				logger.Error("pushing stopped", "error", pushErr, "pushed", pushed.Load())
+			}
+		}()
+	} else {
+		close(pushDone)
+	}
+	// Every path out of here ends the pusher and waits for it, so a publish that
+	// failed leaves no goroutine pushing a month nobody publishes any more. On
+	// the path that ends well the pusher has already finished, and the wait
+	// returns at once.
+	defer func() {
+		cancelPush()
+		<-pushDone
+	}()
+
 	if err := publishLines(ctx, clock, publisher, logger, lines, &published); err != nil {
 		return stop(err)
 	}
@@ -541,6 +648,15 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		}
 	}
 
+	// The push is reported here rather than while the month runs, the way the
+	// control endpoint is: the month is what the operator asked for, and the
+	// exit status is what says the metric half of it failed. stop turns a
+	// cancelled push into the clean stop it is.
+	<-pushDone
+	if pushErr != nil {
+		return stop(pushErr)
+	}
+
 	// A control endpoint that never came up is reported here rather than while
 	// the month runs: the month is what the operator asked for, and losing the
 	// endpoint is no reason to stop publishing it.
@@ -552,7 +668,7 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 	default:
 	}
 
-	logger.Info("completed", "published", published.Load(), "total", total)
+	logger.Info("completed", "published", published.Load(), "total", total, "pushed", pushed.Load())
 	return nil
 }
 
@@ -602,6 +718,61 @@ func publishLines(ctx context.Context, clock *Clock, publisher *Publisher, logge
 			"exchange", line.exchange,
 			"message_id", line.messageID,
 			"timestamp", line.at.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// pushSamples posts the metrics of the month, paced by the clock the
+// notifications are paced by: it waits for a grid instant, takes the traffic
+// samples that belong to it and the inventory that stands at it, and counts
+// every point the endpoint accepted.
+//
+// When a batch goes out is what the flush decides. A paced run has not reached
+// the next grid instant by the time it has folded this one, so the batch of a
+// step leaves with that step. At factor 0 the clock never reaches the next
+// instant and SleepUntil never waits, so the batch fills to maxDataPoints
+// instead of going out a step at a time, which is what keeps a month at factor
+// 0 from being one request per step.
+//
+// The error comes back as it is: the pusher already names the endpoint in it,
+// and a cancellation arrives as the context's own error, which is the clean
+// stop the publishing loop answers a signal with.
+func pushSamples(ctx context.Context, clock *Clock, metrics *metricsRun,
+	logger *slog.Logger, pushed *atomic.Int64,
+) error {
+	from, to := metrics.month.Oracle.PeriodFrom, metrics.month.Oracle.PeriodTo
+	pending := make([]Sample, 0, maxDataPoints)
+	cursor := 0
+	// The grid only moves forward, so the routers of the inventory are folded
+	// across it rather than per step: one fold walks the schedule once for the
+	// month, where a reading of its own would walk it from the head at every one
+	// of the month's thousands of steps.
+	routers := routerFold{schedule: metrics.month.Schedule}
+
+	for s := from; s.Before(to); s = s.Add(metrics.interval) {
+		if err := clock.SleepUntil(ctx, s); err != nil {
+			return err
+		}
+		// The samples are in instant order, so one cursor walks them: everything
+		// up to this instant belongs to this step.
+		for cursor < len(metrics.traffic) && !metrics.traffic[cursor].At.After(s) {
+			pending = append(pending, metrics.traffic[cursor])
+			cursor++
+		}
+		pending = append(pending, inventoryAt(metrics.month, s, &routers)...)
+
+		next := s.Add(metrics.interval)
+		flush := len(pending) >= maxDataPoints || !next.Before(to) ||
+			(clock.Factor() != 0 && clock.Now().Before(next))
+		if !flush {
+			continue
+		}
+		if err := metrics.pusher.Push(ctx, pending); err != nil {
+			return err
+		}
+		pushed.Add(int64(len(pending)))
+		logger.Debug("pushed", "at", s.Format(time.RFC3339), "points", len(pending))
+		pending = pending[:0]
 	}
 	return nil
 }

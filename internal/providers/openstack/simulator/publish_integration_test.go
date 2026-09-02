@@ -11,11 +11,13 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -449,6 +451,7 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 		Factor:           0,
 		Out:              out,
 		WaitForCollector: pollDeadline,
+		MetricsInterval:  testMetricsInterval,
 	}, publisher, testLogger(t))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -466,6 +469,16 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 	// so it is held against what the collector did produce rather than trusted.
 	if got := eventIDsOf(t, filepath.Join(out, "events.jsonl")); !slices.Equal(got, want) {
 		t.Errorf("the event ids in events.jsonl = %v, want %v", got, want)
+	}
+	// The oracle beside them is one this build reads back, and it carries the
+	// traffic of the month although this run pushed none of it: what a drill
+	// reads the intended figure off is the file, not the endpoint.
+	oracle, err := ReadOracle(filepath.Join(out, "oracle.json"))
+	if err != nil {
+		t.Fatalf("ReadOracle() error = %v, want nil", err)
+	}
+	if len(oracle.Traffic) == 0 {
+		t.Error("oracle.json states no traffic row, want the rows the run placed")
 	}
 
 	// What the rest of the month becomes in the collector: every notification the
@@ -537,6 +550,7 @@ func TestACollectorAtItsDefaultExchangesMissesTheOtherFourExchanges(t *testing.T
 		Factor:           0,
 		Out:              t.TempDir(),
 		WaitForCollector: pollDeadline,
+		MetricsInterval:  testMetricsInterval,
 	}, publisher, testLogger(t))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -600,10 +614,11 @@ func TestACollectorAtItsDefaultExchangesMissesTheOtherFourExchanges(t *testing.T
 func TestReplayPublishesACapturedMonth(t *testing.T) {
 	out := t.TempDir()
 	err := Run(t.Context(), Config{Cloud: testCloud}, RunOptions{
-		Period: "2026-07",
-		Seed:   1,
-		Factor: 0,
-		Out:    out,
+		Period:          "2026-07",
+		Seed:            1,
+		Factor:          0,
+		Out:             out,
+		MetricsInterval: testMetricsInterval,
 	}, nil, testLogger(t))
 	if err != nil {
 		t.Fatalf("Run() in file mode error = %v, want nil", err)
@@ -663,6 +678,7 @@ func TestRunWaitsForTheCollector(t *testing.T) {
 				Period:           "2026-07",
 				Seed:             2,
 				WaitForCollector: 0,
+				MetricsInterval:  testMetricsInterval,
 			}, publisher, testLogger(t))
 		}()
 
@@ -683,6 +699,7 @@ func TestRunWaitsForTheCollector(t *testing.T) {
 			Period:           "2026-07",
 			Seed:             2,
 			WaitForCollector: wait,
+			MetricsInterval:  testMetricsInterval,
 		}, publisher, testLogger(t))
 
 		want := "no consumer on the queue tally-notifications appeared within 2s; " +
@@ -747,6 +764,7 @@ func TestRunHoldsBackUntilReleased(t *testing.T) {
 			Factor:           0,
 			Faults:           []string{FaultHeldBack},
 			WaitForCollector: pollDeadline,
+			MetricsInterval:  testMetricsInterval,
 		}, publisher, testLogger(t))
 	}()
 
@@ -870,6 +888,7 @@ func TestRunServesTheFakeAPIOnTheControlListener(t *testing.T) {
 			Factor:           0,
 			Faults:           []string{FaultPreExisting, FaultHeldBack},
 			WaitForCollector: pollDeadline,
+			MetricsInterval:  testMetricsInterval,
 		}, publisher, testLogger(t))
 	}()
 	waitForHold(t, port, held)
@@ -943,6 +962,7 @@ func TestRunStoppedWhileHoldingKeepsTheHeldNotificationsBack(t *testing.T) {
 			Factor:           0,
 			Faults:           []string{FaultHeldBack},
 			WaitForCollector: pollDeadline,
+			MetricsInterval:  testMetricsInterval,
 		}, publisher, logger)
 	}()
 
@@ -986,7 +1006,10 @@ func TestRunStoppedWhileRegisteringWritesNothing(t *testing.T) {
 		ReportingURL: "https://127.0.0.1:1",
 		APIToken:     "tly_a_secret-of-the-test",
 		GardenCloud:  gardenCloud,
-	}, RunOptions{Period: "2026-07", Seed: 1, Out: out, RegisterProjects: true}, nil, logger)
+	}, RunOptions{
+		Period: "2026-07", Seed: 1, Out: out, RegisterProjects: true,
+		MetricsInterval: testMetricsInterval,
+	}, nil, logger)
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil: a stop while registering is a clean stop", err)
 	}
@@ -1030,6 +1053,7 @@ func TestReleaseFailsWhenTheBrokerIsGone(t *testing.T) {
 			Factor:           0,
 			Faults:           []string{FaultHeldBack},
 			WaitForCollector: 0,
+			MetricsInterval:  testMetricsInterval,
 		}, publisher, testLogger(t))
 	}()
 
@@ -1077,6 +1101,7 @@ func TestRunPublishesDuplicatesTheCollectorHandsOn(t *testing.T) {
 		Factor:           0,
 		Faults:           []string{FaultDuplicates},
 		WaitForCollector: pollDeadline,
+		MetricsInterval:  testMetricsInterval,
 	}, publisher, testLogger(t))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -1135,6 +1160,7 @@ func TestRunPublishesRefusedShapesTheCollectorRefuses(t *testing.T) {
 		Factor:           0,
 		Faults:           []string{FaultRefusedShapes},
 		WaitForCollector: pollDeadline,
+		MetricsInterval:  testMetricsInterval,
 	}, publisher, testLogger(t))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -1180,5 +1206,418 @@ func TestRunPublishesRefusedShapesTheCollectorRefuses(t *testing.T) {
 	})
 	if got := storedEventIDs(t, outbox, len(want)); !slices.Equal(got, want) {
 		t.Errorf("buffered event ids = %v, want %v", got, want)
+	}
+}
+
+// metricsStub stands in for the OTLP/HTTP endpoint a run pushes to. It records
+// what a request carried rather than the request itself: a month at factor 0
+// arrives as hundreds of batches of five thousand points, and a stub keeping
+// the bodies would hold the whole month a second time.
+//
+// The statuses are answered one per request, the last of them repeated, the way
+// the stand-in of otlp_test.go answers them. No status at all is 200 throughout.
+type metricsStub struct {
+	*httptest.Server
+	mu       sync.Mutex
+	statuses []int
+	requests []pushedBatch
+}
+
+// pushedBatch is what the stub saw of one request: how many points it carried,
+// whether it authenticated, and the series in it.
+type pushedBatch struct {
+	points int
+	basic  bool
+	series map[string]pushedSeries
+}
+
+// pushedSeries is one metric name inside one request: the points it carried and
+// the shape it arrived under. A counter has to reach the collector as a
+// monotonic cumulative sum, because that is what the remote write exporter
+// stores under the name the sample was pushed with.
+type pushedSeries struct {
+	points      int
+	sum         bool
+	monotonic   bool
+	temporality int
+}
+
+// startMetricsStub runs the stand-in endpoint for the test.
+func startMetricsStub(t *testing.T, statuses ...int) *metricsStub {
+	t.Helper()
+
+	stub := &metricsStub{statuses: statuses}
+	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var export otlpExport
+		// A body that ends early is passed over rather than failed on: a stopped
+		// run drops the request it was sending, and half a document arriving is
+		// that stop working. What a whole document holds is held in otlp_test.go,
+		// and a build that wrote none at all would leave the counts below at zero.
+		if err := json.NewDecoder(r.Body).Decode(&export); err != nil {
+			return
+		}
+		_, _, ok := r.BasicAuth()
+		batch := pushedBatch{basic: ok, series: make(map[string]pushedSeries)}
+		for _, resource := range export.ResourceMetrics {
+			for _, scope := range resource.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					series := batch.series[metric.Name]
+					if metric.Sum != nil {
+						series.sum = true
+						series.monotonic = metric.Sum.IsMonotonic
+						series.temporality = metric.Sum.AggregationTemporality
+						series.points += len(metric.Sum.DataPoints)
+						batch.points += len(metric.Sum.DataPoints)
+					}
+					if metric.Gauge != nil {
+						series.points += len(metric.Gauge.DataPoints)
+						batch.points += len(metric.Gauge.DataPoints)
+					}
+					batch.series[metric.Name] = series
+				}
+			}
+		}
+
+		stub.mu.Lock()
+		stub.requests = append(stub.requests, batch)
+		status := http.StatusOK
+		if len(stub.statuses) > 0 {
+			status = stub.statuses[min(len(stub.requests)-1, len(stub.statuses)-1)]
+		}
+		stub.mu.Unlock()
+
+		if status/100 != 2 {
+			http.Error(w, "the collector refused the batch", status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{}")
+	}))
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+// taken is the batches the endpoint took. The pusher reaches the handler from
+// the run's goroutine and a case reads the slice from its own, so it is guarded
+// and handed out as a copy.
+func (s *metricsStub) taken() []pushedBatch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.requests)
+}
+
+// pushSettleWait is the window a case watches the stand-in endpoint for once a
+// run has returned, and it waits two of them. The first lets the batch the
+// endpoint was still handling when the run gave up on it arrive, and a count
+// that moves during the second is a pusher that outlived the run: one at factor
+// 0 walks the month batch after batch.
+const pushSettleWait = 500 * time.Millisecond
+
+// TestPushSamplesFlushesEveryStepOfAPacedRun is the branch a drill runs under.
+// At a factor above zero the clock has not reached the next grid instant by the
+// time the step has been folded, so the batch of a step leaves with that step
+// instead of filling to the cap; the cases around it run at factor 0, where
+// virtual time stands still and the cap is what flushes. A month whose metrics
+// all arrived in one lump at the end would leave the panels of a paced drill
+// empty for as long as it ran.
+func TestPushSamplesFlushesEveryStepOfAPacedRun(t *testing.T) {
+	stub := startMetricsStub(t)
+
+	// Twelve grid steps of a period of its own rather than a whole month: the
+	// factor puts each of them a twentieth of a second of wall time behind the
+	// one before, and a month at that pace would outlast the test by hours.
+	const steps = 12
+	from := july2026
+	month := Month{
+		Tenants: []Tenant{{ID: cloudTenant, Name: "tenant-a", Workload: workloadClassic}},
+		Oracle: Oracle{
+			Cloud:      testCloud,
+			PeriodFrom: from,
+			PeriodTo:   from.Add(steps * testMetricsInterval),
+		},
+	}
+	factor := 20 * testMetricsInterval.Seconds()
+
+	var pushed atomic.Int64
+	err := pushSamples(t.Context(), NewClock(from, factor, time.Now), &metricsRun{
+		pusher:   NewPusher(stub.URL, pushUser, pushPassword, testCloud, nil),
+		month:    month,
+		interval: testMetricsInterval,
+	}, testLogger(t), &pushed)
+	if err != nil {
+		t.Fatalf("pushSamples() error = %v, want nil", err)
+	}
+
+	if n := len(stub.taken()); n != steps {
+		t.Errorf("the endpoint took %d requests over %d grid steps, want one per step: "+
+			"the batch of a step leaves with that step on a paced run", n, steps)
+	}
+	if pushed.Load() == 0 {
+		t.Error("the run counted no pushed point, want the inventory of every step")
+	}
+}
+
+// TestRunPushesTheMetricsAndServesTheInventory is the second face of a month
+// end to end: while the notifications go out, the traffic counters and the
+// inventory are pushed to the endpoint the configuration names, and the
+// inventory of the instant the run stands at is served on the control
+// listener. What each of the two states is held in metrics_test.go and
+// exporter_test.go; what only a run puts together is that both go out beside
+// the month.
+func TestRunPushesTheMetricsAndServesTheInventory(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	startCollector(t, url, ServiceExchanges)
+	stub := startMetricsStub(t)
+
+	// A factor of 0 stops virtual time at the first instant of the month, and
+	// held-back is what keeps the run up long enough to scrape it: it waits in
+	// the hold, and the endpoint goes down with the run.
+	month := faultyMonth(t, 1, Faults{PreExisting: true, HeldBack: true})
+	held := len(month.Held)
+	if held == 0 {
+		t.Fatal("the month holds nothing back, want the switch to have picked notifications")
+	}
+	samples, _, err := TrafficOf(month.Oracle, 1, testMetricsInterval)
+	if err != nil {
+		t.Fatalf("TrafficOf() error = %v, want nil", err)
+	}
+
+	logger, log := capturedLogger(t)
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(t.Context(), Config{
+			Cloud:          testCloud,
+			HTTPPort:       port,
+			MetricsEnabled: true,
+			OTLPURL:        stub.URL,
+			OTLPUser:       pushUser,
+			OTLPPassword:   pushPassword,
+			OTLPInsecure:   true,
+		}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultPreExisting, FaultHeldBack},
+			WaitForCollector: pollDeadline,
+			MetricsInterval:  testMetricsInterval,
+		}, publisher, logger)
+	}()
+	waitForHold(t, port, held)
+
+	status, body, answered := controlRequest(t, port, http.MethodGet, "/metrics")
+	if !answered {
+		t.Fatal("GET /metrics reached nothing, want the inventory on the run's listener")
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GET /metrics = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	for _, want := range []string{
+		seriesNovaTotalVMs, seriesCinderVolumes, seriesNeutronFloatingIPs,
+		seriesGlanceImages, seriesLoadBalancerTotal,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the scrape carries no %s, want the aggregate the dashboards read", want)
+		}
+	}
+	// A scrape carries no static label of its own: platform and cloud come from
+	// the scrape job, and an endpoint stating them would push the job's own under
+	// exported_cloud.
+	if strings.Contains(body, "platform=") {
+		t.Error("the scrape carries a platform label, want the scrape job to state it")
+	}
+
+	status, body, answered = controlRequest(t, port, http.MethodPost, "/release")
+	if !answered {
+		t.Fatal("POST /release reached nothing, want the endpoint to serve the hold")
+	}
+	if status != http.StatusOK {
+		t.Fatalf("POST /release = %d, want %d (body %q)", status, http.StatusOK, body)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the release", pollDeadline)
+	}
+
+	batches := stub.taken()
+	if len(batches) < 2 {
+		t.Fatalf("the endpoint took %d requests, want a month to arrive in several", len(batches))
+	}
+	traffic, inventory := 0, 0
+	pushedNames := make(map[string]bool)
+	for number, batch := range batches {
+		if batch.points > maxDataPoints {
+			t.Errorf("request %d carried %d points, want at most %d", number, batch.points, maxDataPoints)
+		}
+		if !batch.basic {
+			t.Errorf("request %d carried no Basic credential, want every push to authenticate", number)
+		}
+		for _, name := range []string{egressSeries, ingressSeries} {
+			series, ok := batch.series[name]
+			if !ok {
+				continue
+			}
+			traffic += series.points
+			if !series.sum || !series.monotonic || series.temporality != otlpCumulative {
+				t.Fatalf("request %d states %s as sum=%v monotonic=%v temporality=%d, "+
+					"want a monotonic cumulative sum", number, name, series.sum, series.monotonic,
+					series.temporality)
+			}
+		}
+		// Everything else in the batch is the inventory of the grid step, which
+		// the push carries beside the counters: the scrape above reads the same
+		// world through the exporter, and nothing but this states that it reaches
+		// the endpoint at all.
+		for name, series := range batch.series {
+			if name == egressSeries || name == ingressSeries {
+				continue
+			}
+			pushedNames[name] = true
+			inventory += series.points
+			if series.sum {
+				t.Errorf("request %d states the inventory series %s as a sum, "+
+					"want the gauge a world read at an instant is", number, name)
+			}
+		}
+	}
+	if inventory == 0 {
+		t.Error("the endpoint took no inventory point, want the gauges beside the counters")
+	}
+	for _, name := range []string{seriesNovaTotalVMs, seriesIdentityProjects, seriesNeutronRouter} {
+		if !pushedNames[name] {
+			t.Errorf("the endpoint took no %s point, want the pushed month to hold what the scraped one holds",
+				name)
+		}
+	}
+	// Every traffic sample the month placed reached the endpoint exactly once:
+	// the cursor hands each grid step to the step it belongs to, and no batch
+	// repeats one.
+	if traffic != len(samples) {
+		t.Errorf("the endpoint took %d traffic points, want the %d the month placed", traffic, len(samples))
+	}
+	if !strings.Contains(log.String(), "msg=completed") || strings.Contains(log.String(), "pushed=0") {
+		t.Errorf("the run logged %q, want a completed line with the points it pushed", log.String())
+	}
+}
+
+// TestRunReportsAFailedPushAfterTheMonth is the endpoint that refuses every
+// batch: the month goes out whole regardless, because that is what the operator
+// asked for, and the run ends with the failed push so the exit status says the
+// metric half of it never arrived.
+func TestRunReportsAFailedPushAfterTheMonth(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	outbox, _, _ := startCollector(t, url, ServiceExchanges)
+	stub := startMetricsStub(t, http.StatusServiceUnavailable)
+
+	want := billableMessageIDs(t, generateMonth(t, 1, july2026, testCloud))
+	logger, log := capturedLogger(t)
+	err := Run(t.Context(), Config{
+		Cloud:        testCloud,
+		HTTPPort:     0,
+		OTLPURL:      stub.URL,
+		OTLPUser:     pushUser,
+		OTLPPassword: pushPassword,
+		OTLPInsecure: true,
+	}, RunOptions{
+		Period:           "2026-07",
+		Seed:             1,
+		Factor:           0,
+		WaitForCollector: pollDeadline,
+		MetricsInterval:  testMetricsInterval,
+	}, publisher, logger)
+
+	if err == nil {
+		t.Fatal("Run() error = nil, want the refused push")
+	}
+	for _, fragment := range []string{"pushing metrics to " + stub.URL, "503"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Run() error = %q, want it to contain %q", err, fragment)
+		}
+	}
+	// The message reaches whatever an operator pastes it into, and the credential
+	// is never in it.
+	if strings.Contains(err.Error(), pushPassword) {
+		t.Errorf("Run() error = %q, want it to keep the password out", err)
+	}
+	// The exit status waits for the month, and the log does not: a drill paced
+	// over an hour would otherwise publish for the rest of it with nothing but
+	// healthy progress in the log.
+	if !strings.Contains(log.String(), "msg=\"pushing stopped\"") {
+		t.Errorf("the run logged %q, want the push to be reported where it stopped", log.String())
+	}
+	// And the month is on the bus whole: the push is reported after the last
+	// notification, not instead of it.
+	waitFor(t, "every billable notification is buffered", func() bool {
+		return outbox.Depth() == int64(len(want))
+	})
+}
+
+// TestRunStoppedWhilePushingIsACleanStop is what SIGINT does to the pusher: the
+// cancellation reaches it as the context's own error, which is no failed push,
+// so the process ends with exit status 0 the way a stop during the publishing
+// does. The run waits for the pusher on its way out, so nothing pushes a month
+// the run has already left behind.
+func TestRunStoppedWhilePushingIsACleanStop(t *testing.T) {
+	url, _ := startBroker(t)
+	publisher := connect(t, url)
+	startCollector(t, url, ServiceExchanges)
+	stub := startMetricsStub(t)
+
+	month := faultyMonth(t, 1, Faults{HeldBack: true})
+	held := len(month.Held)
+	if held == 0 {
+		t.Fatal("the month holds nothing back, want the switch to have picked notifications")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	port := reservePort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			Cloud:        testCloud,
+			HTTPPort:     port,
+			OTLPURL:      stub.URL,
+			OTLPUser:     pushUser,
+			OTLPPassword: pushPassword,
+			OTLPInsecure: true,
+		}, RunOptions{
+			Period:           "2026-07",
+			Seed:             1,
+			Factor:           0,
+			Faults:           []string{FaultHeldBack},
+			WaitForCollector: pollDeadline,
+			MetricsInterval:  testMetricsInterval,
+		}, publisher, testLogger(t))
+	}()
+
+	waitForHold(t, port, held)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil: a stop during the push is a clean stop", err)
+		}
+	case <-time.After(pollDeadline):
+		t.Fatalf("Run() did not finish within %v after the stop", pollDeadline)
+	}
+
+	time.Sleep(pushSettleWait)
+	taken := len(stub.taken())
+	if taken == 0 {
+		t.Fatal("the endpoint took no request, want the run to have pushed while it published")
+	}
+	time.Sleep(pushSettleWait)
+	if again := len(stub.taken()); again != taken {
+		t.Errorf("the endpoint took %d requests after the run returned, want it to stay at %d: "+
+			"the pusher outlived the run", again, taken)
 	}
 }
