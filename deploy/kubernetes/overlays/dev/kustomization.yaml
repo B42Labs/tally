@@ -72,6 +72,23 @@ configMapGenerator:
   - name: tally-reconciliation
     files:
       - reconciliation/clouds-config.yaml
+  # The scrape config of this cluster, in place of the base's. A generator for
+  # the same name marked behavior: replace overrides a generated ConfigMap,
+  # which is the mechanism docs/openstack-metrics.md documents under "Replacing
+  # the placeholders"; the generated name still carries a hash of the content,
+  # so editing the file re-rolls the VictoriaMetrics pod. What the overlay's
+  # file changes against the base is written in its own header.
+  - name: victoriametrics-scrape
+    behavior: replace
+    files:
+      - victoriametrics/scrape.yaml
+  # What the scheduler measures beyond the drafts metering folds: the egress of
+  # a simulated instance, out of the counter the simulator pushes. Generated
+  # from the file for the same reason as the reconciliation config above, and
+  # mounted by the last patch in this file.
+  - name: tally-counter-sources
+    files:
+      - counter-sources.yaml
 
 patches:
   # Route every service to its nip.io hostname.
@@ -197,7 +214,7 @@ patches:
         path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
         value: Never
 
-  # The four strategic merge patches in this file. They merge env entries by
+  # The five strategic merge patches in this file. They merge env entries by
   # name, so each names only the variables it sets instead of indexing into the
   # base env list, where a reorder in the base would move the values onto the
   # wrong variables.
@@ -298,3 +315,35 @@ patches:
                         name: tally-reconciliation
                     - secret:
                         name: tally-reconciliation-auth
+
+  # What the dev engine measures counters from. The base keeps
+  # TALLY_ENGINE_COUNTER_SOURCES empty, which is the zero configuration that
+  # works without a mounted file (see TestCounterSourcesIsSetToTheEmptyPath in
+  # deploy/kubernetes/base/tally-engine); this overlay mounts the ConfigMap the
+  # generator above builds and points the variable at the file inside it, so the
+  # tick measures the egress counter the simulator pushes. The volume names the
+  # generator by its unsuffixed name and the name reference transformer rewrites
+  # it to the hashed one, the same as the two sources of the clouds volume.
+  - patch: |
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: tally-engine
+      spec:
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: tally-engine
+                    env:
+                      - name: TALLY_ENGINE_COUNTER_SOURCES
+                        value: /etc/tally/counter-sources.yaml
+                    volumeMounts:
+                      - name: counter-sources
+                        mountPath: /etc/tally
+                        readOnly: true
+                volumes:
+                  - name: counter-sources
+                    configMap:
+                      name: tally-counter-sources

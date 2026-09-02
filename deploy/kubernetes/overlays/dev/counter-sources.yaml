@@ -1,0 +1,28 @@
+# Counter sources of the dev cluster's metering engine, mounted into the
+# scheduler CronJob at /etc/tally/counter-sources.yaml by the patch at the end
+# of kustomization.yaml. The base manifest keeps TALLY_ENGINE_COUNTER_SOURCES
+# empty, which is the zero configuration a cluster that mounts no file needs;
+# this overlay is what points the variable at a file.
+#
+# The series is the one the simulator pushes over OTLP while it runs a month
+# (internal/providers/openstack/simulator/metrics.go), labelled with the cloud
+# and the resource id the query selects on.
+#
+# required: false because a dev cluster where no month was ever simulated holds
+# none of that series, and a required source that fails takes the whole tick
+# down with it, every scheduled hour. A failed query yields a
+# counter_source_failed warning instead, which the drill triages on a run that
+# finished.
+#
+# The divisor is 2^30, which is what bytesPerGibibyte in
+# internal/providers/openstack/simulator/oracle.go converts a reported size
+# with, so the export's quantity and the oracle's bytes are in one unit.
+sources:
+  - platform: openstack
+    resource_type: instance
+    metric: egress_gb
+    kind: metricsql
+    required: false
+    query: >
+      sum(increase(ceilometer_network_outgoing_bytes_total{cloud="{cloud}",
+          resource_id="{resource_id}"}[{window}])) / (1024 * 1024 * 1024)
