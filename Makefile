@@ -41,7 +41,7 @@ IMAGES := $(SERVICES) tally-openstack-collector tally-openstack-simulator
 SIM_IMAGES := tally-openstack-collector tally-openstack-simulator
 
 # The simulator stack, deploy/compose/compose.yaml: a broker, the collector, and
-# the simulator, run beside the dev cluster rather than in it. The seven SIM_
+# the simulator, run beside the dev cluster rather than in it. The ten SIM_
 # values below are what `simulator-up` writes into the .env file compose reads.
 # A factor of 744 puts a 31-day month on the bus in an hour.
 SIM_CLOUD ?= os-sim
@@ -60,6 +60,14 @@ SIM_REGISTER_PROJECTS ?= false
 # The cloud the two Gardener projects are registered under. It differs from
 # SIM_CLOUD because a cloud is one installation of one platform.
 SIM_GARDEN_CLOUD ?= garden-sim
+# The credential the OTLP endpoint of the dev Gateway asks for. The default
+# password is the literal the dev overlay generates into the tally-otlp-auth
+# secret (deploy/kubernetes/overlays/dev/kustomization.yaml).
+SIM_OTLP_USER ?= tally
+SIM_OTLP_PASSWORD ?= tally-dev-otlp-password
+# The grid the pushed traffic and inventory series lie on, which is the interval
+# Ceilometer polls at.
+SIM_METRICS_INTERVAL ?= 300s
 COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
@@ -182,9 +190,10 @@ dev:
 # and written again under umask 077, because that api token writes the whole
 # registry and the default umask of a shell would leave it readable by every
 # other user of the machine, as would the mode of a file an earlier run left
-# behind. `tally-reporting-admin revoke-api-token <id>` is what ends it; the id
-# is the one the issuing line above prints, and `simulator-down` revokes
-# nothing.
+# behind. The OTLP password is a third credential the same file carries, and the
+# same umask covers it. `tally-reporting-admin revoke-api-token <id>` is what
+# ends it; the id is the one the issuing line above prints, and
+# `simulator-down` revokes nothing.
 ## simulator-up: run the simulator, the collector, and a broker against the dev cluster
 simulator-up:
 	@[ -n '$(SIM_PERIOD)' ] || { echo 'ERROR: set SIM_PERIOD to the past month to simulate, e.g. make simulator-up SIM_PERIOD=2026-07' >&2; exit 1; }
@@ -201,15 +210,18 @@ simulator-up:
 	fi; \
 	rm -f deploy/compose/.env; \
 	umask 077; \
-	printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_SIM_FAULTS=%s\nTALLY_SIM_REGISTER_PROJECTS=%s\nTALLY_SIM_GARDEN_CLOUD=%s\nTALLY_OSC_TOKEN=%s\nTALLY_SIM_API_TOKEN=%s\n' \
-		'$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' '$(SIM_FAULTS)' '$(SIM_REGISTER_PROJECTS)' '$(SIM_GARDEN_CLOUD)' "$$token" "$$api_token" > deploy/compose/.env
+	printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_SIM_FAULTS=%s\nTALLY_SIM_REGISTER_PROJECTS=%s\nTALLY_SIM_GARDEN_CLOUD=%s\nTALLY_OSC_TOKEN=%s\nTALLY_SIM_API_TOKEN=%s\nTALLY_SIM_OTLP_USER=%s\nTALLY_SIM_OTLP_PASSWORD=%s\nTALLY_SIM_METRICS_INTERVAL=%s\n' \
+		'$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' '$(SIM_FAULTS)' '$(SIM_REGISTER_PROJECTS)' '$(SIM_GARDEN_CLOUD)' "$$token" "$$api_token" '$(SIM_OTLP_USER)' '$(SIM_OTLP_PASSWORD)' '$(SIM_METRICS_INTERVAL)' > deploy/compose/.env
 	$(COMPOSE) up -d
 	@echo
 	@echo 'Simulator stack is up:'
-	@echo '  http://127.0.0.1:15672                          broker UI, guest/guest'
-	@echo '  http://127.0.0.1:8090/metrics                   collector'
-	@echo '  http://127.0.0.1:8091/clock                     simulator control'
-	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1  Reporting API'
+	@echo '  http://127.0.0.1:15672                               broker UI, guest/guest'
+	@echo '  http://127.0.0.1:8090/metrics                        collector'
+	@echo '  http://127.0.0.1:8091/clock                          simulator control'
+	@echo '  http://127.0.0.1:8091/metrics                        simulator inventory, the database exporter stand-in'
+	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1       Reporting API'
+	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics  OTLP endpoint the series are pushed to'
+	@echo '  https://vm.tally.127-0-0-1.nip.io:8443/targets       scrape targets'
 	@echo
 	@echo "Finish the month at once with:"
 	@echo "  curl -X PUT -d '{\"factor\": 0}' http://127.0.0.1:8091/clock"

@@ -41,6 +41,11 @@ const (
 	gatewayHost  = "api.tally.127-0-0-1.nip.io"
 	reportingURL = "https://" + gatewayHost + ":8443"
 
+	// The OTLP endpoint of the same Gateway, as the simulator reaches it: a second
+	// extra_hosts entry maps this name, and the month's samples are pushed there.
+	otlpHost = "otlp.tally.127-0-0-1.nip.io"
+	otlpURL  = "https://" + otlpHost + ":8443"
+
 	// Every variable Tally itself reads carries this prefix. The environment maps
 	// below also hold variables of the base image, which no EnvNames list knows.
 	tallyPrefix = "TALLY_"
@@ -195,13 +200,24 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 		t.Errorf("the %s mount carries the options %q, want %q; the simulator has no reason to write the CA", caSource, ca.options, "ro")
 	}
 
-	if hosts := []string{gatewayHost + ":host-gateway"}; !slices.Equal(svc.ExtraHosts, hosts) {
-		t.Errorf("extra_hosts = %v, want %v; the name is otherwise resolved in the container's network, where the dev cluster is not",
+	if hosts := []string{gatewayHost + ":host-gateway", otlpHost + ":host-gateway"}; !slices.Equal(svc.ExtraHosts, hosts) {
+		t.Errorf("extra_hosts = %v, want %v; the names are otherwise resolved in the container's network, where the dev cluster is not",
 			svc.ExtraHosts, hosts)
 	}
 	if url := svc.Environment["TALLY_SIM_REPORTING_URL"]; !strings.HasPrefix(url, reportingURL) {
 		t.Errorf("TALLY_SIM_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
 			url, reportingURL)
+	}
+	if url := svc.Environment["TALLY_SIM_OTLP_URL"]; !strings.HasPrefix(url, otlpURL) {
+		t.Errorf("TALLY_SIM_OTLP_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
+			url, otlpURL)
+	}
+	// A push without the two is refused by the binary before it dials the broker,
+	// which is a stack that starts and publishes nothing.
+	for _, name := range []string{"TALLY_SIM_OTLP_USER", "TALLY_SIM_OTLP_PASSWORD"} {
+		if _, ok := svc.Environment[name]; !ok {
+			t.Errorf("environment = %v, want %s among it", svc.Environment, name)
+		}
 	}
 
 	if len(svc.Command) == 0 || svc.Command[0] != "run" {
@@ -212,11 +228,13 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 	// dropping either leaves a month that is not the one asked for, published at
 	// a pace nobody chose. A dropped --faults leaves SIM_FAULTS with nowhere to
 	// arrive, so a stack asked for a fault switch publishes the month without it.
+	// A dropped --metrics-interval leaves SIM_METRICS_INTERVAL with nowhere to
+	// arrive, so the month is pushed on a grid nobody chose.
 	// Without --allow-remote-broker the container refuses the broker beside it,
 	// which is a stack that starts and publishes nothing. A dropped
 	// --register-projects costs SIM_REGISTER_PROJECTS the same way, and it is
 	// checked below rather than in this loop.
-	for _, flag := range []string{"--period", "--seed", "--factor", "--faults", "--allow-remote-broker"} {
+	for _, flag := range []string{"--period", "--seed", "--factor", "--metrics-interval", "--faults", "--allow-remote-broker"} {
 		if !slices.Contains(svc.Command, flag) {
 			t.Errorf("command = %v, want %s among the arguments", svc.Command, flag)
 		}

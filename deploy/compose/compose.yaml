@@ -15,10 +15,11 @@
 #
 # The values interpolated below come from deploy/compose/.env, which
 # `make simulator-up` writes and git ignores. It carries the cloud, the period,
-# the seed, the factor, the fault switches, and the ingest token issued for that
-# cloud. It also carries the registry switch, the cloud the simulated Gardener
-# projects are registered under, and the admin api token that registers them,
-# which is the empty string unless the switch is on.
+# the seed, the factor, the fault switches, the OTLP user and password, the
+# metrics interval, and the ingest token issued for that cloud. It also carries
+# the registry switch, the cloud the simulated Gardener projects are registered
+# under, and the admin api token that registers them, which is the empty string
+# unless the switch is on.
 #
 # A named volume of one of these images belongs under /home/nonroot; the
 # collector's outbox below says why.
@@ -109,12 +110,28 @@ services:
       TALLY_SIM_API_TOKEN: ${TALLY_SIM_API_TOKEN}
       TALLY_SIM_GARDEN_CLOUD: ${TALLY_SIM_GARDEN_CLOUD}
       SSL_CERT_FILE: /etc/tally/tally-ca.crt
+      # The OTLP/HTTP route the dev Gateway publishes in front of the cluster's
+      # OpenTelemetry collector. The traffic counters and the inventory gauges
+      # of the month go there. The CA mounted below and SSL_CERT_FILE are what
+      # make the Gateway's certificate verify on this path too, and
+      # TALLY_SIM_OTLP_INSECURE stays unset because the endpoint is https.
+      TALLY_SIM_OTLP_URL: https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics
+      # The credential the dev overlay generates into tally-otlp-auth, written
+      # into .env by `make simulator-up`.
+      TALLY_SIM_OTLP_USER: ${TALLY_SIM_OTLP_USER}
+      TALLY_SIM_OTLP_PASSWORD: ${TALLY_SIM_OTLP_PASSWORD}
     # Both mirror the collector's above and are there for the reasons given
-    # with them.
+    # with them. The second name is the OTLP route on the same Gateway, mapped
+    # to the host the same way.
     extra_hosts:
       - "api.tally.127-0-0-1.nip.io:host-gateway"
+      - "otlp.tally.127-0-0-1.nip.io:host-gateway"
     volumes:
       - "../../tally-ca.crt:/etc/tally/tally-ca.crt:ro"
+    # --metrics-interval reaches the binary as a flag the way --factor does. It
+    # is the grid the traffic counters and the inventory gauges of the month lie
+    # on.
+    #
     # --faults is empty unless SIM_FAULTS names a switch. An empty value reaches
     # the binary as --faults "", which is an empty list of switch names, and an
     # empty list is the run with every switch off.
@@ -128,9 +145,11 @@ services:
     # --register-projects carries its value in the same argument because that is
     # where pflag reads a boolean flag's value from. A separate `false` would
     # reach the binary as a positional argument, and cobra.NoArgs refuses those.
-    command: ["run", "--period", "${TALLY_SIM_PERIOD}", "--seed", "${TALLY_SIM_SEED}", "--factor", "${TALLY_SIM_FACTOR}", "--faults", "${TALLY_SIM_FAULTS}", "--register-projects=${TALLY_SIM_REGISTER_PROJECTS}", "--allow-remote-broker"]
+    command: ["run", "--period", "${TALLY_SIM_PERIOD}", "--seed", "${TALLY_SIM_SEED}", "--factor", "${TALLY_SIM_FACTOR}", "--metrics-interval", "${TALLY_SIM_METRICS_INTERVAL}", "--faults", "${TALLY_SIM_FAULTS}", "--register-projects=${TALLY_SIM_REGISTER_PROJECTS}", "--allow-remote-broker"]
     ports:
       # the control endpoint: GET /clock, PUT /clock, POST /release, GET /healthz,
+      # GET /metrics, which is the inventory the dev cluster's
+      # openstack-db-exporter scrape job reads off host.docker.internal:8091,
       # and the fake OpenStack API a run serves on the same listener
       - "127.0.0.1:8091:8080"
 
