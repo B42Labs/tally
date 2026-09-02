@@ -806,7 +806,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 	// surface is the format the lists below are stated for. A change to any of
 	// them raises this number and oracleFormat with it.
-	const surface = 2
+	const surface = 3
 
 	if oracleFormat != surface {
 		t.Fatalf("oracleFormat = %d and the surface below is stated for format %d, want the two "+
@@ -891,7 +891,7 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 				named: "Oracle", typ: reflect.TypeFor[Oracle](),
 				want: []string{
 					"format", "cloud", "seed", "period_from", "period_to", "resources", "counts",
-					"faults",
+					"faults", "traffic",
 				},
 			},
 			{
@@ -905,6 +905,10 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 			{
 				named: "OracleCount", typ: reflect.TypeFor[OracleCount](),
 				want: []string{"project_id", "event_type", "count"},
+			},
+			{
+				named: "OracleTraffic", typ: reflect.TypeFor[OracleTraffic](),
+				want: []string{"resource_id", "from", "to", "egress_bytes", "ingress_bytes"},
 			},
 		} {
 			t.Run(tc.named, func(t *testing.T) {
@@ -938,9 +942,9 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 // emptyOracleDocument is an oracle of a month that states no resource, written
 // out by hand because buildOracle only folds one from a ledger the generator
 // never produces.
-const emptyOracleDocument = `{"format":2,"cloud":"os-test","seed":1,` +
+const emptyOracleDocument = `{"format":3,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z",` +
-	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[],"faults":[]}`
+	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[],"faults":[],"traffic":[]}`
 
 // completeOracleDocument is the smallest document ReadOracle accepts, and
 // oracleIntervalDocument the one interval it holds. The cases that hold the
@@ -949,10 +953,11 @@ const emptyOracleDocument = `{"format":2,"cloud":"os-test","seed":1,` +
 const oracleIntervalDocument = `{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
 	`"state":"available","project_id":"p1","size":{"size_gb":50}}`
 
-const completeOracleDocument = `{"format":2,"cloud":"os-test","seed":1,` +
+const completeOracleDocument = `{"format":3,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",` +
 	`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",` +
-	`"intervals":[` + oracleIntervalDocument + `],"faults":[]}],"counts":[],"faults":[]}`
+	`"intervals":[` + oracleIntervalDocument + `],"faults":[]}],"counts":[],"faults":[],` +
+	`"traffic":[]}`
 
 // generatedOracle is the oracle of one generated month, or a failed test.
 func generatedOracle(t *testing.T, seed uint64) Oracle {
@@ -985,6 +990,17 @@ func writeOracleFile(t *testing.T, document string) string {
 // the engine read from the same notification and lose them.
 func TestOracleRoundTrips(t *testing.T) {
 	oracle := generatedOracle(t, 1)
+	// The traffic rows are put on by hand, because Run fills them from the
+	// metric samples and a fold states the empty list. The second row was given
+	// no traffic at all, which has to come back as the zero it was written as
+	// rather than as a row the read dropped.
+	oracle.Traffic = []OracleTraffic{
+		{
+			ResourceID: "i1", From: july2026, To: july2026.AddDate(0, 0, 1),
+			EgressBytes: 12, IngressBytes: 3,
+		},
+		{ResourceID: "i1", From: july2026.AddDate(0, 0, 1), To: july2026.AddDate(0, 0, 2)},
+	}
 	path := filepath.Join(t.TempDir(), "oracle.json")
 
 	if err := WriteOracle(path, oracle); err != nil {
@@ -997,6 +1013,9 @@ func TestOracleRoundTrips(t *testing.T) {
 
 	if !reflect.DeepEqual(read, oracle) {
 		t.Errorf("ReadOracle() = %+v, want %+v", read, oracle)
+	}
+	if !reflect.DeepEqual(read.Traffic, oracle.Traffic) {
+		t.Errorf("ReadOracle().Traffic = %+v, want %+v", read.Traffic, oracle.Traffic)
 	}
 
 	content, err := os.ReadFile(path)
@@ -1011,6 +1030,26 @@ func TestOracleRoundTrips(t *testing.T) {
 	if !strings.HasSuffix(text, "\n") {
 		t.Errorf("%s ends with %q, want a trailing newline", path, text[max(len(text)-20, 0):])
 	}
+
+	t.Run("a month nothing pushed a counter for keeps its empty list", func(t *testing.T) {
+		quiet := generatedOracle(t, 1)
+		quiet.Traffic = []OracleTraffic{}
+		path := filepath.Join(t.TempDir(), "oracle.json")
+
+		if err := WriteOracle(path, quiet); err != nil {
+			t.Fatalf("WriteOracle() error = %v, want nil", err)
+		}
+		read, err := ReadOracle(path)
+		if err != nil {
+			t.Fatalf("ReadOracle() error = %v, want nil", err)
+		}
+
+		// A null would leave a comparison unable to tell a month without traffic
+		// from one whose rows the read dropped.
+		if read.Traffic == nil || len(read.Traffic) != 0 {
+			t.Errorf("ReadOracle().Traffic = %+v, want an empty list", read.Traffic)
+		}
+	})
 }
 
 // TestOracleRoundTripsTheFaultSwitches holds the two faults members through a
@@ -1123,11 +1162,11 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 	})
 
 	t.Run("an oracle written to another format", func(t *testing.T) {
-		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":2`, `"format":1`, 1))
+		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":3`, `"format":2`, 1))
 
 		_, err := ReadOracle(path)
 
-		want := fmt.Sprintf("%s states format 1 and this build writes format %d", path, oracleFormat)
+		want := fmt.Sprintf("%s states format 2 and this build writes format %d", path, oracleFormat)
 		if err == nil || err.Error() != want {
 			t.Fatalf("ReadOracle() error = %v, want %q", err, want)
 		}
@@ -1179,6 +1218,43 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 			document := strings.Replace(completeOracleDocument, tc.cut, "", 1)
 			if document == completeOracleDocument {
 				t.Fatalf("the document holds no %q to cut, want the case to name a member of it", tc.cut)
+			}
+			path := writeOracleFile(t, document)
+
+			_, err := ReadOracle(path)
+
+			want := path + " " + tc.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("ReadOracle() error = %v, want %q", err, want)
+			}
+		})
+	}
+
+	// The traffic rows are written into the document rather than cut out of it:
+	// an accepted file states the empty list, and what the read has to refuse is
+	// a row that names no instance or no bounds for one.
+	for _, tc := range []struct {
+		name    string
+		traffic string
+		want    string
+	}{
+		{
+			name: "a traffic row without a resource",
+			traffic: `[{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
+				`"egress_bytes":1,"ingress_bytes":1}]`,
+			want: "states a traffic row without a resource",
+		},
+		{
+			name: "a traffic row without bounds",
+			traffic: `[{"resource_id":"i","to":"2026-07-02T00:00:00Z",` +
+				`"egress_bytes":1,"ingress_bytes":1}]`,
+			want: "states a traffic row of instance i without bounds",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			document := strings.Replace(completeOracleDocument, `"traffic":[]`, `"traffic":`+tc.traffic, 1)
+			if document == completeOracleDocument {
+				t.Fatalf("the document states no empty traffic list, want the one the case fills")
 			}
 			path := writeOracleFile(t, document)
 
