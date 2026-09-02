@@ -11,15 +11,16 @@ paced by a virtual clock, so a 31-day month goes out in the wall time the
 factor compresses it into.
 
 A `run` serves the month it publishes as a fake OpenStack API on the control
-listener, which "The fake OpenStack API" below describes. The simulator has no
-metrics endpoint of its own. #65 is the meta issue the simulated workloads
-belong to, and this document describes its first stage. The noise, the
+listener, which "The fake OpenStack API" below describes. It pushes the month's
+network traffic counters and inventory gauges to an OTLP endpoint on the same
+virtual clock, and serves the inventory on `GET /metrics` of that listener,
+which "The metric series" below describes. #65 is the meta issue the simulated
+workloads belong to, and this document describes its first stage. The noise, the
 notifications the collector does not bill, is rendered and described under "The
 noise" below. The oracle of a month and the comparison against an engine export
 are described under "The oracle" below, the six fault switches under "The fault
 switches", and the registration of the month's tenants and Gardener projects
-with the project registry under "The project registry". #67 owns the traffic
-series and `/metrics`.
+with the project registry under "The project registry".
 The drill #51 cites this simulator as the way a month reaches the Reporting API.
 The workload renders octavia's three load balancer types from the shoots' load
 balancers.
@@ -507,6 +508,16 @@ of them draws from the stream the month's shape comes from, so a run with every
 switch off consumes the three streams above the way a run without the switches
 consumes them.
 
+The traffic jitter is drawn from a fourth stream, seeded by the seed together
+with a salt of its own, `metrics\x00traffic`. It never touches the shape stream,
+the identifier stream, or the noise stream, so a month whose traffic was placed
+consumes those three exactly as one whose traffic was not, and the notifications
+of a month are the same bytes whatever its metrics say. The metrics interval
+joins the seed, the period, and the cloud among the inputs the oracle depends
+on: a coarser grid rounds each step's integer division differently, so two runs
+of one seed under two intervals state traffic figures that differ by a few bytes
+per interval.
+
 The same seed, period, and cloud therefore publish byte-identical
 notifications, and a rerun of the same build costs nothing at the far end: the
 collector books the oslo message id as the event's `event_id`, and the
@@ -569,7 +580,11 @@ The target builds the collector and the simulator image, writes the dev CA to
 `tally-reporting-admin create-api-token --role admin`. It writes the cloud, the
 period, the seed, the factor, the fault switches as `TALLY_SIM_FAULTS`, the
 switch as `TALLY_SIM_REGISTER_PROJECTS`, the garden cloud as
-`TALLY_SIM_GARDEN_CLOUD`, and the two tokens as `TALLY_OSC_TOKEN` and
+`TALLY_SIM_GARDEN_CLOUD`, the OTLP credential of `SIM_OTLP_USER` (`tally`) and
+`SIM_OTLP_PASSWORD` (`tally-dev-otlp-password`, the literal the dev overlay
+generates into the `tally-otlp-auth` Secret) as `TALLY_SIM_OTLP_USER` and
+`TALLY_SIM_OTLP_PASSWORD`, the grid of `SIM_METRICS_INTERVAL` (`300s`) as
+`TALLY_SIM_METRICS_INTERVAL`, and the two tokens as `TALLY_OSC_TOKEN` and
 `TALLY_SIM_API_TOKEN` into `deploy/compose/.env`, where the api token is the
 empty string with the switch off. The file is removed and written again under
 `umask 077`, because an admin api token in a world-readable file is one every
@@ -587,20 +602,29 @@ The period has to lie in the past. `run` refuses a month that has not ended,
 because the engine warns about a period that has not ended, and a simulated
 month reaching into the future would carry that warning into every run over it.
 
-Four URLs come out of the stack:
+Seven URLs come out of the stack:
 
 - `http://127.0.0.1:15672`, the broker's management UI, guest/guest
 - `http://127.0.0.1:8090/metrics`, the collector
 - `http://127.0.0.1:8091/clock`, the simulator's control endpoint
+- `http://127.0.0.1:8091/metrics`, the simulator's inventory, the database
+  exporter stand-in of "The metric series"
 - `https://api.tally.127-0-0-1.nip.io:8443/api/v1`, the Reporting API
+- `https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics`, the OTLP endpoint the
+  series are pushed to
+- `https://vm.tally.127-0-0-1.nip.io:8443/targets`, the scrape targets of the
+  dev cluster, where the `openstack-db-exporter` job goes green while the run
+  publishes
 
 Every host port is bound to `127.0.0.1` and lies above 1024;
 `deploy/kind/kind.yaml` states why. The collector's container reaches the
 cluster through `extra_hosts`, which maps `api.tally.127-0-0-1.nip.io` to
 `host-gateway`, and `tally-ca.crt` is mounted read-only at the path
 `SSL_CERT_FILE` names, which is what makes the Gateway's certificate verify. The
-simulator's container carries the same three: a registration posts to the
-Gateway over the same kind of client the collector delivers with.
+simulator's container carries the same three, and a second `extra_hosts` entry
+beside them, `otlp.tally.127-0-0-1.nip.io`: a registration posts to the Gateway
+over the same kind of client the collector delivers with, and the push takes
+that second name to the same Gateway.
 
 The collector service of the stack lists all eight exchanges in
 `TALLY_OSC_EXCHANGES`:
@@ -843,8 +867,9 @@ of the month is paced by the lead the switch drew.
 
 `oracle.json` states the month the generator built. It holds the `format` of the
 document, the `cloud` and the `seed` it was rendered from, the month as
-`period_from` and `period_to`, the `resources` the month bills, and the `counts`
-of the events the collector has to record. A resource names its type, its id, and its workload (`classic`,
+`period_from` and `period_to`, the `resources` the month bills, the `counts`
+of the events the collector has to record, and the `traffic` its instances
+moved. A resource names its type, its id, and its workload (`classic`,
 `gardener`, or `ci`), and lists the intervals of constant state, size, and
 project it was billed over. The spare volume of a
 classic project has two of them, meeting at the transfer that hands it to the
@@ -926,6 +951,31 @@ as `compute.instance.power_off`, and the transfer of a spare volume counts under
 the accepting project. They are what `GET /api/v1/stats/events` of the Reporting
 API holds for the month.
 
+The traffic is one row per instance and per interval of that instance: the
+`resource_id`, the interval's `from` and `to`, and the `egress_bytes` and
+`ingress_bytes` the instance moved over it. The rows are ordered by resource id
+and then by `from`.
+
+```json
+{
+  "resource_id": "079faae9-9d39-426f-a963-769cb12aa629",
+  "from": "2026-07-01T03:17:02Z",
+  "to": "2026-07-02T05:36:15Z",
+  "egress_bytes": 39956080648,
+  "ingress_bytes": 9989019968
+}
+```
+
+A row states the exact sum of the grid steps of "The metric series" that fall
+inside its interval, so an interval the instance spent `shutoff`, `shelved`, or
+`resized` carries 0, and an interval shorter than the grid, which holds no step
+at all, carries 0 as well rather than being left out: a comparison reads a row
+of every interval the oracle holds. The rows stand beside the resources rather
+than inside their intervals because of the fold: two adjacent facts that repeat
+the state, the size, and the project are kept in one interval, and a traffic
+figure inside an interval would make two such facts compare unequal and split
+that fold.
+
 The oracle is folded by the simulator's own code out of what the generator knows
 while it emits a billable transition, not out of the rendered notification and
 not out of what the engine made of it. A payload that lost a member renders a
@@ -951,7 +1001,9 @@ not read, and one that leaves a member it does read unstated. The last of the
 three is the one nothing else would catch, because JSON leaves an absent member
 at its zero value: an oracle without its sizes would be compared, and every
 `time_gauge` dimension of every priced resource would come out as a difference
-the engine did not cause.
+the engine did not cause. This build is at format 3, the number the `traffic`
+rows were added in, so a file an earlier build wrote at format 2 is refused
+rather than compared.
 
 ### Comparing an export
 
@@ -976,10 +1028,12 @@ against each other by index rather than by their bounds, so an interval one fold
 split in two is reported at the place the two folds part ways rather than on
 every interval behind it.
 
-The `counter` dimensions are left out, `egress_gb` among them: the counters pass
-measures one from the events table or from a metrics store, and the oracle
-models neither. Left out as well are the amounts, the state modifiers, the
-statement totals, and the resource types the model does not price. Under
+The `counter` dimensions are left out, `egress_gb` among them: `increase()`
+extrapolates a counter over the edges of the window it is asked about, so the
+quantity an export carries differs from the exact integral the generator placed
+in the interval, and the `traffic` rows of the oracle are what a drill reads
+that figure off instead. Left out as well are the amounts, the state modifiers,
+the statement totals, and the resource types the model does not price. Under
 `pricing/2026-03.yaml` an `image` and a `loadbalancer` are unpriced, so the
 rating pass writes no record of one, and the report names each such type on a
 line of its own instead of calling its resources missing:
@@ -1614,6 +1668,248 @@ run, and the instants told to the runs of one cloud must not go backwards.
 Nothing schedules it here and no target starts it; the drill of #51 folds it
 into its procedure.
 
+## The metric series
+
+A `run` states the month a second time, as the series a monitoring stack would
+have recorded while it went by: the two network counters Ceilometer polls off
+every instance, and the inventory gauges the OpenStack database exporter reads
+off the service databases of a real cloud. Both are placed by
+[`metrics.go`](../internal/providers/openstack/simulator/metrics.go) out of the
+month the notifications describe, so the pushed series, the scraped endpoint,
+and the oracle state one world instead of three descriptions of it. A `replay`
+places neither of the two: a recorded file holds notifications and no month to
+fold them out of.
+
+### The grid
+
+Every series of a month lies on one grid, the whole steps of
+`--metrics-interval` counted from the period start. The flag defaults to `300s`,
+the interval Ceilometer polls at out of the box, and it takes a whole number of
+seconds between 30s and 24h. Whole seconds because a step's bytes are counted in
+seconds, and a grid of half seconds would drop that half out of every step it
+places; 24h because the byte arithmetic below is a product of int64 factors, and
+a longer step is where it stops fitting into one; 30s because the traffic of the
+whole period is placed before the first notification goes out, and a July of
+seed 1 that carries about 320,000 samples on the 300s grid carries ten times
+that at 30s and about a hundred million at 1s, which is where the run is killed
+for its memory instead of publishing anything.
+
+The grid is counted from the period start rather than from each instance's own
+first interval, so two instances sampled around one instant carry the very same
+timestamp and one query reads a step as one point per series.
+
+### The traffic
+
+Every instance carries two cumulative counters,
+`ceilometer_network_outgoing_bytes_total` and
+`ceilometer_network_incoming_bytes_total`, under the names Ceilometer's
+Prometheus exporter publishes them with, so a dashboard written for a real cloud
+reads a simulated one.
+
+What an instance moves is stated per office hour and per workload: a classic
+tenant's server sends 2 GiB, a shoot's worker 8 GiB, and a CI runner 256 MiB.
+The ingress is the egress times 1/4 for a classic tenant, times 1/2 for a shoot,
+and times 2/1 for a runner, which pulls its image and its dependencies and sends
+little back; each of the three quotients is exact.
+
+Every other hour of the month is that level weighed by the working-week profile
+of "The profile" above. A step carries `hourWeight(step)/officeWeight` of the
+level and the step's share of an hour, so a night step accrues a tenth of an
+office step of the same length. The weight is read off the step's start, so a
+step that straddles the boundary between two hours carries the weight of the
+hour it began in. A jitter drawn once per instance, a numerator in [50, 150]
+over a denominator of 100, keeps two instances of one workload from reporting
+the same byte count without taking either of them out of its level:
+
+```text
+bytes = level * hourWeight(step) * step_seconds * jitter
+        / (officeWeight * 3600 * 100)
+```
+
+`hourWeight` is 10 in an office hour, 3 in the fringe around it, and 1 at night
+and on a weekend; `officeWeight` is 10. Every factor is an int64 and the one
+division comes last. A byte count is a usage quantity that reaches an invoice,
+and a quotient that went through a float64 would arrive carrying digits nobody
+placed.
+
+A step accrues bytes only while the interval its start falls in is `active`. A
+`shutoff`, a `shelved`, and a `resized` instance move nothing, so their steps
+carry zero and the counter behind them stays flat, which is what the counter of
+a stopped machine does. A step that falls into a gap between two intervals
+belongs to no state and accrues nothing either.
+
+A series begins at 0 on the first grid step at or after the instance's first
+interval start and ends before the end of its last interval, which is where
+Ceilometer starts polling an instance and where it stops. The value at an
+instant is what accrued before it, the way a cumulative counter reports: the
+increment of the last step therefore lands in the oracle's last traffic row of
+that instance and in no sample at all, the way Ceilometer's last poll precedes a
+delete.
+
+Five labels identify a point: `platform`, `cloud`, `resource_type="instance"`,
+`resource_id`, and `project_id`, the project the instance ran in over the
+interval the step lies in.
+
+### The inventory
+
+The inventory is the world of the month as it stands at one instant: one gauge
+per live resource, the limits of every project, and the counts the cloud reports
+about itself.
+
+| Series | Labels | Value |
+| --- | --- | --- |
+| `openstack_nova_server_status` | `id`, `uuid`, `name`, `tenant_id`, `status`, `flavor_id` | 1 |
+| `openstack_cinder_volume_status` | `id`, `name`, `tenant_id`, `status`, `volume_type` | 1 |
+| `openstack_cinder_volume_gb` | `id`, `name`, `tenant_id`, `volume_type` | the volume's `size_gb` |
+| `openstack_glance_image_bytes` | `id`, `name`, `tenant_id` | the image's size in bytes |
+| `openstack_neutron_floating_ip` | `id`, `project_id`, `status` | 1 |
+| `openstack_neutron_router` | `id`, `project_id`, `status` | 1 |
+| `openstack_loadbalancer_loadbalancer_status` | `id`, `name`, `project_id`, `provisioning_status`, `operating_status` | 1 |
+| `openstack_nova_limits_instances_used` and `_max` | `tenant_id` | the project's live instances, and 100 |
+| `openstack_nova_limits_vcpus_used` and `_max` | `tenant_id` | their summed vcpus, and 400 |
+| `openstack_nova_limits_memory_used` and `_max` | `tenant_id` | their summed memory in MB, and 819200 |
+| `openstack_identity_projects` | none | the count of tenants |
+| `openstack_identity_project_info` | `id`, `name`, `domain_id="default"`, `enabled="true"` | 1 |
+| `openstack_nova_total_vms` | none | the live instances of the cloud |
+| `openstack_cinder_volumes` | none | its live volumes |
+| `openstack_neutron_floating_ips` | none | its live floating addresses |
+| `openstack_glance_images` | none | its live images |
+| `openstack_loadbalancer_total_loadbalancers` | none | its live load balancers |
+
+The names and the label spellings are the exporter's own. A name this endpoint
+spelled its own way is a panel that stays empty against a simulated cloud and
+fills against a real one. The `id`, the `uuid`, and the `name` of a resource are
+all its generated id, because the oracle these gauges are folded out of holds no
+display name; the fake OpenStack API answers a listing the same way.
+
+The `status` of a server is nova's own word, read through the same table the
+fake OpenStack API answers a listing with, so it is `active`, `stopped`,
+`shelved_offloaded`, or `resized` where the oracle states the state the
+collector books. The memory is `ram_gb` times 1024, because nova's limits report
+megabytes where a size states gibibytes. The three maxima are constants: the
+simulated world has no quota, and the drilldown's gauge panels divide a used
+series by a maximum one, so a panel without the divisor would show a division by
+an absent series rather than a ratio. A size member an interval does not carry
+reads as zero, so one malformed interval costs its own series a value instead of
+failing a whole scrape.
+
+The routers are the one family the oracle does not hold, because nothing bills a
+router and the generator books none. They are folded out of the schedule's
+`router.create.end` and `router.delete.end` instead, which are transitions of
+the noise catalogue. The classic tenants' networks pre-exist the month and
+neutron announces nothing about them, so those projects report no router at all,
+which is what the simulated world holds.
+
+The samples carry neither `platform` nor `cloud`. A real exporter carries
+neither: both come from the static labels of the scrape job, and an endpoint
+that stated them as well would push the job's own under `exported_cloud`. A
+pushed point carries both, because a push has no scrape job to take them from.
+
+### The push
+
+`TALLY_SIM_OTLP_URL` is the OTLP/HTTP endpoint a run posts to, and an empty one
+is a run without a push. The document is OTLP/HTTP JSON, written by
+[`otlp.go`](../internal/providers/openstack/simulator/otlp.go) rather than by
+the OpenTelemetry SDK: the SDK stamps a point with the instant it collected it,
+and every point of a month belongs to a virtual instant months away from the
+wall clock; `timeUnixNano` is where a point carries that instant. A value
+travels as an `asInt` string, which keeps a byte count exact where a float64
+stops being exact above 2^53. The two counters go out as a monotonic cumulative
+`sum` and the inventory as a `gauge`. No metric declares a unit and the counter
+names already end in `_total`, so the OpenTelemetry collector's
+`prometheusremotewrite` exporter appends nothing and the store keeps the name
+that was sent.
+
+One request carries at most 5000 data points, and when a batch goes out is the
+clock's decision. At the default factor of 744 the run has not reached the next
+grid instant by the time it has folded this one, so the batch of a grid step
+leaves as the clock passes that step, about one request per 0.4 wall seconds on
+a 300s grid. At factor 0 virtual time stands still, no step ever waits, and the
+batch fills to the cap instead, which is what keeps a month at factor 0 from
+being one request per step.
+
+A request is retried under the policy the engine's counter client queries
+VictoriaMetrics with: a connection error, a 429, which is what the Gateway's
+`BackendTrafficPolicy` answers a run that pushes faster than the rate it allows,
+and a 5xx except 501, four retries at most; a 4xx such as the 401 of a wrong
+password comes back at once. A batch that still fails ends the push with
+`pushing metrics to <url>: ...` and exit status 1, reported once the last
+notification is on the bus: the month is what the operator asked for, and the
+exit status is what says the metric half of it failed. SIGINT and SIGTERM stop
+the push the way they stop the publishing, with exit status 0.
+
+A `replay` pushes nothing and serves no `/metrics`. A `run` in file mode pushes
+nothing either, and it writes the traffic rows of the month into its oracle all
+the same. The compose stack pushes to the dev Gateway's
+`https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics` under the credential the
+dev overlay generates into the `tally-otlp-auth` Secret.
+
+The points lie on the simulated period rather than on the wall clock of the run
+that sent them. A dashboard therefore reads the month by setting its time range
+to the period, not to the hour the run took.
+
+### The endpoint
+
+`GET /metrics` on the control listener serves the inventory in the Prometheus
+exposition format while a run publishes, out of the same `InventoryAt` the push
+reads and clamped to the end of the month the way a listing of the fake
+OpenStack API is. The registry behind it is private and holds that one
+collector: no Go metrics and no process metrics, because an endpoint that stands
+in for an exporter of the cloud has no business reporting the heap and the file
+descriptors of the process that runs the drill.
+
+`TALLY_METRICS_ENABLED=false` registers no route, and the path is then left to
+the fake OpenStack API, which answers it with the 404 it answers any unknown
+path with.
+
+The dev overlay's `openstack-db-exporter` scrape job reads that endpoint at
+`host.docker.internal:8091` under `cloud: os-sim`, which is where a pod in the
+kind node reaches the port the compose stack publishes on the host
+([`scrape.yaml`](../deploy/kubernetes/overlays/dev/victoriametrics/scrape.yaml)).
+The job is up while a run publishes and down between runs, where
+`TallyScrapeTargetDown` fires for it after five minutes, the way it does against
+the base's placeholder target. The `ceilometer` job keeps its placeholder: the
+recorded Ceilometer default is the Pushgateway path, and the traffic of a
+simulated month reaches the store over OTLP.
+
+### The counter
+
+[`counter-sources.yaml`](../deploy/kubernetes/overlays/dev/counter-sources.yaml)
+of the dev overlay measures `egress_gb` of an OpenStack instance from the
+counter a push writes:
+
+```yaml
+sources:
+  - platform: openstack
+    resource_type: instance
+    metric: egress_gb
+    kind: metricsql
+    required: false
+    query: >
+      sum(increase(ceilometer_network_outgoing_bytes_total{cloud="{cloud}",
+          resource_id="{resource_id}"}[{window}])) / (1024 * 1024 * 1024)
+```
+
+`required: false` because a dev cluster where no month was ever simulated holds
+none of that series, and a required source whose query fails takes the whole
+tick down with it, every scheduled hour; a failed query of an optional source
+yields a `counter_source_failed` warning on a run that finished. The divisor is
+2^30, which is what `bytesPerGibibyte` converts a reported size with, so the
+export's quantity and the oracle's bytes are in one unit. The overlay mounts the
+generated ConfigMap into the `tally-engine` CronJob at
+`/etc/tally/counter-sources.yaml` and points `TALLY_ENGINE_COUNTER_SOURCES` at
+that path. A metricsql source is queried at the end of every usage draft, which
+for a simulated month is an instant inside the period the points lie on, so
+`rated.csv` of a run over that month carries a non-zero `egress_gb` quantity for
+every instance that was active.
+
+`compare` leaves the `counter` dimensions out all the same. `increase()`
+extrapolates a counter over the edges of the window it is asked about, so the
+quantity an export carries differs from the exact integral the generator placed
+in the interval, and a comparison that held the two equal would report the
+extrapolation as an engine difference. The oracle's `traffic` rows are what a
+drill reads the intended figure off.
+
 ## Configuration
 
 [`../cmd/tally-openstack-simulator/.env.example`](../cmd/tally-openstack-simulator/.env.example)
@@ -1630,6 +1926,11 @@ lists every variable with its default and its meaning.
 | `TALLY_SIM_REPORTING_INSECURE` | `false` | `run` with `--register-projects` | allow a plaintext Reporting API. The api token travels in a header on every request and is of role `admin`, so it is not scoped to one cloud the way an ingest token is. |
 | `TALLY_SIM_API_TOKEN` | none | `run` with `--register-projects` | credential of the registration, an api token of role `admin`, which `POST /api/v1/projects` and `POST /api/v1/projects/{id}/relations` demand. It also accepts `TALLY_SIM_API_TOKEN_FILE`; setting both is an error. |
 | `TALLY_SIM_GARDEN_CLOUD` | none | `run` with `--register-projects` | cloud the two Gardener rows are registered under. It has to differ from `TALLY_SIM_CLOUD`: a cloud is one installation of one platform. |
+| `TALLY_SIM_OTLP_URL` | none | `run` | OTLP/HTTP endpoint the traffic counters and the inventory gauges are pushed to. Empty is a run without a push. It has to be absolute and carry a host, to carry no userinfo, query or fragment, because the credential of a push belongs in `TALLY_SIM_OTLP_USER` and `TALLY_SIM_OTLP_PASSWORD` and a URL that carries one hands it to every error the push writes, and to be `https` unless `TALLY_SIM_OTLP_INSECURE` says otherwise, because the Basic password travels on it. |
+| `TALLY_SIM_OTLP_USER` | none | `run` with `TALLY_SIM_OTLP_URL` | Basic user of the push. The endpoint in front of the collector answers an unauthenticated push with a 401. |
+| `TALLY_SIM_OTLP_PASSWORD` | none | `run` with `TALLY_SIM_OTLP_URL` | Basic password of the push. It also accepts `TALLY_SIM_OTLP_PASSWORD_FILE`; setting both is an error. |
+| `TALLY_SIM_OTLP_INSECURE` | `false` | `run` | allow a plaintext OTLP endpoint. The password travels on every request, so an `http` endpoint hands it to whoever reads the wire. |
+| `TALLY_METRICS_ENABLED` | `true` | `run`, while publishing | serve the inventory on `GET /metrics` of the control listener, which "The metric series" describes. `false` registers no route, and the fake OpenStack API answers that path with its own 404. |
 
 An empty `TALLY_SIM_AMQP_URL` puts `run` in file mode, where `--out` is what it
 writes to instead, and `replay` refuses to start without one.
@@ -1647,14 +1948,17 @@ reason, and `--allow-remote-broker` is the confirmation that lets one through.
 The compose stack passes it, because its broker is the container next door.
 
 `run` takes `--period` (required, `YYYY-MM`), `--seed` (1), `--factor` (744),
-`--out` (empty), `--wait-for-collector` (two minutes), `--faults` (empty),
-`--register-projects` (off), and `--allow-remote-broker` (off). `--faults` takes
+`--out` (empty), `--wait-for-collector` (two minutes), `--metrics-interval`
+(`300s`), `--faults` (empty), `--register-projects` (off), and
+`--allow-remote-broker` (off). `--faults` takes
 the six switch names `pre-existing`, `missing-create`, `duplicates`,
 `reordering`, `refused-shapes`, and `held-back`, comma-separated; empty is every
 switch off, and "The fault switches" describes what each of them does.
 `--register-projects` registers the month's tenants, the two Gardener projects,
 and their `infrastructure_tenant` relations before anything is written or
-published, which "The project registry" describes. `replay` takes `--in`
+published, which "The project registry" describes. `--metrics-interval` is the
+grid the traffic and the inventory samples lie on, which "The metric series"
+describes. `replay` takes `--in`
 (required),
 `--factor` (744), `--wait-for-collector` (two minutes), and
 `--allow-remote-broker` (off). `compare` takes `--oracle`, `--export`, and
@@ -1662,5 +1966,5 @@ published, which "The project registry" describes. `replay` takes `--in`
 holds three files against each other and touches neither a broker nor the
 Reporting API.
 
-`TALLY_METRICS_ENABLED` is not read: the simulator exports no metrics, and #67
-owns the endpoint that would serve them.
+`TALLY_METRICS_ENABLED` switches the inventory endpoint of "The metric series"
+above.

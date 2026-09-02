@@ -136,9 +136,10 @@ from breaking a panel is its "All" value `.*`: a selector `cloud=~".*"` matches
 whatever the store holds, including nothing.
 
 The scrape-health stat on Tally / Ingestion Health reports `up == 0` for
-`openstack-db-exporter` and `ceilometer`. Both are static targets for exporters
-that run beside an OpenStack control plane rather than in this cluster. That is
-the designed dev state, described under
+`ceilometer`, a static target for an exporter that runs beside an OpenStack
+control plane rather than in this cluster, and for `openstack-db-exporter`
+until a simulator run publishes a month, when that job scrapes the simulator's
+inventory. That is the designed dev state, described under
 [Replacing the placeholders](openstack-metrics.md#replacing-the-placeholders),
 and not a fault to chase.
 
@@ -412,9 +413,20 @@ dashboards then carries a value. The panels built on `rate()` and `increase()`
 show the drill as one spike over their window rather than a level, because the
 drill pushed each series once.
 
-On the scrape-health stat, `openstack-db-exporter` and `ceilometer` report
-`up == 0` while `reporting-api` and `otel-collector` report `up == 1`. Those two
-jobs stay down for the reason above: the designed dev state, not a failure.
+A simulated month fills the same `openstack_*` panels without Part 2.
+`make simulator-up SIM_PERIOD=2026-07` pushes the traffic counters and the
+inventory gauges of a generated cloud and serves that inventory to the
+`openstack-db-exporter` job, which
+[`openstack-simulator.md`](openstack-simulator.md#the-metric-series) describes.
+Those series carry `cloud="os-sim"` and lie on the simulated period, so the
+panels and the Project variable fill with the Cloud variable on `os-sim` and the
+time range set to that month rather than to the hour the run took. Part 2 stays
+the way to fill the panels without a run.
+
+On the scrape-health stat, `ceilometer` reports `up == 0` while `reporting-api`
+and `otel-collector` report `up == 1`. `openstack-db-exporter` reports `up == 0`
+as well between simulator runs, and `up == 1` while one publishes. Both are the
+designed dev state for the reason above, not a failure.
 
 The same OTLP push without `--user` answers `401` and
 `{"code":16,"message":"no basic auth provided"}`, and writes nothing. That is

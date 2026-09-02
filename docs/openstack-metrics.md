@@ -137,7 +137,8 @@ in the tree.
 
 `os-db-exporter:9180`, `ceilometer-exporter:9101`, and the cloud name
 `os-prod-eu1` are placeholders. Those exporters run beside an OpenStack control
-plane and not in this cluster, so on dev both jobs stay down.
+plane and not in this cluster. On dev the `ceilometer` job stays down, and
+`openstack-db-exporter` is pointed at the OpenStack simulator instead.
 
 A real deployment does not patch the file. Its overlay declares a
 `configMapGenerator` of its own for the same generated name and marks it
@@ -154,6 +155,16 @@ configMapGenerator:
 
 The overlay's own `scrape.yaml` then names that deployment's exporter addresses
 and its cloud.
+
+[`victoriametrics/scrape.yaml`](../deploy/kubernetes/overlays/dev/victoriametrics/scrape.yaml)
+of the dev overlay is such a file. It points `openstack-db-exporter` at the
+simulator the compose stack publishes, `host.docker.internal:8091` under
+`cloud: os-sim`, which is where a pod in the kind node reaches the inventory
+endpoint [`openstack-simulator.md`](openstack-simulator.md#the-metric-series)
+describes. The job is up while a run publishes a month and down between runs,
+where nothing listens on that port. The `ceilometer` job is copied over on its
+placeholder target, because the traffic of a simulated month reaches the store
+over OTLP rather than through a Pushgateway.
 
 ### What is exposed and what is not
 
@@ -659,19 +670,22 @@ Target health is a separate page, `/targets`, and the same CA file reaches it:
 curl --cacert tally-ca.crt 'https://vm.tally.127-0-0-1.nip.io:8443/targets'
 ```
 
-Four jobs are listed. `reporting-api` and `otel-collector` are up.
-`openstack-db-exporter` and `ceilometer` are down with an unresolved-host error,
-because neither target exists in this cluster. That is the designed dev state
-and not a fault to chase.
+Four jobs are listed. `reporting-api` and `otel-collector` are up. `ceilometer`
+is down with an unresolved-host error, because its target exists in no dev
+cluster. `openstack-db-exporter` is down between simulator runs, when nothing
+listens on `host.docker.internal:8091`, and up while `make simulator-up`
+publishes a month. Neither is a fault to chase: both are the dev state as it is
+designed.
 
-It is the designed state in dev alone. Both of those jobs are metering sources
+That state is acceptable in dev alone. Both of those jobs are metering sources
 for everything Tally bills, so a deployment where they are down produces the
-same `/targets` page as a healthy dev cluster while the meter runs empty, and
-the first symptom is an invoice that comes up short. A deployment that replaces
-this file therefore alerts on `up == 0` for both jobs — they are static targets,
-so their `up` series exists whatever the exporter is doing. The two discovered
-jobs need the second rule as well, on `absent(up{job="..."})`, for the reason
-above. `TallyScrapeTargetDown` and `TallyScrapeJobMissing` in
+same `/targets` page as a dev cluster between simulator runs while the meter
+runs empty, and the first symptom is an invoice that comes up short. A
+deployment that replaces this file therefore alerts on `up == 0` for both jobs
+— they are static targets, so their `up` series exists whatever the exporter is
+doing. The two discovered jobs need the second rule as well, on
+`absent(up{job="..."})`, for the reason above. `TallyScrapeTargetDown` and
+`TallyScrapeJobMissing` in
 [`deploy/kubernetes/base/vmalert/rules.yaml`](../deploy/kubernetes/base/vmalert/rules.yaml)
 are those two rules; [`alerting.md`](alerting.md) describes them and the eight
 others the tree ships.
