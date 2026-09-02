@@ -446,7 +446,9 @@ func Replay(ctx context.Context, cfg Config, opts ReplayOptions, publisher *Publ
 // An api is mounted on the same listener, under every path the control routes
 // leave: those are method-qualified and beat the catch-all, so the fake
 // OpenStack API answers the rest and lives exactly as long as the endpoint. A
-// nil api mounts nothing, which is what a replay passes.
+// nil api mounts nothing, which is what a replay passes. Both mounts are
+// mountRun's, and the inventory endpoint it takes beside the api goes up the
+// same way: one method-qualified pattern ahead of that catch-all.
 //
 // A held share is published after the last regular line, once POST /release
 // asks for it. Every held instant lies before the clock by then, so the
@@ -489,9 +491,7 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 		}
 	}
 	mux := NewControlMux(clock, progress, hb.release)
-	if api != nil {
-		mux.Handle("/", api)
-	}
+	mountRun(mux, api, nil)
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -554,6 +554,28 @@ func broadcast(ctx context.Context, cfg Config, publisher *Publisher, logger *sl
 
 	logger.Info("completed", "published", published.Load(), "total", total)
 	return nil
+}
+
+// mountRun puts what a run serves beside its control routes onto the one mux:
+// the inventory exporter under GET /metrics, and the fake OpenStack API under
+// every path left over.
+//
+// The order the two are registered in decides nothing; the patterns do: a
+// method-qualified pattern is more specific than the catch-all and is matched
+// ahead of it, which is how the control routes keep their paths as well. The
+// fake API therefore answers everything except the one path a scrape asks for.
+//
+// A nil exporter registers no route at all, which is a run with metrics turned
+// off: the fake API then answers a scrape with its own 404, the way it answers
+// any other path it holds no route for. A nil api mounts no catch-all, which is
+// what a replay passes, because a recorded file holds no oracle to serve.
+func mountRun(mux *http.ServeMux, api, exporter http.Handler) {
+	if exporter != nil {
+		mux.Handle("GET /metrics", exporter)
+	}
+	if api != nil {
+		mux.Handle("/", api)
+	}
 }
 
 // publishLines puts the lines on the bus in the order they stand in, paced by
