@@ -21,7 +21,8 @@ noise" below. The oracle of a month and the comparison against an engine export
 are described under "The oracle" below, the six fault switches under "The fault
 switches", and the registration of the month's tenants and Gardener projects
 with the project registry under "The project registry".
-The drill #51 cites this simulator as the way a month reaches the Reporting API.
+The drill [drills/phase3.md](drills/phase3.md) cites this simulator as the way a
+month reaches the Reporting API.
 The workload renders octavia's three load balancer types from the shoots' load
 balancers.
 
@@ -1665,8 +1666,8 @@ end of the month.
 
 The loop belongs inside the publishing month: the fake API goes down with the
 run, and the instants told to the runs of one cloud must not go backwards.
-Nothing schedules it here and no target starts it; the drill of #51 folds it
-into its procedure.
+Nothing schedules it here and no target starts it; the drill of
+[drills/phase3.md](drills/phase3.md) folds it into its procedure.
 
 ## The metric series
 
