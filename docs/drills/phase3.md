@@ -45,6 +45,10 @@ twice costs time and changes nothing.
 make up
 ```
 
+A first `make up` on a machine that pulls the images of the overlay for the
+first time can outlast a rollout timeout and fail there. It is run again once
+the pods are Running.
+
 Every engine command of this drill runs in one shell, and this block is exported
 into that shell once:
 
@@ -216,20 +220,34 @@ One iteration that reached the Reporting API gets one of four answers:
 {"sync_run_id": "...", "stats": {"created": 0, "updated": 0, "deleted": 0}}
 ```
 
-- The document above. Every answer of the clean month carries 0, 0, 0, because
-  the bus told the projection everything the cloud did.
+- The document above, with the counts the sync found. At factor 744 a sync
+  corrects the resources whose notifications the collector has consumed and not
+  posted yet: its outbox goes out every 5 seconds
+  (`TALLY_OSC_FLUSH_INTERVAL_S`, 62 virtual minutes at this factor). Such a
+  correction is a `sync.create` dated at the platform's instant, which is the
+  instant the collector's own create carries, a `sync.update` dated at the told
+  instant, or a `sync.delete` found by absence and dated there as well.
+  `0, 0, 0` is what a sync answers when the outbox was empty at its instant.
 - `409` with `a sync for this cloud is already running`, while the previous
   iteration's run still holds the cloud. The next iteration waits it out.
-- `500` with `the sync run failed`, once the run has ended. It means the fake
-  API is gone and the loop was stopped too late, and nothing else.
-- `400` with `the request body must be a JSON object whose optional member "at"
-  is an RFC 3339 instant`, on the iterations before `/clock` answers, where the
-  `at` the `jq` derives is the empty string. It stops by itself once the run
-  publishes.
+- `500` with `the sync run failed`, for a sync that was running when the fake
+  API went away. A loop stopped after the run has ended gets the `400` below
+  instead.
+- `400` with `the request does not match the API contract` and `body.at` in its
+  `errors`, on every iteration while `/clock` does not answer: before the run
+  listens and after it has ended. The `at` the `jq` derives is the empty string
+  there, and the OpenAPI validation of the Reporting API refuses the body
+  before the handler sees it.
+
+The told instant is read before the sync posts, so the fake API answers the
+listings minutes of virtual time past it. A resource the cloud deleted inside
+that gap is found by absence and booked deleted at the told instant, ahead of
+the platform's own delete. The difference such a delete leaves in the
+comparison is the finding "The first run" records.
 
 The loop stops when `published` reaches `total`: Ctrl-C on the loop, then
-`kill %1` on the port-forward it started. What goes into the write-up is that
-every answer carried 0, 0, 0.
+`kill %1` on the port-forward it started. What goes into the write-up is the
+totals the answers carried: `created`, `updated` and `deleted`.
 
 The month is watched through the control endpoint
 ([the control endpoint](../openstack-simulator.md#the-control-endpoint)):
@@ -304,7 +322,7 @@ fields, 0 unregistered projects`. Where a tick of the hourly CronJob metered the
 month first, a `superseded run <id>` line stands between the second and the
 third ("What else the run shows" below).
 
-The two unpriced entries are `image` and `loadbalancer` on platform `openstack`.
+The two unpriced entries are `openstack/image` and `openstack/loadbalancer`.
 `runs.stats.unpriced` holds them as `{platform, resource_type, count}`. They are
 the types `pricing/2026-03.yaml` does not price: expected, explained, not fixed.
 A `counter_source_failed` warning on this month means the VictoriaMetrics
@@ -390,16 +408,17 @@ ID="$(jq -r '.resources[]
 jq -r --arg id "$ID" '[.traffic[]
   | select(.resource_id == $id) | .egress_bytes] | add / pow(2; 30)' \
   "$DRILL_DIR/clean/month/oracle.json"
-awk -F, -v id="$ID" '$9 == id && $14 == "egress_gb" { sum += $15 }
+LC_ALL=C awk -F, -v id="$ID" '$9 == id && $14 == "egress_gb" { sum += $15 }
   END { printf "%.4f\n", sum }' "$DRILL_DIR/clean/csv/rated.csv"
 ```
 
 Column 9 of `rated.csv` is `resource_id`, column 14 `dimension` and column 15
-`quantity`. The first figure is the sum of the oracle's `egress_bytes` over
-2^30, the divisor `bytesPerGibibyte` of `oracle.go` and of the counter source.
-The second is the `egress_gb` quantity the export carries. Both go into the
-write-up with the gap between them, which is the extrapolation `increase()`
-leaves. They are recorded, not compared.
+`quantity`. `LC_ALL=C` stands in front of the awk because a shell whose locale
+writes a decimal comma makes awk read `37.1490` as 37. The first figure is the
+sum of the oracle's `egress_bytes` over 2^30, the divisor `bytesPerGibibyte` of
+`oracle.go` and of the counter source. The second is the `egress_gb` quantity
+the export carries. Both go into the write-up with the gap between them, which
+is the extrapolation `increase()` leaves. They are recorded, not compared.
 
 The month is then closed:
 
@@ -529,8 +548,9 @@ curl --cacert tally-ca.crt -G \
 ```
 
 The same query runs again at the hold, and the difference between the two is
-what the write-up records: 86 for seed 1, the copies the `duplicates` switch
-puts on the bus.
+what the write-up records. 86 is the figure of seed 1 with `duplicates` alone;
+the five-switch month carries fewer copies, 77 in the first run, because the
+other switches take away transitions a copy would have followed.
 
 One faulted month carries the five compatible switches (author's decision of
 2026-09-03). `pre-existing` excludes `missing-create` and is left out. Each
@@ -577,8 +597,9 @@ command, so that the run's snapshot holds every correction the loop booked and
 the release is the only late arrival.
 
 The collector is read at the hold: `consumed`, `skipped`,
-`tally_collector_unparseable_total`, which is 20 for `refused-shapes`, and the
-three `instance.*` series under `skipped`. `tally_collector_buffer_depth` is 0.
+`tally_collector_unparseable_total`, 20 with `refused-shapes` alone and 18 in
+the five-switch month of the first run, and the three `instance.*` series under
+`skipped`. `tally_collector_buffer_depth` is 0.
 The per-switch figures stand in
 [the fault switches](../openstack-simulator.md#the-fault-switches). No document
 states the combined totals, so the first run of this drill is what records them.
@@ -598,8 +619,11 @@ go run ./cmd/tally-engine export --run <f> --format json \
 `metered ...` line, and `warnings recorded in runs.stats: N metering, 0 counter,
 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6
 unregistered projects`. The N metering warnings are
-`history_starts_without_create`, one per touched resource the bus named first;
-`runs.stats.metering_warnings` holds them as
+`history_starts_without_create`, and they have two sources: a `missing-create`
+resource the loop did not create before its first in-month notification, and a
+resource whose create was held back and whose delete was on the bus, a CI runner
+that lived minutes and that no sync saw alive. The first run saw 25 of the
+second kind and none of the first. `runs.stats.metering_warnings` holds them as
 `{cloud, resource_type, resource_id, code}`. The 2 unpriced come from the
 pricing model and the 6 unregistered from the registration switch. `finalize`
 answers `run <f> finalized, period 2026-07 closed`. The two exports print the
@@ -614,10 +638,13 @@ go run ./cmd/tally-openstack-simulator compare \
 
 This one is expected to differ, so it exits 1 with `N resources differ from the
 oracle` on stderr. Above the verdict stands `the month ran with the fault
-switches duplicates, held-back, missing-create, refused-shapes, reordering`, and
-every difference carries ` (touched by missing-create)` or
-` (touched by held-back)`. The verdict itself is `N of M resources differ from
-the oracle`. A difference with no mark is a finding.
+switches missing-create, duplicates, reordering, refused-shapes, held-back`, the
+switches in the order `FaultNames` lists them. The verdict itself is `N of M
+resources differ from the oracle`. A difference with no mark is a finding, and
+so is one marked by `duplicates`, `reordering` or `refused-shapes` alone: those
+three switches move nothing in the export, so they account for no interval
+bound. ` (touched by missing-create)` stands only on a resource the loop did not
+create before its first in-month notification.
 
 The held share goes out only after that first comparison:
 
@@ -660,30 +687,35 @@ go run ./cmd/tally-openstack-simulator compare \
   --export "$DRILL_DIR/faults/corrected" --pricing pricing/2026-03.yaml
 ```
 
-Every remaining difference carries ` (touched by missing-create)`, because no
-correction closes a gap the bus never carried. Where the loop's `sync.create`
-corrections closed those gaps too, this comparison prints the match verdict.
+The ` (touched by held-back)` differences are gone here: the release put those
+notifications on the bus and the correction books them. What remains is a
+` (touched by missing-create)` difference on a resource the loop did not create
+first, because no correction closes a gap the bus never carried, and any
+difference of the told-instant race above. The first run saw none of the first
+kind and one of the second.
 
 The triage:
 
-| Warning code or compare mark | Switch or cause | Count observed | Where it is read |
-| --- | --- | --- | --- |
-| `history_starts_without_create` | `missing-create` | recorded by the first run | `run` output, `.stats.metering_warnings` |
-| ` (touched by missing-create)` | `missing-create` | recorded by the first run | both comparisons |
-| ` (touched by held-back)` | `held-back` | recorded by the first run | the first comparison |
-| `tally_events_deduplicated_total` | `duplicates` | 86 | the VictoriaMetrics query above |
-| `tally_collector_unparseable_total`, three `instance.*` skipped series | `refused-shapes` | 20 | `http://127.0.0.1:8090/metrics` |
-| none | `reordering` | none | no warning, no counter, no difference |
-| `unpriced` `openstack/image`, `openstack/loadbalancer` | the pricing model, not a switch | 2 | `run` output, `run.json`, the two compare lines |
-| `unregistered_projects` | the registration switch, not a fault switch | 6 | `run` output, `run.json` |
-| `candidate_without_history` | every candidate has an event inside the month | not observed | `run` output |
-| `counter_source_failed` | only a metrics store that is unreachable | not observed | `run` output |
-| `counter_identity_not_queryable` | every instance carries the id the query selects on | not observed | `run` output |
-| `period_not_ended` | `2026-07` had ended | not observed | `run` output |
-| `attribution_multiple_paths` | at most one attributing relation per project | not observed | `run` output |
-| `attribution_cycle` | the two registered relations hold no cycle | not observed | `run` output |
-| `adjustment_kickback_target_not_partner` | the month registers no partner | not observed | `run` output |
-| `unreadable` | the simulator writes every size as a number | not observed | `run` output |
+| Warning code or compare mark | Switch or cause | Where it is read |
+| --- | --- | --- |
+| `history_starts_without_create` | `held-back`, a held create with a delivered delete | `run` output, `.stats.metering_warnings` |
+| `history_starts_without_create` | `missing-create`, on a resource the loop did not create first | `run` output, `.stats.metering_warnings` |
+| ` (touched by missing-create)` | `missing-create` | both comparisons |
+| ` (touched by held-back)` | `held-back` | the first comparison |
+| `tally_events_deduplicated_total` | `duplicates` | the VictoriaMetrics query above |
+| `tally_collector_unparseable_total`, three `instance.*` skipped series | `refused-shapes` | `http://127.0.0.1:8090/metrics` |
+| none | `reordering` | no warning, no counter, no difference |
+| `unpriced` `openstack/image`, `openstack/loadbalancer` | the pricing model, not a switch | `run` output, `run.json`, the two compare lines |
+| `unregistered_projects` | the registration switch, not a fault switch | `run` output, `run.json` |
+| a delete dated at the told instant, ahead of the platform's own | the loop's told instant against the fake API's clock, not a switch | the comparison |
+| `candidate_without_history` | every candidate has an event inside the month | `run` output |
+| `counter_source_failed` | only a metrics store that is unreachable | `run` output |
+| `counter_identity_not_queryable` | every instance carries the id the query selects on | `run` output |
+| `period_not_ended` | `2026-07` had ended | `run` output |
+| `attribution_multiple_paths` | at most one attributing relation per project | `run` output |
+| `attribution_cycle` | the two registered relations hold no cycle | `run` output |
+| `adjustment_kickback_target_not_partner` | the month registers no partner | `run` output |
+| `unreadable` | the simulator writes every size as a number | `run` output |
 
 ## The checklist
 
@@ -700,10 +732,400 @@ The triage:
 
 ## The first run
 
-The record of the first run against the dev stack follows here, with the date,
-the commit, the seed, period, cloud and factor it ran under, the lines each
-command printed, the two verdicts, the collector counters, the sync totals, the
-egress read-off and every deviation.
+The drill ran on 2026-09-03 at commit 77eb5eb of the branch
+`implement/issue-51-phase3-drill`, over the simulated month of seed 1 for
+`2026-07` on cloud `os-sim` at factor 744. The machine runs macOS with Docker
+Desktop, and its shell locale is `de_DE.UTF-8`. The clean month ran from 18:54Z
+to 20:11Z, the databases were reset at 20:12Z, and the faulted month ran from
+20:13Z to 21:20Z. Every instant below is UTC. `DRILL_DIR` was `/tmp/drill`, the
+fixed path the procedure carried at that commit, and the output quoted below
+names it.
+
+### Preparation
+
+The cluster took three `make up` calls on a machine that held none of the
+overlay's images. The first ended on
+
+```text
+kubectl --context kind-tally -n tally rollout status statefulset/timescaledb --timeout=300s
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+```
+
+while the node was still pulling. The second applied both migration chains and
+ended on `error: deployment "reporting-api" exceeded its progress deadline`,
+with the pod waiting on its image. The images the host Docker already held were
+put on the node with `kind load docker-image`, the four it did not hold
+(`victoriametrics/vmalert:v1.148.0`, `prom/alertmanager:v0.34.0`,
+`victoriametrics/victoria-metrics:v1.148.0` and
+`otel/opentelemetry-collector-contrib:0.157.0`) were pulled on the host and
+loaded the same way, and the third `make up` came through with every pod Ready.
+None of this touches the engine.
+
+A `run` before the pricing import failed with exit status 1:
+
+```text
+Error: selecting the pricing model for the period beginning 2026-07-01T00:00:00Z: no pricing model is valid for this period
+```
+
+`periods list` printed `2026-07 open` after it. The import answered `imported
+pricing model 2026-03 valid from 2026-03-01T00:00:00Z`, and a second import of
+the same file `pricing model 2026-03 already imported`.
+
+### The clean month
+
+`make simulator-up` without the period printed the `ERROR: set SIM_PERIOD ...`
+line and exited 2. With `SIM_PERIOD=2026-07 SIM_REGISTER_PROJECTS=true` the
+stack was up at 18:54:52Z and printed the seven URLs.
+
+The loop posted 75 requests. 60 of them were answered 200, from 18:55:14Z to
+19:54:21Z, and 15 were answered 400 after the run had ended, the first at
+19:55:21Z. Over the 60 the totals are 42 created, 6 updated and 36 deleted; 35
+carried `0, 0, 0` and the other 25 carried a correction. The first, told
+2026-07-01T04:31:54Z, created six:
+
+```text
+18:55:14 at=2026-07-01T04:31:54Z {"stats":{"created":6,"deleted":0,"updated":0},"sync_run_id":"33fb9384-55c8-495f-a807-adf9bce56636"}
+```
+
+Its six `sync.create` events are four volumes, an instance and a floating IP
+created between 04:06:21 and 04:23:11 virtual, each dated at the platform's
+instant. The collector's own create for each of them arrived three seconds after
+the sync, out of the outbox whose `tally_collector_buffer_depth` read 12 at that
+moment. No answer was a 409 and none a 500.
+
+`published` reached 15727 between 19:54:21Z and 19:55:21Z, an hour after the
+start, and the control endpoint stopped answering there. The collector then read
+1812 consumed, 13915 skipped, `tally_collector_unparseable_total` 0 and
+`tally_collector_buffer_depth` 0, the two counts the simulator's doc states. The
+`openstack-db-exporter` target read `0/1 up` when the loop stopped, on its first
+scrape after the run had ended.
+
+The oracle's file-mode run logged `completed` with `published` 0 and `total`
+15727, and wrote `notifications.jsonl` with 15727 lines, `events.jsonl` with
+1812 and `oracle.json` with 871 resources.
+
+`run` at 20:09:44Z:
+
+```text
+run aa48861f-69e1-4e1c-9feb-d46cd3d11506 completed for 2026-07 with pricing model 2026-03
+metered 871 candidates into 996 usage records, 3265 rated records and 6 project statements
+superseded run bcdab7ba-c615-45d1-bfb1-8047c3d017ac
+warnings recorded in runs.stats: 0 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
+```
+
+The superseded run is the one the 20:00Z tick of the CronJob had made. The json
+export answered:
+
+```text
+run aa48861f-69e1-4e1c-9feb-d46cd3d11506 exported for 2026-07 as json into /tmp/drill/clean/json
+wrote run.json and 6 statements
+wrote kickbacks.json with 0 kickbacks
+```
+
+`.stats` of `run.json` carries `unpriced` with `openstack/image` at 9 and
+`openstack/loadbalancer` at 5, `candidates` 871, `statements` 6, `rated_records`
+3265, `usage_records` 996 and `snapshot_at`, and no other list. The six
+statements are four `statement-os-sim%2F<tenant>.json` and the two Gardener
+ones, whose `related_costs` read
+
+```text
+{"relation_type":"infrastructure_tenant","project_id":"005be5adeef3d87e280d03d9d57c38b4","total":3147.41}
+{"relation_type":"infrastructure_tenant","project_id":"e31f9083a7e5ee15071a3bd53cb2bac7","total":661.45}
+```
+
+for alpha and for beta. The csv export wrote `rated.csv with 3265 rated records`
+and `kickbacks.csv with 0 kickbacks`, and repeating it into the same directory
+was refused with `Error: --out: /tmp/drill/clean/csv is not empty, and an export
+does not remove what an earlier one left there`.
+
+`compare` exited 1:
+
+```text
+instance 8489e5af-80dd-42e6-bb23-94bb7229f70e: the oracle expects [2026-07-17T17:32:17Z, 2026-07-17T18:12:00Z) and the export books [2026-07-17T17:32:17Z, 2026-07-17T18:11:48Z)
+image: 9 resources are not priced by pricing model 2026-03 and were not compared
+loadbalancer: 5 resources are not priced by pricing model 2026-03 and were not compared
+1 of 857 resources differ from the oracle
+Error: 1 resources differ from the oracle
+```
+
+The one difference is the told-instant race, and it is the finding of this run
+("The deviations" below).
+
+The egress read-off picked instance `079faae9-9d39-426f-a963-769cb12aa629`,
+classic, with 11 intervals from 2026-07-01T03:17:02Z to the period end. The
+oracle's `traffic` rows sum to 746.0670 GiB and the export's `egress_gb`
+quantities to 746.0460, a gap of 0.0210 GiB.
+
+`finalize` answered `run aa48861f-69e1-4e1c-9feb-d46cd3d11506 finalized, period
+2026-07 closed`, and `periods list` after it:
+
+```text
+2026-07 finalized finalized_run=aa48861f-69e1-4e1c-9feb-d46cd3d11506 finalized_at=2026-09-03T20:11:27Z
+2026-08 grace
+```
+
+A second `run` was refused with `Error: the billing period is finalized: 2026-07
+was closed by run aa48861f-69e1-4e1c-9feb-d46cd3d11506, and a finalized period
+is changed with tally-engine correct --period 2026-07`. `detect-late` answered
+`run aa48861f-69e1-4e1c-9feb-d46cd3d11506 read 2026-07 at
+2026-09-03T20:09:45Z` and `no events arrived later`.
+
+Three Jobs of the hourly CronJob ran, all three complete. The 19:00Z one logged
+`2026-07 open -> grace` and `2026-08 open -> grace`, the 20:00Z one `2026-07 run
+bcdab7ba-c615-45d1-bfb1-8047c3d017ac completed`, and the 21:00Z one, after the
+reset, `2026-08 open -> grace`. No Job failed: the drill ran on 2026-09-03,
+inside the 72-hour grace window of 2026-08, so no tick tried to bill that month
+and the failed-Job state the manifest's header comment describes was not seen.
+
+### The reset
+
+`make simulator-down` removed the three containers, the network, the outbox
+volume and `deploy/compose/.env`. The reporting rollback without `--yes` was
+refused with `Error: --yes: rolling back drops the data of every migration above
+the target`; with it, it printed `rolled back migration 10` down to `rolled back
+migration 1`, and the engine rollback `rolled back migration 2` and `rolled back
+migration 1`. The Reporting API pod read `0/1` between the rollback and
+`make migrate`, which applied migrations 1 to 10 and 1 to 2; the pod read `1/1`
+again after it. The import answered `imported pricing model 2026-03 valid from
+2026-03-01T00:00:00Z`, and `periods list` `no billing periods`.
+
+`tally_events_deduplicated_total{cloud="os-sim"}` had no series before the
+faulted month. The clean month deduplicated nothing, so the counter was never
+exposed, and its absence is its zero. The clean month's series stayed in
+VictoriaMetrics, 667 `ceilometer_network_outgoing_bytes_total` series over the
+month.
+
+### The faulted month
+
+The stack came up at 20:13:01Z with the five switches. The oracle's run logged
+`transitions` 15551, `billable` 1752, `stream` 15632 and `held` 84, then
+`completed` with `total` 15716, and wrote `notifications.jsonl` with 15632
+lines, `events.jsonl` with 1752, `held-back.jsonl` with 84 and an `oracle.json`
+whose `faults` names the five switches.
+
+The loop posted 65 syncs, all answered 200, with the totals 69 created, 5
+updated and 49 deleted. The first, told 2026-07-01T03:02:28Z, created 29: the 18
+`missing-create` resources (5 instances, 8 volumes and 5 floating IPs), each
+with a `sync.create` at the period start 2026-07-01T00:00:00Z, and 11
+corrections of the collector's lag. Five answers came at `period_to` during the
+hold, the first with 2 deleted and the four others with `0, 0, 0`, and the loop
+was stopped at 21:17:44Z after them and before the first engine command. Every
+`missing-create` resource was therefore created before the engine saw the month.
+
+`/clock` reported `holding` true at 21:13:23Z, with `published` 15632, `total`
+15716 and `held` 84. The collector read 1745 consumed, 13869 skipped,
+`tally_collector_unparseable_total` 18 and `tally_collector_buffer_depth` 0 at
+the hold, with `tally_collector_skipped_total` at 34 for
+`instance.create.end`, 35 for `instance.delete.end` and 1 for
+`instance.unshelve.end`. `tally_events_deduplicated_total{cloud="os-sim"}` read
+77 at the hold and 77 after the release.
+
+Those are the combined totals of the five switches, which no other document
+states. 1752 billable events from `missing-create`, plus the 77 duplicate copies
+the collector mapped, minus the 84 held ones, make the 1745 consumed; 13799
+skipped from `missing-create` plus the 70 versioned twins of `refused-shapes`
+make the 13869 skipped. The month ends at 18 unparseable rather than the 20 of
+`refused-shapes` alone and at 77 copies rather than the 86 of `duplicates`
+alone, because the other switches take away transitions a twin or a copy would
+have followed.
+
+`run` at 21:17:44Z:
+
+```text
+run 8d336aeb-666e-47b0-b0e6-d887829738d5 completed for 2026-07 with pricing model 2026-03
+metered 869 candidates into 927 usage records, 2989 rated records and 6 project statements
+warnings recorded in runs.stats: 25 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
+```
+
+All 25 metering warnings are `history_starts_without_create` on instances, and
+each of them is a CI runner whose `compute.instance.create.end` was held back
+and whose delete was on the bus: a history that starts with a delete. 36 of the
+84 held notifications are instance creates. None of the 25 came from
+`missing-create`, because the loop's first sync had created all 18 of those
+resources, and no sync saw a CI runner alive, because each lived under 40
+virtual minutes, far less than the 12.4 virtual hours between two syncs. The six
+unregistered projects are the month's six tenants, with 324, 16, 444, 15, 16 and
+18 resources.
+
+`finalize` answered `run 8d336aeb-666e-47b0-b0e6-d887829738d5 finalized, period
+2026-07 closed`. The csv export wrote `rated.csv with 2989 rated records` and
+`kickbacks.csv with 0 kickbacks`, the json export `run.json and 6 statements`
+and `kickbacks.json with 0 kickbacks`, and `.stats` carries `metering_warnings`
+with its 25 entries and `unregistered_projects` with its 6 beside `unpriced`.
+
+The first comparison exited 1:
+
+```text
+the month ran with the fault switches missing-create, duplicates, reordering, refused-shapes, held-back
+39 of 857 resources differ from the oracle
+Error: 39 resources differ from the oracle
+```
+
+The 39 by mark: 33 ` (touched by held-back)`, and one each of
+` (touched by duplicates, held-back)`,
+` (touched by duplicates, refused-shapes, held-back)`,
+` (touched by missing-create, held-back)`,
+` (touched by refused-shapes, held-back)`,
+` (touched by reordering, held-back)` and ` (touched by duplicates)`. By kind:
+27 instances `missing from the export`, CI runners whose create was held back;
+11 interval ends hours after the oracle's, on volumes and
+instances whose delete was held back and which a sync found deleted by absence
+at the told instant; and one interval end 31 seconds ahead of the oracle's, the
+told-instant race again:
+
+```text
+volume bcf4ab00-a379-4d3d-ad5c-adba0f124ebc: the oracle expects [2026-07-09T16:14:58Z, 2026-07-10T10:39:10Z) and the export books [2026-07-09T16:14:58Z, 2026-07-10T10:38:39Z) (and 1 more) (touched by duplicates)
+```
+
+Two of the 27 missing instances, `86321e6d-9f5b-4119-b056-d0c89669a281` and
+`cf0e36d7-f77a-4b4f-ae2a-d21c51449bca`, carry no metering warning: both their
+create and their delete were held back, so the projection held nothing of them
+to warn about. No difference carried ` (touched by missing-create)` alone.
+
+The release at 21:18:21Z answered 200 with the clock document as it stood the
+moment before it:
+
+```text
+{"virtual_now":"2026-08-03T18:05:49Z","factor":744,"published":15632,"total":15716,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+```
+
+A second release answered 409 with `the held-back notifications were already
+released`. A release before the hold was not sent in this run, so the 409 the
+procedure names for that case stands as the code states it. The endpoint had
+stopped answering by 21:19:21Z, and the collector read 1829 consumed, 13869
+skipped, 18 unparseable and buffer depth 0.
+
+`detect-late` at 21:19:56Z printed `run 8d336aeb-666e-47b0-b0e6-d887829738d5
+read 2026-07 at 2026-09-03T21:17:47Z`, then 80 resource lines (67 instances, 12
+volumes and 1 floating IP, the resources of `held-back.jsonl`) of the form
+
+```text
+os-sim/openstack/volume/dc476aff-35dc-4615-a50d-1512329dec6c: 1 late events, last received 2026-09-03T21:18:21Z
+```
+
+and `book them with tally-engine correct --period 2026-07`. `correct`:
+
+```text
+run 87cfc6b6-3197-4d2d-9831-5977b0688fc3 completed as a correction of run 8d336aeb-666e-47b0-b0e6-d887829738d5 for 2026-07 with pricing model 2026-03
+metered 871 candidates into 954 usage records and 3097 rated records
+95 deltas in 5 credit notes
+warnings recorded in runs.stats: 0 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 5 unregistered projects
+```
+
+`finalize` answered `correction run 87cfc6b6-3197-4d2d-9831-5977b0688fc3
+finalized for 2026-07`, and `periods list` still names the regular run under
+`finalized_run`:
+
+```text
+2026-07 finalized finalized_run=8d336aeb-666e-47b0-b0e6-d887829738d5 finalized_at=2026-09-03T21:17:48Z
+2026-08 grace
+```
+
+The csv export wrote `rated.csv with 3097 rated records`, `deltas.csv with 95
+deltas` and `kickbacks.csv with 0 kickback deltas`; the json export wrote
+`run.json and 5 credit notes`, `kickbacks.json with 0 kickback deltas` and five
+`credit-note-os-sim%2F<tenant>.json` files with the totals -0.22, 0.40, 1.04,
+-0.07 and -0.01. 82 of the 95 deltas are positive and 13 negative.
+
+The corrected comparison exited 1 with `1 of 857 resources differ from the
+oracle`, on the same `volume bcf4ab00-a379-4d3d-ad5c-adba0f124ebc` line as the
+first comparison. Every `held-back` difference is gone, and no
+` (touched by missing-create)` difference remained, because the loop had created
+those resources first.
+
+### The deviations
+
+- `make up` failed twice before the cluster stood, on a rollout timeout and on a
+  progress deadline, both times while the node pulled images. The images were
+  loaded onto the node and `make up` ran again. "Preparation" states that a
+  first `make up` can end this way.
+- The reset ran with the hourly CronJob live, twelve minutes after the 20:00Z
+  tick had finished run `bcdab7ba-c615-45d1-bfb1-8047c3d017ac`, and the 21:00Z
+  tick found the chains applied again. Neither the failed Job nor the rollback
+  behind a tick's transaction that "Reset the databases" describes was hit, and
+  it was the timing that kept them away. The procedure suspends the CronJob
+  across the reset since; this run did not.
+- The clean month's sync answers did not all carry `0, 0, 0`: 25 of the 60
+  carried a correction, 42 created, 6 updated and 36 deleted over the run. The
+  collector posts its outbox every 5 seconds (`TALLY_OSC_FLUSH_INTERVAL_S`,
+  default 5, `internal/providers/openstack/config.go`), which is 62 virtual
+  minutes at factor 744, so a sync lists resources the bus has carried and the
+  projection does not hold yet. The fold merges a `sync.create` at the same
+  instant as the real create, a `sync.update` with the same values and a
+  `sync.delete` behind the real delete, so none of the 25 moved a billed figure.
+  "The clean month" states what a sync finds at this factor, and checklist item
+  5 stays open.
+- The 15 iterations after the run had ended were answered 400, not the 500 the
+  procedure named for a loop stopped too late. With `/clock` gone the `jq`
+  derives an empty `at`, and the OpenAPI validation of the Reporting API refuses
+  the body before the handler sees it:
+
+  ```text
+  19:55:21 at= {"type":"urn:tally:error:validation","title":"Validation failed","status":400,"detail":"the request does not match the API contract","errors":[{"loc":"body.at","msg":"string doesn't match the format \"date-time\" (string doesn't match pattern \"^[0-9]{4}-(0[1-9]|10|11|12)-(0[1-9]|[12][0-9]|3[01])T([0-1][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?(Z|(\\+|-)[0-9]{2}:[0-9]{2})$\")"}]}
+  ```
+
+  The 500 is the answer of a sync that was running when the fake API went away.
+  The procedure names both.
+- The fault-switch line prints the switches in the order `FaultNames` lists
+  them, `missing-create, duplicates, reordering, refused-shapes, held-back`, not
+  alphabetically. The procedure carries that order.
+- All 25 metering warnings came from `held-back` and none from `missing-create`,
+  and no difference carried ` (touched by missing-create)` alone, because the
+  loop's first sync had created the 18 touched resources at the period start.
+  The procedure names both sources of the warning.
+- The awk of the egress read-off printed `744,0000` on this machine, because the
+  `de_DE.UTF-8` locale made it read `37.1490` as 37 and print a decimal comma.
+  With `LC_ALL=C` in front of it the sum is `746.0460`. The procedure carries
+  `LC_ALL=C`.
+- One difference of each comparison is the told-instant race, and no switch
+  accounts for it. It is the finding of this run, and the issue the author files
+  is about it.
+
+The clean month's difference is instance
+`8489e5af-80dd-42e6-bb23-94bb7229f70e`, a CI runner that lived 40 minutes. The
+reporting database holds the collector's `compute.instance.create.end` at
+17:32:17, a `sync.delete` at 18:11:48 from the sync told that instant (received
+at 19:27:18Z), and the collector's `compute.instance.delete.end` at 18:12:00
+(received two seconds later). The loop reads `/clock` and then posts, and one
+wall second is 12.4 virtual minutes, so the fake API answered the sync's
+listings minutes past the told instant, when the instance was already deleted.
+Its `terminated_at` lies after the told instant and therefore outside the
+deleted-servers window, so the sync found the instance by absence and booked its
+delete at the told instant, 12 seconds ahead of the platform's own. The fold
+closes the interval at the first delete, so the export bills 12 seconds less
+than the oracle. That is the poll-time dating of a delete found by absence, the
+concept's accepted approximation, turned by the factor into a delete ahead of
+the platform's instant. In the faulted month the same race hit volume
+`bcf4ab00-a379-4d3d-ad5c-adba0f124ebc` 31 seconds early, under a
+` (touched by duplicates)` mark that does not account for it, because
+`duplicates` moves nothing in the export.
+
+### The checklist after this run
+
+- [x] The clean month's `run` completed with `runs.stats` carrying no warning
+      beyond the two `unpriced` entries.
+- [x] `finalize` closed the period and `periods list` says so.
+- [x] Both exports of the clean month were written.
+- [ ] `compare` matched the clean month over every priced resource. 1 of 857
+      resources differs: the told-instant race on instance
+      `8489e5af-80dd-42e6-bb23-94bb7229f70e`.
+- [ ] Every sync answer of the clean month carried 0, 0, 0. 25 of the 60
+      answers carried a correction: the collector's batch delivery lag.
+- [ ] Every warning and every difference of the faulted month carries a switch
+      that explains it. 38 of the 39 differences and all 25 warnings do; volume
+      `bcf4ab00-a379-4d3d-ad5c-adba0f124ebc` carries `duplicates`, which does
+      not.
+- [ ] The correction's comparison differs only on resources marked
+      ` (touched by missing-create)`. Its one remaining difference is that same
+      race, and no `missing-create` mark remained.
+
+Two mechanisms stand behind the four open items: the collector's flush interval
+against the loop's cadence, and the told instant lying minutes before the fake
+API's clock at factor 744. Both are properties of the drill's compression and of
+the poll-time dating of a delete found by absence, not of the metering. The
+told-instant race is the finding this run records for the issue the author
+files.
 
 ## What else the run shows
 
