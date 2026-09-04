@@ -5,7 +5,7 @@
 # The result is a static binary on distroless, so dev and prod run the same
 # image (roadmap/00-conventions.md section 1).
 
-FROM golang:1.26.1-alpine AS build
+FROM golang:1.27.1-alpine AS build
 
 ARG CMD
 WORKDIR /src
