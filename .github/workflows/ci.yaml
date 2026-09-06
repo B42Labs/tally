@@ -37,3 +37,21 @@ jobs:
       # above names.
       - name: alerting
         run: make check-alerting
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # VitePress fails the build on a dead internal link (ignoreDeadLinks is
+      # not set in docs/.vitepress/config.mts), so this step is the link check.
+      # The frontmatter, heading and sidebar gates run in the test step of the
+      # ci job as part of go test ./...
+      - run: npm run docs:build
