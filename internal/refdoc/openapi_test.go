@@ -78,22 +78,36 @@ func TestOpenAPIOperationsRendersEachOperationShape(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		// An operation the contract leaves unsecured says so rather than
-		// leaving the line out.
+		// An operation the contract opens up with an empty block says so rather
+		// than leaving the line out, and one that declares no block at all
+		// takes the document's credential.
 		"No credential.",
 		"Security: `apiToken`",
+		// A requirement naming two schemes asks for both, and a second
+		// requirement is an alternative to the first.
+		"Security: `ingestToken`, or `apiToken` and `internalToken`",
 		// A referenced parameter is rendered from the component it names.
 		"| `cursor` | `query` | no | string | The `next_cursor` of the page",
 		// An enum is its values, and a format is appended to the type.
 		"| `kind` | `query` | no | `draft`, `final` |",
 		"| `since` | `query` | no | string, `date-time` |",
+		// A bound the server answers 400 past, and the value a caller who
+		// omits the parameter sends, are on the row rather than nowhere.
+		"| `limit` | `query` | no | integer, 1 to 1000, default `100` |",
 		// A body of two alternatives names both.
 		"The request body is `application/json`, a [Item](/reference/api/reporting-api-schemas#item) " +
 			"or an array of [Item](/reference/api/reporting-api-schemas#item).",
+		// A body that is not JSON is named by its media type, which is what
+		// keeps it apart from a status carrying no body at all.
+		"| `200` | The service is alive. | `text/plain` | none |",
 		// The shared problem response and one declared with the media type
 		// itself are both the problem document.
 		"| `500` | The request failed. The body says how. | `application/problem+json` |",
 		"| `413` | The batch carried more items than one call takes. | `application/problem+json` |",
+		// The header a created resource is addressed by, beside the
+		// correlation id every response of the contract declares.
+		"| `201` | The items as they now stand. | " +
+			"[ItemList](/reference/api/reporting-api-schemas#itemlist) | `Location` |",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the rendering does not carry %q:\n%s", want, got)
@@ -106,7 +120,105 @@ func TestOpenAPIOperationsRendersEachOperationShape(t *testing.T) {
 		"### `GET /healthz`",
 		"### `GET /api/v1/items/{cloud}`",
 		"### `POST /api/v1/items/{cloud}`",
+		"### `PUT /api/v1/items/{cloud}`",
 	})
+}
+
+func TestOpenAPIOperationsRendersThePathParametersFirst(t *testing.T) {
+	got, err := OpenAPIOperations(loadDocument(t, filepath.Join("testdata", "openapi.yaml")))
+	if err != nil {
+		t.Fatalf("OpenAPIOperations() error = %v, want nil", err)
+	}
+
+	// The path template declares its parameter on the path item, so the row
+	// stands above the rows of the parameters the operation declares itself.
+	assertOrder(t, section(t, got, "### `GET /api/v1/items/{cloud}`"), []string{
+		"| `cloud` | `path` | yes | string | The installation the items live in. |",
+		"| `kind` | `query` |",
+		"| `cursor` | `query` |",
+	})
+
+	// An operation declaring no parameter of its own still carries the ones of
+	// the path it stands under, which is a table it would render none of.
+	ingest := section(t, got, "### `POST /api/v1/items/{cloud}`")
+	if !strings.Contains(ingest, "| `cloud` | `path` | yes | string |") {
+		t.Errorf("the ingest operation carries no row for the path parameter:\n%s", ingest)
+	}
+}
+
+// numberParameter is one query parameter of type number held to the bounds the
+// caller sets, which is the shape a bound of either kind arrives in.
+func numberParameter(name string, bounds *openapi3.Schema) *openapi3.ParameterRef {
+	bounds.Type = &openapi3.Types{"number"}
+	return &openapi3.ParameterRef{Value: &openapi3.Parameter{
+		Name:   name,
+		In:     "query",
+		Schema: &openapi3.SchemaRef{Value: bounds},
+	}}
+}
+
+// openBound is what OpenAPI 3.0 writes an open end as: a flag beside the
+// minimum or the maximum it opens, rather than a bound of its own.
+func openBound() openapi3.ExclusiveBound {
+	return openapi3.ExclusiveBound{Bool: openapi3.BoolPtr(true)}
+}
+
+func TestOpenAPIOperationsWordsAnOpenBoundApart(t *testing.T) {
+	// The open and the closed range carry the same minimum and maximum, so a
+	// row that words them alike names an endpoint the server answers 400 to as
+	// a value in range.
+	paths := openapi3.NewPaths()
+	paths.Set("/items", &openapi3.PathItem{Get: &openapi3.Operation{
+		OperationID: "listItems",
+		Parameters: openapi3.Parameters{
+			numberParameter("closed", &openapi3.Schema{
+				Min: openapi3.Float64Ptr(0),
+				Max: openapi3.Float64Ptr(1),
+			}),
+			numberParameter("open_low", &openapi3.Schema{
+				Min:          openapi3.Float64Ptr(0),
+				Max:          openapi3.Float64Ptr(1),
+				ExclusiveMin: openBound(),
+			}),
+			numberParameter("open_high", &openapi3.Schema{
+				Min:          openapi3.Float64Ptr(0),
+				Max:          openapi3.Float64Ptr(1),
+				ExclusiveMax: openBound(),
+			}),
+			numberParameter("open_both", &openapi3.Schema{
+				Min:          openapi3.Float64Ptr(0),
+				Max:          openapi3.Float64Ptr(1),
+				ExclusiveMin: openBound(),
+				ExclusiveMax: openBound(),
+			}),
+			numberParameter("open_low_only", &openapi3.Schema{
+				Min:          openapi3.Float64Ptr(0),
+				ExclusiveMin: openBound(),
+			}),
+			numberParameter("open_high_only", &openapi3.Schema{
+				Max:          openapi3.Float64Ptr(1),
+				ExclusiveMax: openBound(),
+			}),
+		},
+	}})
+
+	got, err := OpenAPIOperations(&openapi3.T{Paths: paths})
+	if err != nil {
+		t.Fatalf("OpenAPIOperations() error = %v, want nil", err)
+	}
+
+	for _, want := range []string{
+		"| `closed` | `query` | no | number, 0 to 1 |",
+		"| `open_low` | `query` | no | number, above 0 and at most 1 |",
+		"| `open_high` | `query` | no | number, at least 0 and below 1 |",
+		"| `open_both` | `query` | no | number, above 0 and below 1 |",
+		"| `open_low_only` | `query` | no | number, above 0 |",
+		"| `open_high_only` | `query` | no | number, below 1 |",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the rendering does not carry %q:\n%s", want, got)
+		}
+	}
 }
 
 func TestOpenAPIOperationsRejectsWhatItCannotRender(t *testing.T) {
@@ -132,6 +244,25 @@ func TestOpenAPIOperationsRejectsWhatItCannotRender(t *testing.T) {
 				t.Errorf("OpenAPIOperations() error = %q, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestOpenAPIOperationsRejectsAnEmptySecurityRequirement(t *testing.T) {
+	// An empty requirement is what OpenAPI writes optional security as, and
+	// there is no honest word for a credential that is asked for and not.
+	paths := openapi3.NewPaths()
+	paths.Set("/items", &openapi3.PathItem{Get: &openapi3.Operation{
+		OperationID: "listItems",
+		Security:    &openapi3.SecurityRequirements{openapi3.SecurityRequirement{}},
+	}})
+
+	_, err := OpenAPIOperations(&openapi3.T{Paths: paths})
+	if err == nil {
+		t.Fatal("OpenAPIOperations() error = nil, want an error")
+	}
+	want := "refdoc: listItems declares an empty security requirement"
+	if err.Error() != want {
+		t.Errorf("OpenAPIOperations() error = %q, want %q", err, want)
 	}
 }
 
@@ -198,12 +329,50 @@ func TestOpenAPIRendersTheContractOfThisRepository(t *testing.T) {
 		}
 	}
 	// The health probes take no credential, and the ingest path answers a
-	// batch past its bound with 413.
-	if !strings.Contains(healthzSection(t, operations), "No credential.") {
+	// batch past its bound with 413. The probe answers the exposition format
+	// rather than nothing, which is what a status without a body reads as.
+	healthz := healthzSection(t, operations)
+	if !strings.Contains(healthz, "No credential.") {
 		t.Error("the liveness probe does not read as unsecured")
+	}
+	if !strings.Contains(healthz, "| `200` | The service is alive. | `text/plain` |") {
+		t.Errorf("the liveness probe reads as answering no body:\n%s", healthz)
 	}
 	if !strings.Contains(ingestSection(t, operations), "| `413` |") {
 		t.Error("the ingest operation carries no 413 row")
+	}
+
+	// The bounds a caller is answered 400 past and the value one who omits the
+	// parameter sends are on the row: neither is anywhere else on the page.
+	for _, want := range []string{
+		"| `depth` | `query` | no | integer, 1 to 10, default `1` |",
+		"| `limit` | `query` | no | integer, 1 to 1000, default `100` |",
+		"| `direction` | `query` | no | `outgoing`, `incoming`, `both`, default `both` |",
+	} {
+		if !strings.Contains(operations, want) {
+			t.Errorf("the rendering does not carry %q", want)
+		}
+	}
+
+	// Both operations that create a resource answer with the header the
+	// resource is addressed by.
+	if n := strings.Count(operations, "| `Location` |"); n != 2 {
+		t.Errorf("the rendering carries %d Location headers, want 2", n)
+	}
+
+	// Every path template of this contract declares its parameter on the path
+	// item, so the operations under it are the ones that would lose the rows.
+	project := section(t, operations, "### `GET /api/v1/projects/{id}`")
+	if !strings.Contains(project, "| `id` | `path` | yes |") {
+		t.Errorf("the project operation carries no row for the path parameter:\n%s", project)
+	}
+
+	// The contract folds its descriptions, so a paragraph of one arrives with a
+	// single newline in front of it and is rendered with the blank line that
+	// makes it a paragraph of its own.
+	events := section(t, operations, "### `GET /api/v1/events`")
+	if !strings.Contains(events, "\n\nOne call answers one page.") {
+		t.Errorf("the events operation runs its paragraphs together:\n%s", events)
 	}
 
 	schemas, err := OpenAPISchemas(doc)

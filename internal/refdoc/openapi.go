@@ -25,6 +25,11 @@ const (
 // problemResponse is the component every error status of this API references.
 const problemResponse = "#/components/responses/Problem"
 
+// requestIDHeader is the header every response of this contract declares. The
+// Conventions section of the endpoints page states it once for all of them, so
+// a column repeating it on every row would say nothing.
+const requestIDHeader = "X-Request-ID"
+
 // schemaRefPrefix opens a reference to a component schema.
 const schemaRefPrefix = "#/components/schemas/"
 
@@ -88,8 +93,12 @@ func OpenAPIOperations(doc *openapi3.T) (string, error) {
 		}
 		operations := item.Operations()
 		for _, method := range httpMethods {
-			if operation := operations[method]; operation != nil {
-				writeOperation(&b, method, path, operation)
+			operation := operations[method]
+			if operation == nil {
+				continue
+			}
+			if err := writeOperation(&b, doc, method, path, item, operation); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -99,7 +108,18 @@ func OpenAPIOperations(doc *openapi3.T) (string, error) {
 // writeOperation renders one operation under a heading of its own. The heading
 // holds the method and the path in one code span, which is what keeps a path
 // template out of the site's heading syntax.
-func writeOperation(b *strings.Builder, method, path string, operation *openapi3.Operation) {
+//
+// item is the path the operation stands under. A path template declares its
+// parameters there rather than on each method, so the operation is rendered
+// from both. doc is where an operation that declares no security block of its
+// own inherits one.
+func writeOperation(b *strings.Builder, doc *openapi3.T, method, path string,
+	item *openapi3.PathItem, operation *openapi3.Operation) error {
+	credential, err := credentialLine(doc, operation)
+	if err != nil {
+		return err
+	}
+
 	if b.Len() > 0 {
 		b.WriteString("\n")
 	}
@@ -108,42 +128,62 @@ func writeOperation(b *strings.Builder, method, path string, operation *openapi3
 	if summary := strings.TrimSpace(operation.Summary); summary != "" {
 		writeBlock(b, escapePlaceholders(summary)+"\n")
 	}
-	// The description is kept as the contract writes it, several paragraphs and
-	// their markup included.
-	if description := strings.TrimSpace(operation.Description); description != "" {
+	// The contract folds its descriptions, so the break between two paragraphs
+	// arrives as a single newline. Each paragraph is rendered as one.
+	if description := paragraphs(operation.Description); description != "" {
 		writeBlock(b, escapePlaceholders(description)+"\n")
 	}
-	writeBlock(b, credentialLine(operation)+"\n")
+	writeBlock(b, credential+"\n")
 
-	if rows := parameterRows(operation); len(rows) > 0 {
+	if rows := parameterRows(slices.Concat(item.Parameters, operation.Parameters)); len(rows) > 0 {
 		writeBlock(b, table([]string{"Name", "In", "Required", "Type", "Description"}, rows))
 	}
 	if sentence := requestBodySentence(operation); sentence != "" {
 		writeBlock(b, sentence+"\n")
 	}
 	if rows := responseRows(operation); len(rows) > 0 {
-		writeBlock(b, table([]string{"Status", "Description", "Body"}, rows))
+		writeBlock(b, table([]string{"Status", "Description", "Body", "Headers"}, rows))
 	}
+	return nil
 }
 
-// credentialLine names the credential the operation takes, or says that it
+// credentialLine names the credentials the operation takes, or says that it
 // takes none. The health probes are the operations that take none, which is
 // what makes the absence worth stating rather than leaving blank.
-func credentialLine(operation *openapi3.Operation) string {
-	if operation.Security == nil || len(*operation.Security) == 0 {
-		return "No credential."
+//
+// An operation without a security block of its own inherits the document's, so
+// the absence of a block is not the same as an empty one: only the empty block
+// opens the operation up. A requirement naming several schemes asks for all of
+// them and several requirements are alternatives, so both are spelled out
+// rather than reduced to the first of each, which would tell an integrator that
+// an accepted credential is refused.
+func credentialLine(doc *openapi3.T, operation *openapi3.Operation) (string, error) {
+	requirements := doc.Security
+	if operation.Security != nil {
+		requirements = *operation.Security
 	}
-	names := slices.Sorted(maps.Keys((*operation.Security)[0]))
-	if len(names) == 0 {
-		return "No credential."
+	if len(requirements) == 0 {
+		return "No credential.", nil
 	}
-	return "Security: " + code(names[0])
+
+	alternatives := make([]string, 0, len(requirements))
+	for _, requirement := range requirements {
+		names := slices.Sorted(maps.Keys(requirement))
+		if len(names) == 0 {
+			return "", fmt.Errorf("refdoc: %s declares an empty security requirement",
+				operation.OperationID)
+		}
+		alternatives = append(alternatives, codeSpans(names, " and "))
+	}
+	return "Security: " + strings.Join(alternatives, ", or "), nil
 }
 
-// parameterRows is one row per parameter the operation declares itself.
-func parameterRows(operation *openapi3.Operation) [][]string {
+// parameterRows is one row per parameter, in the order the parameters are
+// handed over: the ones the path declares first, the operation's own after
+// them.
+func parameterRows(parameters openapi3.Parameters) [][]string {
 	var rows [][]string
-	for _, ref := range operation.Parameters {
+	for _, ref := range parameters {
 		parameter := ref.Value
 		if parameter == nil {
 			continue
@@ -216,6 +256,7 @@ func responseRows(operation *openapi3.Operation) [][]string {
 			code(status),
 			escapePlaceholders(oneLine(description)),
 			responseBody(ref),
+			responseHeaders(ref),
 		})
 	}
 	return rows
@@ -224,15 +265,32 @@ func responseRows(operation *openapi3.Operation) [][]string {
 // responseBody names what one status carries. Every error of this API is the
 // shared problem document, which the media type says more plainly than a link
 // to the schema behind it would.
+//
+// A status carrying a body of another type is named by that type rather than by
+// none: the probes and the metrics route answer text/plain, and none is what a
+// status without a body at all reads as.
 func responseBody(ref *openapi3.ResponseRef) string {
 	if ref.Ref == problemResponse || ref.Value.Content[problemMediaType] != nil {
 		return code(problemMediaType)
 	}
-	media := ref.Value.Content[jsonMediaType]
-	if media == nil || media.Schema == nil {
-		return "none"
+	if media := ref.Value.Content[jsonMediaType]; media != nil && media.Schema != nil {
+		return apiTypeWord(media.Schema, schemaPageLink)
 	}
-	return apiTypeWord(media.Schema, schemaPageLink)
+	return codeSpans(slices.Sorted(maps.Keys(ref.Value.Content)), ", ")
+}
+
+// responseHeaders names the headers one status carries beyond the correlation
+// id every response of this contract declares. The Location of a created
+// resource is the one this contract states per operation, and a client that
+// never learns of it has to guess where what it just created lives.
+func responseHeaders(ref *openapi3.ResponseRef) string {
+	names := make([]string, 0, len(ref.Value.Headers))
+	for _, name := range slices.Sorted(maps.Keys(ref.Value.Headers)) {
+		if name != requestIDHeader {
+			names = append(names, name)
+		}
+	}
+	return codeSpans(names, ", ")
 }
 
 // OpenAPISchemas renders the component schemas: one section per schema in name
@@ -257,7 +315,7 @@ func OpenAPISchemas(doc *openapi3.T) (string, error) {
 			b.WriteString("\n")
 		}
 		b.WriteString("### " + code(name) + "\n")
-		if description := oneLine(value.Description); description != "" {
+		if description := paragraphs(value.Description); description != "" {
 			writeBlock(&b, escapePlaceholders(description)+"\n")
 		}
 		if len(value.Properties) == 0 {
@@ -342,7 +400,52 @@ func apiTypeWord(ref *openapi3.SchemaRef, link func(string) string) string {
 	if value.Pattern != "" {
 		word += ", " + code(value.Pattern)
 	}
+	if bounds := boundsWords(value); bounds != "" {
+		word += ", " + bounds
+	}
+	// A caller that omits the parameter sends the default, and a caller past a
+	// bound is answered 400. Neither is anywhere else on the page.
+	if value.Default != nil {
+		word += ", default " + code(jsonLiteral(value.Default))
+	}
 	return word
+}
+
+// boundsWords states the range a schema holds a number to, or nothing for one
+// it holds to no range. This contract is OpenAPI 3.0, which writes an open end
+// as exclusiveMinimum or exclusiveMaximum beside the bound it opens: the open
+// and the closed range carry the same minimum and maximum, so an end rendered
+// as closed throughout would name an endpoint the server answers 400 to.
+func boundsWords(value *openapi3.Schema) string {
+	switch {
+	case value.Min != nil && value.Max != nil &&
+		!value.ExclusiveMin.IsTrue() && !value.ExclusiveMax.IsTrue():
+		return jsonLiteral(*value.Min) + " to " + jsonLiteral(*value.Max)
+	case value.Min != nil && value.Max != nil:
+		return lowBound(value) + " and " + highBound(value)
+	case value.Min != nil:
+		return lowBound(value)
+	case value.Max != nil:
+		return highBound(value)
+	}
+	return ""
+}
+
+// lowBound is the bottom of the range: the value itself where the bound is
+// closed, and the values past it where it is open.
+func lowBound(value *openapi3.Schema) string {
+	if value.ExclusiveMin.IsTrue() {
+		return "above " + jsonLiteral(*value.Min)
+	}
+	return "at least " + jsonLiteral(*value.Min)
+}
+
+// highBound is the top of the range, worded the way lowBound words the bottom.
+func highBound(value *openapi3.Schema) string {
+	if value.ExclusiveMax.IsTrue() {
+		return "below " + jsonLiteral(*value.Max)
+	}
+	return "at most " + jsonLiteral(*value.Max)
 }
 
 // typeName is the type a schema states, or any for one that states none. The

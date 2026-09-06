@@ -457,6 +457,42 @@ func TestEscapePlaceholders(t *testing.T) {
 	}
 }
 
+func TestParagraphs(t *testing.T) {
+	cases := map[string]struct {
+		text string
+		want string
+	}{
+		"one paragraph": {
+			text: "Returns the items of the cloud.",
+			want: "Returns the items of the cloud.",
+		},
+		"a folded break between two": {
+			text: "Returns the items of the cloud.\nOne call answers one page.",
+			want: "Returns the items of the cloud.\n\nOne call answers one page.",
+		},
+		"a break already written as a blank line": {
+			text: "Returns the items.\n\nOne call answers one page.",
+			want: "Returns the items.\n\nOne call answers one page.",
+		},
+		"leading and trailing space": {
+			text: "\n  Returns the items.  \n",
+			want: "Returns the items.",
+		},
+		"nothing to say": {
+			text: "  \n\n  ",
+			want: "",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := paragraphs(tc.text); got != tc.want {
+				t.Errorf("paragraphs(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTableEscapesThePipe(t *testing.T) {
 	got := table([]string{"Name", "Meaning"}, [][]string{{"sep", "a | b"}})
 	want := "| Name | Meaning |\n| --- | --- |\n| sep | a \\| b |\n"

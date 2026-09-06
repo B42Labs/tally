@@ -21,6 +21,10 @@ const defsPrefix = "#/$defs/"
 // which has no name of its own the way a definition does.
 const rootHeading = "root"
 
+// alternativeLead opens the bullets of a oneOf, so that the list reads as the
+// choice it states rather than as a set of unrelated conditions.
+const alternativeLead = "Exactly one of these alternatives holds:"
+
 // JSONSchema renders a JSON Schema draft 2020-12 document: a paragraph naming
 // the document, then one section per schema object, the root first and the
 // definitions after it in the order the file writes them.
@@ -354,6 +358,7 @@ func writeObject(b *strings.Builder, s *jsonSchema) {
 	writeBlock(b, propertyTable(s))
 	writeBlock(b, additionalSentence(s)+"\n")
 	if list := alternativeList(s); list != "" {
+		writeBlock(b, alternativeLead+"\n")
 		writeBlock(b, list)
 	}
 }
