@@ -65,6 +65,15 @@
             { "text": "Export formats", "link": "/reference/formats/exports" },
             { "text": "OpenStack notification mapping", "link": "/reference/formats/notification-mapping" }
           ]
+        },
+        {
+          "text": "Observability",
+          "collapsed": true,
+          "items": [
+            { "text": "Metrics", "link": "/reference/observability/metrics" },
+            { "text": "Alert rules", "link": "/reference/observability/alert-rules" },
+            { "text": "Grafana dashboards", "link": "/reference/observability/dashboards" }
+          ]
         }
       ]
     }
