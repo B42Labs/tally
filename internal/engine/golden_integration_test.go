@@ -7,7 +7,7 @@
 // Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z),
 // which is the period docs/explanation/worked-examples.md computes its
 // examples over, and the temporal case bills the April after it as well. The
-// expectations come from that section, from WP 5.6 of
+// expectations come from that page, from WP 5.6 of
 // roadmap/05-phase-5-commercial-pricing.md (the commercial cases) and from
 // pricing/2026-03.yaml, never from a previous run: a failure here is a report
 // about the engine, so the answer to one is to find what changed in the
