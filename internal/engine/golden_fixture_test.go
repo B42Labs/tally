@@ -4,8 +4,8 @@
 //
 // Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z),
 // and the temporal case bills the April after it as well. The values in
-// testdata/golden/<case>/expected.json are derived by hand from README section
-// 3.4 ("Metering Output Examples"), from the WP 5.6 table of
+// testdata/golden/<case>/expected.json are derived by hand from
+// docs/explanation/worked-examples.md, from the WP 5.6 table of
 // roadmap/05-phase-5-commercial-pricing.md (the Phase 5 cases and the
 // adjustments they carry) and from pricing/2026-03.yaml. They are never
 // regenerated from what the engine produced: a number the engine wrote says

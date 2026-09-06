@@ -1,5 +1,5 @@
-# Example pricing model from the concept, section 3.4 (README section
-# "Pricing Model"). A price may be written as a number or as a string: either
+# The pricing model of the concept's worked examples
+# (docs/explanation/worked-examples.md). A price may be written as a number or as a string: either
 # way it keeps the digits spelled here and is read with decimal.NewFromString,
 # never through a float. `tally-engine pricing import` loads this file.
 version: "2026-03"

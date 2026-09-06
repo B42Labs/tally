@@ -198,8 +198,9 @@ type meterCase struct {
 	drafts  []want
 }
 
-// histories is the concept's worked examples (README.md lines 537 to 720 and
-// 972) together with the lifetime, boundary, and ownership cases around them.
+// histories is the concept's worked examples
+// (docs/explanation/worked-examples.md) together with the lifetime, boundary,
+// and ownership cases around them.
 func histories(t *testing.T) []meterCase {
 	t.Helper()
 
