@@ -1,0 +1,77 @@
+name: deploy-docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - package.json
+      - package-lock.json
+      - .nvmrc
+      - .github/workflows/deploy-docs.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# GitHub Pages has one deployment target, so runs queue rather than cancel.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    # enablement asks GitHub to create the Pages site with GitHub Actions as
+    # its source the first time. If the token is refused, a repository admin
+    # runs once:
+    #   gh api --method POST repos/B42Labs/tally/pages -f build_type=workflow
+    # It runs no third-party code, so pages: write lives in a job of its own
+    # rather than next to npm ci.
+    permissions:
+      pages: write
+    steps:
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+
+  build:
+    needs: configure
+    runs-on: ubuntu-latest
+    # npm ci and the VitePress build run the install and build scripts of the
+    # whole dependency tree, so this job holds contents: read and nothing else.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # lastUpdated reads the git history of every page
+          persist-credentials: false # the build steps never call git
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run docs:build
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # deploy-pages mints an OIDC token to publish the artifact. It runs no
+    # third-party code of its own, so this is the only job that needs one.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
