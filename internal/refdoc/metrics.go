@@ -74,7 +74,7 @@ func Metrics(reg *prometheus.Registry) (string, error) {
 		rows = append(rows, []string{
 			code(instrument.name),
 			word,
-			labelCell(instrument.labels),
+			codeSpans(instrument.labels, ", "),
 			escapePlaceholders(oneLine(instrument.help)),
 		})
 	}
@@ -172,18 +172,4 @@ func labelNames(list string) []string {
 		}
 	}
 	return names
-}
-
-// labelCell lists the labels a series is broken down by, or none for a series
-// that carries one value.
-func labelCell(labels []string) string {
-	if len(labels) == 0 {
-		return "none"
-	}
-
-	spans := make([]string, 0, len(labels))
-	for _, label := range labels {
-		spans = append(spans, code(label))
-	}
-	return strings.Join(spans, ", ")
 }

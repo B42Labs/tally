@@ -255,6 +255,29 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// codeSpans renders values as code spans joined by sep, or none for a cell with
+// no value to show.
+func codeSpans(values []string, sep string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+
+	spans := make([]string, 0, len(values))
+	for _, value := range values {
+		spans = append(spans, code(value))
+	}
+	return strings.Join(spans, sep)
+}
+
+// codeOrNone renders one value as a code span, or none for a value a document
+// leaves out.
+func codeOrNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return code(value)
+}
+
 // yesNo is how a table answers a question a cell holds.
 func yesNo(b bool) string {
 	if b {
