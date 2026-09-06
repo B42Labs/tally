@@ -29,6 +29,18 @@
             { "text": "Endpoints", "link": "/reference/api/reporting-api" },
             { "text": "Schemas", "link": "/reference/api/reporting-api-schemas" }
           ]
+        },
+        {
+          "text": "Command lines",
+          "collapsed": true,
+          "items": [
+            { "text": "tally-reporting", "link": "/reference/command-line/tally-reporting" },
+            { "text": "tally-reporting-admin", "link": "/reference/command-line/tally-reporting-admin" },
+            { "text": "tally-engine", "link": "/reference/command-line/tally-engine" },
+            { "text": "tally-openstack-collector", "link": "/reference/command-line/tally-openstack-collector" },
+            { "text": "tally-openstack-simulator", "link": "/reference/command-line/tally-openstack-simulator" },
+            { "text": "tally-vertical-slice", "link": "/reference/command-line/tally-vertical-slice" }
+          ]
         }
       ]
     }
