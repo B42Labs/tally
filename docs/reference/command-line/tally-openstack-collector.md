@@ -155,5 +155,6 @@ server.
 The [collector settings](/reference/configuration/tally-openstack-collector)
 page lists every variable with its default. The
 [notification mapping](/reference/formats/notification-mapping) page states
-which event type maps to which Tally event, and the OpenStack metrics page
-states the series the exposition carries.
+which event type maps to which Tally event, and the
+[metrics](/reference/observability/metrics) page states the series the
+exposition carries.

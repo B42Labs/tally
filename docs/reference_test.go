@@ -17,12 +17,14 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/prometheus/client_golang/prometheus"
 
 	engineconfig "github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
 	"github.com/b42labs/tally/internal/refdoc"
 	reportingconfig "github.com/b42labs/tally/internal/reporting/config"
+	reportingmetrics "github.com/b42labs/tally/internal/reporting/metrics"
 )
 
 // openAPIDocument is the contract the two Reporting API pages are rendered
@@ -74,6 +76,18 @@ const (
 	adjustmentsSchemaSource = "../internal/core/adjustment/adjustments_schema.json"
 	adjustmentsSource       = "../internal/engine/adjustments/adjustments.go"
 	mappingSource           = "../internal/providers/openstack/mapping.go"
+)
+
+// The manifests the three observability pages render from: the scrape
+// configuration the store reads, the rules the evaluator loads, the routing a
+// fired alert takes, and the directory the provisioned dashboards are shipped
+// out of. Each is the file a cluster runs, so a page states what is deployed
+// rather than what was once written down.
+const (
+	scrapeSource     = "../deploy/kubernetes/base/victoriametrics/scrape.yaml"
+	rulesSource      = "../deploy/kubernetes/base/vmalert/rules.yaml"
+	routingSource    = "../deploy/kubernetes/base/alertmanager/config.yaml"
+	dashboardsSource = "../deploy/kubernetes/base/grafana/dashboards"
 )
 
 // The sources the export page renders its documents from: the two file writers
@@ -289,6 +303,97 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 			"mapping": render(t, mapping, err),
 		})
 	})
+
+	t.Run("observability/metrics.md", func(t *testing.T) {
+		reportingAPI, reportingErr := refdoc.Metrics(recordedReportingRegistry())
+		collector, collectorErr := refdoc.Metrics(recordedCollectorRegistry())
+		jobs, jobsErr := refdoc.ScrapeJobs(readSource(t, scrapeSource))
+
+		refdoc.Verify(t, referencePage("observability/metrics.md"), map[string]string{
+			"reporting-api": render(t, reportingAPI, reportingErr),
+			"collector":     render(t, collector, collectorErr),
+			"scrape-jobs":   render(t, jobs, jobsErr),
+		})
+	})
+
+	t.Run("observability/alert-rules.md", func(t *testing.T) {
+		rules, rulesErr := refdoc.AlertRules(readSource(t, rulesSource))
+		routing, routingErr := refdoc.AlertRouting(readSource(t, routingSource))
+
+		refdoc.Verify(t, referencePage("observability/alert-rules.md"), map[string]string{
+			"rules":   render(t, rules, rulesErr),
+			"routing": render(t, routing, routingErr),
+		})
+	})
+
+	t.Run("observability/dashboards.md", func(t *testing.T) {
+		dashboards, err := refdoc.Dashboards(readDashboards(t))
+
+		refdoc.Verify(t, referencePage("observability/dashboards.md"), map[string]string{
+			"dashboards": render(t, dashboards, err),
+		})
+	})
+}
+
+// recordedReportingRegistry is the Reporting API's registry with one sample on
+// every instrument a recording method writes. A vector without a child is
+// gathered as nothing, so the exposition would state the type of none of them
+// and the rendering would fall back to the name throughout; recording once
+// leaves the type of the eight counters read off the exposition, which is what
+// makes a counter misnamed as a gauge fail here. tally_current_resources is
+// written by the refresher rather than by a recording method and stays on the
+// name.
+func recordedReportingRegistry() *prometheus.Registry {
+	reg := prometheus.NewRegistry()
+	m := reportingmetrics.New(reg)
+
+	m.EventIngested("openstack", "os-prod-eu1", "instance", "compute.instance.create.end", "collector")
+	m.EventDeduplicated("os-prod-eu1")
+	m.EventRejected("os-prod-eu1", "schema: the item carries a NUL character")
+	m.SizeUnvalidated("openstack", "instance")
+	m.ProjectionReplayed("os-prod-eu1")
+	m.SyncRunFinished("os-prod-eu1", "completed")
+	m.ResourcesReconciled("os-prod-eu1", "created", 1)
+	m.SyncErrorsRecorded("os-prod-eu1", 1)
+	return reg
+}
+
+// recordedCollectorRegistry is the OpenStack collector's registry, recorded the
+// same way. The two gauges are read at scrape time and take the functions the
+// binary wires to the outbox; a page states what they report rather than what
+// they hold, so the fixture reports an empty outbox.
+func recordedCollectorRegistry() *prometheus.Registry {
+	reg := prometheus.NewRegistry()
+	c := openstack.NewMetrics(reg, func() float64 { return 0 }, func() float64 { return 0 })
+
+	c.Consumed("compute.instance.create.end")
+	c.Skipped("compute.instance.reboot.end")
+	c.Unparseable()
+	c.Delivered(1)
+	c.DeliveryError()
+	return reg
+}
+
+// readDashboards reads the provisioned dashboard files, keyed by the file name
+// the page names each dashboard by. The directory is read rather than listed,
+// so a dashboard added to the ConfigMap without a section on the page fails the
+// subtest instead of being published unlisted.
+func readDashboards(t *testing.T) map[string][]byte {
+	t.Helper()
+
+	entries, err := os.ReadDir(dashboardsSource)
+	if err != nil {
+		t.Fatalf("%s: %v", dashboardsSource, err)
+	}
+
+	files := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		files[entry.Name()] = readSource(t, dashboardsSource+"/"+entry.Name())
+	}
+	return files
 }
 
 // referencePage is the page under docs/reference/ a subtest verifies. The path
