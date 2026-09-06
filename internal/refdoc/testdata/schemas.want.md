@@ -2,6 +2,8 @@
 
 One item as this API stores it.
 
+A member the producer leaves out is absent rather than null.
+
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `id` | [Uuid](#uuid) | yes |  |

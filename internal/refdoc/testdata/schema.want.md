@@ -33,6 +33,8 @@ No other property is allowed.
 
 Other properties are [rate](#rate).
 
+Exactly one of these alternatives holds:
+
 - `hourly` is required, `each` is absent, `kind` is `gauge`
 - `each` is required, `hourly` is absent, `kind` is `counter`
 
