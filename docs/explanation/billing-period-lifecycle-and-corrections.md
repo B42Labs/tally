@@ -92,7 +92,8 @@ finalized run twice yields byte-identical files
 
 `tally-engine` drives the lifecycle from the command line. These are the
 subcommands that belong to it; the tree carries others, and the flags of each
-one are documented in the reference quadrant.
+one are documented on the
+[tally-engine reference page](/reference/command-line/tally-engine).
 
 - `run` meters and rates one billing period.
 - `finalize` finalizes a completed run and closes its billing period.

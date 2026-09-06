@@ -125,18 +125,15 @@ running. What failed goes to the log rather than into the body.
 with `ok` while the outbox answers, and it keeps answering 200 while the outbox
 has been unusable for fewer seconds than `TALLY_OSC_UNHEALTHY_THRESHOLD_S`.
 Past that threshold it answers 503 with
-`the collector has been unhealthy for too long`. The broker is deliberately not
-part of it: during a broker outage the sender is the loop that can still make
-progress, and a liveness that failed on the broker would restart every replica
-for the length of that outage.
+`the collector has been unhealthy for too long`. The probe does not consult the
+broker.
 
 Both probes bound their outbox check at 2 seconds, so a probe never outlasts the
 request that asked it.
 
 `GET /metrics` serves the Prometheus exposition. A deployment that sets
-`TALLY_METRICS_ENABLED` to `false` is answered 404 there rather than an empty
-exposition, which would read as a collector with no activity. The consumer and
-the sender keep counting either way.
+`TALLY_METRICS_ENABLED` to `false` is answered 404 there. The consumer and the
+sender keep counting either way.
 
 ## Signals and exit status
 

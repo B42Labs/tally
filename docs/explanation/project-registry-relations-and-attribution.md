@@ -34,7 +34,8 @@ the reporting database directly.
 A relation is created, patched and closed through the relation endpoints of the
 Reporting API, and the point-in-time traversal of the graph is
 `GET /api/v1/projects/{id}/related` with its `at` parameter. The endpoints and
-their parameters are documented in the reference quadrant.
+their parameters are documented in the
+[Reporting API reference](/reference/api/reporting-api).
 
 The concept has the registry filled by an event-driven sync, where a
 `shoot.create.end` event registers the shoot's infrastructure tenant and links
