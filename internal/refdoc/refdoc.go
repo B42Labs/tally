@@ -248,6 +248,14 @@ func cell(s string) string {
 	return strings.ReplaceAll(s, "|", `\|`)
 }
 
+// yesNo is how a table answers a question a cell holds.
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
 // prosePattern is one whitespace-delimited token of prose.
 var prosePattern = regexp.MustCompile(`\S+`)
 
