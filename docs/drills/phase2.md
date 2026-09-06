@@ -1,7 +1,7 @@
 # Phase 2 acceptance drill: TallyCloudEventsSilent
 
 `TallyCloudEventsSilent` is the alert the concept asks for under
-[Reconciliation](../../README.md#reconciliation): a cloud whose collector has
+[Known limitations](https://b42labs.github.io/tally/explanation/dual-ingestion-and-reconciliation#known-limitations): a cloud whose collector has
 gone quiet while the cloud kept creating and deleting resources. This drill
 takes one dev cluster from a seeded event through the pending state, the firing
 state, the notification in Alertmanager, and the resolution, and it checks on

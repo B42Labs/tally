@@ -29,7 +29,7 @@ about this command.
 ## The egress delta
 
 The slice rates the golden instance `abc-123` at 124.80 EUR for March 2026. The
-end-to-end example of section 3.4 in the [root README](../../README.md) rates
+end-to-end example on the [worked examples page](https://b42labs.github.io/tally/explanation/worked-examples) rates
 the same instance at 128.45 EUR. The whole difference is egress: that example
 bills 18.0 GB in the first active interval at 1.62 EUR and 22.5 GB in the third
 at 2.03 EUR, and 124.80 plus 3.65 is 128.45. The vCPU, RAM, and disk costs of
