@@ -1,0 +1,2 @@
+# One word per line; # starts a comment. Words a heading may capitalise
+# after its first word. Extend it in the pull request that needs the word.

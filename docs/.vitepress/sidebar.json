@@ -1,0 +1,41 @@
+{
+  "/": [
+    {
+      "text": "Sections",
+      "items": [
+        { "text": "Tutorials", "link": "/tutorials/" },
+        { "text": "How-to guides", "link": "/how-to/" },
+        { "text": "Reference", "link": "/reference/" },
+        { "text": "Explanation", "link": "/explanation/" },
+        { "text": "Contributing", "link": "/contributing/" }
+      ]
+    }
+  ],
+  "/tutorials/": [
+    { "text": "Tutorials", "items": [{ "text": "Overview", "link": "/tutorials/" }] }
+  ],
+  "/how-to/": [
+    { "text": "How-to guides", "items": [{ "text": "Overview", "link": "/how-to/" }] }
+  ],
+  "/reference/": [
+    { "text": "Reference", "items": [{ "text": "Overview", "link": "/reference/" }] }
+  ],
+  "/explanation/": [
+    {
+      "text": "Explanation",
+      "items": [
+        { "text": "Overview", "link": "/explanation/" },
+        { "text": "How this documentation is organised", "link": "/explanation/how-this-documentation-is-organised" }
+      ]
+    }
+  ],
+  "/contributing/": [
+    {
+      "text": "Contributing",
+      "items": [
+        { "text": "Overview", "link": "/contributing/" },
+        { "text": "Authoring conventions", "link": "/contributing/authoring-conventions" }
+      ]
+    }
+  ]
+}
