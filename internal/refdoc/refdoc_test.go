@@ -435,12 +435,19 @@ func TestEscapePlaceholders(t *testing.T) {
 			want: "Export a run.\n\nIt writes `rollup-<key>.json` or rollup.csv.",
 		},
 		"punctuation the token carries": {
-			// The token is what whitespace delimits, so a comma or a period
-			// against it ends up inside the span. Help text that puts a
-			// placeholder mid-sentence, which is where every one of them sits
-			// today, reads as it was written.
+			// The token is what whitespace delimits, so the period that ends
+			// the sentence arrives with it. It is written after the span,
+			// while the .json the file name ends on stays inside.
 			text: "writes rollup-<key>.json.",
-			want: "writes `rollup-<key>.json.`",
+			want: "writes `rollup-<key>.json`.",
+		},
+		"punctuation the sentence goes on after": {
+			text: "rollup-<key>.json: one document per group",
+			want: "`rollup-<key>.json`: one document per group",
+		},
+		"a code span with punctuation against it": {
+			text: "writes `rollup-<key>.json`.",
+			want: "writes `rollup-<key>.json`.",
 		},
 		"comparison rather than a placeholder": {
 			text: "a > b and c < d",

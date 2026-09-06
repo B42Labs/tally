@@ -382,7 +382,7 @@ The answer is 200 whenever the request itself was authorized and readable, whate
 
 Security: `ingestToken`
 
-The request body is `application/json`, a [EventInput](/reference/api/reporting-api-schemas#eventinput) or an array of [EventInput](/reference/api/reporting-api-schemas#eventinput).
+The request body is `application/json`, an [EventInput](/reference/api/reporting-api-schemas#eventinput) or an array of [EventInput](/reference/api/reporting-api-schemas#eventinput).
 
 | Status | Description | Body | Headers |
 | --- | --- | --- | --- |
@@ -573,7 +573,7 @@ Security: `apiToken`
 | --- | --- | --- | --- | --- |
 | `id` | `path` | yes | [Uuid](/reference/api/reporting-api-schemas#uuid) | The project, as this API names it. |
 
-The request body is `application/json`, a [UpdateProject](/reference/api/reporting-api-schemas#updateproject).
+The request body is `application/json`, an [UpdateProject](/reference/api/reporting-api-schemas#updateproject).
 
 | Status | Description | Body | Headers |
 | --- | --- | --- | --- |
@@ -645,7 +645,7 @@ Security: `apiToken`
 | `id` | `path` | yes | [Uuid](/reference/api/reporting-api-schemas#uuid) | The project the relation leaves. |
 | `relation_id` | `path` | yes | [Uuid](/reference/api/reporting-api-schemas#uuid) | The relation itself, as this API names it. |
 
-The request body is `application/json`, a [UpdateRelation](/reference/api/reporting-api-schemas#updaterelation).
+The request body is `application/json`, an [UpdateRelation](/reference/api/reporting-api-schemas#updaterelation).
 
 | Status | Description | Body | Headers |
 | --- | --- | --- | --- |

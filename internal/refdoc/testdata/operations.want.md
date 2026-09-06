@@ -46,7 +46,7 @@ Security: `ingestToken`, or `apiToken` and `internalToken`
 | --- | --- | --- | --- | --- |
 | `cloud` | `path` | yes | string | The installation the items live in. |
 
-The request body is `application/json`, a [Item](/reference/api/reporting-api-schemas#item) or an array of [Item](/reference/api/reporting-api-schemas#item).
+The request body is `application/json`, an [Item](/reference/api/reporting-api-schemas#item) or an array of [Item](/reference/api/reporting-api-schemas#item).
 
 | Status | Description | Body | Headers |
 | --- | --- | --- | --- |
@@ -65,7 +65,7 @@ Security: `apiToken`
 | --- | --- | --- | --- | --- |
 | `cloud` | `path` | yes | string | The installation the items live in. |
 
-The request body is `application/json`, a [Item](/reference/api/reporting-api-schemas#item).
+The request body is `application/json`, an [Item](/reference/api/reporting-api-schemas#item).
 
 | Status | Description | Body | Headers |
 | --- | --- | --- | --- |

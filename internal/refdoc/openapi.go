@@ -216,7 +216,7 @@ func requestBodySentence(operation *openapi3.Operation) string {
 // alternatives a oneOf leaves open.
 func bodyWords(ref *openapi3.SchemaRef) string {
 	if name, ok := schemaName(ref); ok {
-		return "a " + schemaPageLink(name)
+		return withArticle(schemaPageLink(name))
 	}
 
 	value := ref.Value
@@ -232,7 +232,7 @@ func bodyWords(ref *openapi3.SchemaRef) string {
 		}
 		return strings.Join(alternatives, " or ")
 	}
-	return "a " + apiTypeWord(ref, schemaPageLink)
+	return withArticle(apiTypeWord(ref, schemaPageLink))
 }
 
 // responseRows is one row per status the operation answers with, in status
