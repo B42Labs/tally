@@ -1,0 +1,27 @@
+# A rule set carrying the three shapes a section is rendered from: an alerting
+# rule holding every annotation, one holding none of the optional ones, and a
+# recorded series.
+groups:
+  - name: fixture
+    interval: 1m
+    rules:
+      - alert: FixtureCloudSilent
+        expr: |
+          sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[1h])) == 0
+          and sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[24h])) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No collector events from {{ $labels.cloud }} for >1h"
+          runbook: docs/runbooks/FixtureCloudSilent.md
+
+      - alert: FixtureSyncStale
+        expr: sum by (cloud) (increase(tally_sync_runs_total{status="completed"}[30m])) == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "No completed reconciliation run for {{ $labels.cloud }} in 30m"
+
+      - record: fixture:current_resources:sum
+        expr: sum by (cloud, resource_type) (tally_current_resources)

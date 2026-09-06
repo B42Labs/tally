@@ -18,7 +18,65 @@
     { "text": "How-to guides", "items": [{ "text": "Overview", "link": "/how-to/" }] }
   ],
   "/reference/": [
-    { "text": "Reference", "items": [{ "text": "Overview", "link": "/reference/" }] }
+    {
+      "text": "Reference",
+      "items": [
+        { "text": "Overview", "link": "/reference/" },
+        {
+          "text": "Reporting API",
+          "collapsed": true,
+          "items": [
+            { "text": "Endpoints", "link": "/reference/api/reporting-api" },
+            { "text": "Schemas", "link": "/reference/api/reporting-api-schemas" }
+          ]
+        },
+        {
+          "text": "Command lines",
+          "collapsed": true,
+          "items": [
+            { "text": "tally-reporting", "link": "/reference/command-line/tally-reporting" },
+            { "text": "tally-reporting-admin", "link": "/reference/command-line/tally-reporting-admin" },
+            { "text": "tally-engine", "link": "/reference/command-line/tally-engine" },
+            { "text": "tally-openstack-collector", "link": "/reference/command-line/tally-openstack-collector" },
+            { "text": "tally-openstack-simulator", "link": "/reference/command-line/tally-openstack-simulator" },
+            { "text": "tally-vertical-slice", "link": "/reference/command-line/tally-vertical-slice" }
+          ]
+        },
+        {
+          "text": "Configuration",
+          "collapsed": true,
+          "items": [
+            { "text": "Reporting API settings", "link": "/reference/configuration/tally-reporting" },
+            { "text": "Engine settings", "link": "/reference/configuration/tally-engine" },
+            { "text": "OpenStack collector settings", "link": "/reference/configuration/tally-openstack-collector" },
+            { "text": "OpenStack simulator settings", "link": "/reference/configuration/tally-openstack-simulator" },
+            { "text": "Clouds file", "link": "/reference/configuration/clouds-file" },
+            { "text": "Counter sources file", "link": "/reference/configuration/counter-sources-file" }
+          ]
+        },
+        {
+          "text": "Schemas and formats",
+          "collapsed": true,
+          "items": [
+            { "text": "Canonical event", "link": "/reference/formats/canonical-event" },
+            { "text": "Label convention", "link": "/reference/formats/label-convention" },
+            { "text": "Pricing model file", "link": "/reference/formats/pricing-model" },
+            { "text": "Pricing adjustments", "link": "/reference/formats/pricing-adjustments" },
+            { "text": "Export formats", "link": "/reference/formats/exports" },
+            { "text": "OpenStack notification mapping", "link": "/reference/formats/notification-mapping" }
+          ]
+        },
+        {
+          "text": "Observability",
+          "collapsed": true,
+          "items": [
+            { "text": "Metrics", "link": "/reference/observability/metrics" },
+            { "text": "Alert rules", "link": "/reference/observability/alert-rules" },
+            { "text": "Grafana dashboards", "link": "/reference/observability/dashboards" }
+          ]
+        }
+      ]
+    }
   ],
   "/explanation/": [
     {

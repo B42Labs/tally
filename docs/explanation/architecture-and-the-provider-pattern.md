@@ -119,7 +119,10 @@ deduplicates on it, so a collector that replays a batch changes nothing.
 The label convention and the event schema are contracts rather than arguments,
 so they are not reproduced here. The normative text is sections 3 and 4 of
 [the roadmap conventions](https://github.com/B42Labs/tally/blob/main/roadmap/00-conventions.md);
-the reference quadrant is where that contract belongs on this site.
+on this site the contract is the
+[canonical event](/reference/formats/canonical-event) and
+[label convention](/reference/formats/label-convention) pages of the
+reference quadrant.
 
 ## What a provider supplies
 

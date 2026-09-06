@@ -28,6 +28,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/source"
 	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
+	"github.com/b42labs/tally/internal/refdoc"
 	reportingtest "github.com/b42labs/tally/internal/reporting/store/storetest"
 	enginemigrations "github.com/b42labs/tally/migrations/engine"
 )
@@ -2766,4 +2767,18 @@ func migrationStatusOutput(state string) string {
 		fmt.Fprintf(&out, "migration %d %s\n", version, state)
 	}
 	return out.String()
+}
+
+// TestReferencePageIsCurrent holds the command line reference page of this
+// binary to the tree it documents. A subcommand or a flag added here without
+// the page being regenerated fails this test rather than leaving a reader with
+// a tree the binary no longer has.
+func TestReferencePageIsCurrent(t *testing.T) {
+	text, err := refdoc.Commands(newRootCmd())
+	if err != nil {
+		t.Fatalf("rendering the command tree: %v", err)
+	}
+
+	refdoc.Verify(t, "../../docs/reference/command-line/tally-engine.md",
+		map[string]string{"commands": text})
 }

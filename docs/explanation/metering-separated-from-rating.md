@@ -198,7 +198,8 @@ re-rating a past period yields the same numbers.
 
 [pricing/2026-03.yaml](https://github.com/B42Labs/tally/blob/main/pricing/2026-03.yaml)
 is the example model of the concept, and it is what the golden suite rates with.
-The file format is documented in the reference quadrant.
+The file format is documented on the
+[pricing model file page](/reference/formats/pricing-model).
 
 [Worked examples](/explanation/worked-examples) carries the five metering output
 examples of the concept, each with the golden case it seeded.
