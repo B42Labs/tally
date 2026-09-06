@@ -5,13 +5,13 @@
 // down by hand.
 //
 // Every case bills March 2026, [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z),
-// which is the period README section 3.4 computes its examples over, and the
-// temporal case bills the April after it as well. The expectations come from
-// that section, from WP 5.6 of roadmap/05-phase-5-commercial-pricing.md (the
-// commercial cases) and from pricing/2026-03.yaml, never from a previous run:
-// a failure here is a report about the engine, so the answer to one is to find
-// what changed in the engine, not to write the engine's new number into
-// expected.json.
+// which is the period docs/explanation/worked-examples.md computes its
+// examples over, and the temporal case bills the April after it as well. The
+// expectations come from that section, from WP 5.6 of
+// roadmap/05-phase-5-commercial-pricing.md (the commercial cases) and from
+// pricing/2026-03.yaml, never from a previous run: a failure here is a report
+// about the engine, so the answer to one is to find what changed in the
+// engine, not to write the engine's new number into expected.json.
 package engine_test
 
 import (
@@ -331,10 +331,10 @@ func TestGolden(t *testing.T) {
 // goldenCorrectionCredit runs the correction chain of the concept over the
 // pricing model the suite rates with: a month billed as one active interval,
 // closed, and then reached by the power cycle that arrives after the invoice
-// went out. The credit note it checks is the one README section 3.4 computes,
-// down to the three deltas and the -24.00 they add up to, and the second
-// correction after it checks that a period whose late events have been settled
-// has nothing left to credit.
+// went out. The credit note it checks is the one
+// docs/explanation/worked-examples.md computes, down to the three deltas and
+// the -24.00 they add up to, and the second correction after it checks that a
+// period whose late events have been settled has nothing left to credit.
 func goldenCorrectionCredit(t *testing.T, f goldenFixture) {
 	const (
 		cloud = "os-golden-credit"

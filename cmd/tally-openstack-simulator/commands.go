@@ -20,8 +20,8 @@ const defaultFactor = 744
 
 // defaultMetricsInterval is the grid a run samples its traffic counters and its
 // inventory on. It is the polling interval Ceilometer runs at out of the box,
-// which README section 4.1 names, so a simulated month carries as many points
-// per series as a real one.
+// which docs/explanation/openstack-as-the-reference-provider.md names, so a
+// simulated month carries as many points per series as a real one.
 const defaultMetricsInterval = 300 * time.Second
 
 // defaultWaitForCollector is how long a run waits for the collector to appear

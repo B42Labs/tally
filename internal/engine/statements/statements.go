@@ -1,10 +1,10 @@
 // Package statements renders what a billing period is invoiced from: one
 // statement document per top-level project, in the format the concept fixes
-// (README section 3.4), holding a line item per resource, a period per usage
-// draft, and the costs of every project attributed to that one beside its own.
-// Build is a pure function. It reads nothing and writes nothing, so a period is
-// rendered from the metering, rating, and attribution results a caller already
-// holds.
+// (docs/explanation/worked-examples.md), holding a line item per resource, a
+// period per usage draft, and the costs of every project attributed to that
+// one beside its own. Build is a pure function. It reads nothing and writes
+// nothing, so a period is rendered from the metering, rating, and attribution
+// results a caller already holds.
 //
 // Every number in a document comes from those results, which is why the
 // renderer takes no pricing model. An amount was rounded where it was rated,
