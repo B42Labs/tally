@@ -16,7 +16,8 @@ process is assembled in
 ## Invocation
 
 The process takes no flags and reads no arguments. Every setting comes from the
-environment, under the names the Reporting API settings page lists.
+environment, under the names the
+[Reporting API settings](/reference/configuration/tally-reporting) page lists.
 
 ## What it serves
 
@@ -49,8 +50,9 @@ The clouds file `TALLY_REPORTING_CLOUDS_CONFIG` names is read once at startup
 rather than per sync run. Every configured cloud's adapter name and platform is
 checked against the registered adapters there, so a cloud that names an
 unregistered adapter, or one that observes a different platform than the cloud
-declares, stops the process before it listens. The clouds file page states the
-file's shape.
+declares, stops the process before it listens. The
+[clouds file](/reference/configuration/clouds-file) page states the file's
+shape.
 
 Authentication turned off with `TALLY_REPORTING_AUTH_MODE=disabled` is logged as
 a warning at startup: every request is then served without a credential.

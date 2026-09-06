@@ -41,6 +41,18 @@
             { "text": "tally-openstack-simulator", "link": "/reference/command-line/tally-openstack-simulator" },
             { "text": "tally-vertical-slice", "link": "/reference/command-line/tally-vertical-slice" }
           ]
+        },
+        {
+          "text": "Configuration",
+          "collapsed": true,
+          "items": [
+            { "text": "Reporting API settings", "link": "/reference/configuration/tally-reporting" },
+            { "text": "Engine settings", "link": "/reference/configuration/tally-engine" },
+            { "text": "OpenStack collector settings", "link": "/reference/configuration/tally-openstack-collector" },
+            { "text": "OpenStack simulator settings", "link": "/reference/configuration/tally-openstack-simulator" },
+            { "text": "Clouds file", "link": "/reference/configuration/clouds-file" },
+            { "text": "Counter sources file", "link": "/reference/configuration/counter-sources-file" }
+          ]
         }
       ]
     }

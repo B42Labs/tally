@@ -26,9 +26,10 @@ and its subcommands in
 
 ## Environment
 
-Every setting comes from the environment, under the names the metering engine
-settings page lists. It is read when a subcommand runs rather than when the tree
-is built, so `--help` needs no configuration at all.
+Every setting comes from the environment, under the names the
+[metering engine settings](/reference/configuration/tally-engine) page lists. It
+is read when a subcommand runs rather than when the tree is built, so `--help`
+needs no configuration at all.
 
 How much of it a subcommand needs differs, and each gate refuses a missing value
 before the first query rather than at it.
