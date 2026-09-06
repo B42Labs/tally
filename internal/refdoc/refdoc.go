@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -245,6 +246,29 @@ func code(s string) string {
 // of a GitHub-flavoured table, so a pipe in the text is escaped.
 func cell(s string) string {
 	return strings.ReplaceAll(s, "|", `\|`)
+}
+
+// prosePattern is one whitespace-delimited token of prose.
+var prosePattern = regexp.MustCompile(`\S+`)
+
+// escapePlaceholders wraps every whitespace-delimited token holding a <...>
+// placeholder in a code span. A command's help text names its arguments and its
+// output files that way, and the site reads a bare <key> as markup rather than
+// as text. A token that already carries a backtick is left alone, so nothing is
+// wrapped twice. The whitespace between the tokens is kept, because the prose
+// it separates is rendered as it was written.
+func escapePlaceholders(s string) string {
+	return prosePattern.ReplaceAllStringFunc(s, wrapPlaceholder)
+}
+
+// wrapPlaceholder is one token of prose, in a code span where it holds a
+// placeholder.
+func wrapPlaceholder(token string) string {
+	open := strings.Index(token, "<")
+	if open < 0 || !strings.Contains(token[open:], ">") || strings.Contains(token, "`") {
+		return token
+	}
+	return code(token)
 }
 
 // table renders a header row, its separator, and one row per entry. Every cell
