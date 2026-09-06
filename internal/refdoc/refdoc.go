@@ -315,14 +315,26 @@ func escapePlaceholders(s string) string {
 	return prosePattern.ReplaceAllStringFunc(s, wrapPlaceholder)
 }
 
+// trailingPunctuation is what a token carries after the placeholder rather than
+// as part of it. It ends the sentence the placeholder stands in, so it stays
+// outside the code span.
+const trailingPunctuation = ".,:;!?)"
+
 // wrapPlaceholder is one token of prose, in a code span where it holds a
-// placeholder.
+// placeholder. Punctuation the token ends on is written after the span, so
+// help text that puts a placeholder at the end of a sentence reads as it was
+// written. What the placeholder itself ends on, a .json suffix among it, stays
+// inside the span.
 func wrapPlaceholder(token string) string {
-	open := strings.Index(token, "<")
-	if open < 0 || !strings.Contains(token[open:], ">") || strings.Contains(token, "`") {
+	if strings.Contains(token, "`") {
 		return token
 	}
-	return code(token)
+	text := strings.TrimRight(token, trailingPunctuation)
+	open := strings.Index(text, "<")
+	if open < 0 || !strings.Contains(text[open:], ">") {
+		return token
+	}
+	return code(text) + token[len(text):]
 }
 
 // table renders a header row, its separator, and one row per entry. Every cell

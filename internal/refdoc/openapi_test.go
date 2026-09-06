@@ -95,7 +95,7 @@ func TestOpenAPIOperationsRendersEachOperationShape(t *testing.T) {
 		// omits the parameter sends, are on the row rather than nowhere.
 		"| `limit` | `query` | no | integer, 1 to 1000, default `100` |",
 		// A body of two alternatives names both.
-		"The request body is `application/json`, a [Item](/reference/api/reporting-api-schemas#item) " +
+		"The request body is `application/json`, an [Item](/reference/api/reporting-api-schemas#item) " +
 			"or an array of [Item](/reference/api/reporting-api-schemas#item).",
 		// A body that is not JSON is named by its media type, which is what
 		// keeps it apart from a status carrying no body at all.
@@ -323,6 +323,10 @@ func TestOpenAPIRendersTheContractOfThisRepository(t *testing.T) {
 		"Security: `ingestToken`",
 		"### `POST /internal/sync/{cloud}`",
 		"### `GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/events`",
+		// The article in front of a body names the schema the way it is
+		// spelled: a vowel takes an, every other letter takes a.
+		"body is `application/json`, an [EventInput](",
+		"body is `application/json`, a [SyncRequest](",
 	} {
 		if !strings.Contains(operations, want) {
 			t.Errorf("the rendering does not carry %q", want)
