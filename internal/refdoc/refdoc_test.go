@@ -409,6 +409,54 @@ func TestFenced(t *testing.T) {
 	}
 }
 
+func TestEscapePlaceholders(t *testing.T) {
+	cases := map[string]struct {
+		text string
+		want string
+	}{
+		"no placeholder": {
+			text: "Export the statements of a run.",
+			want: "Export the statements of a run.",
+		},
+		"one placeholder": {
+			text: "writes rollup-<key>.json beside the statements",
+			want: "writes `rollup-<key>.json` beside the statements",
+		},
+		"argument on its own": {
+			text: "migrate-down-to <version>",
+			want: "migrate-down-to `<version>`",
+		},
+		"already in a code span": {
+			text: "writes `rollup-<key>.json` beside the statements",
+			want: "writes `rollup-<key>.json` beside the statements",
+		},
+		"paragraphs and their newlines": {
+			text: "Export a run.\n\nIt writes rollup-<key>.json or rollup.csv.",
+			want: "Export a run.\n\nIt writes `rollup-<key>.json` or rollup.csv.",
+		},
+		"punctuation the token carries": {
+			// The token is what whitespace delimits, so a comma or a period
+			// against it ends up inside the span. Help text that puts a
+			// placeholder mid-sentence, which is where every one of them sits
+			// today, reads as it was written.
+			text: "writes rollup-<key>.json.",
+			want: "writes `rollup-<key>.json.`",
+		},
+		"comparison rather than a placeholder": {
+			text: "a > b and c < d",
+			want: "a > b and c < d",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := escapePlaceholders(tc.text); got != tc.want {
+				t.Errorf("escapePlaceholders(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTableEscapesThePipe(t *testing.T) {
 	got := table([]string{"Name", "Meaning"}, [][]string{{"sep", "a | b"}})
 	want := "| Name | Meaning |\n| --- | --- |\n| sep | a \\| b |\n"
