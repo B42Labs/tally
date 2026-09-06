@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/b42labs/tally/internal/core/event"
+	"github.com/b42labs/tally/internal/refdoc"
 )
 
 // completeConfig is a run's input with nothing missing. Every case below is
@@ -248,4 +249,18 @@ func TestBrokenResourceBoundsTheViolation(t *testing.T) {
 			t.Errorf("Violations = %v, want [%q]", resource.Violations, violation)
 		}
 	})
+}
+
+// TestReferencePageIsCurrent holds the command line reference page of this
+// binary to the flags it documents. A flag added here without the page being
+// regenerated fails this test rather than leaving a reader with a set the
+// binary no longer parses.
+func TestReferencePageIsCurrent(t *testing.T) {
+	text, err := refdoc.Flags(newFlagSet(&config{}))
+	if err != nil {
+		t.Fatalf("rendering the flag set: %v", err)
+	}
+
+	refdoc.Verify(t, "../../docs/reference/command-line/tally-vertical-slice.md",
+		map[string]string{"flags": text})
 }

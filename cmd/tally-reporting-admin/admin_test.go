@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/b42labs/tally/internal/refdoc"
 	"github.com/b42labs/tally/internal/reporting/auth"
 	"github.com/b42labs/tally/internal/reporting/config"
 	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
@@ -702,4 +703,18 @@ func statusFor(t *testing.T, middleware func(http.Handler) http.Handler, token s
 	})).ServeHTTP(rec, req)
 
 	return rec.Code
+}
+
+// TestReferencePageIsCurrent holds the command line reference page of this
+// binary to the tree it documents. A subcommand or a flag added here without
+// the page being regenerated fails this test rather than leaving a reader with
+// a tree the binary no longer has.
+func TestReferencePageIsCurrent(t *testing.T) {
+	text, err := refdoc.Commands(newRootCmd())
+	if err != nil {
+		t.Fatalf("rendering the command tree: %v", err)
+	}
+
+	refdoc.Verify(t, "../../docs/reference/command-line/tally-reporting-admin.md",
+		map[string]string{"commands": text})
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
+	"github.com/b42labs/tally/internal/refdoc"
 )
 
 // endedMonth is a billing month that is over and stays over, which is what the
@@ -1450,4 +1451,18 @@ func firstTouchedResource(t *testing.T, oracle simulator.Oracle, fault string) (
 func lastLine(stdout string) string {
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	return lines[len(lines)-1]
+}
+
+// TestReferencePageIsCurrent holds the command line reference page of this
+// binary to the tree it documents. A subcommand or a flag added here without
+// the page being regenerated fails this test rather than leaving a reader with
+// a tree the binary no longer has.
+func TestReferencePageIsCurrent(t *testing.T) {
+	text, err := refdoc.Commands(newRootCmd())
+	if err != nil {
+		t.Fatalf("rendering the command tree: %v", err)
+	}
+
+	refdoc.Verify(t, "../../docs/reference/command-line/tally-openstack-simulator.md",
+		map[string]string{"commands": text})
 }

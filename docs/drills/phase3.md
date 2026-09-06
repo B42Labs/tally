@@ -29,7 +29,7 @@ inside the drill, and the checklist at the end stays unticked until it is
 closed.
 
 The drill runs outside CI for the reason the vertical slice's does
-([`../../cmd/tally-vertical-slice/README.md`](../../cmd/tally-vertical-slice/README.md#why-the-drill-runs-outside-ci)):
+([the vertical slice page](https://b42labs.github.io/tally/reference/command-line/tally-vertical-slice#verification)):
 it needs Docker, a kind cluster and hours of wall clock, and the CI runner has
 the first of the three alone.
 

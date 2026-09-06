@@ -18,6 +18,7 @@ import (
 
 	"github.com/b42labs/tally/internal/core/health"
 	"github.com/b42labs/tally/internal/providers/openstack"
+	"github.com/b42labs/tally/internal/refdoc"
 )
 
 // startupTimeout is how long a test waits for the collector to answer its first
@@ -415,4 +416,18 @@ func waitForHealthz(t *testing.T, port int, done <-chan error) {
 		return
 	}
 	t.Fatalf("the collector did not answer on port %d within %v", port, startupTimeout)
+}
+
+// TestReferencePageIsCurrent holds the command line reference page of this
+// binary to the flags it documents. A flag added here without the page being
+// regenerated fails this test rather than leaving a reader with a set the
+// binary no longer parses.
+func TestReferencePageIsCurrent(t *testing.T) {
+	text, err := refdoc.Flags(newFlagSet(new(bool)))
+	if err != nil {
+		t.Fatalf("rendering the flag set: %v", err)
+	}
+
+	refdoc.Verify(t, "../../docs/reference/command-line/tally-openstack-collector.md",
+		map[string]string{"flags": text})
 }
