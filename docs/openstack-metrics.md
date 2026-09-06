@@ -75,7 +75,7 @@ VictoriaMetrics reads its own scrape config,
 | `otel-collector` | 15s | discovered: the `metrics` port of the `otel-collector` endpoints | The collector's own telemetry: what it accepted, what it exported, what it refused. |
 
 The two OpenStack jobs carry static `platform` and `cloud` labels, because
-third-party exporters do not know Tally's label convention (README section 3.1,
+third-party exporters do not know Tally's label convention ([the architecture page](https://b42labs.github.io/tally/explanation/architecture-and-the-provider-pattern),
 [`roadmap/00-conventions.md`](../roadmap/00-conventions.md) section 3). The
 other two jobs carry no such labels: they export service metrics, not provider
 resource metrics.
@@ -281,8 +281,8 @@ cloud, and the resulting series count would be set by the size of the cloud
 instead of by what Tally bills. The store is one 5Gi volume with 13 months of
 retention, no expansion and no capacity alert, and when it fills it stops
 accepting writes on the push path and all four scrape jobs at once, with nothing
-ageing out for a year. The list above is the instance runtime data README
-section 4.1 names; check the names against the deployment's own `polling.yaml`
+ageing out for a year. The list above is the instance runtime data [the OpenStack page](https://b42labs.github.io/tally/explanation/openstack-as-the-reference-provider)
+names; check the names against the deployment's own `polling.yaml`
 before using it, because which meters exist depends on the pollsters that
 deployment runs.
 
@@ -397,7 +397,7 @@ not match their service name: keystone's is `identity`
 
 ### Coverage against the concept
 
-One row per requirement of README section 4.3.
+One row per requirement of [the OpenStack page](https://b42labs.github.io/tally/explanation/openstack-as-the-reference-provider).
 
 | Requirement | Verdict | Upstream file | Exposed metrics |
 | --- | --- | --- | --- |
@@ -604,7 +604,7 @@ account that may write DDL.
 ### Extend upstream, or supplement it
 
 The concept asks to evaluate the existing exporter first and to extend it if
-necessary (README section 4.3). The decision is to run it unchanged and to write
+necessary ([the OpenStack page](https://b42labs.github.io/tally/explanation/openstack-as-the-reference-provider)). The decision is to run it unchanged and to write
 no supplementary exporter.
 
 The evidence is the coverage table: nine of eleven requirements are covered, and

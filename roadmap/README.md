@@ -1,6 +1,6 @@
 # Tally Implementation Roadmap
 
-This directory turns the phased roadmap from the [concept document](../README.md#6-phased-roadmap)
+This directory turns the phased roadmap from the [concept document](https://b42labs.github.io/tally/explanation/roadmap)
 into **implementation-ready phase documents**. Each document is written so that a code-generation
 model (or a human developer) can implement the phase work-package by work-package without having
 to re-derive design decisions.
@@ -19,7 +19,7 @@ to re-derive design decisions.
 ## How to use these documents with a code-generation model
 
 1. **Load context**: give the model `00-conventions.md` plus the phase document you are working
-   on. The concept `README.md` is useful background but the phase documents are self-contained
+   on. The explanation quadrant of the documentation site (`https://b42labs.github.io/tally/explanation/`) is useful background but the phase documents are self-contained
    for their scope; where they refine or deviate from the concept, they say so explicitly in a
    "Decisions made by this document" section.
 2. **Work package by work package**: each phase is broken into numbered work packages (WP) with

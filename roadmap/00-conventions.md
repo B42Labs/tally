@@ -62,7 +62,7 @@ repo — deliberate: the wire contracts, not Go APIs, are the public interface).
 
 ```
 tally/
-├── README.md                      # concept document (do not modify casually)
+├── README.md                      # project readme; the concept is the explanation quadrant of the docs site
 ├── roadmap/                       # these documents
 ├── go.mod / go.sum                # single module: github.com/b42labs/tally
 ├── Makefile                       # dev entry points: make up / dev / test / lint / migrate

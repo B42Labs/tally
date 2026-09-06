@@ -16,7 +16,7 @@ or overbilled until a reconciliation run turns the difference into synthetic
 events. A resource that is created and deleted inside the gap is invisible for
 good: no run ever observes it, so nothing books it, and no later repair
 recovers it. That is the accepted limitation of the event-driven design, listed
-under [Reconciliation](../../README.md#reconciliation) in the concept.
+under [Known limitations](https://b42labs.github.io/tally/explanation/dual-ingestion-and-reconciliation#known-limitations) in the concept.
 
 ## First checks
 
