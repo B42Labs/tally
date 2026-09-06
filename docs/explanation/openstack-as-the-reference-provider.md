@@ -72,7 +72,8 @@ octavia.loadbalancer.create.end / update.end / delete.end
 ```
 
 The exact set, the event type each of them becomes, and the size fields the
-mapping reads out of its payload are documented in the reference quadrant.
+mapping reads out of its payload are documented on the
+[notification mapping page](/reference/formats/notification-mapping).
 
 ## The database exporter
 
