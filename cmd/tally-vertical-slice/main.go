@@ -69,15 +69,8 @@ type config struct {
 
 func main() {
 	var cfg config
-	flag.StringVar(&cfg.cloud, "cloud", "", "the cloud the instances live in, os-prod-eu1 for example")
-	flag.StringVar(&cfg.project, "project", "", "the project to rate, named the way its cloud names it")
-	flag.StringVar(&cfg.month, "month", "", "the calendar month to rate, as YYYY-MM")
-	flag.StringVar(&cfg.reportingURL, "reporting-url", "",
-		"https base URL of the Reporting API, without the /api/v1 suffix")
-	flag.StringVar(&cfg.pricingPath, "pricing", "", "path to the pricing file, pricing/prototype.yaml for example")
-	flag.StringVar(&cfg.caFile, "ca-file", "",
-		"PEM bundle to trust instead of the system store, for a dev cluster's own CA")
-	flag.Parse()
+	// ExitOnError exits before Parse returns an error.
+	_ = newFlagSet(&cfg).Parse(os.Args[1:])
 
 	cfg.token = os.Getenv(tokenEnv)
 
@@ -88,6 +81,23 @@ func main() {
 		slog.Error("tally-vertical-slice stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// newFlagSet is the flag set the slice parses its arguments with. It writes
+// each flag into the field of cfg it configures. The set is built here rather
+// than in main so that the flags a run accepts are readable without running
+// the command.
+func newFlagSet(cfg *config) *flag.FlagSet {
+	fs := flag.NewFlagSet("tally-vertical-slice", flag.ExitOnError)
+	fs.StringVar(&cfg.cloud, "cloud", "", "the cloud the instances live in, os-prod-eu1 for example")
+	fs.StringVar(&cfg.project, "project", "", "the project to rate, named the way its cloud names it")
+	fs.StringVar(&cfg.month, "month", "", "the calendar month to rate, as YYYY-MM")
+	fs.StringVar(&cfg.reportingURL, "reporting-url", "",
+		"https base URL of the Reporting API, without the /api/v1 suffix")
+	fs.StringVar(&cfg.pricingPath, "pricing", "", "path to the pricing file, pricing/prototype.yaml for example")
+	fs.StringVar(&cfg.caFile, "ca-file", "",
+		"PEM bundle to trust instead of the system store, for a dev cluster's own CA")
+	return fs
 }
 
 // run rates the configured month and writes the document to out. It returns an

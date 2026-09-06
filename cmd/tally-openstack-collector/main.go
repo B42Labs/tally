@@ -67,19 +67,29 @@ const (
 )
 
 func main() {
-	dump := flag.Bool("dump", false,
-		"print the notifications the broker delivers as JSON lines instead of collecting them")
-	flag.Parse()
+	var dump bool
+	// ExitOnError exits before Parse returns an error.
+	_ = newFlagSet(&dump).Parse(os.Args[1:])
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *dump); err != nil {
+	if err := run(ctx, dump); err != nil {
 		// The configured logger may not exist yet, because loading the
 		// configuration is the first thing that can fail.
 		slog.Error("tally-openstack-collector stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// newFlagSet is the flag set the collector parses its arguments with. It
+// writes --dump into dump. The set is built here rather than in main so that
+// the flags a run accepts are readable without running the command.
+func newFlagSet(dump *bool) *flag.FlagSet {
+	fs := flag.NewFlagSet("tally-openstack-collector", flag.ExitOnError)
+	fs.BoolVar(dump, "dump", false,
+		"print the notifications the broker delivers as JSON lines instead of collecting them")
+	return fs
 }
 
 // run loads the configuration and then either dumps notifications or collects
