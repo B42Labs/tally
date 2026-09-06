@@ -1,0 +1,186 @@
+# A contract carrying the shapes the renderers have to get through: an
+# unsecured probe, a secured pair of operations on one path, a referenced
+# parameter, a body of two alternatives, the shared problem response, and a
+# schema that constrains a scalar rather than naming members.
+openapi: 3.0.3
+
+info:
+  title: Fixture API
+  version: 0.1.0
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      description: >-
+        Reports whether the process should keep running.
+      responses:
+        "200":
+          description: The service is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/Problem"
+
+  /api/v1/items/{cloud}:
+    get:
+      operationId: listItems
+      summary: List the items of one cloud
+      description: >-
+        Returns the items of the cloud, narrowed by whichever filters the
+        request carries.
+
+        One call answers one page. `next_cursor` is what the next call passes
+        as `cursor`.
+      security:
+        - apiToken: []
+      parameters:
+        - name: cloud
+          in: path
+          required: true
+          description: The installation the items live in.
+          schema:
+            type: string
+        - name: kind
+          in: query
+          description: Serve only the items of this kind.
+          schema:
+            type: string
+            enum: [draft, final]
+        - name: since
+          in: query
+          description: >-
+            Serve only the items at or after this instant, the inclusive bound
+            of the window.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemList"
+        "400":
+          $ref: "#/components/responses/Problem"
+    post:
+      operationId: ingestItems
+      summary: Ingest items
+      description: >-
+        Stores a batch of items. The body is either one item or an array of
+        them.
+      security:
+        - ingestToken: []
+      parameters:
+        - name: cloud
+          in: path
+          required: true
+          description: The installation the items live in.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/Item"
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/Item"
+      responses:
+        "200":
+          description: The batch was processed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemList"
+        "413":
+          description: The batch carried more items than one call takes.
+          content:
+            application/problem+json:
+              schema:
+                type: object
+
+components:
+  responses:
+    Problem:
+      description: The request failed. The body says how.
+      content:
+        application/problem+json:
+          schema:
+            type: object
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: >-
+        The `next_cursor` of the page before this one. It is opaque: a client
+        passes it back as it received it.
+      schema:
+        type: string
+
+  schemas:
+    Item:
+      type: object
+      description: One item as this API stores it.
+      required: [id, kind]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        kind:
+          type: string
+          enum: [draft, final]
+          description: What the item is.
+        payload:
+          description: >-
+            Whatever the producer sent. It is described rather than
+            constrained, so that one bad member refuses one item.
+        tags:
+          type: array
+          description: The labels the item carries.
+          items:
+            type: string
+        note:
+          type: string
+          nullable: true
+          description: Free text, null when the item carries none.
+
+    ItemList:
+      type: object
+      description: One page of items.
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: The items of this page.
+          items:
+            $ref: "#/components/schemas/Item"
+        next_cursor:
+          type: string
+          nullable: true
+          description: Where the next page starts. It is null on the last page.
+
+    Uuid:
+      type: string
+      format: uuid
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+
+  securitySchemes:
+    ingestToken:
+      type: http
+      scheme: bearer
+      description: >-
+        An ingest credential, issued per cloud and passed as
+        `Authorization: Bearer <token>`.
+    apiToken:
+      type: http
+      scheme: bearer
+      description: >-
+        An API token passed as `Authorization: Bearer <token>`.
