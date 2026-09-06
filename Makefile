@@ -95,7 +95,7 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: up down dev ca test lint fmt check-alerting migrate generate images \
-	simulator-up simulator-down
+	simulator-up simulator-down docs docs-build
 
 ## up: create the kind cluster, install the add-ons, and deploy the dev overlay
 up:
@@ -293,3 +293,17 @@ generate:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION) \
 		-config api/reporting/oapi-codegen.yaml api/reporting/openapi.yaml
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
+
+# npm ci recreates node_modules from the lockfile and writes this marker, which
+# is what tells make the install is current. It runs once, and again after a
+# lockfile change.
+node_modules/.package-lock.json: package-lock.json
+	npm ci
+
+## docs: serve the documentation site locally with live reload
+docs: node_modules/.package-lock.json
+	npm run docs:dev
+
+## docs-build: build the documentation site; a dead internal link fails the build
+docs-build: node_modules/.package-lock.json
+	npm run docs:build

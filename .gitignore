@@ -25,3 +25,8 @@ tilt_modules/
 
 # Locally generated CA certificate
 tally-ca.crt
+
+# Documentation site
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
