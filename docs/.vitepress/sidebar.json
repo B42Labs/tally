@@ -18,7 +18,20 @@
     { "text": "How-to guides", "items": [{ "text": "Overview", "link": "/how-to/" }] }
   ],
   "/reference/": [
-    { "text": "Reference", "items": [{ "text": "Overview", "link": "/reference/" }] }
+    {
+      "text": "Reference",
+      "items": [
+        { "text": "Overview", "link": "/reference/" },
+        {
+          "text": "Reporting API",
+          "collapsed": true,
+          "items": [
+            { "text": "Endpoints", "link": "/reference/api/reporting-api" },
+            { "text": "Schemas", "link": "/reference/api/reporting-api-schemas" }
+          ]
+        }
+      ]
+    }
   ],
   "/explanation/": [
     {
