@@ -64,6 +64,32 @@ const (
 	counterSourcesExample = "../cmd/tally-engine/counter-sources.example.yaml"
 )
 
+// The sources the schema and format pages render from: the canonical event, the
+// two embedded JSON Schemas, the pricing model the repository ships, and the
+// mapping literal the OpenStack collector maps notifications with.
+const (
+	eventSource             = "../internal/core/event/event.go"
+	pricingSchemaSource     = "../internal/engine/pricing/pricing.schema.json"
+	pricingExample          = "../pricing/2026-03.yaml"
+	adjustmentsSchemaSource = "../internal/core/adjustment/adjustments_schema.json"
+	adjustmentsSource       = "../internal/engine/adjustments/adjustments.go"
+	mappingSource           = "../internal/providers/openstack/mapping.go"
+)
+
+// The sources the export page renders its documents from: the two file writers
+// that declare them and the two packages whose types the writers re-render.
+// goldenDir holds the examples, which are the files the export tests compare a
+// written directory against, so the page shows output a test produced rather
+// than output written for the page.
+const (
+	exportJSONSource      = "../internal/engine/export/json.go"
+	exportKickbacksSource = "../internal/engine/export/kickbacks.go"
+	exportRollupSource    = "../internal/engine/export/rollup.go"
+	statementsSource      = "../internal/engine/statements/statements.go"
+	correctionsSource     = "../internal/engine/corrections/corrections.go"
+	goldenDir             = "../internal/engine/export/testdata/golden"
+)
+
 // problemTypes are the constants the errors table of the endpoints page lists,
 // in the order the source declares them.
 var problemTypes = []string{
@@ -180,6 +206,87 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 		refdoc.Verify(t, referencePage("configuration/counter-sources-file.md"), map[string]string{
 			"entry":   render(t, entry, err),
 			"example": refdoc.Fenced("yaml", readSource(t, counterSourcesExample)),
+		})
+	})
+
+	t.Run("formats/canonical-event.md", func(t *testing.T) {
+		source := readSource(t, eventSource)
+		wire, wireErr := refdoc.Struct(source, "json", "Event", "PayloadEnvelope")
+		bounds, boundsErr := refdoc.Consts(source,
+			"eventIDMaxLen", "eventTypeMaxLen", "identifierMaxLen", "stateMaxLen")
+		origins, originsErr := refdoc.Consts(source,
+			"SourceCollector", "SourceReconciliation",
+			"CategoryCreate", "CategoryUpdate", "CategoryDelete")
+
+		refdoc.Verify(t, referencePage("formats/canonical-event.md"), map[string]string{
+			"event":   render(t, wire, wireErr),
+			"bounds":  render(t, bounds, boundsErr),
+			"sources": render(t, origins, originsErr),
+		})
+	})
+
+	t.Run("formats/pricing-model.md", func(t *testing.T) {
+		schema, err := refdoc.JSONSchema(readSource(t, pricingSchemaSource))
+
+		refdoc.Verify(t, referencePage("formats/pricing-model.md"), map[string]string{
+			"schema":  render(t, schema, err),
+			"example": refdoc.Fenced("yaml", readSource(t, pricingExample)),
+		})
+	})
+
+	t.Run("formats/pricing-adjustments.md", func(t *testing.T) {
+		schema, schemaErr := refdoc.JSONSchema(readSource(t, adjustmentsSchemaSource))
+		line, lineErr := refdoc.Struct(readSource(t, adjustmentsSource), "json", "Line")
+
+		refdoc.Verify(t, referencePage("formats/pricing-adjustments.md"), map[string]string{
+			"schema": render(t, schema, schemaErr),
+			"line":   render(t, line, lineErr),
+		})
+	})
+
+	t.Run("formats/exports.md", func(t *testing.T) {
+		index, indexErr := refdoc.Struct(readSource(t, exportJSONSource), "json",
+			"runDocument", "statementEntry", "rollupIndex", "rollupEntry")
+		statement, statementErr := refdoc.Struct(readSource(t, statementsSource), "json",
+			"Document", "BillingPeriod", "LineItem", "Period", "RelatedCost")
+		creditNote, creditNoteErr := refdoc.Struct(readSource(t, correctionsSource), "json",
+			"CreditNote", "LineItem", "Change", "AdjustmentChange", "RelatedCost")
+		settlement, settlementErr := refdoc.Struct(readSource(t, exportKickbacksSource), "json",
+			"kickbacksDocument", "beneficiaryEntry", "kickbackEntry")
+		rollup, rollupErr := refdoc.Struct(readSource(t, exportRollupSource), "json",
+			"rollupDocument", "rollupMemberEntry")
+		// The golden files the examples are fenced from, read the way every other
+		// source of this test is: relative to this directory.
+		golden := func(name string) []byte { return readSource(t, goldenDir+"/"+name) }
+
+		refdoc.Verify(t, referencePage("formats/exports.md"), map[string]string{
+			"run-json":    render(t, index, indexErr),
+			"statement":   render(t, statement, statementErr),
+			"credit-note": render(t, creditNote, creditNoteErr),
+			"kickbacks":   render(t, settlement, settlementErr),
+			"rollup":      render(t, rollup, rollupErr),
+
+			"example-run-json":            refdoc.Fenced("json", golden("regular/run.json")),
+			"example-statement":           refdoc.Fenced("json", golden("regular/statement-os-prod%2Fproj-456.json")),
+			"example-correction-run-json": refdoc.Fenced("json", golden("correction/run.json")),
+			"example-credit-note":         refdoc.Fenced("json", golden("correction/credit-note-os-prod%2Fproj-456.json")),
+			"example-kickbacks":           refdoc.Fenced("json", golden("kickbacks/regular.json")),
+			"example-kickback-deltas":     refdoc.Fenced("json", golden("kickbacks/correction.json")),
+			"example-rollup-run-json":     refdoc.Fenced("json", golden("rollup/run.json")),
+			"example-rollup":              refdoc.Fenced("json", golden("rollup/rollup-meta%2Fcustomer-alpha.json")),
+
+			"example-rated-csv":     refdoc.Fenced("csv", golden("regular/rated.csv")),
+			"example-deltas-csv":    refdoc.Fenced("csv", golden("correction/deltas.csv")),
+			"example-kickbacks-csv": refdoc.Fenced("csv", golden("kickbacks/regular.csv")),
+			"example-rollup-csv":    refdoc.Fenced("csv", golden("rollup/rollup.csv")),
+		})
+	})
+
+	t.Run("formats/notification-mapping.md", func(t *testing.T) {
+		mapping, err := refdoc.MappingTable(readSource(t, mappingSource))
+
+		refdoc.Verify(t, referencePage("formats/notification-mapping.md"), map[string]string{
+			"mapping": render(t, mapping, err),
 		})
 	})
 }

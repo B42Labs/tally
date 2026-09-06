@@ -103,6 +103,34 @@ func TestStructRendersAYAMLType(t *testing.T) {
 	}
 }
 
+// TestStructWrapsAPlaceholderInAComment covers the one thing a comment carries
+// that the site cannot show as it stands. A page is compiled as a Vue template,
+// so a bare <key> is read as a component that never closes and the build of the
+// page fails on it. rollupDocument in internal/engine/export names its file that
+// way, which is where this came from.
+func TestStructWrapsAPlaceholderInAComment(t *testing.T) {
+	src := []byte("package testdata\n\n" +
+		"// Group is written to rollup-<key>.json beside the statements.\n" +
+		"type Group struct {\n" +
+		"\t// File is the name statement-<key>.json a member points at.\n" +
+		"\tFile string `json:\"file\"`\n" +
+		"}\n")
+
+	got, err := Struct(src, "json", "Group")
+	if err != nil {
+		t.Fatalf("Struct() error = %v, want nil", err)
+	}
+
+	for _, want := range []string{
+		"Group is written to `rollup-<key>.json` beside the statements.",
+		"| `file` | string | always | File is the name `statement-<key>.json` a member points at. |",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the rendering does not carry %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestStructRendersAStructWithoutMembers(t *testing.T) {
 	// Every field is unpublished, so the type gets its heading and its comment
 	// and no table at all.

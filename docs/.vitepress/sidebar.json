@@ -53,6 +53,18 @@
             { "text": "Clouds file", "link": "/reference/configuration/clouds-file" },
             { "text": "Counter sources file", "link": "/reference/configuration/counter-sources-file" }
           ]
+        },
+        {
+          "text": "Schemas and formats",
+          "collapsed": true,
+          "items": [
+            { "text": "Canonical event", "link": "/reference/formats/canonical-event" },
+            { "text": "Label convention", "link": "/reference/formats/label-convention" },
+            { "text": "Pricing model file", "link": "/reference/formats/pricing-model" },
+            { "text": "Pricing adjustments", "link": "/reference/formats/pricing-adjustments" },
+            { "text": "Export formats", "link": "/reference/formats/exports" },
+            { "text": "OpenStack notification mapping", "link": "/reference/formats/notification-mapping" }
+          ]
         }
       ]
     }

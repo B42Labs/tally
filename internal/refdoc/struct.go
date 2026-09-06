@@ -16,6 +16,11 @@ import (
 // type's heading, so a reader follows a document into the one it carries. A
 // field without a name, one the tag leaves out, and one tagged - are not part
 // of the wire format and are left out of the table.
+//
+// A comment that names a file or an argument with a placeholder in angle
+// brackets has that token rendered in a code span. The site reads a bare <key>
+// as markup, so a comment carrying one would fail the build of the page it
+// reaches rather than show the name it spells.
 func Struct(src []byte, tagKey string, typeNames ...string) (string, error) {
 	if len(typeNames) == 0 {
 		return "", errors.New("refdoc: no types named")
@@ -45,7 +50,7 @@ func Struct(src []byte, tagKey string, typeNames ...string) (string, error) {
 			b.WriteString("\n")
 		}
 		b.WriteString("#### " + code(name) + "\n")
-		if doc := joinComment(decl.doc); doc != "" {
+		if doc := escapePlaceholders(joinComment(decl.doc)); doc != "" {
 			b.WriteString("\n" + doc + "\n")
 		}
 		if rows := memberRows(structType, tagKey, linked); len(rows) > 0 {
@@ -79,7 +84,7 @@ func memberRows(structType *ast.StructType, tagKey string, linked map[string]boo
 			code(member),
 			goTypeWord(field.Type, linked),
 			presence,
-			joinComment(field.Doc),
+			escapePlaceholders(joinComment(field.Doc)),
 		})
 	}
 	return rows
