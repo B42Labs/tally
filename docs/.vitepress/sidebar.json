@@ -25,7 +25,38 @@
       "text": "Explanation",
       "items": [
         { "text": "Overview", "link": "/explanation/" },
-        { "text": "How this documentation is organised", "link": "/explanation/how-this-documentation-is-organised" }
+        { "text": "How this documentation is organised", "link": "/explanation/how-this-documentation-is-organised" },
+        {
+          "text": "Design",
+          "collapsed": true,
+          "items": [
+            { "text": "Goals and design principles", "link": "/explanation/goals-and-design-principles" },
+            { "text": "Architecture and the provider pattern", "link": "/explanation/architecture-and-the-provider-pattern" },
+            { "text": "Events as the source of truth", "link": "/explanation/events-as-the-source-of-truth" },
+            { "text": "Dual ingestion and reconciliation", "link": "/explanation/dual-ingestion-and-reconciliation" }
+          ]
+        },
+        {
+          "text": "Billing",
+          "collapsed": true,
+          "items": [
+            { "text": "Metering separated from rating", "link": "/explanation/metering-separated-from-rating" },
+            { "text": "Money and rounding", "link": "/explanation/money-and-rounding" },
+            { "text": "Billing period lifecycle and corrections", "link": "/explanation/billing-period-lifecycle-and-corrections" },
+            { "text": "Project registry, relations and exclusive attribution", "link": "/explanation/project-registry-relations-and-attribution" },
+            { "text": "Commercial pricing on relations", "link": "/explanation/commercial-pricing-on-relations" },
+            { "text": "Worked examples", "link": "/explanation/worked-examples" }
+          ]
+        },
+        {
+          "text": "Providers",
+          "collapsed": true,
+          "items": [
+            { "text": "OpenStack as the reference provider", "link": "/explanation/openstack-as-the-reference-provider" },
+            { "text": "The providers that do not exist yet", "link": "/explanation/providers-that-do-not-exist-yet" }
+          ]
+        },
+        { "text": "Roadmap", "link": "/explanation/roadmap" }
       ]
     }
   ],
