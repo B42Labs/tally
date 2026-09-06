@@ -248,6 +248,13 @@ func cell(s string) string {
 	return strings.ReplaceAll(s, "|", `\|`)
 }
 
+// oneLine joins the lines of s with a single space and trims what is left,
+// which is what a table cell takes. A description a document folds over several
+// lines says the same thing on one.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // yesNo is how a table answers a question a cell holds.
 func yesNo(b bool) string {
 	if b {
