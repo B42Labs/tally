@@ -23,7 +23,9 @@ and its subcommands in
 ## Environment
 
 The CLI reads the server's configuration package, so the variables and their
-defaults are the server's, and the Reporting API settings page lists them.
+defaults are the server's, and the
+[Reporting API settings](/reference/configuration/tally-reporting) page lists
+them.
 
 Its own gate asks for `TALLY_REPORTING_DB_URL` alone. The CLI serves nothing, so
 the internal token and the OIDC URL the server's gate insists on are not asked

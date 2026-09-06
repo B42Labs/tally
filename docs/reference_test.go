@@ -18,7 +18,11 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 
+	engineconfig "github.com/b42labs/tally/internal/engine/config"
+	"github.com/b42labs/tally/internal/providers/openstack"
+	"github.com/b42labs/tally/internal/providers/openstack/simulator"
 	"github.com/b42labs/tally/internal/refdoc"
+	reportingconfig "github.com/b42labs/tally/internal/reporting/config"
 )
 
 // openAPIDocument is the contract the two Reporting API pages are rendered
@@ -37,6 +41,27 @@ const (
 	simulatorStreamSource  = "../internal/providers/openstack/simulator/stream.go"
 	simulatorOracleSource  = "../internal/providers/openstack/simulator/oracle.go"
 	sliceDocumentSource    = "../cmd/tally-vertical-slice/compute.go"
+)
+
+// The configuration structs the four settings pages render their tables from.
+// A settings table is rendered against the package's EnvNames as well, which is
+// where the *_FILE companion of a secret is looked up.
+const (
+	reportingConfigSource = "../internal/reporting/config/config.go"
+	engineConfigSource    = "../internal/engine/config/config.go"
+	collectorConfigSource = "../internal/providers/openstack/config.go"
+	simulatorConfigSource = "../internal/providers/openstack/simulator/config.go"
+)
+
+// The two configuration file formats: the source the entry of each one is
+// rendered from, and the file its example is fenced from. The examples are the
+// ones the repository ships, so a page shows a document that is deployed rather
+// than one written for the page.
+const (
+	cloudsSource          = "../internal/reporting/reconciliation/config.go"
+	cloudsExample         = "../deploy/kubernetes/overlays/dev/reconciliation/clouds-config.yaml"
+	counterSourcesSource  = "../internal/engine/counters/counters.go"
+	counterSourcesExample = "../cmd/tally-engine/counter-sources.example.yaml"
 )
 
 // problemTypes are the constants the errors table of the endpoints page lists,
@@ -101,6 +126,60 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 
 		refdoc.Verify(t, referencePage("command-line/tally-vertical-slice.md"), map[string]string{
 			"document": render(t, document, err),
+		})
+	})
+
+	t.Run("configuration/tally-reporting.md", func(t *testing.T) {
+		settings, err := refdoc.Settings(readSource(t, reportingConfigSource), "Config",
+			reportingconfig.EnvNames)
+
+		refdoc.Verify(t, referencePage("configuration/tally-reporting.md"), map[string]string{
+			"settings": render(t, settings, err),
+		})
+	})
+
+	t.Run("configuration/tally-engine.md", func(t *testing.T) {
+		settings, err := refdoc.Settings(readSource(t, engineConfigSource), "Config",
+			engineconfig.EnvNames)
+
+		refdoc.Verify(t, referencePage("configuration/tally-engine.md"), map[string]string{
+			"settings": render(t, settings, err),
+		})
+	})
+
+	t.Run("configuration/tally-openstack-collector.md", func(t *testing.T) {
+		settings, err := refdoc.Settings(readSource(t, collectorConfigSource), "Config",
+			openstack.EnvNames)
+
+		refdoc.Verify(t, referencePage("configuration/tally-openstack-collector.md"), map[string]string{
+			"settings": render(t, settings, err),
+		})
+	})
+
+	t.Run("configuration/tally-openstack-simulator.md", func(t *testing.T) {
+		settings, err := refdoc.Settings(readSource(t, simulatorConfigSource), "Config",
+			simulator.EnvNames)
+
+		refdoc.Verify(t, referencePage("configuration/tally-openstack-simulator.md"), map[string]string{
+			"settings": render(t, settings, err),
+		})
+	})
+
+	t.Run("configuration/clouds-file.md", func(t *testing.T) {
+		entry, err := refdoc.Struct(readSource(t, cloudsSource), "yaml", "CloudConfig")
+
+		refdoc.Verify(t, referencePage("configuration/clouds-file.md"), map[string]string{
+			"entry":   render(t, entry, err),
+			"example": refdoc.Fenced("yaml", readSource(t, cloudsExample)),
+		})
+	})
+
+	t.Run("configuration/counter-sources-file.md", func(t *testing.T) {
+		entry, err := refdoc.Struct(readSource(t, counterSourcesSource), "yaml", "sourceFile")
+
+		refdoc.Verify(t, referencePage("configuration/counter-sources-file.md"), map[string]string{
+			"entry":   render(t, entry, err),
+			"example": refdoc.Fenced("yaml", readSource(t, counterSourcesExample)),
 		})
 	})
 }

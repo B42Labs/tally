@@ -563,4 +563,5 @@ rest of a run answers a signal with, exit status 0.
 
 ## See also
 
-The simulator settings page lists every variable with its default.
+The [simulator settings](/reference/configuration/tally-openstack-simulator)
+page lists every variable with its default.
