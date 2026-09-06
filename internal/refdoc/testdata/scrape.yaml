@@ -1,0 +1,28 @@
+# Three jobs: one naming its targets with labels and a timeout of its own, one
+# discovering them, and one naming a target without either.
+scrape_configs:
+  - job_name: fixture-exporter
+    scrape_interval: 300s
+    scrape_timeout: 60s
+    static_configs:
+      - targets: ["fixture-exporter:9180"]
+        labels: { platform: "openstack", cloud: "os-prod-eu1" }
+  - job_name: fixture-api
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: fixture-api;http
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  - job_name: fixture-gateway
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["fixture-gateway:9101"]

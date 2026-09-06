@@ -1,0 +1,16 @@
+# A routing tree carrying a root that states every grouping setting and one
+# child that tightens a single one of them.
+global:
+  resolve_timeout: 5m
+route:
+  receiver: default
+  group_by: [alertname, cloud]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      repeat_interval: 1h
+receivers:
+  - name: default
