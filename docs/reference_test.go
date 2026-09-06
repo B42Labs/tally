@@ -29,6 +29,16 @@ const (
 	problemSource   = "../internal/reporting/httpapi/problem/problem.go"
 )
 
+// The sources the two command line pages render their document types from. A
+// simulator page states three of them, because the control endpoint, the stream
+// file and the oracle are written by three files of one package.
+const (
+	simulatorControlSource = "../internal/providers/openstack/simulator/control.go"
+	simulatorStreamSource  = "../internal/providers/openstack/simulator/stream.go"
+	simulatorOracleSource  = "../internal/providers/openstack/simulator/oracle.go"
+	sliceDocumentSource    = "../cmd/tally-vertical-slice/compute.go"
+)
+
 // problemTypes are the constants the errors table of the endpoints page lists,
 // in the order the source declares them.
 var problemTypes = []string{
@@ -66,6 +76,31 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 
 		refdoc.Verify(t, referencePage("api/reporting-api-schemas.md"), map[string]string{
 			"schemas": render(t, schemas, err),
+		})
+	})
+
+	t.Run("command-line/tally-openstack-simulator.md", func(t *testing.T) {
+		clock, clockErr := refdoc.Struct(readSource(t, simulatorControlSource), "json", "clockDocument")
+		line, lineErr := refdoc.Struct(readSource(t, simulatorStreamSource), "json", "Line")
+		oracleSource := readSource(t, simulatorOracleSource)
+		oracle, oracleErr := refdoc.Struct(oracleSource, "json",
+			"Oracle", "OracleResource", "OracleInterval", "OracleCount", "OracleTraffic")
+		format, formatErr := refdoc.Consts(oracleSource, "oracleFormat")
+
+		refdoc.Verify(t, referencePage("command-line/tally-openstack-simulator.md"), map[string]string{
+			"clock-document": render(t, clock, clockErr),
+			"stream-line":    render(t, line, lineErr),
+			"oracle":         render(t, oracle, oracleErr),
+			"oracle-format":  render(t, format, formatErr),
+		})
+	})
+
+	t.Run("command-line/tally-vertical-slice.md", func(t *testing.T) {
+		document, err := refdoc.Struct(readSource(t, sliceDocumentSource), "json",
+			"document", "periodDoc", "resourceDoc", "recordDoc", "dimensionDoc")
+
+		refdoc.Verify(t, referencePage("command-line/tally-vertical-slice.md"), map[string]string{
+			"document": render(t, document, err),
 		})
 	})
 }
