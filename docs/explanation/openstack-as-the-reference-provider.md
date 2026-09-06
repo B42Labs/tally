@@ -57,7 +57,7 @@ in a SQLite outbox and posted to the Reporting API from a loop of its own, at
 least once, with the oslo.messaging `message_id` as the `event_id`, so a
 redelivered notification and a retried batch both deduplicate on arrival.
 
-These are the notifications it consumes:
+Among the notifications it maps are these:
 
 ```text
 compute.instance.create.end / delete.end / resize.end
@@ -71,8 +71,8 @@ image.upload / image.create / image.delete
 octavia.loadbalancer.create.end / update.end / delete.end
 ```
 
-The event type each of them becomes, and the size fields the mapping reads out
-of its payload, are documented in the reference quadrant.
+The exact set, the event type each of them becomes, and the size fields the
+mapping reads out of its payload are documented in the reference quadrant.
 
 ## The database exporter
 

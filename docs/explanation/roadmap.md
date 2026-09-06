@@ -121,6 +121,6 @@ status line a work package gets when it is implemented: that is decision D2 of
 [the documentation Meta Issue](https://github.com/B42Labs/tally/issues/104), and
 the rule at the end of
 [the roadmap index](https://github.com/B42Labs/tally/blob/main/roadmap/README.md)
-says the same thing. This site is where the concept now lives, and it links back
+says the same thing. This site is where the concept lives, and it links back
 rather than copying: every explanation page names the decision that shaped what
 it describes, so the argument and the record stay one click apart.
