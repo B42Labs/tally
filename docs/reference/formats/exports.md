@@ -681,7 +681,7 @@ sums it under these rules:
 <!-- refdoc:begin rollup -->
 #### `rollupDocument`
 
-rollupDocument is `rollup-<key>.json:` which target the group sums under, the period and the kind of the run that produced it, and one entry per member beside the file that member's invoice was written to. Nothing here names the run itself, the way a statement document does not: run.json is the index that ties a file to its run. The field order is the order it is marshalled in.
+rollupDocument is `rollup-<key>.json`: which target the group sums under, the period and the kind of the run that produced it, and one entry per member beside the file that member's invoice was written to. Nothing here names the run itself, the way a statement document does not: run.json is the index that ties a file to its run. The field order is the order it is marshalled in.
 
 | Member | Type | Presence | Description |
 | --- | --- | --- | --- |

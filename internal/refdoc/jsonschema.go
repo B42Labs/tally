@@ -617,10 +617,11 @@ func countWord(n uint64, singular, plural string) string {
 }
 
 // withArticle puts the article in front of a type word. A link and a code span
-// take the article of the word they open with.
+// take the article of the word they open with, and a name spelled with a
+// capital takes the article of its letter, so an EventInput reads as one.
 func withArticle(word string) string {
 	if trimmed := strings.TrimLeft(word, "[`"); trimmed != "" &&
-		strings.ContainsRune("aeiou", rune(trimmed[0])) {
+		strings.ContainsRune("aeiouAEIOU", rune(trimmed[0])) {
 		return "an " + word
 	}
 	return "a " + word
