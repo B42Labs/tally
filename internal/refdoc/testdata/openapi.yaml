@@ -1,12 +1,22 @@
-# A contract carrying the shapes the renderers have to get through: an
-# unsecured probe, a secured pair of operations on one path, a referenced
-# parameter, a body of two alternatives, the shared problem response, and a
-# schema that constrains a scalar rather than naming members.
+# A contract carrying the shapes the renderers have to get through: a probe the
+# document opens up again, an operation that inherits the document's credential,
+# one that names two of them at once and an alternative to the pair, a parameter
+# declared on the path rather than on the operations, a referenced parameter, a
+# bounded parameter with a default, a description folded over two paragraphs, a
+# body of two alternatives, a body that is not JSON, a created resource
+# addressed by a header, the shared problem response, and a schema that
+# constrains a scalar rather than naming members.
 openapi: 3.0.3
 
 info:
   title: Fixture API
   version: 0.1.0
+
+# The credential every operation takes unless it declares one of its own. An
+# operation open to everyone says so with an empty block: leaving the block out
+# is what makes an operation inherit this one.
+security:
+  - apiToken: []
 
 paths:
   /healthz:
@@ -15,6 +25,7 @@ paths:
       summary: Liveness probe
       description: >-
         Reports whether the process should keep running.
+      security: []
       responses:
         "200":
           description: The service is alive.
@@ -26,6 +37,13 @@ paths:
           $ref: "#/components/responses/Problem"
 
   /api/v1/items/{cloud}:
+    parameters:
+      - name: cloud
+        in: path
+        required: true
+        description: The installation the items live in.
+        schema:
+          type: string
     get:
       operationId: listItems
       summary: List the items of one cloud
@@ -38,12 +56,6 @@ paths:
       security:
         - apiToken: []
       parameters:
-        - name: cloud
-          in: path
-          required: true
-          description: The installation the items live in.
-          schema:
-            type: string
         - name: kind
           in: query
           description: Serve only the items of this kind.
@@ -58,6 +70,14 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: limit
+          in: query
+          description: How many items one page carries at most.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
@@ -76,13 +96,8 @@ paths:
         them.
       security:
         - ingestToken: []
-      parameters:
-        - name: cloud
-          in: path
-          required: true
-          description: The installation the items live in.
-          schema:
-            type: string
+        - apiToken: []
+          internalToken: []
       requestBody:
         required: true
         content:
@@ -106,6 +121,36 @@ paths:
             application/problem+json:
               schema:
                 type: object
+    put:
+      operationId: replaceItems
+      summary: Replace the items of one cloud
+      description: >-
+        Stores the items of the cloud, replacing whatever stood there. It
+        declares no credential of its own and takes the document's.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Item"
+      responses:
+        "201":
+          description: The items as they now stand.
+          headers:
+            Location:
+              description: The URL of the stored collection.
+              schema:
+                type: string
+            X-Request-ID:
+              description: Correlation id of this request.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemList"
+        "400":
+          $ref: "#/components/responses/Problem"
 
 components:
   responses:
@@ -129,7 +174,10 @@ components:
   schemas:
     Item:
       type: object
-      description: One item as this API stores it.
+      description: >-
+        One item as this API stores it.
+
+        A member the producer leaves out is absent rather than null.
       required: [id, kind]
       properties:
         id:
@@ -184,3 +232,8 @@ components:
       scheme: bearer
       description: >-
         An API token passed as `Authorization: Bearer <token>`.
+    internalToken:
+      type: http
+      scheme: bearer
+      description: >-
+        The shared secret the components of this fixture call one another with.

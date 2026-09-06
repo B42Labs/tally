@@ -82,9 +82,11 @@ func TestJSONSchemaRendersEachSchemaShape(t *testing.T) {
 		"Other properties are allowed.",
 		"Other properties are `string`.",
 		"Other properties are [rate](#rate).",
-		// A oneOf on an object names what each alternative requires, what it
-		// forbids, and what it pins.
-		"- `hourly` is required, `each` is absent, `kind` is `gauge`",
+		// A oneOf on an object opens with what the bullets under it state, and
+		// each alternative names what it requires, what it forbids, and what it
+		// pins.
+		"Exactly one of these alternatives holds:\n\n" +
+			"- `hourly` is required, `each` is absent, `kind` is `gauge`",
 		// A definition without properties is one sentence.
 		"A number at least 0, or a string matching `^[0-9]+(\\.[0-9]+)?$`.",
 	} {

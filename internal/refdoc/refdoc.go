@@ -255,6 +255,22 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// paragraphs renders prose as the paragraphs it is written in, separated by the
+// blank line Markdown reads as a break between two. A document that folds a
+// description over several lines writes the break between two paragraphs as a
+// single newline, which Markdown reads as a line break inside one paragraph.
+// Empty pieces are dropped, so prose spelled with several blank lines still
+// renders as one break.
+func paragraphs(s string) string {
+	var parts []string
+	for piece := range strings.SplitSeq(strings.TrimSpace(s), "\n") {
+		if trimmed := strings.TrimSpace(piece); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // codeSpans renders values as code spans joined by sep, or none for a cell with
 // no value to show.
 func codeSpans(values []string, sep string) string {
