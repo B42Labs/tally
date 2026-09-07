@@ -35,7 +35,10 @@
           "items": [
             { "text": "Migrate both databases", "link": "/how-to/engine/migrate-both-databases" },
             { "text": "Import a pricing model", "link": "/how-to/engine/import-a-pricing-model" },
-            { "text": "Run a period", "link": "/how-to/engine/run-a-period" }
+            { "text": "Run a period", "link": "/how-to/engine/run-a-period" },
+            { "text": "Finalize a period", "link": "/how-to/engine/finalize-a-period" },
+            { "text": "Detect late events", "link": "/how-to/engine/detect-late-events" },
+            { "text": "Correct a finalized period", "link": "/how-to/engine/correct-a-finalized-period" }
           ]
         }
       ]
