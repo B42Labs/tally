@@ -24,9 +24,9 @@ pins the rest from disk: the alert names and the order they stand in, the
 severities, the runbook annotations and the pages they name, the recorded series
 the anomaly rule reads, and the scrape jobs the last three rules select.
 
-The `runbook` annotation carries a path in this repository rather than a URL, so
-it is read in a checkout rather than followed from Alertmanager. It becomes the
-published address once the how-to quadrant carries the runbooks.
+The `runbook` annotation carries the published URL of the alert's guide under
+[Respond to an alert](/how-to/#respond-to-an-alert), so a receiver that renders
+annotations links the page.
 
 ## Rules
 
