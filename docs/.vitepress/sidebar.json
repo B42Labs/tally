@@ -30,7 +30,8 @@
           "text": "Billing track",
           "items": [
             { "text": "Discount a customer group", "link": "/tutorials/discount-a-customer-group" },
-            { "text": "Pay a reseller a kickback", "link": "/tutorials/pay-a-reseller-a-kickback" }
+            { "text": "Pay a reseller a kickback", "link": "/tutorials/pay-a-reseller-a-kickback" },
+            { "text": "Attribute a tenant to its Gardener project", "link": "/tutorials/attribute-a-tenant-to-its-gardener-project" }
           ]
         }
       ]
