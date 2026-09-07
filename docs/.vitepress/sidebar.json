@@ -28,6 +28,15 @@
             { "text": "Verify a deployment with the dump", "link": "/how-to/openstack/verify-a-deployment-with-the-dump" },
             { "text": "Reconcile a cloud", "link": "/how-to/openstack/reconcile-a-cloud" }
           ]
+        },
+        {
+          "text": "Engine",
+          "collapsed": true,
+          "items": [
+            { "text": "Migrate both databases", "link": "/how-to/engine/migrate-both-databases" },
+            { "text": "Import a pricing model", "link": "/how-to/engine/import-a-pricing-model" },
+            { "text": "Run a period", "link": "/how-to/engine/run-a-period" }
+          ]
         }
       ]
     }
