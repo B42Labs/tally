@@ -4,7 +4,7 @@ description: Create a kind cluster with the Tally dev overlay, trust its certifi
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit d0d5905 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Set up your local Tally
 
@@ -78,11 +78,11 @@ This lesson takes about 60 minutes.
    ```
 
    ```text
-   d0d5905
+   789d782
    ```
 
    A newer commit is fine. Every output this page shows comes from a run at
-   `d0d5905`. Every command from here on runs from this directory, the
+   `789d782`. Every command from here on runs from this directory, the
    repository root.
 
 ## Create the cluster and bring the stack up
@@ -136,7 +136,8 @@ This lesson takes about 60 minutes.
    cluster pulls its images on the first `make up`, and a slow network outlasts
    the five-minute rollout timeout.
 
-3. Wait until every pod of the stack is `Running` before the next call:
+3. Wait until every pod but `reporting-api` reads `Running` before the next
+   call:
 
    ```sh
    kubectl --context kind-tally -n tally get pods
@@ -144,27 +145,65 @@ This lesson takes about 60 minutes.
 
    ```text
    NAME                             READY   STATUS    RESTARTS   AGE
-   alertmanager-0                   1/1     Running   0          33m
-   grafana-6c58589c8b-fjpjz         2/2     Running   0          33m
-   otel-collector-599c64db4-9m2hv   1/1     Running   0          33m
-   reporting-api-6b8ffd9598-bvxnn   1/1     Running   0          33m
-   tally-engine-29813040-6kd9c      0/1     Error     0          32m
-   timescaledb-0                    1/1     Running   0          33m
-   victoriametrics-0                1/1     Running   0          33m
-   vmalert-7699459f4-t89tm          1/1     Running   0          33m
+   alertmanager-0                   1/1     Running   0          37m
+   grafana-6c58589c8b-fg4tm         2/2     Running   0          37m
+   otel-collector-599c64db4-vbh2z   1/1     Running   0          37m
+   reporting-api-6b8ffd9598-smsw8   0/1     Running   0          37m
+   timescaledb-0                    1/1     Running   0          37m
+   victoriametrics-0                1/1     Running   0          37m
+   vmalert-7699459f4-gf2nc          1/1     Running   0          37m
    ```
 
-   The names carry ids of their own and the ages are your machine's. The
-   `tally-engine-<id>` pod is a Job of the hourly scheduler, and it shows
-   `Error` until lesson 3 imports a pricing model, which is expected here.
-   Every other pod reads `Running`. Then run `make up` again: against a cluster
-   that already exists it reuses it, applies the overlay again and prints the
-   block above. The fourth call did that in 16 seconds.
+   The names carry ids of their own and the ages are your machine's.
+   `reporting-api` reads `0/1` here, and waiting does not change it: a
+   `make up` that stopped on a rollout never reached its migration step, and
+   the API holds itself unready while its database carries no schema. Its log
+   says so once per readiness probe:
+
+   ```sh
+   kubectl --context kind-tally -n tally logs deployment/reporting-api | grep readiness | tail -1
+   ```
+
+   ```text
+   {"time":"2026-09-07T18:57:55.783841918Z","level":"WARN","msg":"readiness probe could not use the database","service":"tally-reporting","request_id":"4bc504a2-732d-4902-8c80-d04cd5e5ed2e","error":"reading the schema version: ERROR: relation \"goose_db_version\" does not exist (SQLSTATE 42P01)"}
+   ```
+
+   `goose_db_version` is the table a migration chain records itself in, and
+   `make up` applies the two chains after the rollouts it waited on. So run
+   `make up` again once the other pods read `Running`: against a cluster that
+   already exists it reuses it, applies the overlay again, applies both chains
+   and prints the block above. The fourth call did that in 16 seconds.
 
    `==> kind cluster tally already exists` as the first line of a first
    `make up` means a cluster from an earlier run of this track is still on the
    machine. Tear it down with the `make down` of lesson 5 and start over. On a
    repeated call after a timeout that line is the expected one.
+
+4. Read the pods once `make up` has printed its block:
+
+   ```sh
+   kubectl --context kind-tally -n tally get pods
+   ```
+
+   ```text
+   NAME                             READY   STATUS      RESTARTS   AGE
+   alertmanager-0                   1/1     Running     0          41m
+   grafana-6c58589c8b-fg4tm         2/2     Running     0          41m
+   otel-collector-599c64db4-vbh2z   1/1     Running     0          41m
+   reporting-api-6b8ffd9598-smsw8   1/1     Running     0          41m
+   tally-engine-29813460-mhpnt      0/1     Completed   0          4m18s
+   timescaledb-0                    1/1     Running     0          41m
+   victoriametrics-0                1/1     Running     0          41m
+   vmalert-7699459f4-gf2nc          1/1     Running     0          41m
+   ```
+
+   `reporting-api` reads `1/1` now: the chain that call applied gave the
+   readiness probe the schema it asks for. Every other long-running pod reads
+   `Running`. The `tally-engine-<id>` pod is a Job of the hourly scheduler and
+   appears once the clock has passed an hour mark. Its first tick moves the
+   month that has ended into its grace window and reads `Completed`; a later
+   tick meters that month, finds no pricing model and reads `Error`, which is
+   expected until lesson 3 imports one.
 
 ## Trust the dev CA
 
