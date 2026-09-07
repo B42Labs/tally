@@ -18,7 +18,7 @@ At the end you have a running Tally answering on
 shell, and the CA certificate in `tally-ca.crt` at the repository root. That is
 the state the rest of this track starts from.
 
-This lesson takes about 60 minutes.
+This lesson takes about 30 minutes, most of it `make up` moving images.
 
 ## Before you start
 
@@ -45,9 +45,11 @@ This lesson takes about 60 minutes.
 - No kind cluster named `tally` on the machine. `kind get clusters` printed
   `No kind clusters found.` on the run. If it prints `tally`, tear that cluster
   down with the `make down` of lesson 5 first.
-- 10 GB of free disk for Docker Desktop. Its usage grew by 9.5 GB over this
-  lesson on the run, measured with `docker system df` before and after across
-  images, volumes and build cache.
+- 13 GB of free disk for Docker Desktop, measured with `docker system df`
+  across images, volumes and build cache. The eight images the stack runs come
+  to 3.3 GB and are held twice from here on, once by Docker and once inside the
+  node, which is what lets `make up` copy them onto the node instead of leaving
+  it to fetch them.
 
 ## Get the code
 
@@ -97,10 +99,10 @@ This lesson takes about 60 minutes.
    `==> creating kind cluster tally`, installs cert-manager v1.21.1 and Envoy
    Gateway v1.8.3 and waits for their rollouts, applies the dev certificate
    authority, builds the four images (`tally-reporting`, `tally-engine`,
-   `tally-openstack-collector` and `tally-openstack-simulator`), loads them into
-   the cluster, applies the dev overlay, and applies the two migration chains,
-   the reporting one and the engine one. Several hundred lines go by. These are
-   the last ones:
+   `tally-openstack-collector` and `tally-openstack-simulator`), puts those and
+   the eight images the stack runs on the node, applies the dev overlay, and
+   applies the two migration chains, the reporting one and the engine one.
+   Several hundred lines go by. These are the last ones:
 
    ```text
    Stack is up:
@@ -118,25 +120,52 @@ This lesson takes about 60 minutes.
    The seven URLs and the last line have to match exactly. Everything above
    them differs in timing and in the ids Kubernetes hands out.
 
-2. Read the error if `make up` stopped on a rollout instead of printing that
-   block. The run behind this page needed four calls. The first ended after
-   eight minutes under
-   `kubectl --context kind-tally -n envoy-gateway-system rollout status
-   deployment/envoy-gateway --timeout=300s`:
+2. Leave it alone while it moves the images. A new node carries none of them,
+   so the step before the overlay puts all twelve there: the four built above,
+   and the eight the stack runs. An image your Docker already holds is copied
+   straight onto the node, and only an image it lacks is fetched from the
+   network, which is what the `==> pulling` lines are:
 
    ```text
-   Waiting for deployment "envoy-gateway" rollout to finish: 0 of 1 updated replicas are available...
-   error: timed out waiting for the condition
+   ==> pulling busybox:1.37
+   Image: "busybox:1.37" with ID "sha256:6df9636795d37473994366014c25264edeb6c00d7a57188ff62d5a94276b4297" not yet present on node "tally-control-plane", loading...
+   ```
+
+   The run behind this page fetched three of the eight and copied the other
+   five, `make up` took seventeen minutes end to end, and every pod was ready
+   two minutes after the overlay went on. Which of the eight are fetched is
+   your machine's, and a second `make up` moves none of them: an image the node
+   already carries is skipped.
+
+3. Let it wait if a readiness wait expires. One is given five minutes, and an
+   expired one is repeated rather than ending the run:
+
+   ```text
+   ==> TimescaleDB is not ready after 300s; the node may still be pulling an image, waiting again (2/6)
+   ```
+
+   An `error: timed out waiting for the condition` above such a line is that
+   wait expiring, not a fault. Six waits is the budget one rollout gets, half
+   an hour; `make up WAIT_ATTEMPTS=12` doubles it, and `WAIT_TIMEOUT` changes
+   how long one wait lasts. cert-manager and Envoy Gateway install from their
+   own manifests, so the node still fetches their images itself, and those are
+   the waits most likely to repeat.
+
+4. Read the error if `make up` stopped instead of printing that block. A
+   rollout that never comes up spends the budget and ends the run:
+
+   ```text
+   ERROR: TimescaleDB did not become ready in 6 waits of 300s.
+          make up stops here, so the stack is incomplete. Stopping before
+          the migration chain leaves the Reporting API at 0/1 until a later
+          make up applies it: it never migrates on its own.
+          kubectl --context kind-tally get pods -A, and the events of
+          the pod that is not ready, say why it is not.
+          make up is safe to run again: it reuses the cluster and carries on.
    make: *** [up] Error 1
    ```
 
-   The second ended on the same error under the `statefulset/timescaledb`
-   rollout, the third on `error: deployment "reporting-api" exceeded its
-   progress deadline`. Each time the node was still pulling an image: the
-   cluster pulls its images on the first `make up`, and a slow network outlasts
-   the five-minute rollout timeout.
-
-3. Wait until every pod but `reporting-api` reads `Running` before the next
+5. Wait until every pod but `reporting-api` reads `Running` before the next
    call:
 
    ```sh
@@ -172,14 +201,15 @@ This lesson takes about 60 minutes.
    `make up` applies the two chains after the rollouts it waited on. So run
    `make up` again once the other pods read `Running`: against a cluster that
    already exists it reuses it, applies the overlay again, applies both chains
-   and prints the block above. The fourth call did that in 16 seconds.
+   and prints the block above. It moves no image it moved before, so a repeated
+   call is short.
 
    `==> kind cluster tally already exists` as the first line of a first
    `make up` means a cluster from an earlier run of this track is still on the
    machine. Tear it down with the `make down` of lesson 5 and start over. On a
    repeated call after a timeout that line is the expected one.
 
-4. Read the pods once `make up` has printed its block:
+6. Read the pods once `make up` has printed its block:
 
    ```sh
    kubectl --context kind-tally -n tally get pods
