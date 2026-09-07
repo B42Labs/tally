@@ -49,7 +49,9 @@
           "collapsed": true,
           "items": [
             { "text": "Publish metrics over OTLP", "link": "/how-to/observability/publish-metrics-over-otlp" },
-            { "text": "Scrape the OpenStack exporters", "link": "/how-to/observability/scrape-the-openstack-exporters" }
+            { "text": "Scrape the OpenStack exporters", "link": "/how-to/observability/scrape-the-openstack-exporters" },
+            { "text": "Install the Grafana dashboards", "link": "/how-to/observability/install-the-grafana-dashboards" },
+            { "text": "Fill the dashboards on a dev cluster", "link": "/how-to/observability/fill-the-dashboards" }
           ]
         }
       ]
