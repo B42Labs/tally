@@ -43,6 +43,14 @@
             { "text": "Model a customer group with a discount", "link": "/how-to/engine/model-a-customer-group" },
             { "text": "Export a rollup per customer group", "link": "/how-to/engine/export-a-rollup" }
           ]
+        },
+        {
+          "text": "Observability",
+          "collapsed": true,
+          "items": [
+            { "text": "Publish metrics over OTLP", "link": "/how-to/observability/publish-metrics-over-otlp" },
+            { "text": "Scrape the OpenStack exporters", "link": "/how-to/observability/scrape-the-openstack-exporters" }
+          ]
         }
       ]
     }
