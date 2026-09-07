@@ -59,7 +59,7 @@ func TestAlertRulesRendersTheRulesOfThisRepository(t *testing.T) {
 	for _, want := range []string{
 		"Group `tally`, evaluated every `1m`.",
 		"### `TallyCloudEventsSilent`",
-		"| Runbook | `docs/runbooks/TallyCloudEventsSilent.md` |",
+		"| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyCloudEventsSilent` |",
 		"### `tally:current_resources:sum`\n\nRecorded series.",
 	} {
 		if !strings.Contains(got, want) {

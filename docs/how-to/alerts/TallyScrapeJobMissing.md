@@ -1,3 +1,10 @@
+---
+title: TallyScrapeJobMissing
+description: One of the two discovered scrape jobs resolves to no target at all, so it leaves the target page instead of turning red.
+quadrant: how-to
+audience: operator
+---
+
 # TallyScrapeJobMissing
 
 `absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})`, `for: 5m`.
@@ -12,8 +19,8 @@ TallyScrapeTargetDown stays silent.
 ## Impact on billing
 
 The same as the job's targets being down, described in
-[TallyScrapeTargetDown](TallyScrapeTargetDown.md), without a red target to see
-it by.
+[TallyScrapeTargetDown](/how-to/alerts/TallyScrapeTargetDown), without a red
+target to see it by.
 
 ## First checks
 
@@ -21,10 +28,10 @@ it by.
    off the page.
 2. The Service name and the port name the relabel rule keeps, `reporting-api;http`
    and `otel-collector;metrics` in
-   [`scrape.yaml`](../../deploy/kubernetes/base/victoriametrics/scrape.yaml). A
-   rename on either side drops every endpoint of the job.
+   [`scrape.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/victoriametrics/scrape.yaml).
+   A rename on either side drops every endpoint of the job.
 3. The `victoriametrics-scrape` RoleBinding in
-   [`victoriametrics.yaml`](../../deploy/kubernetes/base/victoriametrics/victoriametrics.yaml).
+   [`victoriametrics.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/victoriametrics/victoriametrics.yaml).
    Without it the endpointslice discovery is refused and the job has nothing to
    keep.
 4. The VictoriaMetrics log for discovery errors, an unreachable API server

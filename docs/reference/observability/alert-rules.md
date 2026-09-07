@@ -39,7 +39,7 @@ Group `tally`, evaluated every `1m`.
 | --- | --- |
 | Severity | `critical` |
 | For | `15m` |
-| Runbook | `docs/runbooks/TallyCloudEventsSilent.md` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyCloudEventsSilent` |
 
 Summary:
 
@@ -100,7 +100,7 @@ sum by (cloud) (increase(tally_sync_errors_total[1h])) > 0
 | --- | --- |
 | Severity | `critical` |
 | For | none |
-| Runbook | `docs/runbooks/TallySyncStale.md` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallySyncStale` |
 
 Summary:
 
@@ -212,7 +212,7 @@ absent(tally:current_resources:sum)
 | --- | --- |
 | Severity | `critical` |
 | For | `5m` |
-| Runbook | `docs/runbooks/TallyScrapeTargetDown.md` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyScrapeTargetDown` |
 
 Summary:
 
@@ -232,7 +232,7 @@ up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0
 | --- | --- |
 | Severity | `critical` |
 | For | `5m` |
-| Runbook | `docs/runbooks/TallyScrapeJobMissing.md` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing` |
 
 Summary:
 
@@ -252,7 +252,7 @@ absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
 | --- | --- |
 | Severity | `critical` |
 | For | `15m` |
-| Runbook | `docs/runbooks/TallyExporterServiceSilent.md` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyExporterServiceSilent` |
 
 Summary:
 

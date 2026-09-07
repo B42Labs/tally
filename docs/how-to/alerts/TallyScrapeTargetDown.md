@@ -1,3 +1,10 @@
+---
+title: TallyScrapeTargetDown
+description: A configured scrape target has answered nothing for five minutes.
+quadrant: how-to
+audience: operator
+---
+
 # TallyScrapeTargetDown
 
 `up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0`, `for: 5m`.
@@ -30,7 +37,7 @@ It depends on the job:
 2. Pod status and log of the workload behind the target, and the Service and
    port names it is reached through.
 3. For `openstack-db-exporter`, the limits on its database account
-   ([`openstack-metrics.md`](../openstack-metrics.md#the-read-only-database-user)).
+   ([the read-only database user](/how-to/observability/scrape-the-openstack-exporters#create-the-read-only-database-user)).
    A statement cap that ends the queries fails the scrape, while a connection
    cap that is too low leaves the target up and the scrape short, which is
    TallyExporterServiceSilent rather than this alert.

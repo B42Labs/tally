@@ -1,3 +1,10 @@
+---
+title: TallyCloudEventsSilent
+description: A cloud that reported collector events in the last 24 hours has reported none for more than an hour.
+quadrant: how-to
+audience: operator
+---
+
 # TallyCloudEventsSilent
 
 `sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[1h])) == 0 and sum by (cloud) (increase(tally_events_ingested_total{source="collector"}[24h])) > 0`, `for: 15m`.
@@ -16,7 +23,7 @@ or overbilled until a reconciliation run turns the difference into synthetic
 events. A resource that is created and deleted inside the gap is invisible for
 good: no run ever observes it, so nothing books it, and no later repair
 recovers it. That is the accepted limitation of the event-driven design, listed
-under [Known limitations](https://b42labs.github.io/tally/explanation/dual-ingestion-and-reconciliation#known-limitations) in the concept.
+under [Known limitations](/explanation/dual-ingestion-and-reconciliation#known-limitations) in the concept.
 
 ## First checks
 
@@ -26,11 +33,13 @@ under [Known limitations](https://b42labs.github.io/tally/explanation/dual-inges
    `tally_collector_delivery_errors_total`. A buffer that grows says the
    collector still consumes and cannot deliver; a readiness that fails names
    its reason in the log
-   ([`openstack-collector.md`](../openstack-collector.md)).
-2. The broker connection. `--dump` prints one line per delivery and reads
-   nothing but the AMQP variables, so it says whether the bus carries
-   notifications at all. It consumes through a queue of its own and takes no
-   delivery away from a running collector.
+   ([the HTTP routes](/reference/command-line/tally-openstack-collector#http-routes)
+   and [the gauges and the counter](/reference/observability/metrics#openstack-collector)).
+2. The broker connection.
+   [`--dump`](/how-to/openstack/verify-a-deployment-with-the-dump) prints one
+   line per delivery and reads nothing but the AMQP variables, so it says
+   whether the bus carries notifications at all. It consumes through a queue of
+   its own and takes no delivery away from a running collector.
 3. The Reporting API as the collector reaches it: the base URL in
    `TALLY_OSC_REPORTING_URL`, and an ingest credential whose scope matches
    `TALLY_OSC_CLOUD`. An event outside that scope is refused with the reason
