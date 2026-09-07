@@ -32,7 +32,8 @@
             { "text": "Discount a customer group", "link": "/tutorials/discount-a-customer-group" },
             { "text": "Pay a reseller a kickback", "link": "/tutorials/pay-a-reseller-a-kickback" },
             { "text": "Attribute a tenant to its Gardener project", "link": "/tutorials/attribute-a-tenant-to-its-gardener-project" },
-            { "text": "Finalize the month and export it", "link": "/tutorials/finalize-the-month-and-export-it" }
+            { "text": "Finalize the month and export it", "link": "/tutorials/finalize-the-month-and-export-it" },
+            { "text": "Book the late events as a credit note", "link": "/tutorials/book-the-late-events-as-a-credit-note" }
           ]
         }
       ]
