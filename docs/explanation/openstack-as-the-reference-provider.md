@@ -36,6 +36,8 @@ What makes a sample on either path usable is the label convention it carries.
 That convention belongs to the shared core rather than to any provider, and the
 exporters and publishers on the OpenStack side are what put it on the data (see
 [architecture and the provider pattern](/explanation/architecture-and-the-provider-pattern)).
+What each of the two paths costs, and what bounds it, is on
+[the OpenStack metrics pipeline](/explanation/the-openstack-metrics-pipeline).
 
 ## Events
 
@@ -74,6 +76,8 @@ octavia.loadbalancer.create.end / update.end / delete.end
 The exact set, the event type each of them becomes, and the size fields the
 mapping reads out of its payload are documented on the
 [notification mapping page](/reference/formats/notification-mapping).
+How the collector acknowledges, buffers and delivers what it maps is on
+[how the collector consumes a bus](/explanation/how-the-collector-consumes-a-bus).
 
 ## The database exporter
 
@@ -109,7 +113,8 @@ than the time the sync happened to look (see
 
 The repository ships no CronJob for the sync. What drives the schedule belongs
 to the deployment, which is also what decides how much overbilling a lost delete
-can cost.
+can cost. What one run establishes, and what it refuses to conclude, is on
+[how reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud).
 
 ## How the pieces fit together
 
@@ -190,3 +195,5 @@ so a simulated month tests the collector rather than a test double.
 That is also why it is the only data source of the tutorials: every lesson is
 reproducible from a seed and needs no cloud account (decision D3 of
 [the documentation Meta Issue](https://github.com/B42Labs/tally/issues/104)).
+What a month is made of, and why it comes out the same every time, is on
+[the simulated OpenStack world](/explanation/the-simulated-openstack-world).

@@ -128,6 +128,23 @@ chain applies the rounded amounts (decision D7, see
 [money and rounding](/explanation/money-and-rounding)). The implementation is
 [`internal/engine/adjustments`](https://github.com/B42Labs/tally/blob/main/internal/engine/adjustments/adjustments.go).
 
+## Why volume tiers are not computed
+
+The engine does not derive a rate from the usage of the period it rates. Such a
+rate changes when a late event moves the period's usage across a tier boundary,
+so the same month rates differently depending on when it is rated. A correction
+would then have to re-derive the rate as well as the base it applies to, and
+that is a correction semantics the engine does not have: a correction re-meters
+and re-rates its period with the relations valid for it, and the rate those
+relations carry is stored rather than computed.
+
+Automatic tiering is recorded as a future extension in
+[the Phase 5 roadmap](https://github.com/B42Labs/tally/blob/main/roadmap/05-phase-5-commercial-pricing.md)
+(WP 5.5). Until it exists, operations sets a tier's rate per period explicitly,
+by closing the relation at the month boundary and creating the successor with
+the rate the next period is owed
+([change the rate for a later month](/how-to/engine/model-a-customer-group#change-the-rate-for-a-later-month)).
+
 ## A reseller example
 
 ```json
