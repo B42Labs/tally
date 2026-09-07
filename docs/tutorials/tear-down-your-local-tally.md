@@ -4,7 +4,7 @@ description: Stop the simulator stack, delete the kind cluster, and remove the f
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit d0d5905 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Tear down your local Tally
 
@@ -109,7 +109,9 @@ This lesson takes about 5 minutes.
    ```
 
    The line has to match. It is the state lesson 1 starts from. A second
-   `make down` prints `kind cluster tally does not exist` and changes nothing.
+   `make down` prints that same line again, from the check it makes before it
+   deletes anything, and then `kind cluster tally does not exist`. It changes
+   nothing.
 
 ## Remove what the lessons wrote
 

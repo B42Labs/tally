@@ -4,7 +4,7 @@ description: Start the simulator stack beside the dev cluster, publish one gener
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit d0d5905 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Simulate a month of OpenStack
 
@@ -306,10 +306,13 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    {"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1785542400,"667"]}]},"stats":{"seriesFetched": "667","executionTimeMsec":2}}
    ```
 
-   667 has to match, the instances of the month that pushed traffic. The series
-   carry July 2026 timestamps, which is why the query is asked at the end of
-   the month with `time` and over a window that spans the month, and why lesson
-   4 sets the dashboards' time range to July.
+   667 has to match, the instances of the month that pushed traffic. A smaller
+   count means the simulator is still pushing the month's series, which it goes
+   on doing after the last notification is out; repeat the read until it stands
+   at 667, which took another minute on the run. The series carry July 2026
+   timestamps, which is why the query is asked at the end of the month with
+   `time` and over a window that spans the month, and why lesson 4 sets the
+   dashboards' time range to July.
 
    The plain instant query, without the window and without `time`, is evaluated
    at the wall clock, where the month's series ended a month ago:

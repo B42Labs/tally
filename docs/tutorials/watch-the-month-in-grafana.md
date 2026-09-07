@@ -4,7 +4,7 @@ description: Open the dev cluster's Grafana as an anonymous viewer, point its fo
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit d0d5905 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Watch the month in Grafana
 
@@ -130,8 +130,11 @@ This lesson takes about 5 minutes.
    month the CI tenant peaked at 10 and the large Gardener tenant at 11.
 
 2. `Tally / Ingestion Health`. With `Last 3 hours`, `Event ingest rate` shows
-   one spike over the minutes the month went out, up to about five events per
-   second for cloud `os-sim` and source `collector`, 1728 events in all.
+   one spike for cloud `os-sim` and source `collector` over the minutes the
+   month went out, 1728 events in all. How high the spike stands is your
+   machine's, because it is those events over the span the collector took to
+   drain its outbox: about five events per second where that took three
+   minutes, and above 30 where it took half a minute.
 
    `Dedup rate` and `Rejected events` draw nothing, because the month carried
    no duplicate and no item was rejected, so those counters were never written.
