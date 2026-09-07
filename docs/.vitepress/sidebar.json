@@ -61,7 +61,10 @@
           "items": [
             { "text": "Run a simulated month against the dev cluster", "link": "/how-to/simulator/run-a-month" },
             { "text": "Replay a recorded month", "link": "/how-to/simulator/replay-a-recorded-month" },
-            { "text": "Compare an export against the oracle", "link": "/how-to/simulator/compare-an-export" }
+            { "text": "Compare an export against the oracle", "link": "/how-to/simulator/compare-an-export" },
+            { "text": "Switch on fault switches", "link": "/how-to/simulator/switch-on-faults" },
+            { "text": "Reconcile the simulated cloud", "link": "/how-to/simulator/reconcile-the-simulated-cloud" },
+            { "text": "Register simulated projects", "link": "/how-to/simulator/register-simulated-projects" }
           ]
         }
       ]
