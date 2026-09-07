@@ -23,20 +23,10 @@ export default defineConfig({
   // GitHub Pages serves foo.html for /foo, so links carry no extension.
   cleanUrls: true,
   lastUpdated: true,
-  // The documents that predate the site. Each sibling of #104 that migrates
-  // one removes its pattern here; a legacy file built before its migration
-  // fails the build on its relative links, which is the intended signal.
-  srcExclude: [
-    'alerting.md',
-    'grafana-dashboards.md',
-    'group-discounts.md',
-    'openstack-collector.md',
-    'openstack-metrics.md',
-    'openstack-reconciliation.md',
-    'openstack-simulator.md',
-    'drills/**',
-    'runbooks/**',
-  ],
+  // The documents that predate the site, now the two drill records alone,
+  // which #111 moves into the contributing section. The sibling of #104 that
+  // migrates one removes its pattern here.
+  srcExclude: ['drills/**'],
   themeConfig: {
     nav,
     sidebar,
