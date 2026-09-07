@@ -25,7 +25,8 @@
           "items": [
             { "text": "Connect the collector to an OpenStack cloud", "link": "/how-to/openstack/connect-the-collector" },
             { "text": "Issue and revoke credentials", "link": "/how-to/openstack/issue-and-revoke-credentials" },
-            { "text": "Verify a deployment with the dump", "link": "/how-to/openstack/verify-a-deployment-with-the-dump" }
+            { "text": "Verify a deployment with the dump", "link": "/how-to/openstack/verify-a-deployment-with-the-dump" },
+            { "text": "Reconcile a cloud", "link": "/how-to/openstack/reconcile-a-cloud" }
           ]
         }
       ]
