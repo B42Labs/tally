@@ -1,6 +1,6 @@
 ---
 title: Tutorials
-description: Lessons that take you by the hand from an empty machine to a rated month, and the track that continues from there.
+description: Lessons that take you by the hand from an empty machine to a rated month, and on through finalization, corrections, commercial pricing and attribution.
 quadrant: tutorial
 audience: all
 ---
@@ -49,15 +49,37 @@ system you built yourself, and a name for each part of it.
 
 The fifth lesson is where the track ends when you want a clean machine. A
 reader going on to the billing track does it after that track's last lesson,
-because the billing track continues from the state the fourth lesson leaves
-behind.
+because the billing track starts with
+[Discount a customer group](/tutorials/discount-a-customer-group) and continues
+from the state the fourth lesson leaves behind.
 
 ### Billing track
 
-"The billing track: finalization, late events and corrections, commercial pricing and related-cost attribution"
-is the track written next. It continues from the state the fourth lesson of the
-core track leaves behind: the cluster up, the simulator holding its 84
-notifications, the month rated but not finalized, the registry empty.
+1. [Discount a customer group](/tutorials/discount-a-customer-group): register
+   three projects, group them under a customer with a discount on each
+   membership, run the month again and read a discounted statement and the
+   group's rollup. Assumes Watch the month in Grafana.
+2. [Pay a reseller a kickback](/tutorials/pay-a-reseller-a-kickback): register
+   the CI tenant, put it under a partner with a discount and a kickback, run
+   the month and read the statement and the kickback report.
+   Assumes Discount a customer group.
+3. [Attribute a tenant to its Gardener project](/tutorials/attribute-a-tenant-to-its-gardener-project):
+   register the two Gardener projects and their tenants, relate each project to
+   its tenant, see the registry refuse a cycle, run the month and read the
+   attributed statement. Assumes Pay a reseller a kickback.
+4. [Finalize the month and export it](/tutorials/finalize-the-month-and-export-it):
+   finalize the month on the attributed run, see the engine refuse to meter it
+   again, and export it as JSON and as CSV.
+   Assumes Attribute a tenant to its Gardener project.
+5. [Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note):
+   release the notifications the simulator held back, book them as a
+   correction, read the credit notes and close the correction.
+   Assumes Finalize the month and export it.
+
+The fifth lesson is where the billing track ends, and the state it leaves is
+written out on that page.
+[Tear down your local Tally](/tutorials/tear-down-your-local-tally) is the way
+back to a clean machine.
 
 ## The simulated cloud
 
@@ -65,7 +87,10 @@ Every lesson works on the same generated month: seed 1, July 2026, the cloud
 `os-sim`, six tenants, of which three are classic projects, two are Gardener
 tenants and one is a CI tenant. That month renders 15727 notifications, 1812 of
 them billable, and 84 of those stay held back by the switch the second lesson
-turns on, so the counts a lesson shows are the counts every machine gets.
+turns on, so the counts a lesson shows are the counts every machine gets. The
+two Gardener projects are `alpha` and `beta`, and the billing track registers
+them under the cloud `garden-sim`, one installation of one platform, beside the
+tenants of `os-sim`.
 
 What the month holds is in
 [the simulated OpenStack world](/explanation/the-simulated-openstack-world).

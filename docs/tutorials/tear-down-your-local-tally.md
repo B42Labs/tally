@@ -18,8 +18,11 @@ databases, because that is where they live. You remove the CA file
 
 What stays is the four `tally-*:dev` images in Docker, the Go build and module
 caches under your home directory, and the clone. A reader going on to the
-billing track does this lesson after that track's last lesson, because the
-billing track continues from the state lesson 4 leaves behind.
+billing track, which starts with
+[Discount a customer group](/tutorials/discount-a-customer-group), does this
+lesson after its last lesson,
+[Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note),
+because the billing track continues from the state lesson 4 leaves behind.
 
 This lesson takes about 5 minutes.
 
@@ -115,21 +118,28 @@ This lesson takes about 5 minutes.
 
 ## Remove what the lessons wrote
 
-1. Remove the CA file, the export directory and the seven variables:
+1. Remove the CA file, the export directory, the seven variables of the core
+   track and the eleven of the billing track:
 
    ```sh
    rm tally-ca.crt
    rm -r ~/tally-tutorial
-   unset TALLY_REPORTING_DB_URL TALLY_API_TOKEN TALLY_ENGINE_DB_URL TALLY_ENGINE_REPORTING_DB_URL TALLY_ENGINE_COUNTER_SOURCES TALLY_ENGINE_VM_URL RUN_ID
+   unset TALLY_REPORTING_DB_URL TALLY_API_TOKEN TALLY_ENGINE_DB_URL TALLY_ENGINE_REPORTING_DB_URL TALLY_ENGINE_COUNTER_SOURCES TALLY_ENGINE_VM_URL RUN_ID ACME_1_ID ACME_2_ID ACME_3_ID ACME_ID CI_ID PARTNER_ID ALPHA_TENANT_ID BETA_TENANT_ID ALPHA_ID BETA_ID CORRECTION_ID
    ```
 
    The three commands print nothing. `tally-ca.crt` is stale from here on: the
    next `make up` creates a new certificate authority, and `make -s ca` writes
    the file again for it. `~/tally-tutorial` held the export of lesson 3, the
-   six statements with `run.json` and `kickbacks.json` beside them. The seven
+   six statements with `run.json` and `kickbacks.json` beside them. After the
+   billing track it also held that track's seven export directories,
+   `2026-07-group`, `2026-07-reseller`, `2026-07-attributed`, `2026-07-final`,
+   `2026-07-final-again`, `2026-07-final-csv` and `2026-07-notes`. The seven
    variables are the shell state lessons 1 to 3 built, and `unset` leaves this
-   shell without them. `rm: tally-ca.crt: No such file or directory` means the
-   file was already gone, which is fine.
+   shell without them. The eleven after `RUN_ID` are the billing track's, and
+   `unset` skips a variable that is not set without a word, so the line is the
+   same on a machine where the billing track never ran.
+   `rm: tally-ca.crt: No such file or directory` means the file was already
+   gone, which is fine.
 
 ## What stays
 
