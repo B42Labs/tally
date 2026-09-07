@@ -54,6 +54,15 @@
             { "text": "Fill the dashboards on a dev cluster", "link": "/how-to/observability/fill-the-dashboards" },
             { "text": "Deploy alerting and route notifications", "link": "/how-to/observability/deploy-alerting" }
           ]
+        },
+        {
+          "text": "Simulator",
+          "collapsed": true,
+          "items": [
+            { "text": "Run a simulated month against the dev cluster", "link": "/how-to/simulator/run-a-month" },
+            { "text": "Replay a recorded month", "link": "/how-to/simulator/replay-a-recorded-month" },
+            { "text": "Compare an export against the oracle", "link": "/how-to/simulator/compare-an-export" }
+          ]
         }
       ]
     }
