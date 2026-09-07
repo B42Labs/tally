@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -22,9 +23,23 @@ import (
 const (
 	rulesFile  = "rules.yaml"
 	scrapeFile = "../victoriametrics/scrape.yaml"
-	// The runbook annotations are written from the repository root, which is
-	// four levels up from this directory.
+	// The page an annotation names is read from runbookDir under the repository
+	// root, which is four levels up from this directory.
 	repoRoot = "../../../.."
+
+	// A notification carries the annotation as it stands, so the runbook is the
+	// published URL of the page rather than a path only a checkout resolves.
+	// The address is built from the origin the site is published under, the
+	// base the site configuration serves it at and the directory the pages are
+	// read from, rather than repeated as a literal beside them: the two halves
+	// of the check are then one string, and a page that moves or a site that
+	// moves fails here instead of 404ing in a notification.
+	siteOrigin = "https://b42labs.github.io"
+	// Where a runbook page is read from in this repository, one file per alert.
+	runbookDir = "docs/how-to/alerts"
+	// The site configuration, under the repository root, which decides both the
+	// path the site is served under and whether its pages carry an extension.
+	configFile = "docs/.vitepress/config.mts"
 
 	// The job TallyExporterServiceSilent selects, the pair the anomaly rule is
 	// split into, and the rule that watches that pair.
@@ -62,6 +77,23 @@ var criticalAlerts = []string{
 	"TallyScrapeTargetDown",
 	"TallySyncStale",
 }
+
+// baseRe captures the path VitePress serves the site under, and cleanURLsRe
+// matches the setting that publishes a page without the .html extension. Both
+// are read from the site configuration rather than assumed, because the
+// annotation is a URL of that site: a base that is renamed, or cleanUrls
+// turned off, moves every published runbook away from the address the five
+// critical alerts hand the on-call.
+//
+// Both are anchored to the start of a line, because they run over the raw bytes
+// of a TypeScript file where a comment is bytes like any other. A setting is
+// usually turned off by commenting the old line out and writing the new one
+// beside it, and unanchored patterns would keep matching the line that no
+// longer configures anything.
+var (
+	baseRe      = regexp.MustCompile(`(?m)^[ \t]*base:\s*'([^']*)',`)
+	cleanURLsRe = regexp.MustCompile(`(?m)^[ \t]*cleanUrls:\s*true,`)
+)
 
 // The headings a runbook answers with. A page that is linked from a critical
 // alert and stops at a description leaves the reader where the alert did.
@@ -150,19 +182,21 @@ func TestCriticalRules(t *testing.T) {
 	})
 
 	t.Run("link a runbook that answers", func(t *testing.T) {
+		base := siteBase(t)
+
 		for _, r := range all {
 			if r.Labels["severity"] != "critical" {
 				continue
 			}
 
-			want := "docs/runbooks/" + r.Alert + ".md"
+			want := siteOrigin + base + strings.TrimPrefix(runbookDir, "docs/") + "/" + r.Alert
 			got := r.Annotations["runbook"]
 			if got != want {
 				t.Errorf("%s links runbook %q, want %q", r.Alert, got, want)
 				continue
 			}
 
-			path := filepath.Join(repoRoot, filepath.FromSlash(got))
+			path := filepath.Join(repoRoot, filepath.FromSlash(runbookDir), r.Alert+".md")
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Errorf("%s links %s, which does not read, so the alert hands its reader a dead link: %v", r.Alert, path, err)
@@ -298,6 +332,55 @@ func TestTheAnomalyRuleReadsARecordedSeries(t *testing.T) {
 		t.Errorf("%s does not pair its absent() with %s, so it fires on any cluster that has not reconciled yet rather than on a stalled write path:\n%s",
 			coverageAlert, rawResourceSeries, coverage.Expr)
 	}
+}
+
+// TestTheSiteConfigGuardReadsLiveSettingsOnly pins what the two patterns match,
+// against the shape a setting is usually turned off in: the old line commented
+// out and the new one written beside it. Unanchored, both patterns matched the
+// commented line, so the site could go to .html pages or move its base while
+// this file stayed green and all five critical alerts handed the on-call a 404.
+func TestTheSiteConfigGuardReadsLiveSettingsOnly(t *testing.T) {
+	turnedOff := []byte("export default defineConfig({\n" +
+		"  // base: '/tally/',\n" +
+		"  base: '/docs/',\n" +
+		"  // cleanUrls: true,\n" +
+		"  cleanUrls: false,\n" +
+		"})\n")
+
+	if cleanURLsRe.Match(turnedOff) {
+		t.Error("cleanURLsRe matches a commented-out cleanUrls: true, so a site that publishes .html pages passes the guard")
+	}
+
+	var bases []string
+	for _, match := range baseRe.FindAllSubmatch(turnedOff, -1) {
+		bases = append(bases, string(match[1]))
+	}
+	if !slices.Equal(bases, []string{"/docs/"}) {
+		t.Errorf("baseRe reads %q, want only the live base [/docs/]; a commented-out base that wins the match builds the annotation from a path the site no longer serves", bases)
+	}
+}
+
+// siteBase returns the path the documentation site is served under, read from
+// the site configuration so that the published address in the annotations and
+// the address this test builds cannot drift apart. A configuration that no
+// longer serves extensionless paths fails the run for the same reason: the
+// annotations carry no extension, so every one of them would name a page the
+// site does not publish.
+func siteBase(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(configFile)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", configFile, err)
+	}
+	if !cleanURLsRe.Match(raw) {
+		t.Fatalf("%s no longer sets cleanUrls: true, so the site publishes each page with an .html extension and no runbook annotation resolves", configFile)
+	}
+	matches := baseRe.FindAllSubmatch(raw, -1)
+	if len(matches) != 1 {
+		t.Fatalf("%s names %d bases, want 1, so the path the site is served under cannot be read unambiguously and the annotations cannot be checked against it", configFile, len(matches))
+	}
+	return string(matches[0][1])
 }
 
 // rules parses the groups vmalert evaluates.

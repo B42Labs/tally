@@ -66,6 +66,17 @@
             { "text": "Reconcile the simulated cloud", "link": "/how-to/simulator/reconcile-the-simulated-cloud" },
             { "text": "Register simulated projects", "link": "/how-to/simulator/register-simulated-projects" }
           ]
+        },
+        {
+          "text": "Respond to an alert",
+          "collapsed": true,
+          "items": [
+            { "text": "TallyCloudEventsSilent", "link": "/how-to/alerts/TallyCloudEventsSilent" },
+            { "text": "TallySyncStale", "link": "/how-to/alerts/TallySyncStale" },
+            { "text": "TallyScrapeTargetDown", "link": "/how-to/alerts/TallyScrapeTargetDown" },
+            { "text": "TallyScrapeJobMissing", "link": "/how-to/alerts/TallyScrapeJobMissing" },
+            { "text": "TallyExporterServiceSilent", "link": "/how-to/alerts/TallyExporterServiceSilent" }
+          ]
         }
       ]
     }

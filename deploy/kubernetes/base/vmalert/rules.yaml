@@ -1,8 +1,8 @@
 # The rules vmalert evaluates against the store, in one group at a one-minute
 # interval: eleven alerting rules and the one series recorded for the anomaly
 # rule among them to read. The five critical alerts carry a runbook annotation
-# naming the page under docs/runbooks/ that a reader opens when the alert
-# arrives.
+# naming the published page of the alert under docs/how-to/alerts/, which a
+# reader opens when the alert arrives.
 #
 # rules_test.go pins the shape of this file: the alert names and their order,
 # the severities, the runbooks, the recorded series the anomaly rule reads, and
@@ -22,7 +22,7 @@ groups:
           severity: critical
         annotations:
           summary: "No collector events from {{ $labels.cloud }} for >1h (was active in last 24h)"
-          runbook: docs/runbooks/TallyCloudEventsSilent.md
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyCloudEventsSilent
 
       - alert: TallyEventsRejected
         expr: sum by (cloud, reason) (increase(tally_events_rejected_total[15m])) > 10
@@ -44,7 +44,7 @@ groups:
           severity: critical
         annotations:
           summary: "No completed reconciliation run for {{ $labels.cloud }} in 30m"
-          runbook: docs/runbooks/TallySyncStale.md
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallySyncStale
 
       - alert: TallyReconciliationDriftHigh
         expr: sum by (cloud) (increase(tally_sync_resources_reconciled_total[6h])) > 50
@@ -111,9 +111,10 @@ groups:
 
       # The regex names the four jobs of scrape.yaml, one more than the roadmap
       # lists: the recorded Ceilometer default pushes to a gateway the
-      # ceilometer job scrapes (docs/openstack-metrics.md), so on that path the
-      # job carries metering data and a target of it that stops answering costs
-      # samples the same way the other three do.
+      # ceilometer job scrapes
+      # (docs/explanation/the-openstack-metrics-pipeline.md), so on that path
+      # the job carries metering data and a target of it that stops answering
+      # costs samples the same way the other three do.
       - alert: TallyScrapeTargetDown
         expr: up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0
         for: 5m
@@ -121,7 +122,7 @@ groups:
           severity: critical
         annotations:
           summary: "Scrape target {{ $labels.instance }} of job {{ $labels.job }} is down"
-          runbook: docs/runbooks/TallyScrapeTargetDown.md
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeTargetDown
 
       # Scrape job gone entirely. `up` is a per-target series, and `reporting-api`
       # and `otel-collector` discover their targets (see the scrape config), so a
@@ -136,11 +137,12 @@ groups:
           severity: critical
         annotations:
           summary: "Scrape job {{ $labels.job }} resolves to no targets"
-          runbook: docs/runbooks/TallyScrapeJobMissing.md
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing
 
       # Exporter answering 200 with a service missing. The database exporter opens
       # one connection pool per service, and a scrape that runs out of connections
-      # on the exporter's database account (docs/openstack-metrics.md) loses whole
+      # on the exporter's database account
+      # (docs/explanation/the-openstack-metrics-pipeline.md) loses whole
       # services: their collectors emit nothing while the target stays up and the
       # scrape duration stays normal, so neither of the two rules above sees it and
       # the gap surfaces a month later as a short invoice. One series per billed
@@ -166,4 +168,4 @@ groups:
           severity: critical
         annotations:
           summary: "Database exporter for {{ $labels.cloud }} is up but a whole service emits no series"
-          runbook: docs/runbooks/TallyExporterServiceSilent.md
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyExporterServiceSilent

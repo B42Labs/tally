@@ -1,3 +1,10 @@
+---
+title: TallySyncStale
+description: No reconciliation run of a cloud reached completed in the last 30 minutes.
+quadrant: how-to
+audience: operator
+---
+
 # TallySyncStale
 
 `sum by (cloud) (increase(tally_sync_runs_total{status="completed"}[30m])) == 0`, with no `for`, so it fires on the first evaluation that finds the window empty.
@@ -31,4 +38,6 @@ as long as this holds, because a completed run is what books it.
    flat.
 
 The adapter, its runs, and what a partial outage does to one are described in
-[`openstack-reconciliation.md`](../openstack-reconciliation.md).
+[how reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud),
+and the steps that configure a cloud and trigger a run are in
+[reconcile a cloud](/how-to/openstack/reconcile-a-cloud).

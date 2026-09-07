@@ -1,3 +1,10 @@
+---
+title: TallyExporterServiceSilent
+description: The database exporter target is up while one of the five billed services emits no series for a cloud.
+quadrant: how-to
+audience: operator
+---
+
 # TallyExporterServiceSilent
 
 `(up{job="openstack-db-exporter"} == 1) unless on (cloud) <series>`, joined by `or` over `openstack_nova_total_vms`, `openstack_cinder_volumes`, `openstack_neutron_floating_ips`, `openstack_glance_images`, and `openstack_loadbalancer_total_loadbalancers`, `for: 15m`.
@@ -23,7 +30,7 @@ when the invoice comes up short.
    loses the race gets `ERROR 1226`, its collectors emit nothing, and the scrape
    still answers 200.
 3. The connection cap on the exporter's database account
-   ([`openstack-metrics.md`](../openstack-metrics.md#the-read-only-database-user)).
+   ([the read-only database user](/how-to/observability/scrape-the-openstack-exporters#create-the-read-only-database-user)).
    The exporter opens one pool per DSN, eight of them, and gathers the
    collectors in parallel, so a `MAX_USER_CONNECTIONS` at or below eight
    truncates every scrape by a different set of services.
