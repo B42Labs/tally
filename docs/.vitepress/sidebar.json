@@ -38,7 +38,10 @@
             { "text": "Run a period", "link": "/how-to/engine/run-a-period" },
             { "text": "Finalize a period", "link": "/how-to/engine/finalize-a-period" },
             { "text": "Detect late events", "link": "/how-to/engine/detect-late-events" },
-            { "text": "Correct a finalized period", "link": "/how-to/engine/correct-a-finalized-period" }
+            { "text": "Correct a finalized period", "link": "/how-to/engine/correct-a-finalized-period" },
+            { "text": "Export a run", "link": "/how-to/engine/export-a-run" },
+            { "text": "Model a customer group with a discount", "link": "/how-to/engine/model-a-customer-group" },
+            { "text": "Export a rollup per customer group", "link": "/how-to/engine/export-a-rollup" }
           ]
         }
       ]
