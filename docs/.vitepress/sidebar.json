@@ -12,7 +12,18 @@
     }
   ],
   "/tutorials/": [
-    { "text": "Tutorials", "items": [{ "text": "Overview", "link": "/tutorials/" }] }
+    {
+      "text": "Tutorials",
+      "items": [
+        { "text": "Overview", "link": "/tutorials/" },
+        {
+          "text": "Core track",
+          "items": [
+            { "text": "Set up your local Tally", "link": "/tutorials/set-up-your-local-tally" }
+          ]
+        }
+      ]
+    }
   ],
   "/how-to/": [
     {

@@ -6,3 +6,4 @@ Hetzner
 Ceilometer
 Grafana
 Pushgateway
+Tally
