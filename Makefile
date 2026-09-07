@@ -116,6 +116,13 @@ TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-
 # shell once and stores the result, so whatever the manifest carries here is
 # what `docker run` below is handed: a class that admitted ';' or '$$' would let
 # a manifest line decide what CI runs.
+# Every image the stack runs that is not built here, read out of the manifests
+# for the same reason and with the same care as the two below: the class admits
+# what a repository and a tag may hold and nothing else, so no manifest line can
+# decide what `up` pulls. The `:dev` tags are what `images` builds, and the
+# SERVICES loop of `up` puts those on the node.
+NODE_IMAGES := $(shell grep -rhoE 'image: [A-Za-z0-9._/-]+:[A-Za-z0-9._-]+' deploy/kubernetes/base | sed 's/^image: //' | grep -v ':dev$$' | sort -u)
+
 VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' deploy/kubernetes/base/vmalert/vmalert.yaml | head -n1)
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
@@ -152,6 +159,27 @@ up:
 	@echo '==> loading images into the cluster'
 	@for service in $(SERVICES); do \
 		kind load docker-image "$$service:dev" --name '$(CLUSTER_NAME)'; \
+	done
+	@# A kind node holds none of the stack's other images on the first `make up`,
+	@# so it pulls each of them itself, one at a time, inside the readiness waits
+	@# below. That is where `up` used to end: on the machine the tutorials were
+	@# captured on the node spent half an hour on TimescaleDB alone, past the
+	@# budget of its wait, while the host Docker already held that very image. So
+	@# the host's copy goes onto the node here, where nothing is timing it, and
+	@# only an image the host lacks is fetched at all. It is what the phase 3
+	@# drill did by hand, docs/drills/phase3.md, before `up` did it.
+	@#
+	@# An image the node already carries is skipped, which is what keeps a second
+	@# `make up` from moving every one of them again.
+	@for image in $(NODE_IMAGES); do \
+		if docker exec '$(CLUSTER_NAME)-control-plane' crictl inspecti "$$image" >/dev/null 2>&1; then \
+			continue; \
+		fi; \
+		docker image inspect "$$image" >/dev/null 2>&1 || { \
+			echo "==> pulling $$image"; \
+			docker pull --quiet "$$image" >/dev/null; \
+		}; \
+		kind load docker-image "$$image" --name '$(CLUSTER_NAME)'; \
 	done
 	@echo '==> applying the dev overlay'
 	$(KUBECTL) apply -k $(DEV_OVERLAY)
