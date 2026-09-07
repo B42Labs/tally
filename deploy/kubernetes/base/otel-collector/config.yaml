@@ -12,9 +12,10 @@
 # and resource, and could grow the series count of a store with a fixed volume
 # at will. Basic and not a bearer token because Ceilometer's OTLP publisher
 # takes credentials from the URL's userinfo and cannot set an arbitrary header
-# (docs/openstack-metrics.md). The htpasswd file arrives from a Secret; it
-# takes a bcrypt hash as well as a plain user:password line, and it is read at
-# startup alone, so rotating it rolls the pod.
+# (docs/explanation/the-openstack-metrics-pipeline.md). The htpasswd file
+# arrives from a Secret; it takes a bcrypt hash as well as a plain
+# user:password line, and it is read at startup alone, so rotating it rolls the
+# pod.
 extensions:
   basicauth/otlp:
     htpasswd:

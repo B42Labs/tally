@@ -80,9 +80,10 @@ const (
 
 // nonBillableNotifications is how many notifications of a month the collector
 // maps to no event: the unsized image.create, one per image, and every
-// notification of the noise catalogue (docs/openstack-simulator.md, "The
-// noise"). notifications.jsonl holds every notification and events.jsonl only
-// the billable ones, so the two files differ by exactly this many lines.
+// notification of the noise catalogue
+// (docs/explanation/the-simulated-openstack-world.md, "The noise").
+// notifications.jsonl holds every notification and events.jsonl only the
+// billable ones, so the two files differ by exactly this many lines.
 //
 // The count comes from the month the generator renders rather than from a
 // number written down here. A measured one would fail every time the catalogue

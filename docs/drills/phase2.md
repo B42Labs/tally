@@ -8,7 +8,7 @@ state, the notification in Alertmanager, and the resolution, and it checks on
 the way that the pending timer survives a vmalert restart.
 
 The rule and the components it runs on are described in
-[`../alerting.md`](../alerting.md). Every command below runs from the repository
+[Alerting design](https://b42labs.github.io/tally/explanation/alerting-design). Every command below runs from the repository
 root against a running dev cluster. The drill takes about 80 minutes of wall
 clock, most of it waiting.
 
@@ -34,7 +34,7 @@ The first lists one group, `tally`, with the eleven alerting rules of
 recording rule `TallyResourceCountAnomaly` reads. The second
 answers 200 with the one receiver `config.yaml` declares, `default`.
 `/api/v2/status`, which would answer with the loaded config, is not published
-([alerting.md](../alerting.md#dev-access)); read it from inside the cluster if
+([Deploy alerting and route notifications](https://b42labs.github.io/tally/how-to/observability/deploy-alerting)); read it from inside the cluster if
 you need it.
 
 ## Seed one collector event
@@ -49,7 +49,7 @@ one event now makes the 24-hour window non-empty for the next 24 hours, and the
 
 A seed the dashboard drill posted within the last 24 hours serves the same
 purpose. If
-[`../grafana-dashboards.md`](../grafana-dashboards.md#part-1-real-series-through-the-reporting-api)
+[Push real events](https://b42labs.github.io/tally/how-to/observability/fill-the-dashboards#push-real-events)
 has been run against this cluster inside that window, its events already satisfy
 the second clause, and the timeline below runs from its last post rather than
 from a fresh seed.
@@ -183,7 +183,7 @@ The two `TallyScrapeTargetDown` alerts for `openstack-db-exporter` and
 `ceilometer` are firing throughout and are expected. Both jobs are static
 targets for exporters that run beside an OpenStack control plane rather than in
 this cluster, which is the designed dev state of
-[`../openstack-metrics.md`](../openstack-metrics.md#replacing-the-placeholders).
+[the scrape jobs](https://b42labs.github.io/tally/reference/observability/metrics#scrape-jobs).
 
 The seed call without its `Authorization` header answers 401 and moves no
 counter, which is the check that ingest is not open to whoever resolves the
@@ -193,9 +193,8 @@ A query that comes back empty within 30 seconds of a post has lost nothing.
 VictoriaMetrics evaluates queries behind wall clock by `-search.latencyOffset`,
 30 seconds by default, so a query over a window still being written answers
 empty; repeat it after the offset before treating it as a failure. The full
-explanation is in the
-[acceptance drill](../openstack-metrics.md#acceptance-drill) of the metrics
-pipeline.
+explanation is in
+[Check the result](https://b42labs.github.io/tally/how-to/observability/publish-metrics-over-otlp#check-the-result) of Publish metrics over OTLP.
 
 Two costs of the run, both accepted:
 

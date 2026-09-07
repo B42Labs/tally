@@ -12,7 +12,7 @@ and it is the triage: every warning it records and every difference it produces
 has to carry a switch that accounts for it.
 
 The month is the simulated one of seed 1 over `2026-07` on cloud `os-sim`,
-described in [`../openstack-simulator.md`](../openstack-simulator.md). The truth
+described in [The simulated OpenStack world](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world). The truth
 the export is held against is the oracle the simulator writes beside the month
 it publishes. The warnings and the differences the second run triages are the
 ones the fault switches earn.
@@ -152,14 +152,14 @@ is what the Makefile comment above the target says.
 
 `SIM_REGISTER_PROJECTS=true` registers the month's six tenants and its two
 Gardener projects with the dev registry before the first notification goes out
-([the project registry](../openstack-simulator.md#the-project-registry)).
+([project registration](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#project-registration)).
 
 A `run` also serves the month as an OpenStack API
-([the fake OpenStack API](../openstack-simulator.md#the-fake-openstack-api)), so
+([the fake OpenStack API](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-fake-openstack-api)), so
 the reconciliation loop starts in a second shell right after the URLs print. It
 posts one sync per minute and tells each one where the month stands
-([triggering a sync](../openstack-reconciliation.md#triggering-a-sync),
-[telling a sync the instant it runs at](../openstack-reconciliation.md#telling-a-sync-the-instant-it-runs-at)):
+([triggering a sync](https://b42labs.github.io/tally/how-to/openstack/reconcile-a-cloud),
+[telling a sync the instant it runs at](https://b42labs.github.io/tally/how-to/simulator/reconcile-the-simulated-cloud)):
 
 ```sh
 kubectl --context kind-tally -n tally port-forward svc/reporting-api 8082:80 &
@@ -250,7 +250,7 @@ The loop stops when `published` reaches `total`: Ctrl-C on the loop, then
 totals the answers carried: `created`, `updated` and `deleted`.
 
 The month is watched through the control endpoint
-([the control endpoint](../openstack-simulator.md#the-control-endpoint)):
+([the control endpoint](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-control-endpoint)):
 
 ```sh
 curl -s http://127.0.0.1:8091/clock
@@ -274,7 +274,7 @@ curl -s http://127.0.0.1:8090/metrics | awk '
 ```
 
 It answers `1812 13915` for seed 1, the two counts
-[what the collector shows](../openstack-simulator.md#what-the-collector-shows)
+[what a month renders](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world#what-a-month-renders)
 states, and `tally_collector_unparseable_total` is 0.
 `tally_collector_buffer_depth` has to read 0 before the first engine command: it
 is the outbox the collector drains into the Reporting API, and a run over a
@@ -288,7 +288,7 @@ curl --cacert tally-ca.crt 'https://vm.tally.127-0-0-1.nip.io:8443/targets'
 ```
 
 Four jobs are listed
-([acceptance drill](../openstack-metrics.md#acceptance-drill)). The
+([Check the result](https://b42labs.github.io/tally/how-to/observability/publish-metrics-over-otlp#check-the-result)). The
 `openstack-db-exporter` job is up while the month publishes and down again
 afterwards, because its target is the simulator's inventory endpoint.
 
@@ -302,8 +302,8 @@ TALLY_SIM_CLOUD=os-sim go run ./cmd/tally-openstack-simulator run \
 With no `TALLY_SIM_AMQP_URL`, no `TALLY_SIM_OTLP_URL` and no
 `--register-projects` it dials nothing, pushes nothing and registers nothing. It
 writes `notifications.jsonl`, `events.jsonl` and `oracle.json`
-([the oracle](../openstack-simulator.md#the-oracle),
-[file mode and replay](../openstack-simulator.md#file-mode-and-replay)). It runs
+([the oracle](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-oracle),
+[file mode and replay](https://b42labs.github.io/tally/how-to/simulator/replay-a-recorded-month)). It runs
 from the same checkout the stack's image was built from, because one seed,
 period and cloud render the same month byte for byte only within one build, and
 `ReadOracle` refuses a document of another format.
@@ -373,7 +373,7 @@ export does not remove what an earlier one left there`, so each export of this
 drill gets a directory of its own.
 
 The export is held against the oracle
-([comparing an export](../openstack-simulator.md#comparing-an-export)):
+([comparing an export](https://b42labs.github.io/tally/how-to/simulator/compare-an-export)):
 
 ```sh
 go run ./cmd/tally-openstack-simulator compare \
@@ -395,7 +395,7 @@ does not price: pass the model the run rated with`.
 
 The counter dimensions are outside the comparison, because `increase()`
 extrapolates over the edges of its window; the oracle's `traffic` rows are the
-intended figure ([the counter](../openstack-simulator.md#the-counter)). No
+intended figure ([the metric series](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world#the-metric-series)). No
 instance of seed 1 spans the whole period, because every classic instance is
 created inside the first hours of the month, so the read-off picks one classic
 instance that lives from its create to the period end:
@@ -601,7 +601,7 @@ The collector is read at the hold: `consumed`, `skipped`,
 the five-switch month of the first run, and the three `instance.*` series under
 `skipped`. `tally_collector_buffer_depth` is 0.
 The per-switch figures stand in
-[the fault switches](../openstack-simulator.md#the-fault-switches). No document
+[the fault switches](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-fault-switches). No document
 states the combined totals, so the first run of this drill is what records them.
 
 During the hold the month is metered, closed and exported:

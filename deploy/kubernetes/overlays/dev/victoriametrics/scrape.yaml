@@ -2,9 +2,9 @@
 #
 # This file replaces the generated victoriametrics-scrape ConfigMap through the
 # behavior: replace generator in the overlay's kustomization.yaml, which is the
-# mechanism docs/openstack-metrics.md documents under "Replacing the
-# placeholders". Everything below is the base file; the one change is the
-# openstack-db-exporter job.
+# mechanism docs/how-to/observability/scrape-the-openstack-exporters.md
+# documents under "Replace the scrape targets". Everything below is the base
+# file; the one change is the openstack-db-exporter job.
 #
 # That job scrapes the simulated cloud the compose stack publishes on the host
 # at 127.0.0.1:8091. A pod in the kind node reaches the host as
@@ -24,7 +24,7 @@
 # The jobs, their intervals, how the in-cluster jobs find their targets, the
 # static labels on the two OpenStack jobs, the placeholder targets, and how a
 # real deployment replaces this file are documented in
-# docs/openstack-metrics.md.
+# docs/explanation/the-openstack-metrics-pipeline.md.
 scrape_configs:
   # The in-cluster jobs discover endpoints instead of naming a Service address.
   # A Service address is one ClusterIP that kube-proxy resolves to an arbitrary

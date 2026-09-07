@@ -3,7 +3,7 @@
 # The jobs, their intervals, how the in-cluster jobs find their targets, the
 # static labels on the two OpenStack jobs, the placeholder targets, and how a
 # real deployment replaces this file are documented in
-# docs/openstack-metrics.md.
+# docs/explanation/the-openstack-metrics-pipeline.md.
 scrape_configs:
   # The in-cluster jobs discover endpoints instead of naming a Service address.
   # A Service address is one ClusterIP that kube-proxy resolves to an arbitrary

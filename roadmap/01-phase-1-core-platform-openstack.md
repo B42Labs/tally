@@ -896,7 +896,8 @@ diff scenario wired through the WP 1.10 framework with this adapter mocked at th
 **Create/modify**: `deploy/kubernetes/base/otel-collector/config.yaml`,
 `deploy/kubernetes/base/victoriametrics/scrape.yaml` (both are ConfigMap sources — a change
 re-rolls the pods via kustomize's generated ConfigMap names), docs under
-`docs/openstack-metrics.md`.
+`docs/explanation/the-openstack-metrics-pipeline.md` and
+`docs/how-to/observability/scrape-the-openstack-exporters.md`.
 
 OTel Collector config (universal middleware for all providers):
 
@@ -955,9 +956,12 @@ scrape_configs:
    volumes/sizes, Neutron FIPs/ports/routers, Keystone projects, Glance images, Octavia LBs.
 2. Verify label output can be relabeled to the Tally convention (`project_id`, `resource_id`
    where applicable) — write down the relabel_configs.
-3. Deploy read-only DB users (SQL grants documented in `docs/openstack-metrics.md`).
+3. Deploy read-only DB users (SQL grants documented in
+   `docs/how-to/observability/scrape-the-openstack-exporters.md` under "Create the read-only
+   database user").
 4. Gaps → decide extend-upstream vs. supplement with a small custom exporter; record the
-   decision in `docs/openstack-metrics.md`.
+   decision in `docs/explanation/the-openstack-metrics-pipeline.md` under "Extend upstream,
+   or supplement it".
 
 **Acceptance criteria**: on the dev cluster, a metric pushed to
 `https://otlp.tally.127-0-0-1.nip.io:8443` (OTLP/HTTP through the Gateway) appears in

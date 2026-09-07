@@ -178,7 +178,8 @@ spec:
     # GET, so a POST /api/v2/silences never reaches it and lands here.
     #
     # Silences are created from inside the cluster instead, with the amtool the
-    # image ships; docs/alerting.md carries the command.
+    # image ships; docs/how-to/observability/deploy-alerting.md carries the
+    # command.
     - matches:
         - path:
             type: PathPrefix

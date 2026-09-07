@@ -754,9 +754,9 @@ func TestRefusedShapesTwinTheirOriginals(t *testing.T) {
 
 // TestVersionedTwinOfAFinishResize covers the twin nova would have published
 // had it been left on the versioned notification format
-// docs/openstack-collector.md refuses. The type is renamed, the payload moves
-// under nova_object.data, and the server is named uuid there rather than
-// instance_id.
+// docs/how-to/openstack/connect-the-collector.md (section "Configure the
+// OpenStack services") refuses. The type is renamed, the payload moves under
+// nova_object.data, and the server is named uuid there rather than instance_id.
 func TestVersionedTwinOfAFinishResize(t *testing.T) {
 	const (
 		serverID = "8f7e6d5c-4b3a-4291-8071-6f5e4d3c2b1a"

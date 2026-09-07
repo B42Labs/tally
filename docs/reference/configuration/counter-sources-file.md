@@ -134,7 +134,7 @@ declares one source of each kind.
 #
 # The series name in the first entry is the roadmap's illustration. A
 # deployment queries the series name its own Ceilometer pipeline stores; see
-# docs/openstack-metrics.md.
+# docs/explanation/the-openstack-metrics-pipeline.md.
 
 sources:
   - platform: openstack
