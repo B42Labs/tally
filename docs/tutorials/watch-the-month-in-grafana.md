@@ -271,8 +271,9 @@ two time ranges, or the `cloud` variable is not on `os-sim`.
 
 ## Where to go next
 
-The track written next continues from the state this lesson leaves behind:
-"The billing track: finalization, late events and corrections, commercial pricing and related-cost attribution".
+[Discount a customer group](/tutorials/discount-a-customer-group) is the first
+lesson of the billing track, which continues from the state this lesson leaves
+behind.
 
 [Tear down your local Tally](/tutorials/tear-down-your-local-tally) is the way
 back to a clean machine. A reader going on to the billing track does lesson 5
