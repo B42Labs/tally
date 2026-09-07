@@ -214,7 +214,8 @@ Rules (`groups: [{name: tally, interval: 1m, rules: [...]}]`):
 
 # 9. Exporter answering 200 with a service missing. The database exporter opens
 #    one connection pool per service, and a scrape that runs out of connections
-#    on the exporter's database account (docs/openstack-metrics.md) loses whole
+#    on the exporter's database account
+#    (docs/explanation/the-openstack-metrics-pipeline.md) loses whole
 #    services: their collectors emit nothing while the target stays up and the
 #    scrape duration stays normal, so 7 and 8 both stay silent and the gap
 #    surfaces a month later as a short invoice. One series per billed resource
@@ -247,6 +248,6 @@ with tighter repeat interval; receiver endpoints are deployment-specific (env-su
 1. Four dashboards provisioned from the repo, rendering on the dev cluster.
 2. All vmalert rules load (`-dryRun` in CI); the collector-silent drill fires and resolves.
 3. Aggregation endpoints documented in OpenAPI and covered by RBAC tests.
-4. Runbook stubs in `docs/runbooks/` for the five critical alerts (`TallyCloudEventsSilent`,
+4. Runbook stubs in `docs/how-to/alerts/` for the five critical alerts (`TallyCloudEventsSilent`,
    `TallySyncStale`, `TallyScrapeTargetDown`, `TallyScrapeJobMissing`,
    `TallyExporterServiceSilent`) — symptom, impact on billing, first checks.

@@ -19,9 +19,10 @@ const collectorQueue = "tally-notifications"
 // ServiceExchanges are the exchanges the simulator publishes notifications on,
 // one per service, and the ones Connect declares. The collector's default
 // TALLY_OSC_EXCHANGES lists the first four, and a deployment lists the other
-// four itself (docs/openstack-collector.md, "Exchanges and topics"), so a
-// collector left at its default receives the month without its load balancers
-// and without the keystone, designate, and barbican notifications.
+// four itself (docs/how-to/openstack/connect-the-collector.md, "Bind the
+// exchanges and topics"), so a collector left at its default receives the month
+// without its load balancers and without the keystone, designate, and barbican
+// notifications.
 var ServiceExchanges = []string{
 	"nova", "cinder", "neutron", "glance", "octavia", "keystone", "designate", "barbican",
 }

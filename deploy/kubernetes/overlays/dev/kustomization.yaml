@@ -74,10 +74,11 @@ configMapGenerator:
       - reconciliation/clouds-config.yaml
   # The scrape config of this cluster, in place of the base's. A generator for
   # the same name marked behavior: replace overrides a generated ConfigMap,
-  # which is the mechanism docs/openstack-metrics.md documents under "Replacing
-  # the placeholders"; the generated name still carries a hash of the content,
-  # so editing the file re-rolls the VictoriaMetrics pod. What the overlay's
-  # file changes against the base is written in its own header.
+  # which is the mechanism
+  # docs/how-to/observability/scrape-the-openstack-exporters.md documents under
+  # "Replace the scrape targets"; the generated name still carries a hash of the
+  # content, so editing the file re-rolls the VictoriaMetrics pod. What the
+  # overlay's file changes against the base is written in its own header.
   - name: victoriametrics-scrape
     behavior: replace
     files:

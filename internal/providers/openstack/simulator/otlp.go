@@ -87,9 +87,9 @@ type otlpSum struct {
 //
 // The instant and the value are JSON strings, which is the proto3 JSON mapping
 // of a 64-bit integer and what the OTLP/HTTP receiver reads them as. The
-// recorded drill in docs/grafana-dashboards.md sends timeUnixNano as a string
-// too. An integer value also keeps a byte count exact, which a float64 stops
-// doing above 2^53.
+// recorded drill in docs/how-to/observability/fill-the-dashboards.md sends
+// timeUnixNano as a string too. An integer value also keeps a byte count exact,
+// which a float64 stops doing above 2^53.
 type otlpPoint struct {
 	Attributes   []otlpAttribute `json:"attributes"`
 	TimeUnixNano string          `json:"timeUnixNano"`

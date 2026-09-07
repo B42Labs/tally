@@ -195,7 +195,8 @@ const (
 	// whole frame sequence into delivery.Body, and RabbitMQ has never implemented
 	// the prefetch_size half of Qos, so there is no client-side knob for it: what
 	// bounds resident memory is Prefetch times the broker's max_message_size, and
-	// docs/openstack-collector.md states both as deployment requirements.
+	// docs/how-to/openstack/connect-the-collector.md states both as deployment
+	// requirements.
 	bodyMax = 1 << 20
 	// eventMax bounds the mapped event. The payload strings it copies are the
 	// publisher's, and an event past what one ingest request may carry is one no

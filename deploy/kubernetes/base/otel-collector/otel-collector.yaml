@@ -109,12 +109,13 @@ spec:
 # Both OTLP hostnames are published on the internet and both answer every
 # request with a bcrypt comparison before they can reject it. The username is
 # not a secret — it is in this tree and in the publisher URL in
-# docs/openstack-metrics.md — so a wrong password costs the collector tens of
-# milliseconds of CPU per request while costing the sender nothing. Against one
-# replica with a 100m CPU request that is an amplifier: a few dozen requests a
-# second from a single host starve the pipeline, and Ceilometer's OTLP
-# publisher has neither a queue nor a retry, so the samples it fails to push in
-# the meantime are gone from the billing store for good.
+# docs/how-to/observability/publish-metrics-over-otlp.md — so a wrong password
+# costs the collector tens of milliseconds of CPU per request while costing the
+# sender nothing. Against one replica with a 100m CPU request that is an
+# amplifier: a few dozen requests a second from a single host starve the
+# pipeline, and Ceilometer's OTLP publisher has neither a queue nor a retry, so
+# the samples it fails to push in the meantime are gone from the billing store
+# for good.
 #
 # The limit is enforced by the proxy, so a rejected request is answered with 429
 # and never reaches the authenticator. Local means per proxy replica and needs

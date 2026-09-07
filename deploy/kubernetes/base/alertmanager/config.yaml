@@ -9,8 +9,8 @@
 # generated ConfigMap from its overlay rather than by patching this file: a
 # configMapGenerator entry of its own for alertmanager-config, marked
 # behavior: replace, carrying the overlay's config.yaml. That is the mechanism
-# docs/openstack-metrics.md records for scrape.yaml under "Replacing the
-# placeholders".
+# docs/how-to/observability/scrape-the-openstack-exporters.md records for
+# scrape.yaml under "Replace the scrape targets".
 #
 # The child route below inherits the receiver from its parent and tightens
 # repeat_interval alone, so a deployment that names a receiver at the root

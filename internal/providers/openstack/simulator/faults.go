@@ -439,9 +439,9 @@ func refusedTwin(t Transition, messageID string) Transition {
 // versionedTwin is the notification a nova configured for versioned
 // notifications would have sent instead. It carries another type name and wraps
 // the payload in nova_object.data, which is the format
-// docs/openstack-collector.md refuses under "Required OpenStack service
-// settings": ParseEnvelope reads it, and the mapping table claims nothing for
-// the type, so the collector counts it as skipped.
+// docs/how-to/openstack/connect-the-collector.md refuses under "Configure the
+// OpenStack services": ParseEnvelope reads it, and the mapping table claims
+// nothing for the type, so the collector counts it as skipped.
 func versionedTwin(t Transition, messageID string) Transition {
 	twin := refusedTwin(t, messageID)
 	twin.EventType = versionedType(t.EventType)
