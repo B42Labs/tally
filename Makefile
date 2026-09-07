@@ -77,6 +77,31 @@ COMPOSE := docker compose -f deploy/compose/compose.yaml
 KUBE_CONTEXT := kind-$(CLUSTER_NAME)
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 
+# How long one readiness wait may take, and how many of them a rollout gets. The
+# product is the budget. A first `make up` on a fresh node pulls every image the
+# stack runs, and a pull outlasting one wait is the normal case on a slow line
+# rather than a fault: TimescaleDB, the largest at 555 MB, took fifteen minutes
+# on the machine the tutorials were captured on, where a single five-minute wait
+# ended the run three times over and left a stack whose migration chain had
+# never been applied. So an expired wait is repeated, which leaves a pull that is
+# still running to finish, while a rollout that is genuinely stuck still ends the
+# run once the budget is spent.
+WAIT_TIMEOUT ?= 300s
+WAIT_ATTEMPTS ?= 6
+
+# await runs one readiness wait under that budget. $(1) is the kubectl arguments
+# to wait with, without the timeout, and $(2) is what the messages call the thing
+# waited on.
+#
+# The failure names what stopping here costs, because the expensive one is
+# silent: `up` applies the two migration chains after these waits, the Reporting
+# API never migrates on its own, and its readiness probe answers 503 for as long
+# as its database carries no schema. A reader who does not know that sees a pod
+# sitting at 0/1 and no reason for it.
+define await
+	@attempt=1; 	until $(KUBECTL) $(1) --timeout=$(WAIT_TIMEOUT); do 		if [ "$$attempt" -ge '$(WAIT_ATTEMPTS)' ]; then 			echo '' >&2; 			echo 'ERROR: $(2) did not become ready in $(WAIT_ATTEMPTS) waits of $(WAIT_TIMEOUT).' >&2; 			echo '       make up stops here, so the stack is incomplete. Stopping before' >&2; 			echo '       the migration chain leaves the Reporting API at 0/1 until a later' >&2; 			echo '       make up applies it: it never migrates on its own.' >&2; 			echo '       kubectl --context $(KUBE_CONTEXT) get pods -A, and the events of' >&2; 			echo '       the pod that is not ready, say why it is not.' >&2; 			echo '       make up is safe to run again: it reuses the cluster and carries on.' >&2; 			exit 1; 		fi; 		attempt=$$((attempt + 1)); 		echo '==> $(2) is not ready after $(WAIT_TIMEOUT); the node may still be pulling an image, waiting again ('"$$attempt"'/$(WAIT_ATTEMPTS))'; 	done
+endef
+
 # Reaches TimescaleDB through the Gateway's TCP listener, which is the same path
 # a developer's psql takes.
 TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
@@ -107,12 +132,12 @@ up:
 	fi
 	@echo '==> installing cert-manager $(CERT_MANAGER_VERSION)'
 	$(KUBECTL) apply --server-side -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
-	$(KUBECTL) -n cert-manager rollout status deployment/cert-manager --timeout=300s
-	$(KUBECTL) -n cert-manager rollout status deployment/cert-manager-webhook --timeout=300s
-	$(KUBECTL) -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=300s
+	$(call await,-n cert-manager rollout status deployment/cert-manager,cert-manager)
+	$(call await,-n cert-manager rollout status deployment/cert-manager-webhook,the cert-manager webhook)
+	$(call await,-n cert-manager rollout status deployment/cert-manager-cainjector,the cert-manager cainjector)
 	@echo '==> installing Envoy Gateway $(ENVOY_GATEWAY_VERSION)'
 	$(KUBECTL) apply --server-side -f https://github.com/envoyproxy/gateway/releases/download/$(ENVOY_GATEWAY_VERSION)/install.yaml
-	$(KUBECTL) -n envoy-gateway-system rollout status deployment/envoy-gateway --timeout=300s
+	$(call await,-n envoy-gateway-system rollout status deployment/envoy-gateway,Envoy Gateway)
 	@echo '==> checking for the experimental Gateway API channel'
 	@$(KUBECTL) get crd tcproutes.gateway.networking.k8s.io >/dev/null 2>&1 || { \
 		echo 'ERROR: the TCPRoute CRD is missing, so Postgres cannot be routed.' >&2; \
@@ -130,19 +155,19 @@ up:
 	done
 	@echo '==> applying the dev overlay'
 	$(KUBECTL) apply -k $(DEV_OVERLAY)
-	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/timescaledb --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/victoriametrics --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/otel-collector --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/grafana --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/alertmanager --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/vmalert --timeout=300s
-	$(KUBECTL) -n $(NAMESPACE) wait gateway/tally --for=condition=Programmed --timeout=300s
+	$(call await,-n $(NAMESPACE) rollout status statefulset/timescaledb,TimescaleDB)
+	$(call await,-n $(NAMESPACE) rollout status statefulset/victoriametrics,VictoriaMetrics)
+	$(call await,-n $(NAMESPACE) rollout status deployment/otel-collector,the OpenTelemetry collector)
+	$(call await,-n $(NAMESPACE) rollout status deployment/grafana,Grafana)
+	$(call await,-n $(NAMESPACE) rollout status statefulset/alertmanager,Alertmanager)
+	$(call await,-n $(NAMESPACE) rollout status deployment/vmalert,vmalert)
+	$(call await,-n $(NAMESPACE) wait gateway/tally --for=condition=Programmed,the Gateway)
 	@# The API stays unready until the database carries its schema, and it never
 	@# migrates on its own, so the chain has to be applied before the rollout can
 	@# finish. It runs through the Gateway, which is what the wait above is for.
 	@echo '==> applying the migration chain'
 	$(MAKE) migrate
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/reporting-api --timeout=300s
+	$(call await,-n $(NAMESPACE) rollout status deployment/reporting-api,the Reporting API)
 	@echo
 	@echo 'Stack is up:'
 	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1        Reporting API'
