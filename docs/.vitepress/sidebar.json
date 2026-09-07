@@ -118,6 +118,14 @@
             { "text": "The simulated OpenStack world", "link": "/explanation/the-simulated-openstack-world" }
           ]
         },
+        {
+          "text": "Observability",
+          "collapsed": true,
+          "items": [
+            { "text": "Alerting design", "link": "/explanation/alerting-design" },
+            { "text": "Grafana and the read-only proxy", "link": "/explanation/grafana-and-the-read-only-proxy" }
+          ]
+        },
         { "text": "Roadmap", "link": "/explanation/roadmap" }
       ]
     }
