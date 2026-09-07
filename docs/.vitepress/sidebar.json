@@ -113,7 +113,9 @@
             { "text": "OpenStack as the reference provider", "link": "/explanation/openstack-as-the-reference-provider" },
             { "text": "The providers that do not exist yet", "link": "/explanation/providers-that-do-not-exist-yet" },
             { "text": "How the collector consumes a bus", "link": "/explanation/how-the-collector-consumes-a-bus" },
-            { "text": "How reconciliation observes a cloud", "link": "/explanation/how-reconciliation-observes-a-cloud" }
+            { "text": "How reconciliation observes a cloud", "link": "/explanation/how-reconciliation-observes-a-cloud" },
+            { "text": "The OpenStack metrics pipeline", "link": "/explanation/the-openstack-metrics-pipeline" },
+            { "text": "The simulated OpenStack world", "link": "/explanation/the-simulated-openstack-world" }
           ]
         },
         { "text": "Roadmap", "link": "/explanation/roadmap" }
