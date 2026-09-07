@@ -55,5 +55,22 @@ The pages build on each other in this order.
 - [The providers that do not exist yet](/explanation/providers-that-do-not-exist-yet)
   keeps the unbuilt provider designs as the argument that the pattern
   generalises, and records that none of them is built.
+- [How the collector consumes a bus](/explanation/how-the-collector-consumes-a-bus)
+  says why the OpenStack collector acknowledges a notification only after it is
+  buffered, and what it drops instead.
+- [How reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud)
+  says what one OpenStack sync establishes, and which instant each correction
+  ends up carrying.
+- [The OpenStack metrics pipeline](/explanation/the-openstack-metrics-pipeline)
+  argues why a sample reaches the store on either a push or a pull path, and why
+  Tally ships no exporter of its own.
+- [The simulated OpenStack world](/explanation/the-simulated-openstack-world)
+  describes the month the simulator renders and why the same seed renders it
+  again byte for byte.
+- [Alerting design](/explanation/alerting-design) says why vmalert and
+  Alertmanager are deployed the way they are, and why the repository names no
+  receiver.
+- [Grafana and the read-only proxy](/explanation/grafana-and-the-read-only-proxy)
+  argues why Grafana reaches the metrics store through a filtering proxy.
 - [Roadmap](/explanation/roadmap) says what each phase covers and what is
   built.

@@ -119,7 +119,8 @@ rate drops to zero is alerted on, because a collector outage is what opens the
 window wide enough to matter.
 
 `TallyCloudEventsSilent` is that alert. It fires when a cloud that produced
-collector events in the last 24 hours has produced none for an hour, and the
-runbook for `TallyCloudEventsSilent` says what to do about it. It sits beside
+collector events in the last 24 hours has produced none for an hour, and
+[the runbook for `TallyCloudEventsSilent`](/how-to/alerts/TallyCloudEventsSilent)
+says what to do about it. It sits beside
 `TallySyncErrors`, `TallySyncStale` and `TallyReconciliationDriftHigh` in
 [the alerting rules](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules.yaml).
