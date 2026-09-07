@@ -25,6 +25,12 @@
             { "text": "Watch the month in Grafana", "link": "/tutorials/watch-the-month-in-grafana" },
             { "text": "Tear down your local Tally", "link": "/tutorials/tear-down-your-local-tally" }
           ]
+        },
+        {
+          "text": "Billing track",
+          "items": [
+            { "text": "Discount a customer group", "link": "/tutorials/discount-a-customer-group" }
+          ]
         }
       ]
     }
