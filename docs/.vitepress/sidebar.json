@@ -20,7 +20,8 @@
           "text": "Core track",
           "items": [
             { "text": "Set up your local Tally", "link": "/tutorials/set-up-your-local-tally" },
-            { "text": "Simulate a month of OpenStack", "link": "/tutorials/simulate-a-month-of-openstack" }
+            { "text": "Simulate a month of OpenStack", "link": "/tutorials/simulate-a-month-of-openstack" },
+            { "text": "Meter and rate your first month", "link": "/tutorials/meter-and-rate-your-first-month" }
           ]
         }
       ]
