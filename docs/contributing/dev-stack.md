@@ -297,6 +297,7 @@ The table below is rendered from the `## target: description` comments of the
 | `simulator-up` | run the simulator, the collector, and a broker against the dev cluster |
 | `simulator-down` | stop the simulator stack and drop its volumes |
 | `ca` | print the dev CA certificate, for curl --cacert and browser trust |
+| `console` | run the demo console against the dev cluster |
 | `test` | run the test suite |
 | `lint` | run golangci-lint |
 | `fmt` | format every Go file with gofumpt, through golangci-lint's formatter |
@@ -331,6 +332,8 @@ line, as in `make up WAIT_ATTEMPTS=12`.
 - `SQLC_VERSION` (`v1.31.1`) is the sqlc release `generate` builds the query
   code with.
 - The `SIM_` set belongs to the simulator stack and is in the table above.
+- `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
+  127.0.0.1, and the port of the URL it prints.
 
 ## Where the dev stack ends
 

@@ -70,6 +70,12 @@ SIM_OTLP_PASSWORD ?= tally-dev-otlp-password
 # The grid the pushed traffic and inventory series lie on, which is the interval
 # Ceilometer polls at.
 SIM_METRICS_INTERVAL ?= 300s
+
+# The port `console` binds the demo console to on 127.0.0.1. It is passed to
+# the process and printed as its URL, so the two cannot disagree. 8090 and
+# 8091 are the compose stack's.
+CONSOLE_PORT ?= 8095
+
 COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
@@ -129,7 +135,7 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
-	images simulator-up simulator-down docs docs-build
+	images simulator-up simulator-down console docs docs-build
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
 # stack, and an engine given less than this spends the readiness waits of `up`
@@ -407,6 +413,33 @@ simulator-down:
 ## ca: print the dev CA certificate, for curl --cacert and browser trust
 ca:
 	@$(KUBECTL) -n cert-manager get secret tally-dev-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
+
+# The console reads the dead-letter list, GET /api/v1/rejected-events, and that
+# route is admin-only, so the token below carries the admin role rather than
+# read_all. It is issued fresh on every run for the reason `simulator-up` issues
+# one fresh: the cluster may have been recreated since the last run, and a new
+# database knows none of the tokens the old one handed out.
+#
+# The token comes before the CA, so a machine with no dev cluster fails here,
+# with the admin CLI's connection error, rather than on the kubectl call `ca`
+# makes. It stays in the shell of this recipe and is written to no file, unlike
+# the simulator's, which compose reads out of deploy/compose/.env.
+## console: run the demo console against the dev cluster
+console:
+	@echo '==> issuing an admin api token for the demo console'
+	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-api-token --role admin --description 'demo console')" && \
+	echo '==> writing the dev CA to tally-ca.crt' && \
+	$(MAKE) -s ca > tally-ca.crt && \
+	echo && \
+	echo 'Demo console:' && \
+	echo '  http://127.0.0.1:$(CONSOLE_PORT)/' && \
+	echo && \
+	TALLY_CONSOLE_REPORTING_URL=https://api.tally.127-0-0-1.nip.io:8443 \
+	TALLY_CONSOLE_CA_FILE=tally-ca.crt \
+	TALLY_CONSOLE_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' \
+	TALLY_CONSOLE_HTTP_PORT='$(CONSOLE_PORT)' \
+	TALLY_CONSOLE_API_TOKEN="$$token" \
+	go run ./cmd/tally-console
 
 ## test: run the test suite
 test:
