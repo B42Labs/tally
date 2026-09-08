@@ -28,6 +28,7 @@ func funcMap() template.FuncMap {
 		"stamp":      stamp,
 		"optStamp":   optStamp,
 		"zeroStamp":  zeroStamp,
+		"idText":     idText,
 		"optString":  optString,
 		"pretty":     pretty,
 		"stateClass": stateClass,

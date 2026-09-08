@@ -1,0 +1,48 @@
+{{define "content"}}
+<dl>
+<dt>run</dt><dd>{{.Run.ID}}</dd>
+<dt>period</dt><dd>{{stamp .Run.PeriodFrom}} to {{stamp .Run.PeriodTo}}</dd>
+<dt>kind</dt><dd>{{.Run.Kind}}</dd>
+<dt>status</dt><dd>{{.Run.Status}}</dd>
+<dt>clouds</dt><dd>{{range .Run.Clouds}}{{.}} {{end}}</dd>
+<dt>started</dt><dd>{{zeroStamp .Run.StartedAt}}</dd>
+<dt>completed</dt><dd>{{zeroStamp .Run.CompletedAt}}</dd>
+{{if .CatalogLink}}<dt>pricing</dt><dd><a href="{{.CatalogLink}}">{{.Run.PricingVersion}}</a></dd>{{end}}
+{{if .CorrectsLink}}<dt>corrects</dt><dd><a href="{{.CorrectsLink}}">{{.Run.CorrectsRunID}}</a></dd>{{end}}
+</dl>
+
+<h2>Statements</h2>
+{{if .Statements}}
+<table>
+<thead><tr><th>project</th><th>total</th><th>share</th></tr></thead>
+<tbody>
+{{range .Statements}}<tr>
+<td><a href="{{.Link}}">{{.Row.Key}}</a></td>
+<td class="number">{{amount .Row.Total}} {{.Row.Currency}}</td>
+<td><svg width="640" height="14" viewBox="0 0 640 14"><rect class="bar" x="0" y="1" width="{{.Width}}" height="12"></rect></svg></td>
+</tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>this run produced no statement</p>
+{{end}}
+
+{{if .Deltas}}
+<h2>What this run moved</h2>
+<table>
+<thead><tr><th>cloud</th><th>project</th><th>resource type</th><th>resource</th><th>dimension</th><th>old</th><th>new</th><th>delta</th></tr></thead>
+<tbody>
+{{range .Deltas}}<tr>
+<td>{{.Cloud}}</td>
+<td>{{.ProjectID}}</td>
+<td>{{.ResourceType}}</td>
+<td>{{.ResourceID}}</td>
+<td>{{.Dimension}}</td>
+<td class="number">{{amount .OldAmount}}</td>
+<td class="number">{{amount .NewAmount}}</td>
+<td class="number">{{amount .Delta}} {{.Currency}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+{{end}}
+{{end}}

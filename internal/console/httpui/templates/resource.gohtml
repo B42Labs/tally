@@ -1,0 +1,83 @@
+{{define "content"}}
+<dl>
+<dt>cloud</dt><dd>{{.Resource.Cloud}}</dd>
+<dt>platform</dt><dd>{{.Resource.Platform}}</dd>
+<dt>project</dt><dd>{{.Resource.ProjectId}}</dd>
+<dt>resource type</dt><dd>{{.Resource.ResourceType}}</dd>
+<dt>resource</dt><dd>{{.Resource.ResourceId}}</dd>
+<dt>state</dt><dd>{{.Resource.State}}</dd>
+<dt>created</dt><dd>{{optStamp .Resource.CreatedAt}}</dd>
+<dt>deleted</dt><dd>{{optStamp .Resource.DeletedAt}}</dd>
+<dt>last event</dt><dd>{{.Resource.LastEventType}} at {{stamp .Resource.LastEventAt}}</dd>
+</dl>
+
+<h2>Size</h2>
+<pre>{{pretty .Resource.Size}}</pre>
+
+<h2>Last payload</h2>
+<pre>{{pretty .Resource.LastPayload}}</pre>
+
+{{if .Warnings}}
+<h2>What the fold could not trust</h2>
+<ul>{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>
+{{end}}
+
+<h2>Timeline</h2>
+{{if or .Timeline.Upper .Timeline.Lower}}
+<svg width="640" height="104" viewBox="0 0 640 104" role="img">
+<text class="axis" x="0" y="10">lifecycle</text>
+{{range .Timeline.Upper}}<rect class="lane {{.Class}}{{if .Open}} open{{end}}" x="{{.X}}" y="16" width="{{.W}}" height="20"></rect>
+<text class="label" x="{{.X}}" dx="3" y="30">{{.Label}}</text>
+{{end}}
+{{if .Metered}}
+<text class="axis" x="0" y="58">metered and rated</text>
+{{range .Timeline.Lower}}<rect class="lane {{.Class}}" x="{{.X}}" y="64" width="{{.W}}" height="20"></rect>
+<text class="label" x="{{.X}}" dx="3" y="78">{{.Label}}</text>
+{{end}}
+{{end}}
+<text class="axis" x="0" y="100">{{stamp .Timeline.Start}}</text>
+<text class="axis" x="640" y="100" text-anchor="end">{{stamp .Timeline.End}}</text>
+</svg>
+{{else}}
+<p>the lifecycle holds no interval</p>
+{{end}}
+
+{{if .Metered}}
+<dl>
+<dt>run</dt><dd>{{.Run.ID}}</dd>
+<dt>run status</dt><dd>{{.Run.Status}}</dd>
+{{if .CatalogLink}}<dt>pricing</dt><dd><a href="{{.CatalogLink}}">{{.Run.PricingVersion}}</a></dd>{{end}}
+</dl>
+<table>
+<thead><tr><th>state</th><th>from</th><th>to</th><th>seconds</th><th>dimension</th><th>amount</th><th>currency</th></tr></thead>
+<tbody>
+{{range .Segments}}<tr>
+<td>{{.State}}</td>
+<td>{{stamp .From}}</td>
+<td>{{stamp .To}}</td>
+<td class="number">{{.Seconds}}</td>
+<td>{{.Dimension}}</td>
+<td class="number">{{amount .Amount}}</td>
+<td>{{.Currency}}</td>
+</tr>
+{{else}}<tr><td colspan="7">this run metered no interval of the resource</td></tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>no run holds usage for this resource</p>
+{{end}}
+
+<h2>Events</h2>
+<table>
+<thead><tr><th>timestamp</th><th>event type</th><th>source</th><th>project</th></tr></thead>
+<tbody>
+{{range .Events}}<tr>
+<td>{{stamp .Timestamp}}</td>
+<td>{{.EventType}}</td>
+<td>{{.Source}}</td>
+<td>{{.ProjectId}}</td>
+</tr>
+{{else}}<tr><td colspan="4">this resource has no event</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
