@@ -225,6 +225,7 @@
       "items": [
         { "text": "Overview", "link": "/contributing/" },
         { "text": "The dev stack", "link": "/contributing/dev-stack" },
+        { "text": "The toolchain", "link": "/contributing/toolchain" },
         { "text": "Authoring conventions", "link": "/contributing/authoring-conventions" },
         {
           "text": "Acceptance drill records",
