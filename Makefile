@@ -343,7 +343,7 @@ migrate:
 	TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin migrate
 	TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' go run ./cmd/tally-engine migrate
 
-## generate: run the code generators and refresh the generated blocks of the reference pages
+## generate: run the code generators and refresh the generated blocks of the reference pages and the handbook
 generate:
 	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION) \
 		-config api/reporting/oapi-codegen.yaml api/reporting/openapi.yaml
@@ -353,7 +353,8 @@ generate:
 	# and the cmd package of each renders its own command line. Their test
 	# binaries run at once and rewrite a page under its exclusive lock, so
 	# neither of the two updates is written over.
-	TALLY_UPDATE_DOCS=1 go test ./docs/ ./cmd/... -run TestReferencePage -count=1
+	# The same run refreshes the make-target block of the dev-stack page.
+	TALLY_UPDATE_DOCS=1 go test ./docs/ ./cmd/... -run 'TestReferencePage|TestContributingPages' -count=1
 
 # npm ci recreates node_modules from the lockfile and writes this marker, which
 # is what tells make the install is current. It runs once, and again after a
