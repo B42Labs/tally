@@ -115,6 +115,29 @@ This lesson takes about 5 minutes.
 
 ## Read the four dashboards
 
+The four read one store from four angles, and each of them narrows to what the
+`cloud` variable is set to. What you see on them:
+
+- `Tally / Fleet Overview`, the fleet the events built. It counts the resources
+  the projection holds by type and state, draws the same counts as a trend, and
+  says how many clouds report; two of its panels read the pushed inventory
+  instead, the number of tenants and the ten with the most instances.
+- `Tally / Ingestion Health`, the way in. It draws the events ingested per
+  cloud and source, the duplicates dropped and the items rejected, the
+  collector's buffer and its oldest buffered event, the projection replays, and
+  whether each scrape target answers.
+- `Tally / Project Drilldown`, one tenant at a time. It counts that tenant's
+  servers, volumes, floating IPs, routers, images and load balancers, sums the
+  GB its volumes hold, and reads its usage of the three nova quotas. Its last
+  panel is the cloud's ingest split by event type, the one panel here that does
+  not narrow to the tenant.
+- `Tally / Reconciliation Drift`, what a sync against the cloud's own API
+  changed. It draws the resources reconciled by action, the sync errors, and
+  the sync runs by status, beside a text panel on how to read the three.
+
+Which panels carry a value in this lesson and which stay empty is what the four
+steps below say, and each of them names the time range its panels need.
+
 1. `Tally / Fleet Overview`. With `Last 3 hours`, `Resources by type and state`
    shows 37 instances `active`, 630 `deleted` and 1 `shelved`, 16 volumes
    `available`, 12 `in-use` and 141 `deleted`, 9 floating IPs `active` and 7
