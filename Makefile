@@ -373,13 +373,24 @@ simulator-up:
 	@echo '  https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics  OTLP endpoint the series are pushed to'
 	@echo '  https://vm.tally.127-0-0-1.nip.io:8443/targets       scrape targets'
 	@echo
-	@echo "Finish the month at once with:"
+	@# The four hints below carry one shape: a line naming what the hint does,
+	@# then the command or the path indented under it, with a blank line between
+	@# them. The registry command is broken over three lines the way
+	@# docs/how-to/simulator/register-simulated-projects.md writes it, because
+	@# one line of it runs past the width of a terminal and wraps mid-token.
+	@echo 'Finish the month at once:'
 	@echo "  curl -X PUT -d '{\"factor\": 0}' http://127.0.0.1:8091/clock"
-	@echo "Release the held-back notifications of a run with SIM_FAULTS=held-back with:"
-	@echo "  curl -X POST http://127.0.0.1:8091/release"
-	@echo "Inspect the registry with the admin token in deploy/compose/.env:"
-	@echo "  curl --cacert tally-ca.crt -H \"Authorization: Bearer \$$(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)\" 'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=$(SIM_CLOUD)'"
-	@echo 'Reconcile the cloud the run serves: docs/how-to/simulator/reconcile-the-simulated-cloud.md'
+	@echo
+	@echo 'Release the notifications a run with SIM_FAULTS=held-back keeps back:'
+	@echo '  curl -X POST http://127.0.0.1:8091/release'
+	@echo
+	@echo 'Inspect the registry a run with SIM_REGISTER_PROJECTS=true registered into:'
+	@echo '  curl --cacert tally-ca.crt \'
+	@echo '    -H "Authorization: Bearer $$(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)" \'
+	@echo "    'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=$(SIM_CLOUD)'"
+	@echo
+	@echo 'Reconcile the cloud the run serves:'
+	@echo '  docs/how-to/simulator/reconcile-the-simulated-cloud.md'
 
 # Dropping the volumes empties the outbox and the broker's queue, so the next
 # `simulator-up` starts from nothing rather than delivering what the last run
