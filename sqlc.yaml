@@ -1,6 +1,7 @@
 # sqlc reads a goose migration chain as the schema and compiles the static
 # queries of the store beside it against that chain. One entry per service
-# store, plus the engine's read view over the reporting chain.
+# store, plus the engine's read view over the reporting chain and the console's
+# read view over the engine chain.
 # `make generate` runs it; the generated packages are committed so that a plain
 # `go build` needs no code generator.
 version: "2"
@@ -45,3 +46,15 @@ sql:
         overrides:
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
+  # The demo console's read view over the engine chain: the console shows what
+  # the engine already billed, so every query it compiles is a SELECT and none
+  # of them writes. It takes sqlc's default pgtype mappings like the engine
+  # entry above, and internal/console/store converts them at its edge.
+  - engine: postgresql
+    schema: migrations/engine
+    queries: internal/console/store/queries.sql
+    gen:
+      go:
+        package: sqlcgen
+        out: internal/console/store/sqlcgen
+        sql_package: pgx/v5
