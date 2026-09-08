@@ -22,8 +22,7 @@
             { "text": "Set up your local Tally", "link": "/tutorials/set-up-your-local-tally" },
             { "text": "Simulate a month of OpenStack", "link": "/tutorials/simulate-a-month-of-openstack" },
             { "text": "Meter and rate your first month", "link": "/tutorials/meter-and-rate-your-first-month" },
-            { "text": "Watch the month in Grafana", "link": "/tutorials/watch-the-month-in-grafana" },
-            { "text": "Tear down your local Tally", "link": "/tutorials/tear-down-your-local-tally" }
+            { "text": "Watch the month in Grafana", "link": "/tutorials/watch-the-month-in-grafana" }
           ]
         },
         {
@@ -35,7 +34,8 @@
             { "text": "Finalize the month and export it", "link": "/tutorials/finalize-the-month-and-export-it" },
             { "text": "Book the late events as a credit note", "link": "/tutorials/book-the-late-events-as-a-credit-note" }
           ]
-        }
+        },
+        { "text": "Tear down your local Tally", "link": "/tutorials/tear-down-your-local-tally" }
       ]
     }
   ],

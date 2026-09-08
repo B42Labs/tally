@@ -38,7 +38,8 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
   download this lesson shows.
 - No kind cluster named `tally` on the machine. `kind get clusters` prints
   `No kind clusters found.` when there is none. If it prints `tally`, tear that
-  cluster down with the `make down` of lesson 5 first.
+  cluster down with the `make down` of
+  [Tear down your local Tally](/tutorials/tear-down-your-local-tally) first.
 - 13 GB of free disk for Docker Desktop, measured with `docker system df`
   across images, volumes and build cache. The eight images the stack runs come
   to 3.3 GB and are held twice from here on, once by Docker and once inside the
@@ -196,8 +197,9 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
    `==> kind cluster tally already exists` as the first line of a first
    `make up` means a cluster from an earlier run of this track is still on the
-   machine. Tear it down with the `make down` of lesson 5 and start over. On a
-   repeated call after a timeout that line is the expected one.
+   machine. Tear it down with the `make down` of
+   [Tear down your local Tally](/tutorials/tear-down-your-local-tally) and start
+   over. On a repeated call after a timeout that line is the expected one.
 
 6. Read the pods once `make up` has printed its block:
 

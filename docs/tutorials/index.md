@@ -43,15 +43,12 @@ system you built yourself, and a name for each part of it.
    four dashboards against the simulated cloud and the simulated month, find
    the one alert the dev stack fires by design, and take the state the next
    track continues from.
-5. [Tear down your local Tally](/tutorials/tear-down-your-local-tally): stop the
-   stack, delete the cluster and remove what the lessons wrote.
-   Assumes Set up your local Tally, or any later lesson.
 
-The fifth lesson is where the track ends when you want a clean machine. A
-reader going on to the billing track does it after that track's last lesson,
-because the billing track starts with
+The fourth lesson is where the core track ends, and the machine stays up: the
+billing track starts with
 [Discount a customer group](/tutorials/discount-a-customer-group) and continues
-from the state the fourth lesson leaves behind.
+from the state that lesson leaves behind. Tearing the machine down is a lesson
+of its own, below both tracks.
 
 ### Billing track
 
@@ -78,8 +75,21 @@ from the state the fourth lesson leaves behind.
 
 The fifth lesson is where the billing track ends, and the state it leaves is
 written out on that page.
-[Tear down your local Tally](/tutorials/tear-down-your-local-tally) is the way
-back to a clean machine.
+
+### Teardown
+
+[Tear down your local Tally](/tutorials/tear-down-your-local-tally): stop the
+stack, delete the cluster and remove what the lessons wrote. Assumes Set up
+your local Tally, or any later lesson.
+
+This lesson belongs to neither track, because it ends the cluster and the
+compose stack both of them work on. Run it after the last lesson you want:
+after [Watch the month in Grafana](/tutorials/watch-the-month-in-grafana) if the
+core track is where you stop, and after
+[Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note)
+if you go on through the billing track. Running it between the two tracks leaves
+nothing for the billing track to continue from, and starting over means the core
+track again from lesson 1.
 
 ## The simulated cloud
 
