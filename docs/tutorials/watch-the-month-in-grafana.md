@@ -298,8 +298,8 @@ lesson of the billing track, which continues from the state this lesson leaves
 behind.
 
 [Tear down your local Tally](/tutorials/tear-down-your-local-tally) is the way
-back to a clean machine. A reader going on to the billing track does lesson 5
-after that track's last lesson.
+back to a clean machine, and it belongs to neither track: a reader going on to
+the billing track runs it after that track's last lesson rather than here.
 
 This is the state this track leaves behind:
 

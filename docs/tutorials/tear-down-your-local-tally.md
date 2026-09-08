@@ -1,12 +1,24 @@
 ---
 title: Tear down your local Tally
-description: Stop the simulator stack, delete the kind cluster, and remove the files and the shell variables the core track wrote.
+description: Stop the simulator stack, delete the kind cluster, and remove the files and the shell variables the lessons wrote, after the last lesson you want to run.
 quadrant: tutorial
 audience: all
 ---
 <!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Tear down your local Tally
+
+Do this lesson last. It belongs to neither track: it ends the cluster and the
+compose stack every other lesson works on, and nothing here can be undone. The
+billing track continues from the state
+[Watch the month in Grafana](/tutorials/watch-the-month-in-grafana) leaves
+behind, so a reader going on to it, through
+[Discount a customer group](/tutorials/discount-a-customer-group) and the four
+lessons after it, runs this one after that track's last lesson,
+[Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note).
+Tearing down between the two tracks leaves the billing track nothing to
+continue from, and the way back is the core track again from
+[Set up your local Tally](/tutorials/set-up-your-local-tally).
 
 In this lesson you take the machine back to where lesson 1 started. The
 simulator stack goes with its broker and its outbox, and the kind cluster goes
@@ -17,17 +29,14 @@ databases, because that is where they live. You remove the CA file
 `~/tally-tutorial` by hand.
 
 What stays is the four `tally-*:dev` images in Docker, the Go build and module
-caches under your home directory, and the clone. A reader going on to the
-billing track, which starts with
-[Discount a customer group](/tutorials/discount-a-customer-group), does this
-lesson after its last lesson,
-[Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note),
-because the billing track continues from the state lesson 4 leaves behind.
+caches under your home directory, and the clone.
 
 This lesson takes about 5 minutes.
 
 ## Before you start
 
+- Every lesson you still want to run, done. This one leaves no environment for
+  a later lesson to work on.
 - The state lesson 1 leaves, or the state any later lesson leaves: a cluster
   from `make up`, and whatever the later lessons added to it. A step that finds
   nothing to remove says so and changes nothing.
