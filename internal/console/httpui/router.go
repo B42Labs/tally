@@ -23,6 +23,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -124,6 +125,15 @@ func NewRouter(opts Options) (http.Handler, error) {
 	// answering nothing at all is worse than one answering 500.
 	r.Use(middleware.Recoverer)
 
+	r.Get("/", h.overview)
+	r.Get("/projects", h.projects)
+	r.Get("/project", h.project)
+	r.Get("/resources", h.resources)
+	r.Get("/resource", h.resource)
+	r.Get("/pricing", h.pricing)
+	r.Get("/catalog", h.catalog)
+	r.Get("/run", h.run)
+	r.Get("/statement", h.statement)
 	r.Get("/static/console.css", h.stylesheet)
 	r.NotFound(h.notFound)
 
@@ -148,4 +158,52 @@ func (h *handlers) stylesheet(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) notFound(w http.ResponseWriter, r *http.Request) {
 	h.fail(w, r, http.StatusNotFound, "no such page",
 		fmt.Errorf("the path %s is not part of the console", r.URL.Path), nil)
+}
+
+// link builds one href. The pairs are parameter names and values, encoded once
+// here rather than by every template that prints a link, so a value carrying a
+// slash, a space or an ampersand reaches the console as it was stored. A pair
+// whose value is empty is left out: a filter nobody set does not travel.
+func link(path string, pairs ...string) string {
+	query := url.Values{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			query.Set(pairs[i], pairs[i+1])
+		}
+	}
+	if len(query) == 0 {
+		return path
+	}
+	return path + "?" + query.Encode()
+}
+
+// stringParameter reads a query parameter a page cannot be built without.
+func stringParameter(r *http.Request, name string) (string, error) {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return "", missingParameter(name)
+	}
+	return value, nil
+}
+
+// uuidParameter reads an id a page cannot be built without.
+func uuidParameter(r *http.Request, name string) (uuid.UUID, error) {
+	value, err := stringParameter(r, name)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil, unreadableUUID(name, err)
+	}
+	return id, nil
+}
+
+// idText renders an id the store reads a NULL column as, the corrected run of a
+// regular run for example.
+func idText(id uuid.UUID) string {
+	if id == uuid.Nil {
+		return absent
+	}
+	return id.String()
 }

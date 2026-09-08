@@ -1,0 +1,71 @@
+{{define "content"}}
+<dl>
+<dt>cloud</dt><dd>{{.Cloud}}</dd>
+<dt>project</dt><dd>{{.Project}}</dd>
+<dt>platform</dt><dd>{{.Document.Platform}}</dd>
+<dt>run</dt><dd><a href="{{.RunLink}}">{{.RunID}}</a></dd>
+<dt>billing period</dt><dd>{{.Document.BillingPeriod.From}} to {{.Document.BillingPeriod.To}}</dd>
+<dt>total</dt><dd>{{amount .Document.Total.Decimal}} {{.Document.Currency}}</dd>
+{{with .Document.BaseCost}}<dt>base cost</dt><dd>{{amount .Decimal}}</dd>{{end}}
+{{with .Document.NetCost}}<dt>net cost</dt><dd>{{amount .Decimal}}</dd>{{end}}
+{{with .Document.KickbackTotal}}<dt>kickback total</dt><dd>{{amount .Decimal}}</dd>{{end}}
+</dl>
+
+{{if .Document.Adjustments}}
+<h2>Adjustments</h2>
+<table>
+<thead><tr><th>type</th><th>relation type</th><th>target</th><th>scope</th><th>description</th><th>rate</th><th>base</th><th>amount</th></tr></thead>
+<tbody>
+{{range .Document.Adjustments}}<tr>
+<td>{{.Type}}</td>
+<td>{{.RelationType}}</td>
+<td>{{.RelationTarget}}</td>
+<td>{{.Scope}}</td>
+<td>{{.Description}}</td>
+<td class="number">{{rate .Rate.Decimal}}</td>
+<td class="number">{{amount .Base.Decimal}}</td>
+<td class="number">{{amount .Amount.Decimal}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+<h2>Line items</h2>
+{{template "lineItems" .Document.LineItems}}
+
+{{range .Document.RelatedCosts}}
+<h2>Related cost of {{.ProjectID}}</h2>
+<dl>
+<dt>relation type</dt><dd>{{.RelationType}}</dd>
+<dt>project</dt><dd>{{.ProjectID}}</dd>
+<dt>platform</dt><dd>{{.Platform}}</dd>
+<dt>total</dt><dd>{{amount .Total.Decimal}}</dd>
+</dl>
+{{template "lineItems" .LineItems}}
+{{end}}
+{{end}}
+
+{{define "lineItems"}}
+{{range .}}
+<h3>{{.ResourceType}} {{.ResourceID}}</h3>
+<dl>
+<dt>platform</dt><dd>{{.Platform}}</dd>
+<dt>description</dt><dd>{{.Description}}</dd>
+<dt>total</dt><dd>{{amount .Total.Decimal}}</dd>
+</dl>
+<table>
+<thead><tr><th>state</th><th>hours</th><th>usage</th><th>cost</th><th>state modifier</th></tr></thead>
+<tbody>
+{{range .Periods}}<tr>
+<td>{{.State}}</td>
+<td class="number">{{amount .Hours.Decimal}}</td>
+<td>{{range $metric, $value := .Usage}}{{$metric}}: {{quantity $value.Decimal}}<br>{{end}}</td>
+<td>{{range $dimension, $value := .Cost}}{{$dimension}}: {{amount $value.Decimal}}<br>{{end}}</td>
+<td class="number">{{quantity .StateModifier.Decimal}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>this statement holds no line item</p>
+{{end}}
+{{end}}

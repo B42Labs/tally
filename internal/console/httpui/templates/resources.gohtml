@@ -1,0 +1,20 @@
+{{define "content"}}
+<table>
+<thead><tr><th>cloud</th><th>platform</th><th>project</th><th>resource type</th><th>resource</th><th>state</th><th>created</th><th>deleted</th><th>last payload</th></tr></thead>
+<tbody>
+{{range .Items}}<tr>
+<td>{{.Resource.Cloud}}</td>
+<td>{{.Resource.Platform}}</td>
+<td>{{.Resource.ProjectId}}</td>
+<td>{{.Resource.ResourceType}}</td>
+<td><a href="{{.Link}}">{{.Resource.ResourceId}}</a></td>
+<td>{{.Resource.State}}</td>
+<td>{{optStamp .Resource.CreatedAt}}</td>
+<td>{{optStamp .Resource.DeletedAt}}</td>
+<td><pre>{{pretty .Resource.LastPayload}}</pre></td>
+</tr>
+{{else}}<tr><td colspan="9">no resource matched</td></tr>
+{{end}}</tbody>
+</table>
+{{if .NextLink}}<p><a href="{{.NextLink}}">next page</a></p>{{end}}
+{{end}}

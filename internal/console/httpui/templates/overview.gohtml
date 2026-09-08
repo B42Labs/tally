@@ -1,0 +1,77 @@
+{{define "content"}}
+<h2>Resources the Reporting API counts</h2>
+<table>
+<thead><tr><th>cloud</th><th>resource type</th><th>state</th><th>count</th><th>share</th></tr></thead>
+<tbody>
+{{range .Stats}}<tr>
+<td>{{.Cloud}}</td>
+<td>{{.ResourceType}}</td>
+<td>{{.State}}</td>
+<td class="number">{{.Count}}</td>
+<td><svg width="640" height="14" viewBox="0 0 640 14"><rect class="bar" x="0" y="1" width="{{.Width}}" height="12"></rect></svg></td>
+</tr>
+{{else}}<tr><td colspan="5">no resource is counted</td></tr>
+{{end}}</tbody>
+</table>
+
+<h2>Events per hour, {{stamp .From}} to {{stamp .To}}</h2>
+<table>
+<thead><tr><th>bucket</th><th>cloud</th><th>event type</th><th>count</th></tr></thead>
+<tbody>
+{{range .Events}}<tr>
+<td>{{stamp .Bucket}}</td>
+<td>{{.Cloud}}</td>
+<td>{{.EventType}}</td>
+<td class="number">{{.Count}}</td>
+</tr>
+{{else}}<tr><td colspan="4">no event reached the window</td></tr>
+{{end}}</tbody>
+</table>
+
+{{if .Rejected}}
+<h2>The ingest path refused these events</h2>
+<table>
+<thead><tr><th>received at</th><th>reason</th></tr></thead>
+<tbody>
+{{range .Rejected}}<tr>
+<td>{{stamp .ReceivedAt}}</td>
+<td>{{.Reason}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>nothing was refused</p>
+{{end}}
+
+<h2>Billing periods</h2>
+<table>
+<thead><tr><th>from</th><th>to</th><th>status</th><th>finalized by</th><th>finalized at</th></tr></thead>
+<tbody>
+{{range .Periods}}<tr>
+<td>{{stamp .From}}</td>
+<td>{{stamp .To}}</td>
+<td>{{.Status}}</td>
+<td>{{idText .FinalizedRunID}}</td>
+<td>{{zeroStamp .FinalizedAt}}</td>
+</tr>
+{{else}}<tr><td colspan="5">no period is opened</td></tr>
+{{end}}</tbody>
+</table>
+
+<h2>Metering runs</h2>
+<table>
+<thead><tr><th>run</th><th>period</th><th>kind</th><th>status</th><th>pricing</th><th>started</th><th>completed</th></tr></thead>
+<tbody>
+{{range .Runs}}<tr>
+<td><a href="{{.Link}}">{{.Run.ID}}</a></td>
+<td>{{stamp .Run.PeriodFrom}}</td>
+<td>{{.Run.Kind}}</td>
+<td>{{.Run.Status}}</td>
+<td>{{.Run.PricingVersion}}</td>
+<td>{{zeroStamp .Run.StartedAt}}</td>
+<td>{{zeroStamp .Run.CompletedAt}}</td>
+</tr>
+{{else}}<tr><td colspan="7">no run has been recorded</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}

@@ -1,0 +1,24 @@
+{{define "content"}}
+<dl>
+<dt>version</dt><dd>{{.Version}}</dd>
+<dt>valid from</dt><dd>{{stamp .ValidFrom}}</dd>
+<dt>currency</dt><dd>{{.Currency}}</dd>
+<dt>imported</dt><dd>{{stamp .ImportedAt}}</dd>
+</dl>
+
+<table>
+<thead><tr><th>platform</th><th>resource type</th><th>metric</th><th>type</th><th>price</th><th>state modifiers</th><th>type modifiers</th></tr></thead>
+<tbody>
+{{range .Rows}}<tr>
+<td>{{.Platform}}</td>
+<td>{{.ResourceType}}</td>
+<td>{{.Metric}}</td>
+<td>{{.Type}}</td>
+<td class="number">{{price .Price}}</td>
+<td>{{range .StateModifiers}}{{.Key}}: {{price .Value}}<br>{{else}}none{{end}}</td>
+<td>{{range .TypeModifiers}}{{.Key}}: {{price .Value}}<br>{{else}}none{{end}}</td>
+</tr>
+{{else}}<tr><td colspan="7">this catalog prices nothing</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}

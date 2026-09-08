@@ -28,7 +28,18 @@ var files embed.FS
 // pageNames is every page template. Each of them defines "content" under that
 // one name, so each is parsed into its own clone of the layout: one template
 // set cannot hold two definitions of the same name.
-var pageNames = []string{errorPage}
+var pageNames = []string{
+	"overview",
+	"projects",
+	"project",
+	"resources",
+	"resource",
+	"pricing",
+	"catalog",
+	"run",
+	"statement",
+	errorPage,
+}
 
 // parsePages parses the layout once and clones it per page.
 func parsePages() (map[string]*template.Template, error) {

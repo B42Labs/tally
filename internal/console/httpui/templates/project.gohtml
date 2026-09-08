@@ -1,0 +1,71 @@
+{{define "content"}}
+<dl>
+<dt>cloud</dt><dd>{{.Project.Cloud}}</dd>
+<dt>external id</dt><dd>{{.Project.ExternalId}}</dd>
+<dt>name</dt><dd>{{optString .Project.Name .Project.ExternalId}}</dd>
+<dt>platform</dt><dd>{{.Project.Platform}}</dd>
+<dt>registered</dt><dd>{{stamp .Project.CreatedAt}}</dd>
+<dt>statement key</dt><dd>{{.Key}}</dd>
+</dl>
+
+<h2>Metadata</h2>
+<pre>{{pretty .Project.Metadata}}</pre>
+
+<h2>Relations</h2>
+<table>
+<thead><tr><th>relation type</th><th>source</th><th>target</th><th>valid from</th><th>valid to</th></tr></thead>
+<tbody>
+{{range .Relations}}<tr>
+<td>{{.RelationType}}</td>
+<td>{{.SourceId}}</td>
+<td>{{.TargetId}}</td>
+<td>{{stamp .ValidFrom}}</td>
+<td>{{optStamp .ValidTo}}</td>
+</tr>
+{{else}}<tr><td colspan="5">this project has no relation</td></tr>
+{{end}}</tbody>
+</table>
+
+<h2>Related projects</h2>
+<table>
+<thead><tr><th>project</th><th>cloud</th><th>relation type</th><th>depth</th></tr></thead>
+<tbody>
+{{range .Related}}<tr>
+<td><a href="{{.Link}}">{{optString .Related.Project.Name .Related.Project.ExternalId}}</a></td>
+<td>{{.Related.Project.Cloud}}</td>
+<td>{{.Related.RelationType}}</td>
+<td class="number">{{.Related.Depth}}</td>
+</tr>
+{{else}}<tr><td colspan="4">no relation reaches another project</td></tr>
+{{end}}</tbody>
+</table>
+
+<h2>What this project ran, {{stamp .From}} to {{stamp .To}}</h2>
+<table>
+<thead><tr><th>resource type</th><th>created</th><th>deleted</th><th>active now</th><th>minutes</th></tr></thead>
+<tbody>
+{{range .Activity}}<tr>
+<td>{{.ResourceType}}</td>
+<td class="number">{{.Created}}</td>
+<td class="number">{{.Deleted}}</td>
+<td class="number">{{.ActiveNow}}</td>
+<td class="number">{{.TotalMinutes}}</td>
+</tr>
+{{else}}<tr><td colspan="5">this project ran nothing in this window</td></tr>
+{{end}}</tbody>
+</table>
+
+<h2>Statements</h2>
+<table>
+<thead><tr><th>period</th><th>run kind</th><th>run status</th><th>total</th></tr></thead>
+<tbody>
+{{range .Statements}}<tr>
+<td><a href="{{.Link}}">{{stamp .Row.PeriodFrom}}</a></td>
+<td>{{.Row.Kind}}</td>
+<td>{{.Row.Status}}</td>
+<td class="number">{{amount .Row.Total}} {{.Row.Currency}}</td>
+</tr>
+{{else}}<tr><td colspan="4">no run has billed this project</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
