@@ -10,7 +10,7 @@ import (
 // noticed here.
 const (
 	realMakefile    = "../../Makefile"
-	realMakeTargets = 16
+	realMakeTargets = 17
 )
 
 func TestMakeTargets(t *testing.T) {
