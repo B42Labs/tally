@@ -39,7 +39,7 @@ This lesson takes about 5 minutes.
     `TALLY_ENGINE_COUNTER_SOURCES`, `TALLY_ENGINE_VM_URL` and `RUN_ID` in a
     shell at the repository root.
 
-- `jq` 1.8.1 (`jq --version`).
+- `jq` on the path, which the `make check-tools` of lesson 1 called.
 
 If you closed that shell, restore it with this block:
 

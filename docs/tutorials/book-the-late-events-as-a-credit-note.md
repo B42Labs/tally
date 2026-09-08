@@ -36,7 +36,7 @@ This lesson takes about 5 minutes.
   started: a correction meters the month again and reads the egress counter
   from the store through it.
 - Docker Desktop running, with the three containers of the simulator stack.
-- `jq` 1.8.1 (`jq --version`).
+- `jq` on the path, which the `make check-tools` of lesson 1 called.
 
 If you closed that shell, restore it with this block:
 

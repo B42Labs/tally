@@ -25,7 +25,7 @@ This lesson takes about 5 minutes.
   simulator stack holding its 84 notifications, the month of July 2026 in the
   reporting database, and one completed run of that month in the engine
   database.
-- A browser. The run behind this page used Firefox.
+- A browser.
 - `tally-ca.crt` at the repository root, for the `curl` calls beside the
   browser. A new shell writes the file again with:
 
@@ -106,10 +106,9 @@ This lesson takes about 5 minutes.
    panel that reads an `openstack_*` or a `ceilometer_*` series, because the
    simulator pushed those at simulated time, inside July 2026. `Last 3 hours`
    fits every panel that reads a `tally_` series, because those were scraped
-   off the Reporting API at the wall clock while the month went out, on the run
-   between 12:37 and 12:43 UTC. The dashboards open on `Last 6 hours`
-   refreshing every minute. The next step names which panels are which per
-   dashboard.
+   off the Reporting API at the wall clock while the month went out, in the few
+   minutes lesson 2 took. The dashboards open on `Last 6 hours` refreshing
+   every minute. The next step names which panels are which per dashboard.
 
    Every dashboard file carries `"timezone": "utc"`, so both ranges are read in
    UTC and no time zone setting is needed.
@@ -188,7 +187,7 @@ two time ranges, or the `cloud` variable is not on `os-sim`.
    }
    ```
 
-   This one alert has to be there, and on the run no other rule fired.
+   This one alert has to be there, and nothing else should be firing.
    `TallyScrapeTargetDown` fires about five minutes after `make up` for the
    `ceilometer` job, whose target is a placeholder for an exporter that runs
    beside a real control plane, and that is the designed dev state rather than
@@ -249,9 +248,9 @@ two time ranges, or the `cloud` variable is not on `os-sim`.
    {"name":"TallyExporterServiceSilent","state":"inactive","lastError":""}
    ```
 
-   Every `lastError` is empty on the run. A non-empty one names the query that
-   failed, and `state` tells `firing` from `inactive`.
-   `tally:current_resources:sum` is a recording rule and carries no state.
+   Every `lastError` is empty. A non-empty one names the query that failed, and
+   `state` tells `firing` from `inactive`. `tally:current_resources:sum` is a
+   recording rule and carries no state.
 
 ## What you learned
 

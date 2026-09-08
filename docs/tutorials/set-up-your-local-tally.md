@@ -22,29 +22,23 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
 ## Before you start
 
-- macOS 15.7.4 with Docker Desktop 4.86.0 running, given 6 CPUs and 8 GB of
-  memory. `docker version` prints the Docker Desktop version on its `Server:`
-  line, and this prints what the engine was given:
-
-  ```sh
-  docker info --format '{{.NCPU}} CPUs, {{.MemTotal}} bytes'
-  ```
-
-  ```text
-  6 CPUs, 8322072576 bytes
-  ```
-
-  The lessons are written for macOS with Docker Desktop, the platform the
-  `Makefile` and `deploy/kind/kind.yaml` assume.
-- `git` 2.51.0 (`git --version`), `kind` v0.32.0 (`kind version`), `kubectl`
-  v1.36.1 (`kubectl version --client`) and Go 1.26 or newer (`go version`) on
-  the path. The run had `go1.26.1` installed, and the first `go run` inside the
-  repository downloads `go1.27.1`, the toolchain `go.mod` names.
-- `jq` 1.8.1 (`jq --version`) and `curl` 8.7.1 (`curl --version`), the one
-  macOS ships.
-- No kind cluster named `tally` on the machine. `kind get clusters` printed
-  `No kind clusters found.` on the run. If it prints `tally`, tear that cluster
-  down with the `make down` of lesson 5 first.
+- macOS with Docker Desktop running, given enough of the machine to run the
+  whole stack on one node. The lessons are written for macOS with Docker
+  Desktop, the platform the `Makefile` and `deploy/kind/kind.yaml` assume.
+- `git`, `kind`, `kubectl`, Go, `jq` and `curl` on the path, and `docker` with
+  its `compose` plugin. No version is named here. The clone below carries
+  `make check-tools`, which calls every one of them, prints what each answered
+  and what the Docker engine was given, and ends on the ones that are missing
+  or answering an error. The next section runs it, before `make up`: it touches
+  no cluster, and a tool that is not there is cheaper to find there than half
+  an hour into `make up`.
+- The Go on the path has to satisfy the `go` line of `go.mod`, which is what
+  `make check-tools` compares it against. That Go downloads the toolchain the
+  `toolchain` line names on its first `go run` inside the repository, a
+  download this lesson shows.
+- No kind cluster named `tally` on the machine. `kind get clusters` prints
+  `No kind clusters found.` when there is none. If it prints `tally`, tear that
+  cluster down with the `make down` of lesson 5 first.
 - 13 GB of free disk for Docker Desktop, measured with `docker system df`
   across images, volumes and build cache. The eight images the stack runs come
   to 3.3 GB and are held twice from here on, once by Docker and once inside the
@@ -71,21 +65,20 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    Resolving deltas: 100% (1866/1866), done.
    ```
 
-   The object counts and the transfer speed are your own.
+   The object counts and the transfer speed are your own. Every command from
+   here on runs from this directory, the repository root.
 
-2. Read the commit you are on:
+2. Check the tools of Before you start:
 
    ```sh
-   git rev-parse --short HEAD
+   make check-tools
    ```
 
-   ```text
-   789d782
-   ```
-
-   A newer commit is fine. Every output this page shows comes from a run at
-   `789d782`. Every command from here on runs from this directory, the
-   repository root.
+   Every line has to read `ok`. A `missing` line names a tool that is not on
+   the path and a `broken` one a tool that is there and answering an error, and
+   both are to be settled before the next section: `make up` reaches the same
+   tool minutes in and stops with a half-created cluster behind it. A `warn`
+   line for the Docker engine costs time rather than the run.
 
 ## Create the cluster and bring the stack up
 
@@ -131,11 +124,8 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    Image: "busybox:1.37" with ID "sha256:6df9636795d37473994366014c25264edeb6c00d7a57188ff62d5a94276b4297" not yet present on node "tally-control-plane", loading...
    ```
 
-   The run behind this page fetched three of the eight and copied the other
-   five, `make up` took seventeen minutes end to end, and every pod was ready
-   two minutes after the overlay went on. Which of the eight are fetched is
-   your machine's, and a second `make up` moves none of them: an image the node
-   already carries is skipped.
+   Which of the eight are fetched is your machine's, and a second `make up`
+   moves none of them: an image the node already carries is skipped.
 
 3. Let it wait if a readiness wait expires. One is given five minutes, and an
    expired one is repeated rather than ending the run:

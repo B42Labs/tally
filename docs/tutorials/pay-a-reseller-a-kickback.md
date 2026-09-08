@@ -32,7 +32,7 @@ This lesson takes about 5 minutes.
   - the export under `~/tally-tutorial/2026-07-group`;
   - `ACME_ID`, `ACME_1_ID`, `ACME_2_ID` and `ACME_3_ID` in the shell.
 
-- `jq` 1.8.1 (`jq --version`).
+- `jq` on the path, which the `make check-tools` of lesson 1 called.
 
 If you closed that shell, restore it with this block:
 
