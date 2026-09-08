@@ -83,19 +83,25 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
      https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics  OTLP endpoint the series are pushed to
      https://vm.tally.127-0-0-1.nip.io:8443/targets       scrape targets
 
-   Finish the month at once with:
+   Finish the month at once:
      curl -X PUT -d '{"factor": 0}' http://127.0.0.1:8091/clock
-   Release the held-back notifications of a run with SIM_FAULTS=held-back with:
+
+   Release the notifications a run with SIM_FAULTS=held-back keeps back:
      curl -X POST http://127.0.0.1:8091/release
-   Inspect the registry with the admin token in deploy/compose/.env:
-     curl --cacert tally-ca.crt -H "Authorization: Bearer $(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)" 'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=os-sim'
-   Reconcile the cloud the run serves: docs/how-to/simulator/reconcile-the-simulated-cloud.md
+
+   Inspect the registry a run with SIM_REGISTER_PROJECTS=true registered into:
+     curl --cacert tally-ca.crt \
+       -H "Authorization: Bearer $(grep TALLY_SIM_API_TOKEN deploy/compose/.env | cut -d= -f2)" \
+       'https://api.tally.127-0-0-1.nip.io:8443/api/v1/projects?cloud=os-sim'
+
+   Reconcile the cloud the run serves:
+     docs/how-to/simulator/reconcile-the-simulated-cloud.md
    ```
 
-   The seven URLs have to match. The four hint lines below them are printed on
-   every run. This track follows the first of them, the `PUT /clock` of a later
-   step, and never the second: the `POST /release` line is what lets the held
-   share out, which the billing track does.
+   The seven URLs have to match. The four hints below them are printed on every
+   run. This track follows the first of them, the `PUT /clock` of a later step,
+   and never the second: the `POST /release` hint is what lets the held share
+   out, which the billing track does.
 
    Three containers now run beside the cluster. The month of July 2026 of seed
    1 on the cloud `os-sim`, with its six tenants, goes onto the bus at factor
