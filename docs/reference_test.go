@@ -19,6 +19,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/prometheus/client_golang/prometheus"
 
+	consoleconfig "github.com/b42labs/tally/internal/console/config"
 	engineconfig "github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
@@ -45,14 +46,17 @@ const (
 	sliceDocumentSource    = "../cmd/tally-vertical-slice/compute.go"
 )
 
-// The configuration structs the four settings pages render their tables from.
-// A settings table is rendered against the package's EnvNames as well, which is
-// where the *_FILE companion of a secret is looked up.
+// The configuration structs the five settings tables are rendered from. Four of
+// them sit on a configuration page; the console's sits on its command line
+// page, because the console reads a handful of variables and has no page of its
+// own for them. A settings table is rendered against the package's EnvNames as
+// well, which is where the *_FILE companion of a secret is looked up.
 const (
 	reportingConfigSource = "../internal/reporting/config/config.go"
 	engineConfigSource    = "../internal/engine/config/config.go"
 	collectorConfigSource = "../internal/providers/openstack/config.go"
 	simulatorConfigSource = "../internal/providers/openstack/simulator/config.go"
+	consoleConfigSource   = "../internal/console/config/config.go"
 )
 
 // The two configuration file formats: the source the entry of each one is
@@ -166,6 +170,15 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 
 		refdoc.Verify(t, referencePage("command-line/tally-vertical-slice.md"), map[string]string{
 			"document": render(t, document, err),
+		})
+	})
+
+	t.Run("command-line/tally-console.md", func(t *testing.T) {
+		settings, err := refdoc.Settings(readSource(t, consoleConfigSource), "Config",
+			consoleconfig.EnvNames)
+
+		refdoc.Verify(t, referencePage("command-line/tally-console.md"), map[string]string{
+			"settings": render(t, settings, err),
 		})
 	})
 

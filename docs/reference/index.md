@@ -38,6 +38,9 @@ apart unnoticed.
 - [tally-engine](/reference/command-line/tally-engine) lists the subcommands
   and flags of the engine, what each one reads from the environment and what it
   prints.
+- [tally-console](/reference/command-line/tally-console) states what the
+  read-only demo console serves, the token role it needs and how `make console`
+  starts it.
 - [tally-openstack-collector](/reference/command-line/tally-openstack-collector)
   states the two modes of the collector, the queues it consumes, its HTTP
   routes and the bounds it applies to a notification.
