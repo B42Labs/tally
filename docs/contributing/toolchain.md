@@ -43,6 +43,7 @@ generated blocks of the site.
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/reporting`, `internal/reporting/store/queries.sql` | `internal/reporting/store/sqlcgen` |
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/engine`, `internal/engine/store/queries.sql` | `internal/engine/store/sqlcgen` |
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/reporting`, `internal/engine/source/queries.sql` | `internal/engine/source/sqlcgen`, the engine's read view over the reporting chain |
+| sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/engine`, `internal/console/store/queries.sql` | `internal/console/store/sqlcgen`, the demo console's read view over the engine chain |
 | the doc tests under `TALLY_UPDATE_DOCS=1` | the module's own toolchain | `docs/reference_test.go`, `docs/contributing_test.go`, the `cmd` packages' `TestReferencePageIsCurrent` | the generated blocks of the reference pages and of the handbook |
 
 Generated code is committed, so a plain `go build` needs no generator. Every
@@ -55,7 +56,7 @@ installed on the host.
 | --- | --- | --- | --- |
 | `api/reporting/openapi.yaml` | `make generate` | `openapi.gen.go`, the [endpoints](/reference/api/reporting-api) and [schemas](/reference/api/reporting-api-schemas) pages | a handler set that no longer matches the generated server interface fails `go build`; a stale page fails `TestReferencePagesAreCurrent` |
 | a file under `migrations/reporting/`, `internal/reporting/store/queries.sql`, `internal/engine/source/queries.sql` | `make generate` | the reporting and the source `sqlcgen` packages | a query a store calls that no longer exists fails `go build`; `internal/reporting/store/migrate_test.go` runs the chain against a container |
-| a file under `migrations/engine/`, `internal/engine/store/queries.sql` | `make generate` | the engine `sqlcgen` package | `go build`, the same way; `internal/engine/store/migrate_test.go` |
+| a file under `migrations/engine/`, `internal/engine/store/queries.sql`, `internal/console/store/queries.sql` | `make generate` | the engine and the console `sqlcgen` packages | `go build`, the same way; `internal/engine/store/migrate_test.go` |
 | a `Config` struct, a cobra command tree, a manifest under `deploy/`, a dashboard, `internal/engine/pricing/pricing.schema.json`, `internal/core/event/event.go`, an export writer, a golden file under `internal/engine/export/testdata/golden/` | `make generate` | the reference page whose subtest names the source, in `docs/reference_test.go` or in the `TestReferencePageIsCurrent` of the binary's `cmd` package | `TestReferencePagesAreCurrent`, or that `TestReferencePageIsCurrent`, reading `block "..." differs from its source, run make generate` |
 | a `## target:` comment of the `Makefile` | `make generate` | the `make-targets` block of [The dev stack](/contributing/dev-stack) | `TestContributingPagesAreCurrent` |
 
