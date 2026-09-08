@@ -14,6 +14,30 @@ over HTTPS under `*.tally.127-0-0-1.nip.io:8443`. Lesson 1 of the tutorials,
 once with the output it prints. This page says what the pieces are and which
 target owns each of them.
 
+## What the machine needs
+
+The targets on this page are driven by tools on the host: `git`, `docker` with
+its `compose` plugin, `kind`, `kubectl`, Go, `jq` and `curl`. `make check-tools`
+probes each of them and prints one line per tool, `ok` with what the tool
+answered, `missing` when it is not on the path, or `broken` with the error it
+answered instead. It exits non-zero when any of them failed, which is the cheap
+way to find a tool that is not there: `make up` reaches the same tool minutes
+in and stops with a half-created cluster behind it.
+
+No version is asserted. The pins that decide anything live where the thing they
+pin does, in `deploy/kind/kind.yaml`, in the manifests and in `go.mod`, and a
+list of versions in the `Makefile` would age beside them and start calling a
+working machine wrong. The one comparison the target makes is the Go on the
+path against the `go` line of `go.mod`, which it reads out of the file. Beside
+the tools it prints what the Docker engine was given and warns, rather than
+fails, when that is under `DOCKER_MIN_CPUS` CPUs or `DOCKER_MIN_MEMORY_GB` GB:
+the stack comes up on less, more slowly, and that number is the first thing to
+look at when a readiness wait runs out.
+
+`docs` and `docs-build` need a Node toolchain besides, which `check-tools`
+leaves alone because `npm ci` says plainly enough what is missing.
+[The toolchain](/contributing/toolchain#dependencies) names the version.
+
 ## The kind cluster
 
 [`deploy/kind/kind.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kind/kind.yaml)
@@ -265,6 +289,7 @@ The table below is rendered from the `## target: description` comments of the
 <!-- refdoc:begin make-targets -->
 | Target | What it does |
 | --- | --- |
+| `check-tools` | check that the tools the dev stack and the tutorials need answer |
 | `up` | create the kind cluster, install the add-ons, and deploy the dev overlay |
 | `images` | build one container image per binary |
 | `down` | delete the kind cluster |
@@ -293,6 +318,8 @@ line, as in `make up WAIT_ATTEMPTS=12`.
 - `WAIT_TIMEOUT` (`300s`) is how long one readiness wait may take.
 - `WAIT_ATTEMPTS` (`6`) is how many of those waits a rollout gets before `up`
   gives up on it.
+- `DOCKER_MIN_CPUS` (`4`) and `DOCKER_MIN_MEMORY_GB` (`8`) are the floors
+  `check-tools` warns about the Docker engine under.
 - `ENVOY_GATEWAY_VERSION` (`v1.8.3`) is the Envoy Gateway release `up` installs
   the manifests of.
 - `CERT_MANAGER_VERSION` (`v1.21.1`) is the cert-manager release beside it.

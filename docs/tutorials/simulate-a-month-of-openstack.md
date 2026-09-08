@@ -132,10 +132,9 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
 
    `factor` 744, `total` 15727, `held` 84, `period_from` `2026-07-01T00:00:00Z`
    and `period_to` `2026-08-01T00:00:00Z` have to match. `virtual_now` and
-   `published` are your own and grow between the two reads: on the run they
-   stood at 430 and then at 902 notifications, twelve virtual hours apart.
-   `holding` is false while the month publishes. Connection refused on 8091
-   means the simulator is not running, and
+   `published` are your own and grow between the two reads, which lie twelve
+   virtual hours apart. `holding` is false while the month publishes.
+   Connection refused on 8091 means the simulator is not running, and
    `docker compose -f deploy/compose/compose.yaml ps` shows the three
    containers while
    `docker compose -f deploy/compose/compose.yaml logs simulator` says why it
@@ -164,10 +163,10 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    The counts are your own. They are the resources the collector has delivered
-   at the moment of the call, 15 instances on the run and 20 a minute later.
-   The five resource types are the month's. An empty `items` list two minutes
-   after the start means the collector has delivered nothing yet, which the
-   counter read of the step "Wait for the collector to deliver" diagnoses.
+   at the moment of the call, and they grow while the month goes out. The five
+   resource types are the month's. An empty `items` list two minutes after the
+   start means the collector has delivered nothing yet, which the counter read
+   of the step "Wait for the collector to deliver" diagnoses.
 
 2. Read one row of the fleet:
 
@@ -239,11 +238,11 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    consumed 1728 skipped 13915 unparseable 0 depth 0
    ```
 
-   Repeat the read until `depth` reads 0, which on the run was three minutes
-   after the month went out. The four numbers have to match. 1728 is the
-   month's 1812 billable notifications minus the 84 held ones, 13915 is the
-   notifications the mapping claims nothing for, and the depth is the outbox
-   the collector drains into the Reporting API.
+   Repeat the read until `depth` reads 0, about three minutes after the month
+   went out. The four numbers have to match. 1728 is the month's 1812 billable
+   notifications minus the 84 held ones, 13915 is the notifications the mapping
+   claims nothing for, and the depth is the outbox the collector drains into
+   the Reporting API.
 
 2. Read what the Reporting API took:
 
@@ -309,7 +308,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    667 has to match, the instances of the month that pushed traffic. A smaller
    count means the simulator is still pushing the month's series, which it goes
    on doing after the last notification is out; repeat the read until it stands
-   at 667, which took another minute on the run. The series carry July 2026
+   at 667, which takes about another minute. The series carry July 2026
    timestamps, which is why the query is asked at the end of the month with
    `time` and over a window that spans the month, and why lesson 4 sets the
    dashboards' time range to July.

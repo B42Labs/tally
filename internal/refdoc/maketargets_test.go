@@ -10,7 +10,7 @@ import (
 // noticed here.
 const (
 	realMakefile    = "../../Makefile"
-	realMakeTargets = 15
+	realMakeTargets = 16
 )
 
 func TestMakeTargets(t *testing.T) {
@@ -165,7 +165,7 @@ func TestMakeTargetsReportsAHelpCommentWithoutATarget(t *testing.T) {
 
 func TestMakeTargetsRendersTheTargetsOfThisRepository(t *testing.T) {
 	const (
-		firstRow = "| `up` | create the kind cluster, install the add-ons, and deploy the dev overlay |"
+		firstRow = "| `check-tools` | check that the tools the dev stack and the tutorials need answer |"
 		lastRow  = "| `docs-build` | build the documentation site; a dead internal link fails the build |"
 	)
 

@@ -32,7 +32,7 @@ This lesson takes about 5 minutes.
   - `RUN_ID` on the attributed run;
   - the export under `~/tally-tutorial/2026-07-attributed`.
 
-- `jq` 1.8.1 (`jq --version`).
+- `jq` on the path, which the `make check-tools` of lesson 1 called.
 
 If you closed that shell, restore it with this block:
 
@@ -107,8 +107,8 @@ A connection error from any `go run` command means the cluster is not up, and
 
    The `2026-08` line is the tick's: the cluster's hourly `tally-engine`
    scheduler opens the months that have ended and moves them into their grace
-   window. Its status is your own, `grace` on this run, and the line is absent
-   on a machine whose cluster has not passed an hour mark yet.
+   window. Its status is your own, and the line is absent on a machine whose
+   cluster has not passed an hour mark yet.
 
 ## See that the month is closed
 

@@ -24,7 +24,7 @@ This lesson takes about 5 minutes.
   simulator stack holding its 84 notifications, the month of July 2026 in the
   reporting database, `tally-ca.crt` at the repository root, and that shell at
   the repository root.
-- `jq` 1.8.1 (`jq --version`), the one lesson 1 asks for.
+- `jq` on the path, the one lesson 1 asks for.
 - The engine commands below run with `go run` from the repository root, the way
   lesson 1 ran the admin CLI.
 
@@ -147,7 +147,7 @@ both. Lesson 4 needs neither.
 
    The `metered` line and the warnings line have to match. The run id on the
    first line is your own. `2026-07` is the period this track uses everywhere,
-   and the run took a second on the machine behind this page.
+   and the run takes about a second.
 
    The run is completed, not finalized:
    [the lifecycle](/explanation/billing-period-lifecycle-and-corrections#the-lifecycle)
@@ -212,10 +212,10 @@ both. Lesson 4 needs neither.
    seed's and have to match. The billing track's correction lesson settles the
    38 once the held share is released.
 
-   The other four classes read 0 on this run: no counter source failed, no
-   project was claimed twice, no kickback was dropped and no usage field was
-   unreadable. A non-zero `counter` count means the port-forward died before
-   the run read the store, the fourth mismatch above.
+   The other four classes read 0: no counter source failed, no project was
+   claimed twice, no kickback was dropped and no usage field was unreadable. A
+   non-zero `counter` count means the port-forward died before the run read the
+   store, the fourth mismatch above.
 
 ## Export the statements
 

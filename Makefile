@@ -128,8 +128,103 @@ NODE_IMAGES := $(shell grep -rhoE 'image: [A-Za-z0-9._/-]+:[A-Za-z0-9._-]+' depl
 VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' deploy/kubernetes/base/vmalert/vmalert.yaml | head -n1)
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
-.PHONY: up down dev ca test lint fmt check-alerting migrate generate images \
-	simulator-up simulator-down docs docs-build
+.PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
+	images simulator-up simulator-down docs docs-build
+
+# What `check-tools` holds the Docker engine to. One kind node runs the whole
+# stack, and an engine given less than this spends the readiness waits of `up`
+# swapping rather than pulling. They are floors, not the size of the machine
+# this was written on: what the engine was actually given is printed beside
+# them.
+DOCKER_MIN_CPUS ?= 4
+DOCKER_MIN_MEMORY_GB ?= 8
+
+# The language version go.mod states, which is the minimum a toolchain on the
+# host has to satisfy. It is read out of the file rather than written a second
+# time here, so a bumped module carries this with it. That Go downloads the
+# version the `toolchain` line names on its first run inside the repository,
+# which is why nothing here asks for that one.
+GO_MIN_VERSION := $(shell sed -n 's/^go \([0-9][0-9.]*\)$$/\1/p' go.mod)
+
+# check-tools runs one probe per tool and prints what the probe answered, rather
+# than judging a version against a list. A version written here would be a
+# second pin beside the ones that decide anything, deploy/kind/kind.yaml, the
+# manifests and go.mod, and it would age on its own, telling a reader whose
+# machine works that their machine is wrong. What the target asserts is that the
+# tool is on the path and answers, and for Go that it satisfies the minimum the
+# module itself states.
+#
+# The probe function takes what to call the tool, what needs it, and the command
+# that proves it works. A command that is not there exits 127, which is what
+# separates a tool nobody installed from one that is installed and answering
+# with an error: a Docker whose engine is not running fails the second way, and
+# a reader told to install Docker there would look for a long time.
+#
+# What Docker Desktop was given is a warning rather than a failure. The stack
+# comes up on less, more slowly, and that number is the first thing to look at
+# when a readiness wait of `up` runs out.
+#
+# Nothing here touches a cluster, so the target runs before `up` ever has, which
+# is where a missing tool is cheapest to find. The Node toolchain is not probed:
+# `docs` and `docs-build` are the only targets that need it, and the `npm ci`
+# they run says plainly enough what is missing.
+## check-tools: check that the tools the dev stack and the tutorials need answer
+check-tools:
+	@failed=0; \
+	report() { printf '%-8s %-15s %s\n' "$$1" "$$2" "$$3"; }; \
+	first() { printf '%s\n' "$$1" | head -n1; }; \
+	probe() { \
+		label="$$1"; need="$$2"; shift 2; \
+		if output="$$("$$@" 2>&1)"; then \
+			report ok "$$label" "$$(first "$$output")"; \
+			return 0; \
+		else \
+			status=$$?; \
+		fi; \
+		failed=$$((failed + 1)); \
+		if [ "$$status" -eq 127 ]; then \
+			report missing "$$label" "not on the path, and $$need needs it"; \
+		else \
+			report broken "$$label" "$$(first "$$output")"; \
+		fi; \
+	}; \
+	echo '==> the tools the dev stack, the simulator stack and the tutorials are driven with'; \
+	probe git 'cloning the repository' git --version; \
+	probe docker 'building the images and running the kind node' docker version --format 'engine {{.Server.Version}}'; \
+	probe 'docker compose' 'the simulator stack of deploy/compose' docker compose version; \
+	probe kind 'creating the dev cluster' kind version; \
+	probe kubectl 'every call the targets make against the cluster' kubectl version --client; \
+	probe jq 'reading the JSON the lessons print' jq --version; \
+	probe curl 'the calls against the Reporting API' curl --version; \
+	if goversion="$$(go env GOVERSION 2>&1)"; then \
+		if [ "$$(printf '%s\n%s\n' '$(GO_MIN_VERSION)' "$${goversion#go}" | sort -V | head -n1)" = '$(GO_MIN_VERSION)' ]; then \
+			report ok go "$$goversion, at or above the go $(GO_MIN_VERSION) of go.mod"; \
+		else \
+			report old go "$$goversion is under the go $(GO_MIN_VERSION) go.mod asks for"; \
+			failed=$$((failed + 1)); \
+		fi; \
+	else \
+		report missing go 'not on the path, and every binary here is built with it'; \
+		failed=$$((failed + 1)); \
+	fi; \
+	if resources="$$(docker info --format '{{.NCPU}} {{.MemTotal}}' 2>/dev/null)"; then \
+		cpus="$${resources%% *}"; \
+		gb=$$(( ($${resources##* } + 536870912) / 1073741824 )); \
+		if [ "$$cpus" -ge '$(DOCKER_MIN_CPUS)' ] && [ "$$gb" -ge '$(DOCKER_MIN_MEMORY_GB)' ]; then \
+			report ok 'docker size' "$$cpus CPUs and $$gb GB"; \
+		else \
+			report warn 'docker size' "$$cpus CPUs and $$gb GB, under the $(DOCKER_MIN_CPUS) CPUs and $(DOCKER_MIN_MEMORY_GB) GB make up wants"; \
+		fi; \
+	fi; \
+	echo; \
+	if [ "$$failed" -gt 0 ]; then \
+		echo "ERROR: $$failed of the checks above did not pass. make up would reach" >&2; \
+		echo '       the same tool minutes in and stop there, with a stack half' >&2; \
+		echo '       created. docs/contributing/dev-stack.md says what each of them' >&2; \
+		echo '       is used for.' >&2; \
+		exit 1; \
+	fi; \
+	echo 'Every tool answered. make up creates the cluster.'
 
 ## up: create the kind cluster, install the add-ons, and deploy the dev overlay
 up:

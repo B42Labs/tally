@@ -158,8 +158,7 @@ This lesson takes about 5 minutes.
    ```
 
    The four `:dev` images are what `make up` built, and their names have to
-   match. The ids, the sizes and the column layout are Docker's own, and these
-   columns are the ones the run's Docker Desktop 4.86.0 prints. Beside the
+   match. The ids, the sizes and the column layout are Docker's own. Beside the
    images stay Docker's build cache from the image builds, which
    `docker builder prune` removes, the Go build and module caches under your
    home directory, and the clone.

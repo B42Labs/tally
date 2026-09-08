@@ -187,7 +187,9 @@ A reviewer of a documentation change looks at this:
   and `npm run docs:build` in the `docs` job.
 - The page sits in the quadrant its one-sentence purpose names.
 - A tutorial's shown output comes from a run at the commit its capture comment
-  names.
+  names, and that run stays in the comment: no step has the reader print the
+  commit they are on, and no sentence names the machine, the browser or the
+  tool versions the page was captured with. A reader cannot act on any of it.
 - A how-to guide opens with `## Before you start`, closes with
   `## Check the result`, and links its reasoning instead of stating it.
 - A reference page's generated blocks were refreshed by `make generate` rather
