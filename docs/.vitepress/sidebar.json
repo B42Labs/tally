@@ -227,6 +227,7 @@
         { "text": "The dev stack", "link": "/contributing/dev-stack" },
         { "text": "The toolchain", "link": "/contributing/toolchain" },
         { "text": "How the tests are organised", "link": "/contributing/tests" },
+        { "text": "Writing and previewing documentation", "link": "/contributing/writing-documentation" },
         { "text": "Authoring conventions", "link": "/contributing/authoring-conventions" },
         {
           "text": "Acceptance drill records",
