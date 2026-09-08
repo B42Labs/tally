@@ -126,10 +126,9 @@ navigation links a page and names a section in its `activeMatch`, and that no
 section is missing from it.
 
 `TestNoMarkdownFileEscapesTheGate` checks that every Markdown file under
-`docs/` is either a page of the site or listed in the `srcExclude` array of
-`docs/.vitepress/config.mts`. A file in neither set is published by VitePress
-and read by none of the tests above, so a new page belongs under a section
-directory and a new document that is not one belongs in that array.
+`docs/` is a page of the site. A file that is not is published by VitePress and
+read by none of the tests above, so a new page belongs under a section
+directory.
 
 The tests beside these five feed each rule the input that has to fail it, so a
 rule that stops deciding anything fails a test rather than passing every page.

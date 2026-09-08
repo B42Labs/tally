@@ -224,7 +224,15 @@
       "text": "Contributing",
       "items": [
         { "text": "Overview", "link": "/contributing/" },
-        { "text": "Authoring conventions", "link": "/contributing/authoring-conventions" }
+        { "text": "Authoring conventions", "link": "/contributing/authoring-conventions" },
+        {
+          "text": "Acceptance drill records",
+          "collapsed": true,
+          "items": [
+            { "text": "Phase 2: the alert drill", "link": "/contributing/drills/phase2" },
+            { "text": "Phase 3: the month drill", "link": "/contributing/drills/phase3" }
+          ]
+        }
       ]
     }
   ]

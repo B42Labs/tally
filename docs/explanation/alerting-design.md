@@ -186,4 +186,4 @@ is empty for such a cloud, and an `and` with an empty side returns nothing. That
 is what keeps a cloud that is idle by design or decommissioned from firing
 forever, and it is also why the drill for the rule seeds an event first. The
 scripted run is in
-[`drills/phase2.md`](https://github.com/B42Labs/tally/blob/main/docs/drills/phase2.md).
+[the Phase 2 acceptance drill record](/contributing/drills/phase2).
