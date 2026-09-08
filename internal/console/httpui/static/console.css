@@ -1,0 +1,190 @@
+/* The console's only asset. No font, no image, no second stylesheet: a page
+   loads this file and nothing else. */
+
+:root {
+  --ink: #1b1e22;
+  --muted: #5b6570;
+  --line: #d6dae0;
+  --panel: #f4f6f8;
+  --accent: #2f5d8a;
+  --warn: #8a3b2f;
+}
+
+body {
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+nav {
+  display: flex;
+  gap: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+nav a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+a {
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 1.25rem 0 1rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.5rem;
+}
+
+table {
+  width: 100%;
+  margin: 0.5rem 0 1rem;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--panel);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+td.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+pre {
+  max-height: 18rem;
+  margin: 0;
+  padding: 0.5rem;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 12rem 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+}
+
+p.error {
+  padding: 0.75rem;
+  border-left: 4px solid var(--warn);
+  background: var(--panel);
+  color: var(--warn);
+}
+
+footer {
+  margin-top: 2.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+footer span {
+  display: inline-block;
+  min-width: 9rem;
+  font-weight: 600;
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  margin: 0.5rem 0 1rem;
+}
+
+svg text {
+  fill: var(--ink);
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+}
+
+svg text.label {
+  fill: #ffffff;
+}
+
+svg text.axis {
+  fill: var(--muted);
+}
+
+/* A bar of a count or a total. */
+.bar {
+  fill: var(--accent);
+}
+
+/* A timeline lane whose state has no colour of its own. */
+.lane {
+  fill: #9aa4b0;
+}
+
+.state-active,
+.state-in-use {
+  fill: #2f7d4f;
+}
+
+.state-available {
+  fill: #4a8fbd;
+}
+
+.state-shutoff,
+.state-suspended {
+  fill: #a4761f;
+}
+
+.state-paused,
+.state-hibernated {
+  fill: #6f5aa8;
+}
+
+.state-deleted {
+  fill: #8a3b2f;
+}
+
+/* An interval that has not ended is drawn to the edge of the picture, which is
+   not where it ends. */
+.open {
+  opacity: 0.55;
+}
