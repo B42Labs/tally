@@ -1,7 +1,22 @@
+---
+title: "Phase 3 acceptance drill: a month through metering, rating, finalization and export"
+description: The record of the full simulated month that metered, rated, finalized and exported on a dev cluster, once clean and once under five fault switches, with the triage of every warning.
+quadrant: contributing
+audience: contributor
+---
+
 # Phase 3 acceptance drill: a month through metering, rating, finalization and export
 
+This page is a record, not a guide. It holds the procedure of the Phase 3
+acceptance drill as it was written and the observations of the run it records,
+at the commit and the date named under "The first run". The commands are those
+of that commit, and `make up` has since learned to put the stack's images on
+the node itself, which the record did by hand. The current steps of each part
+are in the how-to guides and the tutorials. The record is kept because it is
+evidence of how the system behaved under a full month of load.
+
 Exit criterion 4 of
-[`../../roadmap/03-phase-3-metering-rating.md`](../../roadmap/03-phase-3-metering-rating.md#phase-exit-criteria)
+[`roadmap/03-phase-3-metering-rating.md`](https://github.com/B42Labs/tally/blob/main/roadmap/03-phase-3-metering-rating.md#phase-exit-criteria)
 asks for a full month of dev-stack OpenStack data that meters, rates, finalizes
 and exports without warnings, or with each warning triaged. This drill is that
 month. Meta Issue #33 makes it part of the phase's definition of done.
@@ -12,7 +27,7 @@ and it is the triage: every warning it records and every difference it produces
 has to carry a switch that accounts for it.
 
 The month is the simulated one of seed 1 over `2026-07` on cloud `os-sim`,
-described in [The simulated OpenStack world](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world). The truth
+described in [The simulated OpenStack world](/explanation/the-simulated-openstack-world). The truth
 the export is held against is the oracle the simulator writes beside the month
 it publishes. The warnings and the differences the second run triages are the
 ones the fault switches earn.
@@ -29,7 +44,7 @@ inside the drill, and the checklist at the end stays unticked until it is
 closed.
 
 The drill runs outside CI for the reason the vertical slice's does
-([the vertical slice page](https://b42labs.github.io/tally/reference/command-line/tally-vertical-slice#verification)):
+([the vertical slice page](/reference/command-line/tally-vertical-slice#verification)):
 it needs Docker, a kind cluster and hours of wall clock, and the CI runner has
 the first of the three alone.
 
@@ -64,11 +79,11 @@ kubectl --context kind-tally -n tally port-forward svc/victoriametrics 8428:8428
   listener, the URL `make migrate` runs the engine chain against.
 - `TALLY_ENGINE_REPORTING_DB_URL` reads the reporting database as the login role
   `tally_engine`, which
-  [`02-create-engine-reader.sh`](../../deploy/kubernetes/base/timescaledb/02-create-engine-reader.sh)
+  [`02-create-engine-reader.sh`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/timescaledb/02-create-engine-reader.sh)
   creates with the password the dev overlay generates. The overlay carries the
   same URL in the `tally-db` secret under the key `engine-reporting-db-url`.
 - `TALLY_ENGINE_COUNTER_SOURCES` points at
-  [`counter-sources.yaml`](../../deploy/kubernetes/overlays/dev/counter-sources.yaml)
+  [`counter-sources.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/overlays/dev/counter-sources.yaml)
   of the dev cluster. The variable defaults to the path
   `/etc/tally/counter-sources.yaml`, which no laptop carries.
 - The port-forward reaches Service `victoriametrics` on port 8428, which
@@ -134,7 +149,7 @@ images, writes the dev CA to `tally-ca.crt`, issues an ingest credential for
 `os-sim` and, because of the switch, an admin api token beside it, writes both
 into `deploy/compose/.env` under `umask 077`, and starts the broker, the
 collector and the simulator of
-[`compose.yaml`](../../deploy/compose/compose.yaml). It prints seven URLs:
+[`compose.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/compose/compose.yaml). It prints seven URLs:
 
 - `http://127.0.0.1:15672`, the broker's management UI, guest/guest
 - `http://127.0.0.1:8090/metrics`, the collector
@@ -152,14 +167,14 @@ is what the Makefile comment above the target says.
 
 `SIM_REGISTER_PROJECTS=true` registers the month's six tenants and its two
 Gardener projects with the dev registry before the first notification goes out
-([project registration](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#project-registration)).
+([project registration](/reference/command-line/tally-openstack-simulator#project-registration)).
 
 A `run` also serves the month as an OpenStack API
-([the fake OpenStack API](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-fake-openstack-api)), so
+([the fake OpenStack API](/reference/command-line/tally-openstack-simulator#the-fake-openstack-api)), so
 the reconciliation loop starts in a second shell right after the URLs print. It
 posts one sync per minute and tells each one where the month stands
-([triggering a sync](https://b42labs.github.io/tally/how-to/openstack/reconcile-a-cloud),
-[telling a sync the instant it runs at](https://b42labs.github.io/tally/how-to/simulator/reconcile-the-simulated-cloud)):
+([triggering a sync](/how-to/openstack/reconcile-a-cloud),
+[telling a sync the instant it runs at](/how-to/simulator/reconcile-the-simulated-cloud)):
 
 ```sh
 kubectl --context kind-tally -n tally port-forward svc/reporting-api 8082:80 &
@@ -250,7 +265,7 @@ The loop stops when `published` reaches `total`: Ctrl-C on the loop, then
 totals the answers carried: `created`, `updated` and `deleted`.
 
 The month is watched through the control endpoint
-([the control endpoint](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-control-endpoint)):
+([the control endpoint](/reference/command-line/tally-openstack-simulator#the-control-endpoint)):
 
 ```sh
 curl -s http://127.0.0.1:8091/clock
@@ -274,7 +289,7 @@ curl -s http://127.0.0.1:8090/metrics | awk '
 ```
 
 It answers `1812 13915` for seed 1, the two counts
-[what a month renders](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world#what-a-month-renders)
+[what a month renders](/explanation/the-simulated-openstack-world#what-a-month-renders)
 states, and `tally_collector_unparseable_total` is 0.
 `tally_collector_buffer_depth` has to read 0 before the first engine command: it
 is the outbox the collector drains into the Reporting API, and a run over a
@@ -288,7 +303,7 @@ curl --cacert tally-ca.crt 'https://vm.tally.127-0-0-1.nip.io:8443/targets'
 ```
 
 Four jobs are listed
-([Check the result](https://b42labs.github.io/tally/how-to/observability/publish-metrics-over-otlp#check-the-result)). The
+([Check the result](/how-to/observability/publish-metrics-over-otlp#check-the-result)). The
 `openstack-db-exporter` job is up while the month publishes and down again
 afterwards, because its target is the simulator's inventory endpoint.
 
@@ -302,8 +317,8 @@ TALLY_SIM_CLOUD=os-sim go run ./cmd/tally-openstack-simulator run \
 With no `TALLY_SIM_AMQP_URL`, no `TALLY_SIM_OTLP_URL` and no
 `--register-projects` it dials nothing, pushes nothing and registers nothing. It
 writes `notifications.jsonl`, `events.jsonl` and `oracle.json`
-([the oracle](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-oracle),
-[file mode and replay](https://b42labs.github.io/tally/how-to/simulator/replay-a-recorded-month)). It runs
+([the oracle](/reference/command-line/tally-openstack-simulator#the-oracle),
+[file mode and replay](/how-to/simulator/replay-a-recorded-month)). It runs
 from the same checkout the stack's image was built from, because one seed,
 period and cloud render the same month byte for byte only within one build, and
 `ReadOracle` refuses a document of another format.
@@ -373,7 +388,7 @@ export does not remove what an earlier one left there`, so each export of this
 drill gets a directory of its own.
 
 The export is held against the oracle
-([comparing an export](https://b42labs.github.io/tally/how-to/simulator/compare-an-export)):
+([comparing an export](/how-to/simulator/compare-an-export)):
 
 ```sh
 go run ./cmd/tally-openstack-simulator compare \
@@ -395,7 +410,7 @@ does not price: pass the model the run rated with`.
 
 The counter dimensions are outside the comparison, because `increase()`
 extrapolates over the edges of its window; the oracle's `traffic` rows are the
-intended figure ([the metric series](https://b42labs.github.io/tally/explanation/the-simulated-openstack-world#the-metric-series)). No
+intended figure ([the metric series](/explanation/the-simulated-openstack-world#the-metric-series)). No
 instance of seed 1 spans the whole period, because every classic instance is
 created inside the first hours of the month, so the read-off picks one classic
 instance that lives from its create to the period end:
@@ -476,7 +491,7 @@ operator confirmed.
 
 `make simulator-down` stops the compose stack alone: the cluster keeps running,
 and with it the hourly `tally-engine` CronJob of
-[`tally-engine.yaml`](../../deploy/kubernetes/base/tally-engine/tally-engine.yaml),
+[`tally-engine.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/tally-engine/tally-engine.yaml),
 whose schedule is `0 * * * *`. A tick that fires while the chains sit at version
 0 dies on a missing `billing_periods` relation, and with `backoffLimit: 0` that
 failed Job stands in the history as the kind of failure this drill's rule sends
@@ -601,7 +616,7 @@ The collector is read at the hold: `consumed`, `skipped`,
 the five-switch month of the first run, and the three `instance.*` series under
 `skipped`. `tally_collector_buffer_depth` is 0.
 The per-switch figures stand in
-[the fault switches](https://b42labs.github.io/tally/reference/command-line/tally-openstack-simulator#the-fault-switches). No document
+[the fault switches](/reference/command-line/tally-openstack-simulator#the-fault-switches). No document
 states the combined totals, so the first run of this drill is what records them.
 
 During the hold the month is metered, closed and exported:
@@ -1130,7 +1145,7 @@ files.
 ## What else the run shows
 
 The `tally-engine` CronJob of
-[`tally-engine.yaml`](../../deploy/kubernetes/base/tally-engine/tally-engine.yaml)
+[`tally-engine.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/tally-engine/tally-engine.yaml)
 runs `tick` every hour. A tick walks from the earliest stored billing period, or
 from the month before now when none is stored. It moves each month it reaches
 from `open` to `grace`, bills a month whose grace window of 72 hours has passed
@@ -1157,7 +1172,7 @@ its volumes, and that is the way to a clean cluster.
 
 The drill exports dev credentials into a shell. The clean month's admin api
 token is not one of them by the end: the reset drops `api_tokens`
-([`0001_init.sql`](../../migrations/reporting/0001_init.sql)), so
+([`0001_init.sql`](https://github.com/B42Labs/tally/blob/main/migrations/reporting/0001_init.sql)), so
 `revoke-api-token` against that id fails with `api_tokens <id>: not found`. What
 outlives the drill is the ingest credential the faulted month's `simulator-up`
 issued. `tally-reporting-admin revoke-ingest-credential <id>` ends that one, on

@@ -169,7 +169,7 @@ up:
 	@# budget of its wait, while the host Docker already held that very image. So
 	@# the host's copy goes onto the node here, where nothing is timing it, and
 	@# only an image the host lacks is fetched at all. It is what the phase 3
-	@# drill did by hand, docs/drills/phase3.md, before `up` did it.
+	@# drill did by hand, docs/contributing/drills/phase3.md, before `up` did it.
 	@#
 	@# An image the node already carries is skipped, which is what keeps a second
 	@# `make up` from moving every one of them again.

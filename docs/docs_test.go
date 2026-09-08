@@ -5,10 +5,8 @@
 // compares two of them, a quadrant naming another directory files the page
 // under a promise the directory does not keep, and a sidebar entry pointing at
 // nothing renders as a dead link. The pages are docs/index.md and the Markdown
-// under the five section directories; the documents that predate the site are
-// the ones srcExclude in docs/.vitepress/config.mts names, and are not read. A
-// Markdown file in neither set is published past every rule here, so it fails
-// a test of its own. The rules that judge a heading or a link are exercised
+// under the five section directories. A Markdown file that is neither is
+// published past every rule here, so it fails a test of its own. The rules that judge a heading or a link are exercised
 // against inputs that break them as well, because a gate no input ever fails
 // is a gate nobody can trust. Whether the site builds is what `make
 // docs-build` answers, by running VitePress over the same files; this test
@@ -36,7 +34,6 @@ import (
 const (
 	sidebarFile     = ".vitepress/sidebar.json"
 	navFile         = ".vitepress/nav.json"
-	configFile      = ".vitepress/config.mts"
 	properNounsFile = ".vitepress/proper-nouns.txt"
 	rootPage        = "index.md"
 	rootQuadrant    = "orientation"
@@ -63,13 +60,6 @@ var headingRe = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
 // Markdown nests a shorter fence inside a longer one, and a flag would read the
 // example as prose and the prose as an example.
 var fenceRe = regexp.MustCompile("^(`{3,}|~{3,})")
-
-// srcExcludeRe captures the body of the srcExclude array of the VitePress
-// configuration, and quotedRe the patterns inside it.
-var (
-	srcExcludeRe = regexp.MustCompile(`(?s)srcExclude:\s*\[(.*?)]`)
-	quotedRe     = regexp.MustCompile(`'([^']*)'`)
-)
 
 // codeSpanRe matches an inline code span. A span holds an identifier rather
 // than a word, so the sentence-case rule counts it as one capitalised token.
@@ -316,8 +306,6 @@ func TestNavReachesEverySectionAndOnlyPages(t *testing.T) {
 }
 
 func TestNoMarkdownFileEscapesTheGate(t *testing.T) {
-	patterns := srcExclude(t)
-
 	pages := map[string]bool{}
 	for _, path := range pagePaths(t) {
 		pages[path] = true
@@ -334,11 +322,10 @@ func TestNoMarkdownFileEscapesTheGate(t *testing.T) {
 			return nil
 		}
 		path = filepath.ToSlash(path)
-		if !strings.HasSuffix(path, ".md") || pages[path] || isExcluded(path, patterns) {
+		if !strings.HasSuffix(path, ".md") || pages[path] {
 			return nil
 		}
-		t.Errorf("%s: neither a page of the site nor named by srcExclude in %s, so VitePress publishes it and no rule above reads it",
-			path, configFile)
+		t.Errorf("%s: not a page of the site, so VitePress publishes it and no rule above reads it", path)
 		return nil
 	})
 	if err != nil {
@@ -348,8 +335,7 @@ func TestNoMarkdownFileEscapesTheGate(t *testing.T) {
 
 // pagePaths returns every page of the site, slash separated and relative to
 // this directory: the root page, then the Markdown under each section
-// directory. Nothing else under docs/ is a page, so the documents that predate
-// the site are invisible to these tests.
+// directory. Nothing else under docs/ is a page.
 func pagePaths(t *testing.T) []string {
 	t.Helper()
 
@@ -508,57 +494,6 @@ func isSectionKey(key string) bool {
 	}
 	name := strings.TrimSuffix(strings.TrimPrefix(key, "/"), "/")
 	return sections[name] != "" && key == "/"+name+"/"
-}
-
-// srcExclude returns the patterns of the srcExclude array of the VitePress
-// configuration, which is the site's own list of the documents that predate
-// it. The array is read rather than repeated here so that the two cannot
-// disagree: a path dropped from it turns its file into a published page, and
-// TestNoMarkdownFileEscapesTheGate has to see that on the same run.
-func srcExclude(t *testing.T) []string {
-	t.Helper()
-
-	raw, err := os.ReadFile(configFile)
-	if err != nil {
-		t.Fatalf("reading %s: %v", configFile, err)
-	}
-
-	array := srcExcludeRe.FindStringSubmatch(string(raw))
-	if array == nil {
-		t.Fatalf("%s: no srcExclude array", configFile)
-	}
-
-	var patterns []string
-	for _, match := range quotedRe.FindAllStringSubmatch(array[1], -1) {
-		pattern := match[1]
-		// isExcluded reads a plain path or a directory glob and nothing else,
-		// so a pattern in another shape would silently cover no file.
-		if strings.Contains(strings.TrimSuffix(pattern, "/**"), "*") {
-			t.Fatalf("%s: srcExclude pattern %q is neither a path nor a <directory>/** glob", configFile, pattern)
-		}
-		patterns = append(patterns, pattern)
-	}
-	if len(patterns) == 0 {
-		t.Fatalf("%s: srcExclude is empty", configFile)
-	}
-	return patterns
-}
-
-// isExcluded reports whether one of the srcExclude patterns covers a path.
-func isExcluded(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		directory, glob := strings.CutSuffix(pattern, "/**")
-		if glob {
-			if strings.HasPrefix(path, directory+"/") {
-				return true
-			}
-			continue
-		}
-		if path == pattern {
-			return true
-		}
-	}
-	return false
 }
 
 // The rules above judge a corpus that satisfies them, so the tests below feed

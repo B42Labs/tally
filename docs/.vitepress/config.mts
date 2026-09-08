@@ -23,10 +23,6 @@ export default defineConfig({
   // GitHub Pages serves foo.html for /foo, so links carry no extension.
   cleanUrls: true,
   lastUpdated: true,
-  // The documents that predate the site, now the two drill records alone,
-  // which #111 moves into the contributing section. The sibling of #104 that
-  // migrates one removes its pattern here.
-  srcExclude: ['drills/**'],
   themeConfig: {
     nav,
     sidebar,
