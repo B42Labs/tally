@@ -12,12 +12,14 @@ SHELL := /usr/bin/env bash
 # which is the cluster's own configuration.
 ENVOY_GATEWAY_VERSION ?= v1.8.3
 CERT_MANAGER_VERSION ?= v1.21.1
-GOLANGCI_LINT_VERSION ?= v2.12.2
 
-# Code generators. They run from the module cache at these versions; nothing has
-# to be installed on the host.
+# Code generators and the linter. They run from the module cache at these
+# versions; nothing has to be installed on the host. The linter version is the
+# one .github/workflows/ci.yaml pins for golangci-lint-action, so the host and
+# CI judge the code with one linter; the two pins are moved together.
 OAPI_CODEGEN_VERSION ?= v2.8.0
 SQLC_VERSION ?= v1.31.1
+GOLANGCI_LINT_VERSION ?= v2.13.2
 
 CLUSTER_NAME ?= tally
 NAMESPACE ?= tally
@@ -306,11 +308,11 @@ test:
 
 ## lint: run golangci-lint
 lint:
-	golangci-lint run
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
 
 ## fmt: format every Go file with gofumpt, through golangci-lint's formatter
 fmt:
-	golangci-lint fmt
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) fmt
 
 # Each file is loaded by the binary that will evaluate it, so an expression or a
 # routing field the pinned version rejects fails here rather than in the
