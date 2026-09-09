@@ -13,26 +13,53 @@ import (
 
 // absent is what a template prints where a value is not there: a timestamp
 // that was never written, a payload nothing stored, a modifier map a catalog
-// entry left out.
-const absent = "none"
+// entry left out. unknown is what it prints where a value exists but the
+// console cannot know it: the creation of a resource whose history starts
+// without a create, and the lifetime that would follow from it.
+const (
+	absent  = "none"
+	unknown = "unknown"
+)
 
 // funcMap is what every page is parsed with. A number reaches a page as a
 // decimal and becomes text here, at the scale its kind is rendered at, so no
 // page decides on its own how many places an amount carries.
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"amount":     amount,
-		"quantity":   quantity,
-		"rate":       rate,
-		"price":      price,
-		"stamp":      stamp,
-		"optStamp":   optStamp,
-		"zeroStamp":  zeroStamp,
-		"idText":     idText,
-		"optString":  optString,
-		"pretty":     pretty,
-		"stateClass": stateClass,
+		"amount":       amount,
+		"quantity":     quantity,
+		"rate":         rate,
+		"price":        price,
+		"stamp":        stamp,
+		"optStamp":     optStamp,
+		"unknownStamp": unknownStamp,
+		"zeroStamp":    zeroStamp,
+		"idText":       idText,
+		"optString":    optString,
+		"pretty":       pretty,
+		"stateClass":   stateClass,
+		"emptyText":    emptyText,
+		"zeroClass":    zeroClass,
 	}
+}
+
+// zeroClass is the class a cell of exactly zero is muted with, appended to the
+// cell's other classes, and nothing for any other value. A bill of a simulated
+// month is mostly zeros, and the few real amounts have to stand out of them.
+func zeroClass(d decimal.Decimal) string {
+	if d.IsZero() {
+		return " zero"
+	}
+	return ""
+}
+
+// emptyText is what a table without rows says. A table the filter emptied says
+// so; a table that had nothing to filter says what the page says about it.
+func emptyText(view tableView, otherwise string) string {
+	if view.Query != "" && view.Total > 0 {
+		return "no row matches the filter"
+	}
+	return otherwise
 }
 
 // amount renders money at the two places every monetary value is rounded to.
@@ -69,6 +96,15 @@ func stamp(t time.Time) string {
 func optStamp(t *time.Time) string {
 	if t == nil {
 		return absent
+	}
+	return stamp(*t)
+}
+
+// unknownStamp renders an instant the API leaves null because it does not
+// know it, the creation of a resource whose history starts without a create.
+func unknownStamp(t *time.Time) string {
+	if t == nil {
+		return unknown
 	}
 	return stamp(*t)
 }
