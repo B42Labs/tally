@@ -40,7 +40,7 @@ type projectRow struct {
 // ran this month, and what every run billed it.
 type projectData struct {
 	Project    httpapi.Project
-	Relations  listing[httpapi.Relation]
+	Relations  listing[relationRow]
 	Related    listing[relatedRow]
 	Activity   listing[httpapi.ProjectActivity]
 	From       time.Time
@@ -51,12 +51,12 @@ type projectData struct {
 
 // The columns of a project page's tables.
 var (
-	relationColumns = []column[httpapi.Relation]{
-		textCol("relation type", func(r httpapi.Relation) string { return r.RelationType }),
-		textCol("source", func(r httpapi.Relation) string { return r.SourceId.String() }),
-		textCol("target", func(r httpapi.Relation) string { return r.TargetId.String() }),
-		textCol("valid from", func(r httpapi.Relation) string { return stamp(r.ValidFrom) }),
-		textCol("valid to", func(r httpapi.Relation) string { return optStamp(r.ValidTo) }),
+	relationColumns = []column[relationRow]{
+		textCol("relation type", func(r relationRow) string { return r.Relation.RelationType }),
+		textCol("source", func(r relationRow) string { return r.Relation.SourceId.String() }),
+		textCol("target", func(r relationRow) string { return r.Relation.TargetId.String() }),
+		textCol("valid from", func(r relationRow) string { return stamp(r.Relation.ValidFrom) }),
+		textCol("valid to", func(r relationRow) string { return optStamp(r.Relation.ValidTo) }),
 	}
 	relatedColumns = []column[relatedRow]{
 		textCol("project", func(r relatedRow) string {
@@ -80,6 +80,17 @@ var (
 		numberCol("total", func(r projectStatementRow) decimal.Decimal { return r.Row.Total }),
 	}
 )
+
+// relationRow is one relation of a project and the pages of the projects at
+// its ends. The listing holds the relations of both directions, so either end
+// can be another project, and that end is what the link leads to. The end that
+// is the project of the page gets no link: it would lead back to the page it is
+// printed on.
+type relationRow struct {
+	Relation   httpapi.Relation
+	SourceLink string
+	TargetLink string
+}
 
 // relatedRow is one project a traversal reached and its own page.
 type relatedRow struct {
@@ -181,6 +192,15 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	listed := make([]relationRow, 0, len(relations.Items))
+	for _, relation := range relations.Items {
+		listed = append(listed, relationRow{
+			Relation:   relation,
+			SourceLink: otherProjectLink(relation.SourceId, id),
+			TargetLink: otherProjectLink(relation.TargetId, id),
+		})
+	}
+
 	reached := make([]relatedRow, 0, len(related.Items))
 	for _, project := range related.Items {
 		reached = append(reached, relatedRow{
@@ -199,7 +219,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	data := projectData{
 		Project:    project,
-		Relations:  tabulate(r, "relations", relationColumns, relations.Items),
+		Relations:  tabulate(r, "relations", relationColumns, listed),
 		Related:    tabulate(r, "related", relatedColumns, reached),
 		Activity:   tabulate(r, "activity", activityColumns, summary.ResourceTypes),
 		From:       from,
@@ -244,6 +264,15 @@ func (h *handlers) projectID(ctx context.Context, r *http.Request, src *sources)
 	}
 	return uuid.Nil, nothingRegistered(
 		fmt.Errorf("no project is registered under the cloud %s and the external id %s", cloud, externalID))
+}
+
+// otherProjectLink is the page of one end of a relation, and nothing for the
+// end that is the project the page is about.
+func otherProjectLink(end, self uuid.UUID) string {
+	if end == self {
+		return ""
+	}
+	return link("/project", "id", end.String())
 }
 
 // projectLink is the page of the project a resource names, addressed by the

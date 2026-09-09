@@ -471,8 +471,13 @@ func pointerTo[T any](value T) *T {
 var (
 	testProjectID = uuid.MustParse("11111111-1111-4111-8111-111111111111")
 	testRunID     = uuid.MustParse("22222222-2222-4222-8222-222222222222")
-	testKey       = statements.Key("os-sim", "p-1")
-	testPeriod    = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	// testSourceID is the project a relation reaching testProjectID leaves and
+	// testTargetID the one a relation leaving it reaches, which are the two ends
+	// the relations table links to.
+	testSourceID = uuid.MustParse("55555555-5555-4555-8555-555555555555")
+	testTargetID = uuid.MustParse("66666666-6666-4666-8666-666666666666")
+	testKey      = statements.Key("os-sim", "p-1")
+	testPeriod   = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // fullAPI answers every Reporting API call of every page.
@@ -514,6 +519,14 @@ func fullAPI(t *testing.T) *fakeAPI {
 			Id:           uuid.MustParse("33333333-3333-4333-8333-333333333333"),
 			RelationType: "infrastructure_tenant",
 			SourceId:     testProjectID,
+			TargetId:     testTargetID,
+			ValidFrom:    created,
+			Metadata:     map[string]interface{}{},
+			CreatedAt:    created,
+		}, {
+			Id:           uuid.MustParse("55555555-5555-4555-8555-555555555555"),
+			RelationType: "infrastructure_tenant",
+			SourceId:     testSourceID,
 			TargetId:     testProjectID,
 			ValidFrom:    created,
 			Metadata:     map[string]interface{}{},
@@ -963,7 +976,32 @@ func TestProjectPage(t *testing.T) {
 		if !strings.Contains(body, "run="+testRunID.String()) {
 			t.Error("the statement row does not link to its run")
 		}
+		relations := section(t, body, "Relations", "Related projects")
+		for _, end := range []uuid.UUID{testSourceID, testTargetID} {
+			if !strings.Contains(relations, `<a href="/project?id=`+end.String()+`">`+end.String()+"</a>") {
+				t.Errorf("the relations do not link the project %s:\n%s", end, relations)
+			}
+		}
+		if strings.Contains(relations, `<a href="/project?id=`+testProjectID.String()+`">`) {
+			t.Errorf("a relation links this project back to the page it is printed on:\n%s", relations)
+		}
 	})
+}
+
+// section is what one page prints between two of its headings, so an assertion
+// about one table reads that table alone and not a link another table drew.
+func section(t *testing.T, body, from, to string) string {
+	t.Helper()
+
+	_, after, found := strings.Cut(body, "<h2>"+from+"</h2>")
+	if !found {
+		t.Fatalf("the page has no %q heading:\n%s", from, body)
+	}
+	before, _, found := strings.Cut(after, "<h2>"+to+"</h2>")
+	if !found {
+		t.Fatalf("the page has no %q heading:\n%s", to, body)
+	}
+	return before
 }
 
 func TestPricingPage(t *testing.T) {
