@@ -41,7 +41,8 @@ const (
 
 	resourceBody = `{"cloud":"os-sim","platform":"openstack","project_id":"p-1","resource_id":"vm/1",` +
 		`"resource_type":"instance","state":"active","size":{},"created_at":"2026-03-01T00:00:00Z",` +
-		`"deleted_at":null,"last_event_at":"2026-03-01T00:00:00Z","last_event_type":"instance.create",` +
+		`"deleted_at":null,"first_event_at":"2026-03-01T00:00:00Z",` +
+		`"last_event_at":"2026-03-01T00:00:00Z","last_event_type":"instance.create",` +
 		`"last_payload":null}`
 
 	lifecycleBody = `{"resource":` + resourceBody + `,"events":[],"intervals":[],"warnings":[]}`

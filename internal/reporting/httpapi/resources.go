@@ -387,8 +387,9 @@ func filterStatus(status *ListResourcesParamsStatus) pgtype.Bool {
 //
 // created_at stays null for a history that never showed a create and deleted_at
 // while the resource lives, so both members are set only when their column holds
-// an instant. A row whose last_payload column is NULL renders as a null member:
-// no envelope was stored, and an empty object would claim one was.
+// an instant. first_event_at is set on every row, which is what places such a
+// history in time at all. A row whose last_payload column is NULL renders as a
+// null member: no envelope was stored, and an empty object would claim one was.
 func resourceOf(row sqlcgen.CurrentResource) (Resource, error) {
 	var size map[string]any
 	if err := json.Unmarshal(row.Size, &size); err != nil {
@@ -404,6 +405,7 @@ func resourceOf(row sqlcgen.CurrentResource) (Resource, error) {
 		ProjectId:     row.ProjectID,
 		State:         row.State,
 		Size:          size,
+		FirstEventAt:  row.FirstEventAt.Time.UTC(),
 		LastEventType: row.LastEventType,
 		LastEventAt:   row.LastEventAt.Time.UTC(),
 	}
