@@ -986,6 +986,95 @@ func TestProjectPage(t *testing.T) {
 			t.Errorf("a relation links this project back to the page it is printed on:\n%s", relations)
 		}
 	})
+
+	t.Run("the activity opens on this month", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if !api.summaryFrom.Equal(testPeriod) || !api.summaryTo.Equal(testPeriod.AddDate(0, 1, 0)) {
+			t.Errorf("the summary was read over %s to %s, want this month", api.summaryFrom, api.summaryTo)
+		}
+		for _, want := range []string{
+			`name="from" value="2026-03-01T00:00"`,
+			`name="to" value="2026-04-01T00:00"`,
+			`aria-current="true">this month</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a window is read over what it names", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler,
+			"/project?id="+testProjectID.String()+"&from=2026-02-01T00:00&to=2026-02-15T00:00:00Z")
+		if !api.summaryFrom.Equal(time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)) ||
+			!api.summaryTo.Equal(time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)) {
+			t.Errorf("the summary was read over %s to %s, want the window of the request",
+				api.summaryFrom, api.summaryTo)
+		}
+		for _, want := range []string{
+			`name="from" value="2026-02-01T00:00"`,
+			`name="to" value="2026-02-15T00:00"`,
+			"2026-02-01T00:00:00Z to 2026-02-15T00:00:00Z",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, `aria-current="true">this month</a>`) {
+			t.Error("a window of its own is marked as this month")
+		}
+	})
+
+	t.Run("the window presets carry the project and mark the one in effect", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		id := testProjectID.String()
+		_, body, _ := get(t, handler, "/project?id="+id+"&activity.sort=minutes")
+		for _, want := range []string{
+			`<a href="/project?activity.sort=minutes&amp;from=2026-02-01T00%3A00%3A00Z&amp;id=` + id +
+				`&amp;to=2026-03-01T00%3A00%3A00Z">last month</a>`,
+			`<input type="hidden" name="id" value="` + id + `">`,
+			`<input type="hidden" name="activity.sort" value="minutes">`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("half a window and a window that ends before it starts are refused", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		cases := []struct {
+			query  string
+			reason string
+		}{
+			{"&from=2026-03-01T00:00", "the parameter to is missing"},
+			{"&to=2026-03-01T00:00", "the parameter from is missing"},
+			{"&from=2026-03-08T00:00&to=2026-03-02T00:00", "the parameter to is not after from"},
+			{"&from=whenever&to=2026-03-02T00:00", "the parameter from is not an instant"},
+		}
+		for _, tc := range cases {
+			status, body, _ := get(t, handler, "/project?id="+testProjectID.String()+tc.query)
+			if status != http.StatusBadRequest || !strings.Contains(body, tc.reason) {
+				t.Errorf("%s: status = %d, body:\n%s", tc.query, status, body)
+			}
+		}
+	})
 }
 
 // section is what one page prints between two of its headings, so an assertion

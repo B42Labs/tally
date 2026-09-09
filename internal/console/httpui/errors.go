@@ -30,6 +30,12 @@ func missingParameter(name string) error {
 	return &paramError{name: name, reason: "is missing"}
 }
 
+// unreadableInstant reports a bound or an instant that was sent in a form no
+// page can read.
+func unreadableInstant(name string, err error) error {
+	return &paramError{name: name, reason: "is not an instant: " + err.Error()}
+}
+
 // unreadableUUID reports a parameter that was sent but is no id.
 func unreadableUUID(name string, err error) error {
 	return &paramError{name: name, reason: fmt.Sprintf("is not a UUID: %v", err)}

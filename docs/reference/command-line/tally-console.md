@@ -27,7 +27,7 @@ environment, under the names the settings table below lists.
 | --- | --- |
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
-| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the current month. Engine: one row per statement of the project. |
+| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default. Engine: one row per statement of the project. |
 | `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
@@ -47,6 +47,16 @@ match on each, and a pair nothing is registered under is answered 404. The
 relations of a project link either end that is not the project of the page, so
 a relation another project leaves leads to it and one this project leaves
 leads to what it reaches.
+
+What a project ran is read over a window, `from` and `to`, with the same inputs
+and the same spans the fleet is read over: the last 24 hours, the last 7 days,
+this month, last month. The window is this month while the request names
+neither bound. The summary route takes both bounds, so a request carrying one
+and not the other is answered 400 naming the missing one, and so is a `to`
+that is not after `from`. Each bound is read as RFC 3339 or as the form the
+inputs write. The rest of the page is read as it stands now, whatever the
+window is: the relations, the projects a traversal reaches, and every statement
+a run wrote for the project.
 
 Paging is one page per request. A listing the API answered with a cursor carries
 a next link that repeats the filters and adds that cursor, and nothing follows a
