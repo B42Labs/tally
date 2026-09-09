@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -15,7 +16,15 @@ import (
 
 // pricingData is the list of imported catalog versions.
 type pricingData struct {
-	Models []pricingRow
+	Models listing[pricingRow]
+}
+
+// modelColumns is the version listing.
+var modelColumns = []column[pricingRow]{
+	textCol("version", func(r pricingRow) string { return r.Model.Version }),
+	textCol("valid from", func(r pricingRow) string { return stamp(r.Model.ValidFrom) }),
+	textCol("currency", func(r pricingRow) string { return r.Model.Currency }),
+	textCol("imported", func(r pricingRow) string { return stamp(r.Model.ImportedAt) }),
 }
 
 // pricingRow is one version and the catalog it opens.
@@ -30,7 +39,19 @@ type catalogData struct {
 	ValidFrom  time.Time
 	Currency   string
 	ImportedAt time.Time
-	Rows       []dimensionRow
+	Rows       listing[dimensionRow]
+}
+
+// dimensionColumns is the catalog table. The modifier columns are searched as
+// the text they print, so a filter finds a state or a flavour inside them.
+var dimensionColumns = []column[dimensionRow]{
+	textCol("platform", func(r dimensionRow) string { return r.Platform }),
+	textCol("resource type", func(r dimensionRow) string { return r.ResourceType }),
+	textCol("metric", func(r dimensionRow) string { return r.Metric }),
+	textCol("type", func(r dimensionRow) string { return r.Type }),
+	numberCol("price", func(r dimensionRow) decimal.Decimal { return r.Price }),
+	textCol("state modifiers", func(r dimensionRow) string { return modifierText(r.StateModifiers) }),
+	textCol("type modifiers", func(r dimensionRow) string { return modifierText(r.TypeModifiers) }),
 }
 
 // dimensionRow is one priced metric of one resource type with the modifiers of
@@ -70,7 +91,7 @@ func (h *handlers) pricing(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "pricing", page{
 		Title:   "Pricing",
 		Sources: src,
-		Data:    pricingData{Models: rows},
+		Data:    pricingData{Models: tabulate(r, "models", modelColumns, rows)},
 	})
 }
 
@@ -104,7 +125,7 @@ func (h *handlers) catalog(w http.ResponseWriter, r *http.Request) {
 		ValidFrom:  stored.ValidFrom,
 		Currency:   stored.Currency,
 		ImportedAt: stored.ImportedAt,
-		Rows:       dimensionRows(model),
+		Rows:       tabulate(r, "dimensions", dimensionColumns, dimensionRows(model)),
 	}
 	h.render(w, r, "catalog", page{
 		Title:   "Catalog " + stored.Version,
@@ -146,6 +167,16 @@ func dimensionPrice(dimension pricing.Dimension) decimal.Decimal {
 		return dimension.PricePerUnit
 	}
 	return dimension.PricePerUnitHour
+}
+
+// modifierText is a modifier list as one line of text, key and factor each,
+// which is what the filter of the catalog table matches against.
+func modifierText(list []modifier) string {
+	parts := make([]string, 0, len(list))
+	for _, m := range list {
+		parts = append(parts, m.Key+": "+price(m.Value))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // modifiers sorts a modifier map by key. An entry that sets none renders as

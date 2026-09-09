@@ -6,10 +6,11 @@
 <dt>imported</dt><dd>{{stamp .ImportedAt}}</dd>
 </dl>
 
+{{template "tableTools" .Rows.Table}}
 <table>
-<thead><tr><th>platform</th><th>resource type</th><th>metric</th><th>type</th><th>price</th><th>state modifiers</th><th>type modifiers</th></tr></thead>
+{{template "tableHead" .Rows.Table}}
 <tbody>
-{{range .Rows}}<tr>
+{{range .Rows.Rows}}<tr>
 <td>{{.Platform}}</td>
 <td>{{.ResourceType}}</td>
 <td>{{.Metric}}</td>
@@ -18,7 +19,7 @@
 <td>{{range .StateModifiers}}{{.Key}}: {{price .Value}}<br>{{else}}none{{end}}</td>
 <td>{{range .TypeModifiers}}{{.Key}}: {{price .Value}}<br>{{else}}none{{end}}</td>
 </tr>
-{{else}}<tr><td colspan="7">this catalog prices nothing</td></tr>
+{{else}}<tr><td colspan="7">{{emptyText .Rows.Table "this catalog prices nothing"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}

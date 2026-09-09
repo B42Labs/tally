@@ -1,42 +1,46 @@
 {{define "content"}}
 <h2>Resources the Reporting API counts</h2>
+{{template "tableTools" .Stats.Table}}
 <table>
-<thead><tr><th>cloud</th><th>resource type</th><th>state</th><th>count</th><th>share</th></tr></thead>
+{{template "tableHead" .Stats.Table}}
 <tbody>
-{{range .Stats}}<tr>
+{{range .Stats.Rows}}<tr>
 <td>{{.Cloud}}</td>
 <td>{{.ResourceType}}</td>
 <td>{{.State}}</td>
 <td class="number">{{.Count}}</td>
 <td><svg width="640" height="14" viewBox="0 0 640 14"><rect class="bar" x="0" y="1" width="{{.Width}}" height="12"></rect></svg></td>
 </tr>
-{{else}}<tr><td colspan="5">no resource is counted</td></tr>
+{{else}}<tr><td colspan="5">{{emptyText .Stats.Table "no resource is counted"}}</td></tr>
 {{end}}</tbody>
 </table>
 
 <h2>Events per hour, {{stamp .From}} to {{stamp .To}}</h2>
+{{template "tableTools" .Events.Table}}
 <table>
-<thead><tr><th>bucket</th><th>cloud</th><th>event type</th><th>count</th></tr></thead>
+{{template "tableHead" .Events.Table}}
 <tbody>
-{{range .Events}}<tr>
+{{range .Events.Rows}}<tr>
 <td>{{stamp .Bucket}}</td>
 <td>{{.Cloud}}</td>
 <td>{{.EventType}}</td>
 <td class="number">{{.Count}}</td>
 </tr>
-{{else}}<tr><td colspan="4">no event reached the window</td></tr>
+{{else}}<tr><td colspan="4">{{emptyText .Events.Table "no event reached the window"}}</td></tr>
 {{end}}</tbody>
 </table>
 
-{{if .Rejected}}
+{{if .Rejected.Table.Total}}
 <h2>The ingest path refused these events</h2>
+{{template "tableTools" .Rejected.Table}}
 <table>
-<thead><tr><th>received at</th><th>reason</th></tr></thead>
+{{template "tableHead" .Rejected.Table}}
 <tbody>
-{{range .Rejected}}<tr>
+{{range .Rejected.Rows}}<tr>
 <td>{{stamp .ReceivedAt}}</td>
 <td>{{.Reason}}</td>
 </tr>
+{{else}}<tr><td colspan="2">{{emptyText .Rejected.Table "nothing was refused"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{else}}
@@ -44,25 +48,27 @@
 {{end}}
 
 <h2>Billing periods</h2>
+{{template "tableTools" .Periods.Table}}
 <table>
-<thead><tr><th>from</th><th>to</th><th>status</th><th>finalized by</th><th>finalized at</th></tr></thead>
+{{template "tableHead" .Periods.Table}}
 <tbody>
-{{range .Periods}}<tr>
+{{range .Periods.Rows}}<tr>
 <td>{{stamp .From}}</td>
 <td>{{stamp .To}}</td>
 <td>{{.Status}}</td>
 <td>{{idText .FinalizedRunID}}</td>
 <td>{{zeroStamp .FinalizedAt}}</td>
 </tr>
-{{else}}<tr><td colspan="5">no period is opened</td></tr>
+{{else}}<tr><td colspan="5">{{emptyText .Periods.Table "no period is opened"}}</td></tr>
 {{end}}</tbody>
 </table>
 
 <h2>Metering runs</h2>
+{{template "tableTools" .Runs.Table}}
 <table>
-<thead><tr><th>run</th><th>period</th><th>kind</th><th>status</th><th>pricing</th><th>started</th><th>completed</th></tr></thead>
+{{template "tableHead" .Runs.Table}}
 <tbody>
-{{range .Runs}}<tr>
+{{range .Runs.Rows}}<tr>
 <td><a href="{{.Link}}">{{.Run.ID}}</a></td>
 <td>{{stamp .Run.PeriodFrom}}</td>
 <td>{{.Run.Kind}}</td>
@@ -71,7 +77,7 @@
 <td>{{zeroStamp .Run.StartedAt}}</td>
 <td>{{zeroStamp .Run.CompletedAt}}</td>
 </tr>
-{{else}}<tr><td colspan="7">no run has been recorded</td></tr>
+{{else}}<tr><td colspan="7">{{emptyText .Runs.Table "no run has been recorded"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}

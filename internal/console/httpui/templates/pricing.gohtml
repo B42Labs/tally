@@ -1,14 +1,15 @@
 {{define "content"}}
+{{template "tableTools" .Models.Table}}
 <table>
-<thead><tr><th>version</th><th>valid from</th><th>currency</th><th>imported</th></tr></thead>
+{{template "tableHead" .Models.Table}}
 <tbody>
-{{range .Models}}<tr>
+{{range .Models.Rows}}<tr>
 <td><a href="{{.Link}}">{{.Model.Version}}</a></td>
 <td>{{stamp .Model.ValidFrom}}</td>
 <td>{{.Model.Currency}}</td>
 <td>{{stamp .Model.ImportedAt}}</td>
 </tr>
-{{else}}<tr><td colspan="4">no catalog is imported</td></tr>
+{{else}}<tr><td colspan="4">{{emptyText .Models.Table "no catalog is imported"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}
