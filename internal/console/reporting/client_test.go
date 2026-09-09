@@ -116,12 +116,13 @@ func TestReadsCarryTheTokenAndTheQuery(t *testing.T) {
 		{
 			name:    "a filtered project list",
 			body:    emptyPage,
-			wantURI: "/api/v1/projects?cloud=os-sim&cursor=abc&platform=openstack",
+			wantURI: "/api/v1/projects?cloud=os-sim&cursor=abc&external_id=p-1&platform=openstack",
 			call: func(ctx context.Context, c *Client) (Request, error) {
 				_, request, err := c.ListProjects(ctx, ProjectsQuery{
-					Platform: "openstack",
-					Cloud:    "os-sim",
-					Cursor:   "abc",
+					Platform:   "openstack",
+					Cloud:      "os-sim",
+					ExternalID: "p-1",
+					Cursor:     "abc",
 				})
 				return request, err
 			},
@@ -166,7 +167,7 @@ func TestReadsCarryTheTokenAndTheQuery(t *testing.T) {
 		{
 			name: "a filtered resource list",
 			body: emptyPage,
-			wantURI: "/api/v1/resources?cloud=os-sim&cursor=abc&project_id=p-1" +
+			wantURI: "/api/v1/resources?cloud=os-sim&cursor=abc&limit=50&project_id=p-1" +
 				"&resource_type=instance&state=active&status=all",
 			call: func(ctx context.Context, c *Client) (Request, error) {
 				_, request, err := c.ListResources(ctx, ResourcesQuery{
@@ -176,6 +177,7 @@ func TestReadsCarryTheTokenAndTheQuery(t *testing.T) {
 					State:        "active",
 					Status:       "all",
 					Cursor:       "abc",
+					Limit:        50,
 				})
 				return request, err
 			},
