@@ -77,6 +77,19 @@ func (e documentError) Unwrap() error { return e.err }
 // documentFailed tags err as a stored document that could not be read.
 func documentFailed(err error) error { return documentError{err: err} }
 
+// lookupError tags a pair nothing is registered under: a cloud and external
+// id the project list, filtered by both, answered with no project for.
+type lookupError struct{ err error }
+
+// Error names the pair that was looked up.
+func (e lookupError) Error() string { return e.err.Error() }
+
+// Unwrap exposes the wrapped error.
+func (e lookupError) Unwrap() error { return e.err }
+
+// nothingRegistered tags err as a lookup that found nothing.
+func nothingRegistered(err error) error { return lookupError{err: err} }
+
 // failFrom answers a failed page by what the error is tagged as. The tag
 // decides the status and the heading; the error itself, wrapped as the handler
 // wrapped it, is what the page and the log carry.
@@ -103,6 +116,12 @@ func (h *handlers) failFrom(w http.ResponseWriter, r *http.Request, err error, s
 			}
 		}
 		h.fail(w, r, http.StatusBadGateway, "the Reporting API call failed", err, src)
+		return
+	}
+
+	var fromLookup lookupError
+	if errors.As(err, &fromLookup) {
+		h.fail(w, r, http.StatusNotFound, "the Reporting API registers nothing under that pair", err, src)
 		return
 	}
 
@@ -154,7 +173,7 @@ func (h *handlers) fail(
 	}
 
 	var body bytes.Buffer
-	p := page{Title: heading, Sources: src, Data: errorData{Message: err.Error()}}
+	p := page{Title: heading, Sources: src, Data: errorData{Message: err.Error()}}.forRequest(r)
 	// The error page is what every other page falls back to, so it cannot fall
 	// back to itself. What is left when it fails is the status and one line.
 	if execErr := tpl.ExecuteTemplate(&body, "layout", p); execErr != nil {

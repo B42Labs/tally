@@ -12,60 +12,64 @@
 <pre>{{pretty .Project.Metadata}}</pre>
 
 <h2>Relations</h2>
+{{template "tableTools" .Relations.Table}}
 <table>
-<thead><tr><th>relation type</th><th>source</th><th>target</th><th>valid from</th><th>valid to</th></tr></thead>
+{{template "tableHead" .Relations.Table}}
 <tbody>
-{{range .Relations}}<tr>
+{{range .Relations.Rows}}<tr>
 <td>{{.RelationType}}</td>
 <td>{{.SourceId}}</td>
 <td>{{.TargetId}}</td>
 <td>{{stamp .ValidFrom}}</td>
 <td>{{optStamp .ValidTo}}</td>
 </tr>
-{{else}}<tr><td colspan="5">this project has no relation</td></tr>
+{{else}}<tr><td colspan="5">{{emptyText .Relations.Table "this project has no relation"}}</td></tr>
 {{end}}</tbody>
 </table>
 
 <h2>Related projects</h2>
+{{template "tableTools" .Related.Table}}
 <table>
-<thead><tr><th>project</th><th>cloud</th><th>relation type</th><th>depth</th></tr></thead>
+{{template "tableHead" .Related.Table}}
 <tbody>
-{{range .Related}}<tr>
+{{range .Related.Rows}}<tr>
 <td><a href="{{.Link}}">{{optString .Related.Project.Name .Related.Project.ExternalId}}</a></td>
 <td>{{.Related.Project.Cloud}}</td>
 <td>{{.Related.RelationType}}</td>
 <td class="number">{{.Related.Depth}}</td>
 </tr>
-{{else}}<tr><td colspan="4">no relation reaches another project</td></tr>
+{{else}}<tr><td colspan="4">{{emptyText .Related.Table "no relation reaches another project"}}</td></tr>
 {{end}}</tbody>
 </table>
 
 <h2>What this project ran, {{stamp .From}} to {{stamp .To}}</h2>
+{{template "tableTools" .Activity.Table}}
 <table>
-<thead><tr><th>resource type</th><th>created</th><th>deleted</th><th>active now</th><th>minutes</th></tr></thead>
+{{template "tableHead" .Activity.Table}}
 <tbody>
-{{range .Activity}}<tr>
+{{range .Activity.Rows}}<tr>
 <td>{{.ResourceType}}</td>
 <td class="number">{{.Created}}</td>
 <td class="number">{{.Deleted}}</td>
 <td class="number">{{.ActiveNow}}</td>
 <td class="number">{{.TotalMinutes}}</td>
 </tr>
-{{else}}<tr><td colspan="5">this project ran nothing in this window</td></tr>
+{{else}}<tr><td colspan="5">{{emptyText .Activity.Table "this project ran nothing in this window"}}</td></tr>
 {{end}}</tbody>
 </table>
 
 <h2>Statements</h2>
+{{template "tableTools" .Statements.Table}}
 <table>
-<thead><tr><th>period</th><th>run kind</th><th>run status</th><th>total</th></tr></thead>
+{{template "tableHead" .Statements.Table}}
 <tbody>
-{{range .Statements}}<tr>
+{{range .Statements.Rows}}<tr>
 <td><a href="{{.Link}}">{{stamp .Row.PeriodFrom}}</a></td>
 <td>{{.Row.Kind}}</td>
 <td>{{.Row.Status}}</td>
 <td class="number">{{amount .Row.Total}} {{.Row.Currency}}</td>
 </tr>
-{{else}}<tr><td colspan="4">no run has billed this project</td></tr>
+{{else}}<tr><td colspan="4">{{emptyText .Statements.Table "no run has billed this project"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}

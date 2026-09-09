@@ -1,15 +1,16 @@
 {{define "content"}}
+{{template "tableTools" .Items.Table}}
 <table>
-<thead><tr><th>cloud</th><th>external id</th><th>name</th><th>platform</th><th>registered</th></tr></thead>
+{{template "tableHead" .Items.Table}}
 <tbody>
-{{range .Items}}<tr>
+{{range .Items.Rows}}<tr>
 <td>{{.Project.Cloud}}</td>
 <td><a href="{{.Link}}">{{.Project.ExternalId}}</a></td>
 <td>{{optString .Project.Name .Project.ExternalId}}</td>
 <td>{{.Project.Platform}}</td>
 <td>{{stamp .Project.CreatedAt}}</td>
 </tr>
-{{else}}<tr><td colspan="5">no project matched</td></tr>
+{{else}}<tr><td colspan="5">{{emptyText .Items.Table "no project matched"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{if .NextLink}}<p><a href="{{.NextLink}}">next page</a></p>{{end}}
