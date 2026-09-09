@@ -23,14 +23,52 @@ const (
 // overviewData is the front page: what the API counts, what the ingest path
 // refused, and what the engine has run.
 type overviewData struct {
-	Stats    []statRow
-	Events   []httpapi.EventStatsItem
-	Rejected []httpapi.DeadLetteredEvent
-	Periods  []store.Period
-	Runs     []runRow
+	Stats    listing[statRow]
+	Events   listing[httpapi.EventStatsItem]
+	Rejected listing[httpapi.DeadLetteredEvent]
+	Periods  listing[store.Period]
+	Runs     listing[runRow]
 	From     time.Time
 	To       time.Time
 }
+
+// The columns of the overview's tables. The share bar of the counts draws the
+// count and is sorted through it.
+var (
+	statColumns = []column[statRow]{
+		textCol("cloud", func(r statRow) string { return r.Cloud }),
+		textCol("resource type", func(r statRow) string { return r.ResourceType }),
+		textCol("state", func(r statRow) string { return r.State }),
+		countCol("count", func(r statRow) int64 { return r.Count }),
+		plainCol[statRow]("share"),
+	}
+	eventColumns = []column[httpapi.EventStatsItem]{
+		textCol("bucket", func(r httpapi.EventStatsItem) string { return stamp(r.Bucket) }),
+		textCol("cloud", func(r httpapi.EventStatsItem) string { return r.Cloud }),
+		textCol("event type", func(r httpapi.EventStatsItem) string { return r.EventType }),
+		countCol("count", func(r httpapi.EventStatsItem) int64 { return r.Count }),
+	}
+	rejectedColumns = []column[httpapi.DeadLetteredEvent]{
+		textCol("received at", func(r httpapi.DeadLetteredEvent) string { return stamp(r.ReceivedAt) }),
+		textCol("reason", func(r httpapi.DeadLetteredEvent) string { return r.Reason }),
+	}
+	periodColumns = []column[store.Period]{
+		textCol("from", func(r store.Period) string { return stamp(r.From) }),
+		textCol("to", func(r store.Period) string { return stamp(r.To) }),
+		textCol("status", func(r store.Period) string { return r.Status }),
+		textCol("finalized by", func(r store.Period) string { return idText(r.FinalizedRunID) }),
+		textCol("finalized at", func(r store.Period) string { return zeroStamp(r.FinalizedAt) }),
+	}
+	runColumns = []column[runRow]{
+		textCol("run", func(r runRow) string { return r.Run.ID.String() }),
+		textCol("period", func(r runRow) string { return stamp(r.Run.PeriodFrom) }),
+		textCol("kind", func(r runRow) string { return r.Run.Kind }),
+		textCol("status", func(r runRow) string { return r.Run.Status }),
+		textCol("pricing", func(r runRow) string { return r.Run.PricingVersion }),
+		textCol("started", func(r runRow) string { return zeroStamp(r.Run.StartedAt) }),
+		textCol("completed", func(r runRow) string { return zeroStamp(r.Run.CompletedAt) }),
+	}
+)
 
 // statRow is one counted group with the bar it is drawn as.
 type statRow struct {
@@ -93,11 +131,11 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := overviewData{
-		Stats:    statRows(stats.Items),
-		Events:   events.Items,
-		Rejected: rejected.Items,
-		Periods:  periods,
-		Runs:     runRows(runs),
+		Stats:    tabulate(r, "stats", statColumns, statRows(stats.Items)),
+		Events:   tabulate(r, "events", eventColumns, events.Items),
+		Rejected: tabulate(r, "rejected", rejectedColumns, rejected.Items),
+		Periods:  tabulate(r, "periods", periodColumns, periods),
+		Runs:     tabulate(r, "runs", runColumns, runRows(runs)),
 		From:     from,
 		To:       to,
 	}
