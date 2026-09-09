@@ -59,16 +59,30 @@
 {{template "tableHead" .Activity.Table}}
 <tbody>
 {{range .Activity.Rows}}<tr>
-<td>{{.ResourceType}}</td>
-<td class="number">{{.Created}}</td>
-<td class="number">{{.Deleted}}</td>
-<td class="number">{{.ActiveNow}}</td>
-<td class="number">{{.TotalMinutes}}</td>
+<td>{{if .Resources}}<details class="cell"><summary>{{.Activity.ResourceType}}</summary>
+<table class="nested">
+<thead><tr><th>resource</th><th>state</th><th>created</th><th>deleted</th><th class="number">lifetime hours</th></tr></thead>
+<tbody>
+{{range .Resources}}<tr>
+<td><a href="{{.Link}}">{{.Resource.ResourceId}}</a></td>
+<td>{{.Resource.State}}</td>
+<td>{{unknownStamp .Resource.CreatedAt}}</td>
+<td>{{optStamp .Resource.DeletedAt}}</td>
+<td class="number">{{if .Lived}}{{amount .Lifetime}}{{else}}unknown{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</details>{{else}}{{.Activity.ResourceType}}{{end}}</td>
+<td class="number">{{.Activity.Created}}</td>
+<td class="number">{{.Activity.Deleted}}</td>
+<td class="number">{{.Activity.ActiveNow}}</td>
+<td class="number">{{.Activity.TotalMinutes}}</td>
 </tr>
 {{else}}<tr><td colspan="5">{{emptyText .Activity.Table "this project ran nothing in this window"}}</td></tr>
 {{end}}</tbody>
 </table>
-
+{{if .Partial}}<p class="axis">a type folds open into the resources of this project the API served in one page; it holds more than one page, so a type may have run resources this list does not name</p>
+{{end}}
 <h2>Statements</h2>
 {{template "tableTools" .Statements.Table}}
 <table>

@@ -1,9 +1,12 @@
 package httpui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,15 +42,38 @@ type projectRow struct {
 // projectData is one project from both sides: what the registry holds, what it
 // ran over the window the viewer reads, and what every run billed it.
 type projectData struct {
-	Project    httpapi.Project
-	Relations  listing[relationRow]
-	Related    listing[relatedRow]
-	Activity   listing[httpapi.ProjectActivity]
+	Project   httpapi.Project
+	Relations listing[relationRow]
+	Related   listing[relatedRow]
+	Activity  listing[activityRow]
+	// Partial is set when the API served one page of the project's resources
+	// and held more, so the folds say they are not the whole list.
+	Partial    bool
 	Window     windowView
 	From       time.Time
 	To         time.Time
 	Key        string
 	Statements listing[projectStatementRow]
+}
+
+// activityRow is one resource type of a project over the window: what the
+// summary counted of it, and the resources of that type the projection holds
+// for that window, which the row folds open. Searched is what the filter
+// matches the row on, the type and the resources under it.
+type activityRow struct {
+	Activity  httpapi.ProjectActivity
+	Resources []projectResourceRow
+	Searched  string
+}
+
+// projectResourceRow is one resource under a type, its own page, and how long
+// it has lived. It is the resources page's row without the columns that only
+// make sense beside resources of other projects.
+type projectResourceRow struct {
+	Resource httpapi.Resource
+	Link     string
+	Lifetime decimal.Decimal
+	Lived    bool
 }
 
 // windowView is the control above a table that reads one window: the two
@@ -79,12 +105,15 @@ var (
 		textCol("relation type", func(r relatedRow) string { return r.Related.RelationType }),
 		countCol("depth", func(r relatedRow) int64 { return int64(r.Related.Depth) }),
 	}
-	activityColumns = []column[httpapi.ProjectActivity]{
-		textCol("resource type", func(r httpapi.ProjectActivity) string { return r.ResourceType }),
-		countCol("created", func(r httpapi.ProjectActivity) int64 { return int64(r.Created) }),
-		countCol("deleted", func(r httpapi.ProjectActivity) int64 { return int64(r.Deleted) }),
-		countCol("active now", func(r httpapi.ProjectActivity) int64 { return int64(r.ActiveNow) }),
-		countCol("minutes", func(r httpapi.ProjectActivity) int64 { return r.TotalMinutes }),
+	// The type column is searched as the type and the resources folded under
+	// it, so a filter finds the type one resource sits in. The type leads the
+	// text, so the column still sorts by type.
+	activityColumns = []column[activityRow]{
+		textCol("resource type", func(r activityRow) string { return r.Searched }),
+		countCol("created", func(r activityRow) int64 { return int64(r.Activity.Created) }),
+		countCol("deleted", func(r activityRow) int64 { return int64(r.Activity.Deleted) }),
+		countCol("active now", func(r activityRow) int64 { return int64(r.Activity.ActiveNow) }),
+		countCol("minutes", func(r activityRow) int64 { return r.Activity.TotalMinutes }),
 	}
 	projectStatementColumns = []column[projectStatementRow]{
 		textCol("period", func(r projectStatementRow) string { return stamp(r.Row.PeriodFrom) }),
@@ -202,6 +231,22 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The resources of the project, which the activity rows fold open. A
+	// resource names its project by the pair the registry row carries, and the
+	// listing holds every status, because a type of the window is mostly
+	// resources that are gone by now.
+	fleet, request, err := h.api.ListResources(ctx, reporting.ResourcesQuery{
+		Cloud:     project.Cloud,
+		ProjectID: project.ExternalId,
+		Status:    statuses[len(statuses)-1],
+		Limit:     resourcePageLimit,
+	})
+	src.api(request)
+	if err != nil {
+		h.failFrom(w, r, apiFailed(err), src)
+		return
+	}
+
 	key := statements.Key(project.Cloud, project.ExternalId)
 	billed, err := h.store.ListStatementsForProject(ctx, key)
 	src.query("ListStatementsForProject")
@@ -227,6 +272,8 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	activity := activityRows(summary.ResourceTypes, fleet.Items, from, to, now)
+
 	rows := make([]projectStatementRow, 0, len(billed))
 	for _, row := range billed {
 		rows = append(rows, projectStatementRow{
@@ -239,7 +286,8 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		Project:    project,
 		Relations:  tabulate(r, "relations", relationColumns, listed),
 		Related:    tabulate(r, "related", relatedColumns, reached),
-		Activity:   tabulate(r, "activity", activityColumns, summary.ResourceTypes),
+		Activity:   tabulate(r, "activity", activityColumns, activity),
+		Partial:    fleet.NextCursor != nil,
 		Window:     buildWindowView(r, from, to, now),
 		From:       from,
 		To:         to,
@@ -251,6 +299,55 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		Sources: src,
 		Data:    data,
 	})
+}
+
+// activityRows puts the resources of a project under the type they are of, so
+// that a type the summary counted folds open into the resources it counted.
+// Only the resources that lived inside the window are listed, the rule the
+// fleet reads a window by, and they are listed in the order their ids sort in,
+// which is the order a reader looks one up in.
+//
+// A type the summary reports and the projection holds nothing of is drawn
+// without a fold rather than with an empty one: the summary folds the events
+// of the window, and the projection holds what the resources are today, so a
+// resource the project has since handed on is counted here and listed nowhere.
+func activityRows(
+	types []httpapi.ProjectActivity, resources []httpapi.Resource, from, to, now time.Time,
+) []activityRow {
+	byType := make(map[string][]projectResourceRow, len(types))
+	for _, resource := range resources {
+		if !livedBetween(resource, &from, &to) {
+			continue
+		}
+		lifetime, lived := lifetimeHours(resource, now)
+		byType[resource.ResourceType] = append(byType[resource.ResourceType], projectResourceRow{
+			Resource: resource,
+			Link: link("/resource",
+				"cloud", resource.Cloud, "type", resource.ResourceType, "id", resource.ResourceId),
+			Lifetime: lifetime,
+			Lived:    lived,
+		})
+	}
+
+	rows := make([]activityRow, 0, len(types))
+	for _, activity := range types {
+		under := byType[activity.ResourceType]
+		slices.SortFunc(under, func(a, b projectResourceRow) int {
+			return cmp.Compare(a.Resource.ResourceId, b.Resource.ResourceId)
+		})
+
+		searched := make([]string, 0, len(under)+1)
+		searched = append(searched, activity.ResourceType)
+		for _, resource := range under {
+			searched = append(searched, resource.Resource.ResourceId)
+		}
+		rows = append(rows, activityRow{
+			Activity:  activity,
+			Resources: under,
+			Searched:  strings.Join(searched, " "),
+		})
+	}
+	return rows
 }
 
 // readWindow reads the window a project's activity is summarized over: the

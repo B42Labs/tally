@@ -1054,6 +1054,73 @@ func TestProjectPage(t *testing.T) {
 		}
 	})
 
+	t.Run("a resource type folds open into its resources", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if api.resourcesQuery.Cloud != "os-sim" || api.resourcesQuery.ProjectID != "p-1" ||
+			api.resourcesQuery.Status != "all" {
+			t.Errorf("the resources were read with %+v, want every status of this project", api.resourcesQuery)
+		}
+		for _, want := range []string{
+			`<details class="cell"><summary>instance</summary>`,
+			`<a href="/resource?cloud=os-sim&amp;id=vm-1&amp;type=instance">vm-1</a>`,
+			`<td class="number">348.00</td>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a page of resources says the folds are not the whole list", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.NextCursor = pointerTo("abc")
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if !strings.Contains(body, "a type may have run resources this list does not name") {
+			t.Errorf("a partial list is not said to be one:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, "/resources")
+		if strings.Contains(body, "a type may have run resources this list does not name") {
+			t.Error("the note is on a page that folds nothing")
+		}
+	})
+
+	t.Run("a type folds only what lived in the window", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		// vm-1 was created in March, so a February window holds none of it and
+		// the row the summary still counts is drawn without a fold.
+		_, body, _ := get(t, handler,
+			"/project?id="+testProjectID.String()+"&from=2026-02-01T00:00&to=2026-02-15T00:00")
+		activity := section(t, body, "What this project ran", "Statements")
+		if strings.Contains(activity, ">vm-1</a>") || !strings.Contains(activity, "<td>instance</td>") {
+			t.Errorf("a window before the resource existed folds it open:\n%s", activity)
+		}
+	})
+
+	t.Run("the activity filter finds the type a resource sits in", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String()+"&activity.q=vm-1")
+		activity := section(t, body, "What this project ran", "Statements")
+		if !strings.Contains(activity, ">instance</summary>") || !strings.Contains(activity, "1 of 1 row match") {
+			t.Errorf("the filter does not match a row on the resources under it:\n%s", activity)
+		}
+	})
+
 	t.Run("half a window and a window that ends before it starts are refused", func(t *testing.T) {
 		t.Parallel()
 
