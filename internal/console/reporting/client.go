@@ -121,9 +121,10 @@ func (e *ProblemError) Error() string {
 // ProjectsQuery narrows a project list. Every field is optional, and an empty
 // one filters nothing.
 type ProjectsQuery struct {
-	Platform string
-	Cloud    string
-	Cursor   string
+	Platform   string
+	Cloud      string
+	ExternalID string
+	Cursor     string
 }
 
 // ResourcesQuery narrows a resource list. Every field is optional, and an empty
@@ -135,6 +136,9 @@ type ResourcesQuery struct {
 	State        string
 	Status       string
 	Cursor       string
+	// Limit is how many rows one page carries at most, within the API's
+	// bounds. Zero leaves the API's default.
+	Limit int
 }
 
 // ListProjects reads one page of the registered projects. The page's
@@ -144,6 +148,7 @@ func (c *Client) ListProjects(ctx context.Context, q ProjectsQuery) (httpapi.Pro
 	query := url.Values{}
 	setFilter(query, "platform", q.Platform)
 	setFilter(query, "cloud", q.Cloud)
+	setFilter(query, "external_id", q.ExternalID)
 	setFilter(query, "cursor", q.Cursor)
 
 	var page httpapi.ProjectList
@@ -215,6 +220,9 @@ func (c *Client) ListResources(ctx context.Context, q ResourcesQuery) (httpapi.R
 	setFilter(query, "state", q.State)
 	setFilter(query, "status", q.Status)
 	setFilter(query, "cursor", q.Cursor)
+	if q.Limit > 0 {
+		query.Set("limit", strconv.Itoa(q.Limit))
+	}
 
 	var page httpapi.ResourceList
 	request, err := c.get(ctx, withQuery("/api/v1/resources", query), &page)
