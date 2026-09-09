@@ -32,6 +32,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/store/sqlcgen"
+	"github.com/b42labs/tally/internal/engine/export"
 )
 
 // poolMaxConns bounds the pool. A demo console serves one viewer clicking
@@ -122,6 +123,26 @@ type ProjectStatementRow struct {
 	Status     string
 	Total      decimal.Decimal
 	Currency   string
+}
+
+// Kickback is one kickback of one run as the settlement report reads it: what
+// a partner is owed for one project, under the run that owes it. A correction's
+// rows are the difference to the run it corrects, which is what makes the
+// kickbacks of a period add up the way its statements do.
+type Kickback struct {
+	RunID      uuid.UUID
+	PeriodFrom time.Time
+	Kind       string
+	Status     string
+	// StatementKey is the key the statement of the adjusted project is stored
+	// under, and Cloud and ProjectID are its two halves.
+	StatementKey     string
+	Cloud, ProjectID string
+	RelationID       uuid.UUID
+	Scope            string
+	Rate             decimal.Decimal
+	Base, Amount     decimal.Decimal
+	Currency         string
 }
 
 // PricingModel is one imported catalog version without its document.
@@ -269,6 +290,58 @@ func (s *Store) ListStatementsForProject(ctx context.Context, key string) ([]Pro
 			Total:      total,
 			Currency:   row.Currency,
 		})
+	}
+	return list, nil
+}
+
+// ListKickbacksForBeneficiary returns what every run that stands settles for
+// one partner, oldest period first and inside a period in the order the runs
+// started.
+//
+// The arithmetic is the engine's own: each run is read through
+// export.LoadKickbacks, which renders a regular run's kickback records as they
+// stand and a correction's as the difference to the run it corrects. Doing it
+// here a second time would be a second implementation of what a partner is
+// paid, and the two would drift.
+//
+// The runs are read one by one rather than in one query, because a
+// correction's settlement is a diff of two runs and only that read knows which
+// run to diff against. A partner is settled by one regular run and its
+// corrections per period, so the reads are one per run of the periods the
+// partner appears in.
+func (s *Store) ListKickbacksForBeneficiary(ctx context.Context, beneficiary string) ([]Kickback, error) {
+	runs, err := s.q.ListRunsSettlingFor(ctx, pgtype.Text{String: beneficiary, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("ListRunsSettlingFor: %w", err)
+	}
+
+	var list []Kickback
+	for _, run := range runs {
+		id := uuidOf(run.ID)
+		loaded, err := export.LoadKickbacks(ctx, s.pool, id)
+		if err != nil {
+			return nil, fmt.Errorf("LoadKickbacks of %s: %w", id, err)
+		}
+		for _, kickback := range loaded.Kickbacks {
+			if kickback.Beneficiary != beneficiary {
+				continue
+			}
+			list = append(list, Kickback{
+				RunID:        id,
+				PeriodFrom:   timeOf(run.PeriodFrom),
+				Kind:         run.Kind,
+				Status:       run.Status,
+				StatementKey: kickback.StatementKey,
+				Cloud:        kickback.Cloud,
+				ProjectID:    kickback.ProjectID,
+				RelationID:   kickback.RelationID,
+				Scope:        kickback.Scope,
+				Rate:         kickback.Rate,
+				Base:         kickback.Base,
+				Amount:       kickback.Amount,
+				Currency:     kickback.Currency,
+			})
+		}
 	}
 	return list, nil
 }

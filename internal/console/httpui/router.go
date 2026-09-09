@@ -86,6 +86,7 @@ type Store interface {
 	ListStatements(ctx context.Context, runID uuid.UUID) ([]store.StatementRow, error)
 	GetStatement(ctx context.Context, runID uuid.UUID, key string) (store.Statement, error)
 	ListStatementsForProject(ctx context.Context, key string) ([]store.ProjectStatementRow, error)
+	ListKickbacksForBeneficiary(ctx context.Context, beneficiary string) ([]store.Kickback, error)
 	ListPricingModels(ctx context.Context) ([]store.PricingModel, error)
 	GetPricingModel(ctx context.Context, version string) (store.PricingDocument, error)
 	LatestRunWithResource(ctx context.Context, cloud, resourceType, resourceID string) (uuid.UUID, bool, error)

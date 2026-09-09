@@ -206,6 +206,10 @@ type fakeStore struct {
 	projectStatementsErr error
 	projectStatementsKey string
 
+	kickbacks            []store.Kickback
+	kickbacksErr         error
+	kickbacksBeneficiary string
+
 	pricingModels    []store.PricingModel
 	pricingModelsErr error
 
@@ -251,6 +255,11 @@ func (f *fakeStore) GetStatement(_ context.Context, runID uuid.UUID, key string)
 func (f *fakeStore) ListStatementsForProject(_ context.Context, key string) ([]store.ProjectStatementRow, error) {
 	f.projectStatementsKey = key
 	return f.projectStatements, f.projectStatementsErr
+}
+
+func (f *fakeStore) ListKickbacksForBeneficiary(_ context.Context, beneficiary string) ([]store.Kickback, error) {
+	f.kickbacksBeneficiary = beneficiary
+	return f.kickbacks, f.kickbacksErr
 }
 
 func (f *fakeStore) ListPricingModels(context.Context) ([]store.PricingModel, error) {
@@ -529,12 +538,18 @@ func fullAPI(t *testing.T) *fakeAPI {
 			CreatedAt:    created,
 		}, {
 			Id:           uuid.MustParse("55555555-5555-4555-8555-555555555555"),
-			RelationType: "infrastructure_tenant",
+			RelationType: "managed_by",
 			SourceId:     testSourceID,
 			TargetId:     testProjectID,
 			ValidFrom:    created,
-			Metadata:     map[string]interface{}{},
-			CreatedAt:    created,
+			Metadata: map[string]interface{}{"pricing_adjustments": []interface{}{
+				map[string]interface{}{
+					"type": "discount", "rate": "0.150000", "scope": "all",
+					"description": "reseller end-customer discount",
+				},
+				map[string]interface{}{"type": "kickback", "rate": "0.100000", "scope": "openstack.instance"},
+			}},
+			CreatedAt: created,
 		}}},
 		related: httpapi.RelatedProjectList{Items: []httpapi.RelatedProject{{
 			Project:      project,
@@ -1003,6 +1018,56 @@ func TestProjectPage(t *testing.T) {
 		}
 	})
 
+	t.Run("a relation folds open into the adjustments it carries", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		relations := section(t, body, "Relations", "Related projects")
+		for _, want := range []string{
+			`<details class="cell"><summary>managed_by</summary>`,
+			"<td>discount</td>",
+			"<td>reseller end-customer discount</td>",
+			`<td class="number">0.150000</td>`,
+			"<td>openstack.instance</td>",
+			// The relation that carries none is drawn without a fold.
+			"<td>infrastructure_tenant</td>",
+		} {
+			if !strings.Contains(relations, want) {
+				t.Errorf("the relations lack %q:\n%s", want, relations)
+			}
+		}
+	})
+
+	t.Run("the relations filter finds a relation by its adjustments", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String()+"&relations.q=kickback")
+		relations := section(t, body, "Relations", "Related projects")
+		if !strings.Contains(relations, "1 of 2 rows match") || !strings.Contains(relations, ">managed_by</summary>") {
+			t.Errorf("the filter does not match a relation on what it grants:\n%s", relations)
+		}
+	})
+
+	t.Run("an adjustments document the console cannot read is reported in the row", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.relations.Items[1].Metadata = map[string]interface{}{"pricing_adjustments": "not an array"}
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want the page anyway", status)
+		}
+		if !strings.Contains(body, "adjustments unreadable") {
+			t.Errorf("the row does not say the document could not be read:\n%s", body)
+		}
+	})
+
 	t.Run("a period adds up the statements that stand", func(t *testing.T) {
 		t.Parallel()
 
@@ -1057,6 +1122,65 @@ func TestProjectPage(t *testing.T) {
 		if !strings.Contains(statements, "1 of 1 row match") ||
 			!strings.Contains(statements, "2026-03-01T00:00:00Z") {
 			t.Errorf("the filter does not match a period on the statements under it:\n%s", statements)
+		}
+	})
+
+	t.Run("a partner is shown what every period settles for it", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.project.Platform = "partner"
+		api.project.Cloud = "partner"
+		api.project.ExternalId = "cloudhouse"
+		engine := fullStore(t)
+		engine.kickbacks = []store.Kickback{
+			{
+				RunID: testRunID, PeriodFrom: testPeriod, Kind: "regular", Status: "finalized",
+				StatementKey: testKey, Cloud: "os-sim", ProjectID: "p-1", Scope: "all",
+				Rate: mustDecimal(t, "0.10"), Base: mustDecimal(t, "593.55"),
+				Amount: mustDecimal(t, "59.36"), Currency: "EUR",
+			},
+			{
+				RunID: testCorrectionRunID, PeriodFrom: testPeriod, Kind: "correction", Status: "finalized",
+				StatementKey: testKey, Cloud: "os-sim", ProjectID: "p-1", Scope: "all",
+				Rate: mustDecimal(t, "0.10"), Base: mustDecimal(t, "-2.55"),
+				Amount: mustDecimal(t, "-0.26"), Currency: "EUR",
+			},
+		}
+		handler, _ := serve(t, api, engine, testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if engine.kickbacksBeneficiary != "cloudhouse" {
+			t.Errorf("the settlement was read for %q, want the partner", engine.kickbacksBeneficiary)
+		}
+		kickbacks := section(t, body, "Kickbacks", "Statements")
+		for _, want := range []string{
+			// 59.36 the run owes less the 0.26 the correction takes back.
+			`<td class="number">59.10 EUR</td>`,
+			`<td class="number">2</td>`,
+			"<td>finalized</td>",
+			`<details class="cell"><summary>2026-03-01T00:00:00Z</summary>`,
+			"<td>correction</td>",
+			`<a href="/statement?key=os-sim%2Fp-1&amp;run=` + testRunID.String() + `">open</a>`,
+		} {
+			if !strings.Contains(kickbacks, want) {
+				t.Errorf("the settlement lacks %q:\n%s", want, kickbacks)
+			}
+		}
+	})
+
+	t.Run("a project that is no partner reads no settlement", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		if engine.kickbacksBeneficiary != "" {
+			t.Errorf("a project of platform openstack was read as a beneficiary: %q", engine.kickbacksBeneficiary)
+		}
+		if strings.Contains(body, "<h2>Kickbacks</h2>") {
+			t.Error("a project that settles nothing carries a settlement table")
 		}
 	})
 

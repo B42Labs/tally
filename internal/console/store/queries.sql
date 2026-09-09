@@ -83,3 +83,22 @@ SELECT cloud, platform, resource_type, resource_id, project_id, dimension,
 FROM correction_deltas
 WHERE run_id = $1
 ORDER BY cloud, platform, resource_type, resource_id, project_id, dimension;
+
+-- The runs a partner's settlement is read from: every run that stands of every
+-- period that ever settled a kickback for the partner. A period is read whole,
+-- rather than only the runs holding a record for the partner, because a
+-- correction that takes a kickback away holds no record of it and is what the
+-- settlement of that period then hangs on.
+-- name: ListRunsSettlingFor :many
+SELECT r.id, r.period_from, r.kind, r.status
+FROM runs r
+WHERE r.status IN ('completed', 'finalized')
+  AND r.period_from IN (
+    SELECT a.period_from FROM (
+        SELECT DISTINCT s.period_from
+        FROM adjustment_records ar
+        JOIN runs s ON s.id = ar.run_id
+        WHERE ar.beneficiary = $1
+    ) a
+  )
+ORDER BY r.period_from, r.started_at;
