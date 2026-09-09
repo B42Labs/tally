@@ -43,7 +43,10 @@ because a cloud name, a resource id and a statement key may each carry a slash.
 A resource names its project by cloud and external id, not by the id the API
 assigns, so the project links on the resource pages carry that pair. The
 project page resolves it through the project list filtered by both, an exact
-match on each, and a pair nothing is registered under is answered 404.
+match on each, and a pair nothing is registered under is answered 404. The
+relations of a project link either end that is not the project of the page, so
+a relation another project leaves leads to it and one this project leaves
+leads to what it reaches.
 
 Paging is one page per request. A listing the API answered with a cursor carries
 a next link that repeats the filters and adds that cursor, and nothing follows a

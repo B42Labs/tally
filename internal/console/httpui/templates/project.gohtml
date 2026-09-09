@@ -17,11 +17,11 @@
 {{template "tableHead" .Relations.Table}}
 <tbody>
 {{range .Relations.Rows}}<tr>
-<td>{{.RelationType}}</td>
-<td>{{.SourceId}}</td>
-<td>{{.TargetId}}</td>
-<td>{{stamp .ValidFrom}}</td>
-<td>{{optStamp .ValidTo}}</td>
+<td>{{.Relation.RelationType}}</td>
+<td>{{if .SourceLink}}<a href="{{.SourceLink}}">{{.Relation.SourceId}}</a>{{else}}{{.Relation.SourceId}}{{end}}</td>
+<td>{{if .TargetLink}}<a href="{{.TargetLink}}">{{.Relation.TargetId}}</a>{{else}}{{.Relation.TargetId}}{{end}}</td>
+<td>{{stamp .Relation.ValidFrom}}</td>
+<td>{{optStamp .Relation.ValidTo}}</td>
 </tr>
 {{else}}<tr><td colspan="5">{{emptyText .Relations.Table "this project has no relation"}}</td></tr>
 {{end}}</tbody>
