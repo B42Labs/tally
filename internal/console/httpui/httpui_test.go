@@ -476,8 +476,12 @@ var (
 	// the relations table links to.
 	testSourceID = uuid.MustParse("55555555-5555-4555-8555-555555555555")
 	testTargetID = uuid.MustParse("66666666-6666-4666-8666-666666666666")
-	testKey      = statements.Key("os-sim", "p-1")
-	testPeriod   = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	// The two other runs of the period testRunID closed: the regular run it
+	// replaced, and the correction booked against it.
+	testSupersededRunID = uuid.MustParse("77777777-7777-4777-8777-777777777777")
+	testCorrectionRunID = uuid.MustParse("88888888-8888-4888-8888-888888888888")
+	testKey             = statements.Key("os-sim", "p-1")
+	testPeriod          = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // fullAPI answers every Reporting API call of every page.
@@ -605,10 +609,22 @@ func fullStore(t *testing.T) *fakeStore {
 			Total:    mustDecimal(t, "128.45"),
 			Currency: "EUR",
 		},
-		projectStatements: []store.ProjectStatementRow{{
-			RunID: testRunID, PeriodFrom: testPeriod, Kind: "regular", Status: "completed",
-			Total: mustDecimal(t, "128.45"), Currency: "EUR",
-		}},
+		// One month as a period accumulates it: the run that was replaced, the
+		// run that closed it, and the correction booked against that one.
+		projectStatements: []store.ProjectStatementRow{
+			{
+				RunID: testSupersededRunID, PeriodFrom: testPeriod, Kind: "regular", Status: "superseded",
+				Total: mustDecimal(t, "150.00"), Currency: "EUR",
+			},
+			{
+				RunID: testRunID, PeriodFrom: testPeriod, Kind: "regular", Status: "finalized",
+				Total: mustDecimal(t, "128.45"), Currency: "EUR",
+			},
+			{
+				RunID: testCorrectionRunID, PeriodFrom: testPeriod, Kind: "correction", Status: "finalized",
+				Total: mustDecimal(t, "-2.55"), Currency: "EUR",
+			},
+		},
 		pricingModels: []store.PricingModel{{
 			Version: "2026-03", ValidFrom: testPeriod, Currency: "EUR", ImportedAt: testPeriod,
 		}},
@@ -987,6 +1003,63 @@ func TestProjectPage(t *testing.T) {
 		}
 	})
 
+	t.Run("a period adds up the statements that stand", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		statements := section(t, body, "Statements", "")
+		for _, want := range []string{
+			// 128.45 of the run that closed the month less the 2.55 the
+			// correction credits; the 150.00 that was replaced counts for
+			// nothing.
+			`<td class="number">125.90 EUR</td>`,
+			`<td class="number">3</td>`,
+			"<td>finalized</td>",
+			`<details class="cell"><summary>2026-03-01T00:00:00Z</summary>`,
+			`<tr class="muted">`,
+			"<td>superseded, replaced</td>",
+			`<a href="/statement?key=os-sim%2Fp-1&amp;run=` + testCorrectionRunID.String() + `">open</a>`,
+		} {
+			if !strings.Contains(statements, want) {
+				t.Errorf("the statements lack %q:\n%s", want, statements)
+			}
+		}
+		if strings.Contains(statements, "150.00 EUR</td>\n<td>") {
+			t.Error("the replaced run is counted")
+		}
+	})
+
+	t.Run("a period whose runs were all replaced is charged nothing", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		for i := range engine.projectStatements {
+			engine.projectStatements[i].Status = "superseded"
+		}
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		statements := section(t, body, "Statements", "")
+		if !strings.Contains(statements, "<td>none</td>") || !strings.Contains(statements, ">none</td>") {
+			t.Errorf("a period standing at nothing says otherwise:\n%s", statements)
+		}
+	})
+
+	t.Run("the statements filter finds a period by what it holds", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String()+"&statements.q=correction")
+		statements := section(t, body, "Statements", "")
+		if !strings.Contains(statements, "1 of 1 row match") ||
+			!strings.Contains(statements, "2026-03-01T00:00:00Z") {
+			t.Errorf("the filter does not match a period on the statements under it:\n%s", statements)
+		}
+	})
+
 	t.Run("the activity opens on this month", func(t *testing.T) {
 		t.Parallel()
 
@@ -1145,13 +1218,17 @@ func TestProjectPage(t *testing.T) {
 }
 
 // section is what one page prints between two of its headings, so an assertion
-// about one table reads that table alone and not a link another table drew.
+// about one table reads that table alone and not a link another table drew. An
+// empty to reads to the end of the page, which is where the last section ends.
 func section(t *testing.T, body, from, to string) string {
 	t.Helper()
 
 	_, after, found := strings.Cut(body, "<h2>"+from+"</h2>")
 	if !found {
 		t.Fatalf("the page has no %q heading:\n%s", from, body)
+	}
+	if to == "" {
+		return after
 	}
 	before, _, found := strings.Cut(after, "<h2>"+to+"</h2>")
 	if !found {

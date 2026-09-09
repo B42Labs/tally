@@ -27,7 +27,7 @@ environment, under the names the settings table below lists.
 | --- | --- |
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
-| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into. Engine: one row per statement of the project. |
+| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into. Engine: every statement of the project, grouped into the periods that were billed. |
 | `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
@@ -70,6 +70,28 @@ and a type the projection holds nothing of is drawn without a fold. The
 resources are read as one page of at most 1000, the widest the API serves, and
 a project that holds more says under the table that a type may have run
 resources the fold does not name.
+
+The statements are one row per billing period rather than one per statement. A
+period accumulates them: the regular run that billed it, every run that
+replaced one of those, and every correction booked against the run that closed
+it. The row carries what the project is charged for the period, which is the
+sum of the statements whose run stands, and folds open into all of them, each
+with its kind, its status, its own total and a link to the statement itself. A
+statement that counts for nothing is drawn in the muted colour and says it was
+replaced.
+
+A run stands when its status is `completed` or `finalized`, which are the two
+an export reads; a `superseded` run was replaced by another of its kind and a
+`failed` one billed nothing, and neither is added up. This is why a correction
+adds to the period rather than replacing it: a correction re-meters the period
+whole and stores the difference against the run it corrects, so its statement
+is a credit note over the run that closed the month, and the two together are
+what the project owes. A period is billed in one currency, so the sum is one
+amount; a period whose standing statements disagree prints each currency
+rather than adding them up. The status of the period is the standing regular
+run's, and a period whose every run was replaced stands at nothing and is
+charged nothing. The filter matches a period on its instant and on the kinds
+and statuses folded under it, so `correction` finds the months that hold one.
 
 Paging is one page per request. A listing the API answered with a cursor carries
 a next link that repeats the filters and adds that cursor, and nothing follows a

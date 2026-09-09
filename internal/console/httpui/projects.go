@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -53,7 +54,7 @@ type projectData struct {
 	From       time.Time
 	To         time.Time
 	Key        string
-	Statements listing[projectStatementRow]
+	Statements listing[periodRow]
 }
 
 // activityRow is one resource type of a project over the window: what the
@@ -115,11 +116,14 @@ var (
 		countCol("active now", func(r activityRow) int64 { return int64(r.Activity.ActiveNow) }),
 		countCol("minutes", func(r activityRow) int64 { return r.Activity.TotalMinutes }),
 	}
-	projectStatementColumns = []column[projectStatementRow]{
-		textCol("period", func(r projectStatementRow) string { return stamp(r.Row.PeriodFrom) }),
-		textCol("run kind", func(r projectStatementRow) string { return r.Row.Kind }),
-		textCol("run status", func(r projectStatementRow) string { return r.Row.Status }),
-		numberCol("total", func(r projectStatementRow) decimal.Decimal { return r.Row.Total }),
+	// A period is searched as the period and every statement under it, so a
+	// filter on a kind or a status finds the month that holds one. The period
+	// leads the text, so the column still sorts by period.
+	projectPeriodColumns = []column[periodRow]{
+		textCol("period", func(r periodRow) string { return r.Searched }),
+		textCol("status", func(r periodRow) string { return r.Status }),
+		countCol("statements", func(r periodRow) int64 { return int64(len(r.Statements)) }),
+		numberCol("total", func(r periodRow) decimal.Decimal { return r.Sort }),
 	}
 )
 
@@ -140,12 +144,52 @@ type relatedRow struct {
 	Link    string
 }
 
-// projectStatementRow is one month of a project's history and the statement it
-// opens.
-type projectStatementRow struct {
-	Row  store.ProjectStatementRow
-	Link string
+// periodRow is one billing period of a project: every statement a run wrote
+// for it, which the row folds open, and what the project is charged for the
+// period once the statements that stand are added up.
+//
+// A period accumulates statements: the regular run that billed it, the run
+// that replaced that one, and every correction booked against the run that
+// closed it. What the project owes for the period is the sum of the ones that
+// stand, and reading it off the rows meant knowing which statuses count.
+type periodRow struct {
+	From       time.Time
+	Statements []projectStatementRow
+	// Totals is what stands, summed per currency, and Sort is the amount the
+	// column is ordered by. A period is billed in one currency, so the sum is
+	// usually one amount; a period whose statements disagree prints each one
+	// rather than adding them up.
+	Totals   []currencyTotal
+	Sort     decimal.Decimal
+	Status   string
+	Searched string
 }
+
+// currencyTotal is an amount in the currency it was billed in.
+type currencyTotal struct {
+	Total    decimal.Decimal
+	Currency string
+}
+
+// projectStatementRow is one statement of a project, the page it opens, and
+// whether it is one of those the period is charged by. A superseded run's
+// statement is on the page for the audit it leaves and counts for nothing.
+type projectStatementRow struct {
+	Row      store.ProjectStatementRow
+	Link     string
+	Standing bool
+}
+
+// standingStatuses are the run statuses whose statements the project is
+// charged by, which are the ones an export reads: a run that stands has either
+// closed its period or is the completed one of its kind. A superseded run was
+// replaced by another of its kind, a failed one billed nothing, and neither is
+// counted.
+var standingStatuses = []string{"completed", "finalized"}
+
+// regularKind is the run kind that bills a period, as opposed to the
+// corrections booked against it afterwards.
+const regularKind = "regular"
 
 // projects lists one page of the registry. The cursor is followed only when the
 // viewer asks for the next page: one request reads one page.
@@ -274,13 +318,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	activity := activityRows(summary.ResourceTypes, fleet.Items, from, to, now)
 
-	rows := make([]projectStatementRow, 0, len(billed))
-	for _, row := range billed {
-		rows = append(rows, projectStatementRow{
-			Row:  row,
-			Link: link("/statement", "run", row.RunID.String(), "key", key),
-		})
-	}
+	periods := periodRows(billed, key)
 
 	data := projectData{
 		Project:    project,
@@ -292,7 +330,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		From:       from,
 		To:         to,
 		Key:        key,
-		Statements: tabulate(r, "statements", projectStatementColumns, rows),
+		Statements: tabulate(r, "statements", projectPeriodColumns, periods),
 	}
 	h.render(w, r, "project", page{
 		Title:   "Project " + optString(project.Name, project.ExternalId),
@@ -348,6 +386,73 @@ func activityRows(
 		})
 	}
 	return rows
+}
+
+// periodRows groups what every run billed one project into the periods the
+// runs billed, oldest period first, which is the order the statements arrive
+// in. Inside a period the statements keep that order too, which is the order
+// the runs started in, so a correction stands under the run it corrects.
+//
+// The period's total is the sum of the statements that stand. A period whose
+// statements were all replaced adds up to nothing, which is what it is: every
+// run of it has been superseded by another the page also holds.
+func periodRows(billed []store.ProjectStatementRow, key string) []periodRow {
+	var rows []periodRow
+	index := make(map[time.Time]int, len(billed))
+	for _, row := range billed {
+		at, held := index[row.PeriodFrom]
+		if !held {
+			at = len(rows)
+			index[row.PeriodFrom] = at
+			rows = append(rows, periodRow{From: row.PeriodFrom})
+		}
+		rows[at].Statements = append(rows[at].Statements, projectStatementRow{
+			Row:      row,
+			Link:     link("/statement", "run", row.RunID.String(), "key", key),
+			Standing: slices.Contains(standingStatuses, row.Status),
+		})
+	}
+
+	for i := range rows {
+		rows[i].total()
+		rows[i].describe()
+	}
+	return rows
+}
+
+// total adds the statements that stand up, per the currency each was billed
+// in, and reports the amount the column is ordered by, which is the first
+// currency of a period billed in more than one.
+func (r *periodRow) total() {
+	sums := make(map[string]decimal.Decimal)
+	for _, statement := range r.Statements {
+		if statement.Standing {
+			sums[statement.Row.Currency] = sums[statement.Row.Currency].Add(statement.Row.Total)
+		}
+	}
+
+	for _, currency := range slices.Sorted(maps.Keys(sums)) {
+		r.Totals = append(r.Totals, currencyTotal{Total: sums[currency], Currency: currency})
+	}
+	if len(r.Totals) > 0 {
+		r.Sort = r.Totals[0].Total
+	}
+}
+
+// describe says what the period stands at and what a filter matches it on. The
+// status is the standing regular run's, which is what says whether the month is
+// closed; a period whose regular run was replaced and not re-run stands at
+// nothing.
+func (r *periodRow) describe() {
+	r.Status = absent
+	searched := []string{stamp(r.From)}
+	for _, statement := range r.Statements {
+		if statement.Standing && statement.Row.Kind == regularKind {
+			r.Status = statement.Row.Status
+		}
+		searched = append(searched, statement.Row.Kind, statement.Row.Status)
+	}
+	r.Searched = strings.Join(searched, " ")
 }
 
 // readWindow reads the window a project's activity is summarized over: the
