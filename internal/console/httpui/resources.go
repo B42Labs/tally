@@ -4,46 +4,105 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
 )
 
-// resourcesData is one page of the projection with the link to the next one.
+// resourcesData is one page of the projection: the fleet controls above it,
+// the rows the instant left of it, and the link to the next page.
 type resourcesData struct {
-	Items    []resourceRow
+	Fleet    fleetView
+	Items    listing[resourceRow]
 	NextLink string
 }
 
-// resourceRow is one resource and its own page.
+// resourceColumns is the projection listing. The payload column is searched
+// as the text the page prints it as, so a filter finds a value inside it.
+var resourceColumns = []column[resourceRow]{
+	textCol("cloud", func(r resourceRow) string { return r.Resource.Cloud }),
+	textCol("platform", func(r resourceRow) string { return r.Resource.Platform }),
+	textCol("project", func(r resourceRow) string { return r.Resource.ProjectId }),
+	textCol("resource type", func(r resourceRow) string { return r.Resource.ResourceType }),
+	textCol("resource", func(r resourceRow) string { return r.Resource.ResourceId }),
+	textCol("state", func(r resourceRow) string { return r.Resource.State }),
+	textCol("created", func(r resourceRow) string { return unknownStamp(r.Resource.CreatedAt) }),
+	textCol("deleted", func(r resourceRow) string { return optStamp(r.Resource.DeletedAt) }),
+	numberCol("lifetime hours", func(r resourceRow) decimal.Decimal { return r.Lifetime }),
+	textCol("last payload", func(r resourceRow) string { return pretty(r.Resource.LastPayload) }),
+}
+
+// resourceRow is one resource, its own page, the page of its project, how
+// long it has lived, and what its folded payload says.
 type resourceRow struct {
-	Resource httpapi.Resource
-	Link     string
+	Resource    httpapi.Resource
+	Link        string
+	ProjectLink string
+	// Lifetime is the resource's hours from creation to deletion or to now,
+	// and Lived is false for a resource whose history shows no create.
+	Lifetime       decimal.Decimal
+	Lived          bool
+	PayloadSummary string
 }
 
 // resourceData is one resource from both sides: what its events made of it, and
 // what a run metered and rated it at.
 type resourceData struct {
-	Cloud    string
-	Type     string
-	ID       string
-	Resource httpapi.Resource
+	Cloud       string
+	Type        string
+	ID          string
+	Resource    httpapi.Resource
+	ProjectLink string
+	// Created and Lifetime are the two lines the head prints for a history
+	// with or without a create.
+	Created  string
+	Lifetime string
 	Warnings []string
-	Events   []httpapi.StoredEvent
+	Events   listing[httpapi.StoredEvent]
 	Timeline timeline
 	// Metered is false for a resource no run holds usage for, which every
 	// resource is until the first run of its period has passed over it.
 	Metered     bool
 	Run         store.Run
-	Segments    []store.Segment
+	Segments    listing[store.Segment]
 	CatalogLink string
 }
 
-// resources lists one page of the projection.
+// The columns of a resource page's tables.
+var (
+	segmentColumns = []column[store.Segment]{
+		textCol("state", func(r store.Segment) string { return r.State }),
+		textCol("from", func(r store.Segment) string { return stamp(r.From) }),
+		textCol("to", func(r store.Segment) string { return stamp(r.To) }),
+		countCol("seconds", func(r store.Segment) int64 { return r.Seconds }),
+		textCol("dimension", func(r store.Segment) string { return r.Dimension }),
+		numberCol("amount", func(r store.Segment) decimal.Decimal { return r.Amount }),
+		textCol("currency", func(r store.Segment) string { return r.Currency }),
+	}
+	storedEventColumns = []column[httpapi.StoredEvent]{
+		textCol("timestamp", func(r httpapi.StoredEvent) string { return stamp(r.Timestamp) }),
+		textCol("event type", func(r httpapi.StoredEvent) string { return r.EventType }),
+		textCol("source", func(r httpapi.StoredEvent) string { return r.Source }),
+		textCol("project", func(r httpapi.StoredEvent) string { return r.ProjectId }),
+	}
+)
+
+// resources lists one page of the projection under the status the viewer
+// chose, and of that page the rows that existed in the window or at the
+// instant. The page is the widest the API serves, so the filters are applied
+// to as much of the fleet as one call can hold.
 func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var src sources
+
+	now := h.now()
+	fleet, err := readFleet(r, now)
+	if err != nil {
+		h.failFrom(w, r, err, src)
+		return
+	}
 
 	parameters := r.URL.Query()
 	query := reporting.ResourcesQuery{
@@ -51,8 +110,9 @@ func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 		ProjectID:    parameters.Get("project_id"),
 		ResourceType: parameters.Get("resource_type"),
 		State:        parameters.Get("state"),
-		Status:       parameters.Get("status"),
+		Status:       fleet.Status,
 		Cursor:       parameters.Get("cursor"),
+		Limit:        resourcePageLimit,
 	}
 
 	list, request, err := h.api.ListResources(ctx, query)
@@ -63,23 +123,38 @@ func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows := make([]resourceRow, 0, len(list.Items))
+	unknown := 0
 	for _, resource := range list.Items {
+		if !keep(resource, fleet, now) {
+			continue
+		}
+		lifetime, lived := lifetimeHours(resource, now)
+		if !lived {
+			unknown++
+		}
 		rows = append(rows, resourceRow{
 			Resource: resource,
 			Link: link("/resource",
 				"cloud", resource.Cloud, "type", resource.ResourceType, "id", resource.ResourceId),
+			ProjectLink:    projectLink(resource.Cloud, resource.ProjectId),
+			Lifetime:       lifetime,
+			Lived:          lived,
+			PayloadSummary: payloadSummary(resource.LastPayload),
 		})
 	}
 
-	data := resourcesData{Items: rows}
+	// A page is one of several only when the API said so, or when it was
+	// reached by a cursor: a fleet that fits one page is the whole fleet.
+	paged := list.NextCursor != nil || query.Cursor != ""
+	data := resourcesData{
+		Fleet: buildFleetView(r, fleet, now, len(rows), len(list.Items), unknown, paged),
+		Items: tabulate(r, resourceTable, resourceColumns, rows),
+	}
+	if paged {
+		data.Items = data.Items.paged()
+	}
 	if list.NextCursor != nil {
-		data.NextLink = link("/resources",
-			"cloud", query.Cloud,
-			"project_id", query.ProjectID,
-			"resource_type", query.ResourceType,
-			"state", query.State,
-			"status", query.Status,
-			"cursor", *list.NextCursor)
+		data.NextLink = nextLink(r, *list.NextCursor)
 	}
 	h.render(w, r, "resources", page{Title: "Resources", Sources: src, Data: data})
 }
@@ -136,14 +211,16 @@ func (h *handlers) resource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := resourceData{
-		Cloud:    cloud,
-		Type:     resourceType,
-		ID:       resourceID,
-		Resource: lifecycle.Resource,
-		Warnings: lifecycle.Warnings,
-		Events:   lifecycle.Events,
-		Metered:  metered,
+		Cloud:       cloud,
+		Type:        resourceType,
+		ID:          resourceID,
+		Resource:    lifecycle.Resource,
+		ProjectLink: projectLink(lifecycle.Resource.Cloud, lifecycle.Resource.ProjectId),
+		Warnings:    lifecycle.Warnings,
+		Events:      tabulate(r, "events", storedEventColumns, lifecycle.Events),
+		Metered:     metered,
 	}
+	data.Created, data.Lifetime = lifecycleTimes(lifecycle, h.now())
 
 	var groups []segmentGroup
 	if metered {
@@ -163,7 +240,7 @@ func (h *handlers) resource(w http.ResponseWriter, r *http.Request) {
 
 		groups = groupSegments(segments)
 		data.Run = run
-		data.Segments = segments
+		data.Segments = tabulate(r, "segments", segmentColumns, segments)
 		if run.PricingVersion != "" {
 			data.CatalogLink = link("/catalog", "version", run.PricingVersion)
 		}

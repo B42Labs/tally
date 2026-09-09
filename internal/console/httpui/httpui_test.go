@@ -79,9 +79,10 @@ func (f *fakeAPI) ListProjects(
 ) (httpapi.ProjectList, reporting.Request, error) {
 	f.projectsQuery = q
 	return f.projects, apiRequest("/api/v1/projects", url.Values{
-		"platform": nonEmpty(q.Platform),
-		"cloud":    nonEmpty(q.Cloud),
-		"cursor":   nonEmpty(q.Cursor),
+		"platform":    nonEmpty(q.Platform),
+		"cloud":       nonEmpty(q.Cloud),
+		"external_id": nonEmpty(q.ExternalID),
+		"cursor":      nonEmpty(q.Cursor),
 	}), f.projectsErr
 }
 
@@ -121,6 +122,7 @@ func (f *fakeAPI) ListResources(
 		"state":         nonEmpty(q.State),
 		"status":        nonEmpty(q.Status),
 		"cursor":        nonEmpty(q.Cursor),
+		"limit":         nonEmpty(strconv.Itoa(q.Limit)),
 	}), f.resourcesErr
 }
 
@@ -1166,7 +1168,7 @@ func TestStatementPage(t *testing.T) {
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
 		}
-		if !strings.Contains(body, "Related cost of p-2") {
+		if !strings.Contains(body, "Related cost of <code>p-2</code>") {
 			t.Errorf("the bill does not name the attributed project:\n%s", body)
 		}
 		for _, want := range []string{"12.00", "vm-2", "24.00"} {
@@ -1432,11 +1434,1098 @@ func TestResourcePage(t *testing.T) {
 		handler, _ := serve(t, api, fullStore(t), testNow)
 
 		_, body, _ := get(t, handler, resourcePath)
-		if got := strings.Count(body, "<dd>none</dd>"); got != 2 {
-			t.Errorf("the page renders %d absent timestamps, want 2:\n%s", got, body)
+		if got := strings.Count(body, "<dd>none</dd>"); got != 1 {
+			t.Errorf("the page renders %d absent timestamps, want the deletion alone:\n%s", got, body)
+		}
+		if !strings.Contains(body, "<dt>created</dt><dd>unknown, the history starts with") {
+			t.Error("the page does not say the creation is unknown")
 		}
 		if !strings.Contains(body, "<pre>none</pre>") {
 			t.Error("the page does not render the absent payload")
+		}
+	})
+}
+
+// post sends one form to the console and reads the whole answer, cookies
+// included.
+func post(t *testing.T, handler http.Handler, path string, form url.Values) *http.Response {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	result := recorder.Result()
+	t.Cleanup(func() { _ = result.Body.Close() })
+	return result
+}
+
+// getWithCookie asks for one page as a viewer who chose a theme.
+func getWithCookie(t *testing.T, handler http.Handler, path, theme string) string {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(&http.Cookie{Name: themeCookie, Value: theme})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	result := recorder.Result()
+	defer func() { _ = result.Body.Close() }()
+	read, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatalf("reading the answer of %s: %v", path, err)
+	}
+	return string(read)
+}
+
+// themeCookieOf finds the theme cookie an answer set.
+func themeCookieOf(t *testing.T, result *http.Response) *http.Cookie {
+	t.Helper()
+
+	for _, cookie := range result.Cookies() {
+		if cookie.Name == themeCookie {
+			return cookie
+		}
+	}
+	t.Fatal("the answer set no theme cookie")
+	return nil
+}
+
+func TestTheme(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a page without a cookie follows the system", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/projects?platform=openstack")
+		if strings.Contains(body, "data-theme") {
+			t.Error("the page pins a theme nobody chose")
+		}
+		if !strings.Contains(body, `value="auto" aria-pressed="true"`) {
+			t.Error("the auto button is not pressed")
+		}
+		if !strings.Contains(body, `name="back" value="/projects?platform=openstack"`) {
+			t.Errorf("the form does not carry the page it stands on:\n%s", body)
+		}
+	})
+
+	t.Run("a choice is kept in a cookie and the viewer goes back", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		result := post(t, handler, themeRoute, url.Values{"theme": {"dark"}, "back": {"/pricing?models.sort=version"}})
+		if result.StatusCode != http.StatusSeeOther {
+			t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusSeeOther)
+		}
+		if location := result.Header.Get("Location"); location != "/pricing?models.sort=version" {
+			t.Errorf("location = %q, want the page the form was on", location)
+		}
+		cookie := themeCookieOf(t, result)
+		if cookie.Value != "dark" || cookie.MaxAge != themeCookieAge || cookie.Path != "/" {
+			t.Errorf("cookie = %s, want dark for a year on /", cookie)
+		}
+	})
+
+	t.Run("the page renders the choice", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		body := getWithCookie(t, handler, "/", "dark")
+		if !strings.Contains(body, `<html lang="en" data-theme="dark">`) {
+			t.Error("the page does not carry the chosen theme")
+		}
+		if !strings.Contains(body, `value="dark" aria-pressed="true"`) {
+			t.Error("the dark button is not pressed")
+		}
+		if strings.Contains(body, `value="auto" aria-pressed="true"`) {
+			t.Error("the auto button is still pressed")
+		}
+
+		body = getWithCookie(t, handler, "/nowhere", "light")
+		if !strings.Contains(body, `data-theme="light"`) {
+			t.Error("the error page ignores the chosen theme")
+		}
+	})
+
+	t.Run("a cookie holding nonsense is no choice", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		if body := getWithCookie(t, handler, "/", "purple"); strings.Contains(body, "data-theme") {
+			t.Error("the page pins a theme the stylesheet does not know")
+		}
+	})
+
+	t.Run("auto deletes the cookie", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		result := post(t, handler, themeRoute, url.Values{"theme": {"auto"}, "back": {"/"}})
+		if result.StatusCode != http.StatusSeeOther {
+			t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusSeeOther)
+		}
+		if cookie := themeCookieOf(t, result); cookie.MaxAge >= 0 || cookie.Value != "" {
+			t.Errorf("cookie = %s, want it deleted", cookie)
+		}
+	})
+
+	t.Run("a back path off the console lands on the front page", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		for _, back := range []string{"https://example.com/", "//example.com/", "", "pricing"} {
+			result := post(t, handler, themeRoute, url.Values{"theme": {"light"}, "back": {back}})
+			if location := result.Header.Get("Location"); location != "/" {
+				t.Errorf("back=%q sent the viewer to %q", back, location)
+			}
+		}
+	})
+
+	t.Run("a choice that is none of the three is refused", func(t *testing.T) {
+		t.Parallel()
+
+		handler, logged := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		result := post(t, handler, themeRoute, url.Values{"theme": {"purple"}, "back": {"/"}})
+		if result.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", result.StatusCode, http.StatusBadRequest)
+		}
+		if len(result.Cookies()) != 0 {
+			t.Error("a refused choice set a cookie")
+		}
+		if !strings.Contains(logged.String(), "is not auto, light or dark") {
+			t.Errorf("the log does not name the choice:\n%s", logged.String())
+		}
+	})
+
+	t.Run("fetching the route lands on the error page", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, contentType := get(t, handler, themeRoute)
+		if status != http.StatusMethodNotAllowed {
+			t.Errorf("status = %d, want %d", status, http.StatusMethodNotAllowed)
+		}
+		if contentType != htmlContentType || !strings.Contains(body, "does not answer GET") {
+			t.Errorf("the answer is not the error page:\n%s", body)
+		}
+	})
+}
+
+func TestTablesOnPages(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the overview sorts a table by a number", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/?stats.sort=count")
+		volume, instance := strings.Index(body, "<td>volume</td>"), strings.Index(body, "<td>instance</td>")
+		if volume < 0 || instance < 0 || volume > instance {
+			t.Errorf("the count of one comes after the count of three:\n%s", body)
+		}
+		if !strings.Contains(body, `<th class="number" aria-sort="ascending"><a href="/?stats.sort=-count">count</a></th>`) {
+			t.Errorf("the sorted heading does not say so, does not flip, or is not aligned over its numbers:\n%s", body)
+		}
+		if !strings.Contains(body, `<th class="number"><a href="/?events.sort=-count&amp;stats.sort=count">count</a></th>`) {
+			t.Errorf("the heading of another table drops the state of this one:\n%s", body)
+		}
+		if !strings.Contains(body, `<th><a href="/?stats.sort=cloud">cloud</a></th>`) {
+			t.Error("a text heading is aligned as a number")
+		}
+	})
+
+	t.Run("the overview filters one table and leaves the others", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/?stats.q=VOLUME")
+		if strings.Contains(body, `<td class="number">3</td>`) {
+			t.Error("the row of the instances survived the filter")
+		}
+		if !strings.Contains(body, "1 of 2 rows match") {
+			t.Error("the count does not say what matched")
+		}
+		if !strings.Contains(body, `href="/"`) {
+			t.Error("the filter cannot be cleared")
+		}
+		if !strings.Contains(body, "instance.create.end") {
+			t.Error("the filter of the counts emptied the events")
+		}
+		if !strings.Contains(body, `<input type="hidden" name="stats.q" value="VOLUME">`) {
+			t.Error("the form of another table drops the filter of this one")
+		}
+	})
+
+	t.Run("a filter that matches nothing says so", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/?runs.q=nomatch")
+		if !strings.Contains(body, "0 of 1 row match") || !strings.Contains(body, "no row matches the filter") {
+			t.Errorf("the emptied table does not say so:\n%s", body)
+		}
+		if strings.Contains(body, "no run has been recorded") {
+			t.Error("the emptied table claims nothing was recorded")
+		}
+	})
+
+	t.Run("the next link carries the table state", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.projects.NextCursor = pointerTo("abc")
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/projects?cloud=os-sim&projects.sort=-name&projects.q=p")
+		if !strings.Contains(body, `href="/projects?cloud=os-sim&amp;cursor=abc&amp;projects.q=p&amp;projects.sort=-name"`) {
+			t.Errorf("the next link drops the filter or the order:\n%s", body)
+		}
+		if !strings.Contains(body, "1 row on this page") {
+			t.Error("the count does not say it counts one page")
+		}
+	})
+
+	t.Run("the form carries the page's own identifier", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/catalog?version=2026-03&dimensions.q=vcpus")
+		if !strings.Contains(body, `<input type="hidden" name="version" value="2026-03">`) {
+			t.Error("the filter form drops the catalog version")
+		}
+		if !strings.Contains(body, `action="/catalog"`) || !strings.Contains(body, `name="dimensions.q" value="vcpus"`) {
+			t.Errorf("the filter form is not the catalog's:\n%s", body)
+		}
+		if strings.Contains(body, "ram_gb") {
+			t.Error("a metric the filter does not name survived")
+		}
+	})
+
+	t.Run("the timeline draws every segment whatever the table shows", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resource?cloud=os-sim&type=instance&id=vm-1&segments.q=nomatch")
+		if !strings.Contains(body, "metered and rated") {
+			t.Error("the filter of the segment table emptied the timeline")
+		}
+		if !strings.Contains(body, "no row matches the filter") {
+			t.Error("the emptied segment table does not say so")
+		}
+	})
+
+	t.Run("every table of every page carries its form", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		for _, path := range pagePaths() {
+			_, body, _ := get(t, handler, path)
+			tables := strings.Count(body, "<table>")
+			forms := strings.Count(body, `<form class="tools"`)
+			// A statement's forms are its summary tables, one per section: the
+			// metric tables inside the items sort and carry no form.
+			if strings.HasPrefix(path, "/statement") {
+				tables = strings.Count(body, "<h2>Adjustments</h2>") +
+					strings.Count(body, "<h2>Line items</h2>") + strings.Count(body, "<h2>Related cost of")
+			}
+			if forms != tables {
+				t.Errorf("%s: %d tables and %d filter forms", path, tables, forms)
+			}
+		}
+	})
+}
+
+func TestProjectByPair(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the resource pages link the project by its pair", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		want := `<a href="/project?cloud=os-sim&amp;external_id=p-1">p-1</a>`
+		for _, path := range []string{"/resources", "/resource?cloud=os-sim&type=instance&id=vm-1"} {
+			if _, body, _ := get(t, handler, path); !strings.Contains(body, want) {
+				t.Errorf("%s does not link the project:\n%s", path, body)
+			}
+		}
+	})
+
+	t.Run("a resource without a project gets no link", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.Items[0].ProjectId = ""
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		if _, body, _ := get(t, handler, "/resources"); strings.Contains(body, "/project?cloud=os-sim") {
+			t.Error("the page links a project the resource does not name")
+		}
+	})
+
+	t.Run("the pair resolves to the project", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/project?cloud=os-sim&external_id=p-1")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		if !strings.Contains(body, "Project the first project") {
+			t.Error("the page is not the project's")
+		}
+		if got := api.projectsQuery; got.Cloud != "os-sim" || got.ExternalID != "p-1" || got.Platform != "" {
+			t.Errorf("the list was asked with %+v, want the cloud and the external id alone", got)
+		}
+		if !strings.Contains(body, "GET /api/v1/projects?cloud=os-sim&amp;external_id=p-1") {
+			t.Error("the provenance panel does not list the lookup")
+		}
+	})
+
+	t.Run("the id wins over the pair", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, _, _ := get(t, handler, "/project?id="+testProjectID.String()+"&cloud=other&external_id=p-9")
+		if status != http.StatusOK {
+			t.Errorf("status = %d, want %d", status, http.StatusOK)
+		}
+		if api.projectsQuery.ExternalID != "" {
+			t.Error("the list was asked although the id was there")
+		}
+	})
+
+	t.Run("a pair nothing is registered under is 404", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.projects.Items = nil
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/project?cloud=os-sim&external_id=p-9")
+		if status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		if !strings.Contains(body, "the cloud os-sim and the external id p-9") {
+			t.Errorf("the error page does not name the pair:\n%s", body)
+		}
+	})
+
+	t.Run("a project of another pair does not stand in", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.projects.Items[0].ExternalId = "p-10"
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		if status, _, _ := get(t, handler, "/project?cloud=os-sim&external_id=p-1"); status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+	})
+
+	t.Run("the pair needs its cloud", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/project?external_id=p-1")
+		if status != http.StatusBadRequest || !strings.Contains(body, "the parameter cloud is missing") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+	})
+}
+
+func TestFleet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the page opens on the active fleet now", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources")
+		if api.resourcesQuery.Status != "active" || api.resourcesQuery.Limit != resourcePageLimit {
+			t.Errorf("the API was asked with %+v, want the active fleet in the widest page", api.resourcesQuery)
+		}
+		for _, want := range []string{
+			`aria-current="true">active</a>`,
+			`aria-current="true">now</a>`,
+			`aria-current="true">all</a>`,
+			`name="at" value=""`,
+			"1 of 1 row exists now",
+			`<th class="number"><a href="/resources?resources.sort=-lifetime_hours">lifetime hours</a></th>`,
+			`<td class="number">348.00</td>`,
+			`<details class="cell"><summary>1 key</summary><pre>{`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "on this page") {
+			t.Error("a fleet that fits one page is called a page")
+		}
+	})
+
+	t.Run("a status is passed to the API and the switch drops the cursor", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=deleted&cursor=abc")
+		if api.resourcesQuery.Status != "deleted" || api.resourcesQuery.Cursor != "abc" {
+			t.Errorf("the API was asked with %+v", api.resourcesQuery)
+		}
+		for _, want := range []string{
+			`<a href="/resources">active</a>`,
+			`<a href="/resources?status=deleted" aria-current="true">deleted</a>`,
+			`<a href="/resources?status=all">all</a>`,
+			`<input type="hidden" name="cursor" value="abc">`,
+			`<input type="hidden" name="status" value="deleted">`,
+			"1 row on this page",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("an unknown status is refused", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/resources?status=zombie")
+		if status != http.StatusBadRequest || !strings.Contains(body, "is not active, deleted or all") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+	})
+
+	t.Run("the instant hides what was not yet there", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?at=2026-02-01T00:00:00Z")
+		if strings.Contains(body, ">vm-1</a>") {
+			t.Error("a resource created after the instant is on the page")
+		}
+		for _, want := range []string{
+			"0 of 1 row existed at 2026-02-01T00:00:00Z",
+			"no resource of this page existed at 2026-02-01T00:00:00Z",
+			`name="at" value="2026-02-01T00:00"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+		if api.resourcesQuery.Status != "active" {
+			t.Error("the instant changed what the API was asked for")
+		}
+	})
+
+	t.Run("a deleted resource is shown while it lived", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		deleted := testPeriod.Add(4 * 24 * time.Hour)
+		api.resources.Items[0].DeletedAt = &deleted
+		api.resources.Items[0].State = "deleted"
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&at=2026-03-03T00:00")
+		for _, want := range []string{
+			">vm-1</a>",
+			"1 of 1 row existed at 2026-03-03T00:00:00Z",
+			`<td class="number">96.00</td>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+
+		_, body, _ = get(t, handler, "/resources?status=all")
+		if strings.Contains(body, ">vm-1</a>") || !strings.Contains(body, "0 of 1 row exist now") {
+			t.Errorf("a deleted resource is on the page now:\n%s", body)
+		}
+	})
+
+	t.Run("an unreadable instant is refused", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/resources?at=yesterday")
+		if status != http.StatusBadRequest || !strings.Contains(body, "the parameter at is not an instant") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+	})
+
+	t.Run("the presets and the form carry the rest of the page", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&resources.sort=state&cursor=abc")
+		for _, want := range []string{
+			`<a href="/resources?at=2026-03-08T12%3A00%3A00Z&amp;cursor=abc&amp;resources.sort=state&amp;status=all">7 days ago</a>`,
+			`<a href="/resources?at=2026-03-01T00%3A00%3A00Z&amp;cursor=abc&amp;resources.sort=state&amp;status=all">start of this month</a>`,
+			`<a href="/resources?at=2026-02-01T00%3A00%3A00Z&amp;cursor=abc&amp;resources.sort=state&amp;status=all">start of last month</a>`,
+			`<a href="/resources?resources.sort=state&amp;status=deleted">deleted</a>`,
+			`<input type="hidden" name="resources.sort" value="state">`,
+			`<input type="hidden" name="status" value="all">`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(fleetForm(t, body), `type="hidden" name="at"`) {
+			t.Error("the fleet form carries its own input hidden")
+		}
+	})
+
+	t.Run("a preset in effect is marked", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?at=2026-03-08T12:00:00Z")
+		if !strings.Contains(body, `aria-current="true">7 days ago</a>`) {
+			t.Error("the preset in effect is not marked")
+		}
+		if strings.Contains(body, `aria-current="true">now</a>`) {
+			t.Error("now is marked although the instant is pinned")
+		}
+	})
+
+	t.Run("the next link keeps the status and the instant", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.NextCursor = pointerTo("abc")
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&at=2026-03-03T00:00:00Z")
+		if !strings.Contains(body, `href="/resources?at=2026-03-03T00%3A00%3A00Z&amp;cursor=abc&amp;status=all"`) {
+			t.Errorf("the next link drops the status or the instant:\n%s", body)
+		}
+		if !strings.Contains(body, "on this page") {
+			t.Error("a page the API followed is not called a page")
+		}
+	})
+
+	t.Run("a project list that fits one page is not called a page", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		if _, body, _ := get(t, handler, "/projects"); strings.Contains(body, "on this page") {
+			t.Error("the whole registry is called a page")
+		}
+	})
+}
+
+// fleetForm cuts the fleet form out of a page, so a test can tell its hidden
+// fields from the table filter's, which carries the window and the instant on
+// purpose.
+func fleetForm(t *testing.T, body string) string {
+	t.Helper()
+
+	start := strings.Index(body, `<form class="tools fleet"`)
+	if start < 0 {
+		t.Fatalf("the page carries no fleet form:\n%s", body)
+	}
+	end := strings.Index(body[start:], "</form>")
+	if end < 0 {
+		t.Fatalf("the fleet form does not end:\n%s", body)
+	}
+	return body[start : start+end]
+}
+
+// twoResources is the fleet the window tests read: the fixture's vm-1, alive
+// since the first of March, beside vm-2, which lived from the third to the
+// tenth.
+func twoResources(t *testing.T) *fakeAPI {
+	t.Helper()
+
+	api := fullAPI(t)
+	second := api.resources.Items[0]
+	created := testPeriod.Add(2 * 24 * time.Hour)
+	deleted := testPeriod.Add(9 * 24 * time.Hour)
+	second.ResourceId, second.CreatedAt, second.DeletedAt, second.State = "vm-2", &created, &deleted, "deleted"
+	api.resources.Items = append(api.resources.Items, second)
+	return api
+}
+
+func TestFleetWindow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a window keeps what lived in it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&from=2026-03-02T00:00&to=2026-03-08T00:00")
+		for _, want := range []string{
+			">vm-1</a>",
+			">vm-2</a>",
+			"2 of 2 rows existed between 2026-03-02T00:00:00Z and 2026-03-08T00:00:00Z",
+			`name="from" value="2026-03-02T00:00"`,
+			`name="to" value="2026-03-08T00:00"`,
+			`name="at" value=""`,
+			// vm-2 lived a week whatever the window is.
+			`<td class="number">168.00</td>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, `>now</a>`) {
+			t.Error("a window offers the instant now")
+		}
+	})
+
+	t.Run("a window drops what ended before it or began after it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&from=2026-03-11T00:00:00Z&to=2026-03-12T00:00:00Z")
+		if strings.Contains(body, ">vm-2</a>") || !strings.Contains(body, ">vm-1</a>") {
+			t.Errorf("the window after vm-2 ended keeps the wrong rows:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, "/resources?status=all&from=2026-02-01T00:00:00Z&to=2026-02-15T00:00:00Z")
+		if strings.Contains(body, ">vm-1</a>") ||
+			!strings.Contains(body, "no resource of this page existed between 2026-02-01T00:00:00Z and 2026-02-15T00:00:00Z") {
+			t.Errorf("the window before anything began keeps a row or does not say so:\n%s", body)
+		}
+	})
+
+	t.Run("an instant inside a window narrows to it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&from=2026-03-02T00:00:00Z&to=2026-03-08T00:00:00Z&at=2026-03-05T00:00:00Z")
+		for _, want := range []string{
+			">vm-1</a>", ">vm-2</a>",
+			"2 of 2 rows existed at 2026-03-05T00:00:00Z",
+			`>clear</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+
+		_, body, _ = get(t, handler, "/resources?status=all&from=2026-03-02T00:00:00Z&to=2026-03-08T00:00:00Z&at=2026-03-11T00:00:00Z")
+		if strings.Contains(body, ">vm-2</a>") || !strings.Contains(body, "1 of 2 rows existed at 2026-03-11T00:00:00Z") {
+			t.Errorf("an instant after vm-2 ended keeps it:\n%s", body)
+		}
+	})
+
+	t.Run("a window open on one side filters on that side", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&from=2026-03-05T00:00:00Z")
+		for _, want := range []string{
+			"2 of 2 rows existed since 2026-03-05T00:00:00Z",
+			`name="to" value=""`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+
+		_, body, _ = get(t, handler, "/resources?status=all&to=2026-03-02T00:00:00Z")
+		if !strings.Contains(body, "1 of 2 rows existed before 2026-03-02T00:00:00Z") {
+			t.Errorf("an open start keeps the wrong rows:\n%s", body)
+		}
+	})
+
+	t.Run("a window that ends before it starts is refused", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/resources?from=2026-03-08T00:00&to=2026-03-02T00:00")
+		if status != http.StatusBadRequest || !strings.Contains(body, "the parameter to is not after from") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+		status, body, _ = get(t, handler, "/resources?from=soon")
+		if status != http.StatusBadRequest || !strings.Contains(body, "the parameter from is not an instant") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+	})
+
+	t.Run("the window presets carry the page and mark the one in effect", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&resources.q=vm")
+		for _, want := range []string{
+			`<a href="/resources?from=2026-03-01T00%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-04-01T00%3A00%3A00Z">this month</a>`,
+			`<a href="/resources?from=2026-02-01T00%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-03-01T00%3A00%3A00Z">last month</a>`,
+			`<a href="/resources?from=2026-03-08T12%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-03-15T12%3A00%3A00Z">last 7 days</a>`,
+			`<a href="/resources?resources.q=vm&amp;status=all" aria-current="true">all</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+
+		_, body, _ = get(t, handler, "/resources?from=2026-03-01T00:00:00Z&to=2026-04-01T00:00:00Z")
+		if !strings.Contains(body, `aria-current="true">this month</a>`) {
+			t.Error("the window in effect is not marked")
+		}
+		if !strings.Contains(body, `<a href="/resources">all</a>`) {
+			t.Error("all does not clear the window")
+		}
+		form := fleetForm(t, body)
+		if strings.Contains(form, `type="hidden" name="from"`) || strings.Contains(form, `type="hidden" name="to"`) {
+			t.Error("the fleet form carries its own inputs hidden")
+		}
+	})
+
+	t.Run("the next link keeps the window", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.NextCursor = pointerTo("abc")
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?from=2026-03-01T00:00:00Z&to=2026-04-01T00:00:00Z")
+		if !strings.Contains(body, `href="/resources?cursor=abc&amp;from=2026-03-01T00%3A00%3A00Z&amp;to=2026-04-01T00%3A00%3A00Z"`) {
+			t.Errorf("the next link drops the window:\n%s", body)
+		}
+	})
+}
+
+// billDocument is a statement of two items, one that cost something and one
+// that cost nothing, whose description only repeats its type and id.
+func billDocument(t *testing.T) []byte {
+	t.Helper()
+
+	period := func(state, hours, vcpus, cost, modifier string) statements.Period {
+		return statements.Period{
+			State: state,
+			Hours: money.NewAmount(mustDecimal(t, hours)),
+			Usage: map[string]money.Quantity{"vcpus": money.NewQuantity(mustDecimal(t, vcpus))},
+			Cost: map[string]money.Amount{
+				"vcpus": money.NewAmount(mustDecimal(t, cost)),
+				"total": money.NewAmount(mustDecimal(t, cost)),
+			},
+			StateModifier: money.NewQuantity(mustDecimal(t, modifier)),
+		}
+	}
+	document := statements.Document{
+		BillingPeriod: statements.BillingPeriod{From: "2026-03-01T00:00:00Z", To: "2026-04-01T00:00:00Z"},
+		ProjectID:     "p-1",
+		Platform:      "openstack",
+		LineItems: []statements.LineItem{
+			{
+				ResourceType: "instance", ResourceID: "vm-3", Platform: "openstack",
+				Description: "instance vm-3",
+				Periods:     []statements.Period{period("shelved", "10", "2", "0", "0")},
+				Total:       money.NewAmount(mustDecimal(t, "0")),
+			},
+			{
+				ResourceType: "instance", ResourceID: "vm-4", Platform: "openstack",
+				Description: "m1.small instance",
+				Periods: []statements.Period{
+					period("active", "24", "2", "12", "1"),
+					period("shutoff", "6", "2", "1.5", "0.5"),
+				},
+				Total: money.NewAmount(mustDecimal(t, "13.5")),
+			},
+		},
+		Total:    money.NewAmount(mustDecimal(t, "13.5")),
+		Currency: "EUR",
+	}
+
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("building the statement document: %v", err)
+	}
+	return raw
+}
+
+func TestBill(t *testing.T) {
+	t.Parallel()
+
+	statementPath := "/statement?run=" + testRunID.String() + "&key=" + url.QueryEscape(testKey)
+
+	billStore := func(t *testing.T) *fakeStore {
+		t.Helper()
+
+		engine := fullStore(t)
+		engine.statement = store.Statement{Document: billDocument(t), Total: mustDecimal(t, "13.5"), Currency: "EUR"}
+		return engine
+	}
+
+	t.Run("the summary opens sorted by total and leads to the items", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath)
+		for _, want := range []string{
+			`<th class="number" aria-sort="descending"><a href="/statement?items.sort=total&amp;key=os-sim%2Fp-1&amp;run=` +
+				testRunID.String() + `">total</a></th>`,
+			`<td><a href="/statement?key=os-sim%2Fp-1&amp;open=li-1&amp;run=` + testRunID.String() +
+				`#li-1"><code>vm-4</code></a></td>`,
+			`<td>m1.small instance</td>`,
+			`<td class="number">30.00</td>`,
+			`<td class="number">13.50 EUR</td>`,
+			`<td class="number zero">0.00 EUR</td>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the summary lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Index(body, `<code>vm-4</code>`) > strings.Index(body, `<code>vm-3</code>`) {
+			t.Error("the item that cost something is not first")
+		}
+	})
+
+	t.Run("every block starts folded and the link opens one", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath)
+		if strings.Contains(body, " open>") {
+			t.Errorf("a block starts unfolded:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, statementPath+"&open=li-1")
+		for _, want := range []string{
+			`<details class="item" id="li-1" open>`,
+			`<details class="item" id="li-0">`,
+			`<input type="hidden" name="open" value="li-1">`,
+			`<summary><span>instance <code>vm-4</code></span> <span class="muted">m1.small instance</span><span class="total">13.50 EUR</span></summary>`,
+			`<summary><span>instance <code>vm-3</code></span><span class="total zero">0.00 EUR</span></summary>`,
+			`<a href="/resource?cloud=os-sim&amp;id=vm-4&amp;type=instance">the resource's page</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the blocks lack %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "<dt>description</dt>") || strings.Contains(body, "instance vm-3</span>") {
+			t.Error("a description that repeats the heading is printed")
+		}
+	})
+
+	t.Run("a period is one row per metric and a total", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath)
+		for _, want := range []string{
+			"<tr>\n<td>active</td>\n<td class=\"number\">24.00</td>\n<td>vcpus</td>\n" +
+				"<td class=\"number\">2.0000</td>\n<td class=\"number\">12.00</td>\n<td class=\"number\">1.0000</td>\n</tr>",
+			"<tr class=\"subtotal\">\n<td>active</td>\n<td class=\"number\">24.00</td>\n<td>total</td>\n" +
+				"<td class=\"number zero\"></td>\n<td class=\"number\">12.00</td>\n<td class=\"number\">1.0000</td>\n</tr>",
+			`<td class="number zero">0.00</td>`,
+			`<th class="number"><a href="/statement?key=os-sim%2Fp-1&amp;li-1.sort=-cost&amp;run=` +
+				testRunID.String() + `">cost</a></th>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the metric rows lack %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a metric table sorts on its own", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath+"&li-1.sort=cost")
+		block := body[strings.Index(body, `id="li-1"`):]
+		if strings.Index(block, "1.50") > strings.Index(block, "12.00") {
+			t.Errorf("the cheapest row is not first:\n%s", block)
+		}
+	})
+
+	t.Run("filtering the summary filters the blocks", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath+"&items.q=vm-4")
+		if strings.Count(body, "<details") != 1 || !strings.Contains(body, `id="li-1"`) {
+			t.Errorf("the blocks do not follow the filter:\n%s", body)
+		}
+		if !strings.Contains(body, "1 of 2 rows match") {
+			t.Error("the summary does not count the filter")
+		}
+	})
+
+	t.Run("the golden statement flattens its periods", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, statementPath)
+		for _, want := range []string{
+			`<td class="number">744.00</td>`,
+			"<td>disk_gb</td>\n<td class=\"number\">80.0000</td>\n<td class=\"number\">19.20</td>",
+			"<td>total</td>\n<td class=\"number zero\"></td>\n<td class=\"number\">49.62</td>",
+			`<details class="item" id="li-0">`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the golden bill lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Count(body, `<tr class="subtotal">`) != 3 {
+			t.Errorf("the golden bill carries %d period totals, want 3", strings.Count(body, `<tr class="subtotal">`))
+		}
+	})
+
+	t.Run("a related cost is a section of its own", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.statement = store.Statement{Document: relatedCostDocument(t), Total: mustDecimal(t, "12.00"), Currency: "EUR"}
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, statementPath)
+		for _, want := range []string{
+			"<p>this section holds no line item</p>",
+			`open=rc-0-li-0&amp;run=` + testRunID.String() + `#rc-0-li-0"><code>vm-2</code></a></td>`,
+			`<details class="item" id="rc-0-li-0">`,
+			`name="rc-0.q"`,
+			`rc-0.sort=total`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the related section lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a key the page cannot read links no resource", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/statement?run="+testRunID.String()+"&key=nokey")
+		if strings.Contains(body, "the resource's page") {
+			t.Error("a statement without a cloud links a resource")
+		}
+	})
+}
+
+func TestHistoryWithoutCreate(t *testing.T) {
+	t.Parallel()
+
+	// orphan is the fixture's resource without a creation, the way the API
+	// serves a history that starts without a create.
+	orphan := func(t *testing.T) *fakeAPI {
+		t.Helper()
+
+		api := fullAPI(t)
+		api.resources.Items[0].CreatedAt = nil
+		api.lifecycle.Resource.CreatedAt = nil
+		api.lifecycle.Warnings = []string{"history_starts_without_create"}
+		return api
+	}
+
+	t.Run("the listing says the creation and the lifetime are unknown", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, orphan(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources")
+		for _, want := range []string{
+			"<td>unknown</td>\n<td>none</td>\n<td class=\"number\">unknown</td>",
+			"1 row has no creation and no lifetime, because its history starts without a create</p>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the listing lacks %q:\n%s", want, body)
+			}
+		}
+
+		handler, _ = serve(t, fullAPI(t), fullStore(t), testNow)
+		if _, body, _ = get(t, handler, "/resources"); strings.Contains(body, "no creation") {
+			t.Error("a fleet with every creation known is told about unknown ones")
+		}
+	})
+
+	t.Run("the resource page names the first event and counts from it", func(t *testing.T) {
+		t.Parallel()
+
+		api := orphan(t)
+		later := api.lifecycle.Events[0]
+		later.EventType, later.Timestamp = "instance.power_on", testPeriod.Add(48*time.Hour)
+		// The later event is served first, and the page still finds the earliest.
+		api.lifecycle.Events = []httpapi.StoredEvent{later, api.lifecycle.Events[0]}
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resource?cloud=os-sim&type=instance&id=vm-1")
+		for _, want := range []string{
+			"<dt>created</dt><dd>unknown, the history starts with instance.create.end at 2026-03-01T00:00:00Z</dd>",
+			"<dt>lifetime</dt><dd>348.00 hours since the first event</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a resource with a creation counts from it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resource?cloud=os-sim&type=instance&id=vm-1")
+		for _, want := range []string{
+			"<dt>created</dt><dd>2026-03-01T00:00:00Z</dd>",
+			"<dt>lifetime</dt><dd>348.00 hours</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page lacks %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a history without any event is unknown throughout", func(t *testing.T) {
+		t.Parallel()
+
+		api := orphan(t)
+		api.lifecycle.Events = nil
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resource?cloud=os-sim&type=instance&id=vm-1")
+		if !strings.Contains(body, "<dt>created</dt><dd>unknown</dd>") ||
+			!strings.Contains(body, "<dt>lifetime</dt><dd>unknown</dd>") {
+			t.Errorf("the page guesses at a history it does not have:\n%s", body)
 		}
 	})
 }
