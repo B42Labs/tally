@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/core/money"
@@ -26,21 +27,28 @@ const (
 // page decides on its own how many places an amount carries.
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"amount":       amount,
-		"quantity":     quantity,
-		"rate":         rate,
-		"price":        price,
-		"stamp":        stamp,
-		"optStamp":     optStamp,
-		"unknownStamp": unknownStamp,
-		"zeroStamp":    zeroStamp,
-		"idText":       idText,
-		"optString":    optString,
-		"pretty":       pretty,
-		"stateClass":   stateClass,
-		"emptyText":    emptyText,
-		"zeroClass":    zeroClass,
+		"amount":        amount,
+		"quantity":      quantity,
+		"rate":          rate,
+		"price":         price,
+		"stamp":         stamp,
+		"optStamp":      optStamp,
+		"unknownStamp":  unknownStamp,
+		"zeroStamp":     zeroStamp,
+		"idText":        idText,
+		"optString":     optString,
+		"pretty":        pretty,
+		"stateClass":    stateClass,
+		"emptyText":     emptyText,
+		"statementLink": statementLink,
+		"zeroClass":     zeroClass,
 	}
+}
+
+// statementLink is the page of one stored statement, addressed the way the
+// engine stores it: the run that wrote it and the key it was written under.
+func statementLink(runID uuid.UUID, key string) string {
+	return link("/statement", "run", runID.String(), "key", key)
 }
 
 // zeroClass is the class a cell of exactly zero is muted with, appended to the

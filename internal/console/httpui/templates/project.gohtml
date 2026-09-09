@@ -17,7 +17,19 @@
 {{template "tableHead" .Relations.Table}}
 <tbody>
 {{range .Relations.Rows}}<tr>
-<td>{{.Relation.RelationType}}</td>
+<td>{{if .Adjustments}}<details class="cell"><summary>{{.Relation.RelationType}}</summary>
+<table class="nested">
+<thead><tr><th>adjustment</th><th>scope</th><th class="number">rate</th><th>description</th></tr></thead>
+<tbody>
+{{range .Adjustments}}<tr>
+<td>{{.Type}}</td>
+<td>{{.Scope}}</td>
+<td class="number">{{rate .Rate}}</td>
+<td>{{if .Description}}{{.Description}}{{else}}none{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</details>{{else if .Unreadable}}{{.Relation.RelationType}} <span class="muted">adjustments unreadable: {{.Unreadable}}</span>{{else}}{{.Relation.RelationType}}{{end}}</td>
 <td>{{if .SourceLink}}<a href="{{.SourceLink}}">{{.Relation.SourceId}}</a>{{else}}{{.Relation.SourceId}}{{end}}</td>
 <td>{{if .TargetLink}}<a href="{{.TargetLink}}">{{.Relation.TargetId}}</a>{{else}}{{.Relation.TargetId}}{{end}}</td>
 <td>{{stamp .Relation.ValidFrom}}</td>
@@ -83,6 +95,38 @@
 </table>
 {{if .Partial}}<p class="axis">a type folds open into the resources of this project the API served in one page; it holds more than one page, so a type may have run resources this list does not name</p>
 {{end}}
+{{if .Kickbacks.Table.Total}}
+<h2>Kickbacks</h2>
+{{template "tableTools" .Kickbacks.Table}}
+<table>
+{{template "tableHead" .Kickbacks.Table}}
+<tbody>
+{{range .Kickbacks.Rows}}<tr>
+<td><details class="cell"><summary>{{stamp .From}}</summary>
+<table class="nested">
+<thead><tr><th>statement</th><th>run kind</th><th>project</th><th>scope</th><th class="number">rate</th><th class="number">base</th><th class="number">amount</th></tr></thead>
+<tbody>
+{{range .Records}}<tr>
+<td><a href="{{statementLink .RunID .StatementKey}}">open</a></td>
+<td>{{.Kind}}</td>
+<td><code>{{.ProjectID}}</code></td>
+<td>{{.Scope}}</td>
+<td class="number">{{rate .Rate}}</td>
+<td class="number">{{amount .Base}}</td>
+<td class="number">{{amount .Amount}} {{.Currency}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</details></td>
+<td>{{.Status}}</td>
+<td class="number">{{len .Records}}</td>
+<td class="number">{{range $i, $t := .Totals}}{{if $i}} + {{end}}{{amount $t.Total}} {{$t.Currency}}{{else}}none{{end}}</td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .Kickbacks.Table "no run settles a kickback for this partner"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
 <h2>Statements</h2>
 {{template "tableTools" .Statements.Table}}
 <table>

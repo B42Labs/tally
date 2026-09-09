@@ -347,6 +347,58 @@ func (q *Queries) ListRuns(ctx context.Context, limit int32) ([]Run, error) {
 	return items, nil
 }
 
+const listRunsSettlingFor = `-- name: ListRunsSettlingFor :many
+SELECT r.id, r.period_from, r.kind, r.status
+FROM runs r
+WHERE r.status IN ('completed', 'finalized')
+  AND r.period_from IN (
+    SELECT a.period_from FROM (
+        SELECT DISTINCT s.period_from
+        FROM adjustment_records ar
+        JOIN runs s ON s.id = ar.run_id
+        WHERE ar.beneficiary = $1
+    ) a
+  )
+ORDER BY r.period_from, r.started_at
+`
+
+type ListRunsSettlingForRow struct {
+	ID         pgtype.UUID
+	PeriodFrom pgtype.Timestamptz
+	Kind       string
+	Status     string
+}
+
+// The runs a partner's settlement is read from: every run that stands of every
+// period that ever settled a kickback for the partner. A period is read whole,
+// rather than only the runs holding a record for the partner, because a
+// correction that takes a kickback away holds no record of it and is what the
+// settlement of that period then hangs on.
+func (q *Queries) ListRunsSettlingFor(ctx context.Context, beneficiary pgtype.Text) ([]ListRunsSettlingForRow, error) {
+	rows, err := q.db.Query(ctx, listRunsSettlingFor, beneficiary)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunsSettlingForRow
+	for rows.Next() {
+		var i ListRunsSettlingForRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PeriodFrom,
+			&i.Kind,
+			&i.Status,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStatements = `-- name: ListStatements :many
 SELECT project_id, total, currency
 FROM project_statements

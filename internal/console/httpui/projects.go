@@ -3,6 +3,7 @@ package httpui
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
+	"github.com/b42labs/tally/internal/core/adjustment"
+	projectcore "github.com/b42labs/tally/internal/core/project"
 	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
 )
@@ -49,7 +52,10 @@ type projectData struct {
 	Activity  listing[activityRow]
 	// Partial is set when the API served one page of the project's resources
 	// and held more, so the folds say they are not the whole list.
-	Partial    bool
+	Partial bool
+	// Kickbacks is what a partner is owed, per period, and is empty for every
+	// project that is not one.
+	Kickbacks  listing[settlementRow]
 	Window     windowView
 	From       time.Time
 	To         time.Time
@@ -91,8 +97,11 @@ type windowView struct {
 
 // The columns of a project page's tables.
 var (
+	// The type column is searched as the type and the adjustments the relation
+	// carries, so a filter on kickback finds the relation that grants one. The
+	// type leads the text, so the column still sorts by type.
 	relationColumns = []column[relationRow]{
-		textCol("relation type", func(r relationRow) string { return r.Relation.RelationType }),
+		textCol("relation type", func(r relationRow) string { return r.Searched }),
 		textCol("source", func(r relationRow) string { return r.Relation.SourceId.String() }),
 		textCol("target", func(r relationRow) string { return r.Relation.TargetId.String() }),
 		textCol("valid from", func(r relationRow) string { return stamp(r.Relation.ValidFrom) }),
@@ -136,12 +145,39 @@ type relationRow struct {
 	Relation   httpapi.Relation
 	SourceLink string
 	TargetLink string
+	// Adjustments is the commercial pricing the relation carries, which the
+	// row folds open: a discount the target grants, the kickback it is owed,
+	// a surcharge, a group discount. Unreadable holds what the metadata could
+	// not be read as, and is empty for the metadata this API answers with.
+	Adjustments []adjustment.Adjustment
+	Unreadable  string
+	Searched    string
 }
 
 // relatedRow is one project a traversal reached and its own page.
 type relatedRow struct {
 	Related httpapi.RelatedProject
 	Link    string
+}
+
+// settlementRow is one billing period of a partner: what every run of it
+// settles for the partner, which the row folds open, and what the partner is
+// owed for the period once the runs are added up.
+type settlementRow struct {
+	From     time.Time
+	Records  []store.Kickback
+	Totals   []currencyTotal
+	Sort     decimal.Decimal
+	Status   string
+	Searched string
+}
+
+// settlementColumns is a partner's settlement, one row per period.
+var settlementColumns = []column[settlementRow]{
+	textCol("period", func(r settlementRow) string { return r.Searched }),
+	textCol("status", func(r settlementRow) string { return r.Status }),
+	countCol("records", func(r settlementRow) int64 { return int64(len(r.Records)) }),
+	numberCol("kickback", func(r settlementRow) decimal.Decimal { return r.Sort }),
 }
 
 // periodRow is one billing period of a project: every statement a run wrote
@@ -301,11 +337,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	listed := make([]relationRow, 0, len(relations.Items))
 	for _, relation := range relations.Items {
-		listed = append(listed, relationRow{
-			Relation:   relation,
-			SourceLink: otherProjectLink(relation.SourceId, id),
-			TargetLink: otherProjectLink(relation.TargetId, id),
-		})
+		listed = append(listed, relationOf(relation, id))
 	}
 
 	reached := make([]relatedRow, 0, len(related.Items))
@@ -320,6 +352,19 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	periods := periodRows(billed, key)
 
+	// What a partner is owed. Only a partner is ever a beneficiary, and the
+	// column holds the external id alone, so the read is made for a partner
+	// and for no other project: another platform's project of the same
+	// external id would otherwise answer with a settlement that is not its.
+	var settled []store.Kickback
+	if project.Platform == projectcore.PlatformPartner {
+		if settled, err = h.store.ListKickbacksForBeneficiary(ctx, project.ExternalId); err != nil {
+			h.failFrom(w, r, storeFailed(err), src)
+			return
+		}
+		src.query("ListKickbacksForBeneficiary")
+	}
+
 	data := projectData{
 		Project:    project,
 		Relations:  tabulate(r, "relations", relationColumns, listed),
@@ -331,6 +376,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		To:         to,
 		Key:        key,
 		Statements: tabulate(r, "statements", projectPeriodColumns, periods),
+		Kickbacks:  tabulate(r, "kickbacks", settlementColumns, settlementRows(settled)),
 	}
 	h.render(w, r, "project", page{
 		Title:   "Project " + optString(project.Name, project.ExternalId),
@@ -384,6 +430,49 @@ func activityRows(
 			Resources: under,
 			Searched:  strings.Join(searched, " "),
 		})
+	}
+	return rows
+}
+
+// settlementRows groups what the runs settle for one partner into the periods
+// they settle, oldest first, and adds each period up. Every row a run of a
+// period holds counts: a regular run's rows are what it owes, and a
+// correction's are the difference to the run it corrects, so the two add up to
+// what the partner is owed for the period the way the statements of a period
+// add up to what a project is charged.
+func settlementRows(settled []store.Kickback) []settlementRow {
+	var rows []settlementRow
+	index := make(map[time.Time]int, len(settled))
+	for _, record := range settled {
+		at, held := index[record.PeriodFrom]
+		if !held {
+			at = len(rows)
+			index[record.PeriodFrom] = at
+			rows = append(rows, settlementRow{From: record.PeriodFrom})
+		}
+		rows[at].Records = append(rows[at].Records, record)
+	}
+
+	for i := range rows {
+		sums := make(map[string]decimal.Decimal)
+		searched := []string{stamp(rows[i].From)}
+		for _, record := range rows[i].Records {
+			sums[record.Currency] = sums[record.Currency].Add(record.Amount)
+			searched = append(searched, record.Kind, record.ProjectID)
+			if record.Kind == regularKind {
+				rows[i].Status = record.Status
+			}
+		}
+		for _, currency := range slices.Sorted(maps.Keys(sums)) {
+			rows[i].Totals = append(rows[i].Totals, currencyTotal{Total: sums[currency], Currency: currency})
+		}
+		if len(rows[i].Totals) > 0 {
+			rows[i].Sort = rows[i].Totals[0].Total
+		}
+		if rows[i].Status == "" {
+			rows[i].Status = absent
+		}
+		rows[i].Searched = strings.Join(searched, " ")
 	}
 	return rows
 }
@@ -532,6 +621,37 @@ func (h *handlers) projectID(ctx context.Context, r *http.Request, src *sources)
 	}
 	return uuid.Nil, nothingRegistered(
 		fmt.Errorf("no project is registered under the cloud %s and the external id %s", cloud, externalID))
+}
+
+// relationOf is one relation as the table draws it: the two ends as links, and
+// the pricing adjustments the relation carries read out of its metadata.
+//
+// The registry holds every adjustments document to the schema at the write, so
+// one that does not read here is a document written past this API or a schema
+// this console does not know. It is reported in the row rather than as a failed
+// page: the other relations of the project are readable, and what the document
+// says is what the reader has to see.
+func relationOf(relation httpapi.Relation, self uuid.UUID) relationRow {
+	row := relationRow{
+		Relation:   relation,
+		SourceLink: otherProjectLink(relation.SourceId, self),
+		TargetLink: otherProjectLink(relation.TargetId, self),
+	}
+
+	metadata, err := json.Marshal(relation.Metadata)
+	if err == nil {
+		row.Adjustments, _, err = adjustment.FromMetadata(metadata)
+	}
+	if err != nil {
+		row.Adjustments, row.Unreadable = nil, err.Error()
+	}
+
+	searched := []string{relation.RelationType}
+	for _, line := range row.Adjustments {
+		searched = append(searched, line.Type, line.Scope, line.Description)
+	}
+	row.Searched = strings.Join(searched, " ")
+	return row
 }
 
 // otherProjectLink is the page of one end of a relation, and nothing for the
