@@ -120,8 +120,51 @@ input[type="search"] {
   min-width: 14rem;
 }
 
-/* The fleet switch is three links drawn as one control, the way the theme
-   buttons are, and the presets are plain links with the current one in bold. */
+/* The fleet controls are two lines under the words for them: what the API
+   serves on the first, and which time the console reads it at on the second.
+   Only the inputs of the chosen time are drawn, and its presets sit under
+   them, so a window and an instant are never asked for at once. */
+.fleet {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.4rem 0.75rem;
+  align-items: center;
+  margin: 0.5rem 0 0;
+}
+
+.fleet-key {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.fleet-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.fleet-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.fleet-row .count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet .presets,
+.fleet .axis {
+  grid-column: 2;
+}
+
+/* A switch is a row of links drawn as one control, the way the theme buttons
+   are, and the presets are plain links with the current one in bold. */
 .switch {
   display: inline-flex;
 }
@@ -161,17 +204,8 @@ p.presets {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
-  margin: 0.5rem 0 0;
+  margin: 0;
   font-size: 0.85rem;
-}
-
-p.presets span {
-  color: var(--muted);
-}
-
-p.presets span + a,
-p.presets a + span {
-  margin-left: 0.4rem;
 }
 
 p.presets a[aria-current="true"] {
@@ -180,7 +214,7 @@ p.presets a[aria-current="true"] {
 }
 
 p.axis {
-  margin: 0.5rem 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.85rem;
 }

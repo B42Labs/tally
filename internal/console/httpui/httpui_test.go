@@ -1908,8 +1908,8 @@ func TestFleet(t *testing.T) {
 		}
 		for _, want := range []string{
 			`aria-current="true">active</a>`,
+			`aria-current="true">at an instant</a>`,
 			`aria-current="true">now</a>`,
-			`aria-current="true">all</a>`,
 			`name="at" value=""`,
 			"1 of 1 row exists now",
 			`<th class="number"><a href="/resources?resources.sort=-lifetime_hours">lifetime hours</a></th>`,
@@ -1922,6 +1922,9 @@ func TestFleet(t *testing.T) {
 		}
 		if strings.Contains(body, "on this page") {
 			t.Error("a fleet that fits one page is called a page")
+		}
+		if form := fleetForm(t, body); strings.Contains(form, `name="from"`) || strings.Contains(form, `name="to"`) {
+			t.Errorf("the instant asks for a window as well:\n%s", form)
 		}
 	})
 
@@ -2085,13 +2088,13 @@ func TestFleet(t *testing.T) {
 	})
 }
 
-// fleetForm cuts the fleet form out of a page, so a test can tell its hidden
-// fields from the table filter's, which carries the window and the instant on
-// purpose.
+// fleetForm cuts the fleet form out of a page, so a test can tell its inputs
+// and hidden fields from the table filter's, which carries the window and the
+// instant on purpose.
 func fleetForm(t *testing.T, body string) string {
 	t.Helper()
 
-	start := strings.Index(body, `<form class="tools fleet"`)
+	start := strings.Index(body, `<form class="fleet-row"`)
 	if start < 0 {
 		t.Fatalf("the page carries no fleet form:\n%s", body)
 	}
@@ -2132,13 +2135,16 @@ func TestFleetWindow(t *testing.T) {
 			"2 of 2 rows existed between 2026-03-02T00:00:00Z and 2026-03-08T00:00:00Z",
 			`name="from" value="2026-03-02T00:00"`,
 			`name="to" value="2026-03-08T00:00"`,
-			`name="at" value=""`,
+			`aria-current="true">over a window</a>`,
 			// vm-2 lived a week whatever the window is.
 			`<td class="number">168.00</td>`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("the page lacks %q:\n%s", want, body)
 			}
+		}
+		if form := fleetForm(t, body); strings.Contains(form, `name="at"`) {
+			t.Errorf("the window asks for an instant as well:\n%s", form)
 		}
 		if strings.Contains(body, `>now</a>`) {
 			t.Error("a window offers the instant now")
@@ -2162,25 +2168,51 @@ func TestFleetWindow(t *testing.T) {
 		}
 	})
 
-	t.Run("an instant inside a window narrows to it", func(t *testing.T) {
+	t.Run("a window without a bound holds whatever lived", func(t *testing.T) {
 		t.Parallel()
 
 		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
 
-		_, body, _ := get(t, handler, "/resources?status=all&from=2026-03-02T00:00:00Z&to=2026-03-08T00:00:00Z&at=2026-03-05T00:00:00Z")
+		_, body, _ := get(t, handler, "/resources?status=all&mode=window")
 		for _, want := range []string{
 			">vm-1</a>", ">vm-2</a>",
-			"2 of 2 rows existed at 2026-03-05T00:00:00Z",
-			`>clear</a>`,
+			"2 of 2 rows existed at some time",
+			`aria-current="true">any time</a>`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("the page lacks %q:\n%s", want, body)
 			}
 		}
+	})
 
-		_, body, _ = get(t, handler, "/resources?status=all&from=2026-03-02T00:00:00Z&to=2026-03-08T00:00:00Z&at=2026-03-11T00:00:00Z")
-		if strings.Contains(body, ">vm-2</a>") || !strings.Contains(body, "1 of 2 rows existed at 2026-03-11T00:00:00Z") {
-			t.Errorf("an instant after vm-2 ended keeps it:\n%s", body)
+	t.Run("a window ignores an instant and the switch drops it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		// The instant would have dropped vm-2, which ended before it; the
+		// window the request also names is what the page answers.
+		_, body, _ := get(t, handler,
+			"/resources?status=all&mode=window&from=2026-03-02T00:00:00Z&to=2026-03-08T00:00:00Z&at=2026-03-11T00:00:00Z")
+		if !strings.Contains(body, ">vm-2</a>") ||
+			!strings.Contains(body, "2 of 2 rows existed between 2026-03-02T00:00:00Z and 2026-03-08T00:00:00Z") {
+			t.Errorf("the window did not answer alone:\n%s", body)
+		}
+		// The switch drops the window and keeps the instant of the request,
+		// which is what the other way is read at.
+		if !strings.Contains(body, `<a href="/resources?at=2026-03-11T00%3A00%3A00Z&amp;status=all">at an instant</a>`) {
+			t.Errorf("the switch to the instant keeps the window:\n%s", body)
+		}
+	})
+
+	t.Run("the switch to the window drops the instant", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, twoResources(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?status=all&at=2026-03-05T00:00:00Z")
+		if !strings.Contains(body, `<a href="/resources?mode=window&amp;status=all">over a window</a>`) {
+			t.Errorf("the switch to the window keeps the instant:\n%s", body)
 		}
 	})
 
@@ -2225,12 +2257,12 @@ func TestFleetWindow(t *testing.T) {
 
 		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
 
-		_, body, _ := get(t, handler, "/resources?status=all&resources.q=vm")
+		_, body, _ := get(t, handler, "/resources?mode=window&status=all&resources.q=vm")
 		for _, want := range []string{
-			`<a href="/resources?from=2026-03-01T00%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-04-01T00%3A00%3A00Z">this month</a>`,
-			`<a href="/resources?from=2026-02-01T00%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-03-01T00%3A00%3A00Z">last month</a>`,
-			`<a href="/resources?from=2026-03-08T12%3A00%3A00Z&amp;resources.q=vm&amp;status=all&amp;to=2026-03-15T12%3A00%3A00Z">last 7 days</a>`,
-			`<a href="/resources?resources.q=vm&amp;status=all" aria-current="true">all</a>`,
+			`<a href="/resources?from=2026-03-01T00%3A00%3A00Z&amp;mode=window&amp;resources.q=vm&amp;status=all&amp;to=2026-04-01T00%3A00%3A00Z">this month</a>`,
+			`<a href="/resources?from=2026-02-01T00%3A00%3A00Z&amp;mode=window&amp;resources.q=vm&amp;status=all&amp;to=2026-03-01T00%3A00%3A00Z">last month</a>`,
+			`<a href="/resources?from=2026-03-08T12%3A00%3A00Z&amp;mode=window&amp;resources.q=vm&amp;status=all&amp;to=2026-03-15T12%3A00%3A00Z">last 7 days</a>`,
+			`<a href="/resources?mode=window&amp;resources.q=vm&amp;status=all" aria-current="true">any time</a>`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("the page lacks %q:\n%s", want, body)
@@ -2241,8 +2273,8 @@ func TestFleetWindow(t *testing.T) {
 		if !strings.Contains(body, `aria-current="true">this month</a>`) {
 			t.Error("the window in effect is not marked")
 		}
-		if !strings.Contains(body, `<a href="/resources">all</a>`) {
-			t.Error("all does not clear the window")
+		if !strings.Contains(body, `<a href="/resources?mode=window">any time</a>`) {
+			t.Error("any time does not clear the window")
 		}
 		form := fleetForm(t, body)
 		if strings.Contains(form, `type="hidden" name="from"`) || strings.Contains(form, `type="hidden" name="to"`) {

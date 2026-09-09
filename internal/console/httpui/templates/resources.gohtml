@@ -1,15 +1,20 @@
 {{define "content"}}
-<form class="tools fleet" method="get" action="{{.Fleet.Path}}">
+<div class="fleet">
+<span class="fleet-key">show</span>
+<p class="fleet-row"><span class="switch">{{range .Fleet.Switch}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span><span class="count">{{.Fleet.Count}}</span></p>
+<span class="fleet-key">when</span>
+<form class="fleet-row" method="get" action="{{.Fleet.Path}}">
 {{range .Fleet.Hidden}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
-{{end}}<span class="switch">{{range .Fleet.Switch}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span>
+{{end}}<span class="switch">{{range .Fleet.Modes}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span>
+{{if .Fleet.Windowed}}<input type="hidden" name="mode" value="window">
 <label>from <input type="datetime-local" name="from" value="{{.Fleet.From}}"></label>
 <label>to <input type="datetime-local" name="to" value="{{.Fleet.To}}"></label>
-<label>at <input type="datetime-local" name="at" value="{{.Fleet.At}}"></label>
-<button type="submit">apply</button>
-<span class="count">{{.Fleet.Count}}</span>
+{{else}}<label>at <input type="datetime-local" name="at" value="{{.Fleet.At}}"></label>
+{{end}}<button type="submit">apply</button>
 </form>
-<p class="presets"><span>window</span>{{range .Fleet.WindowPresets}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}<span>instant</span>{{range .Fleet.Presets}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</p>
+<p class="presets">{{range .Fleet.Presets}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</p>
 <p class="axis">every instant is UTC; a lifetime runs from the creation to the deletion, or to now{{if .Fleet.Unknown}}; {{.Fleet.Unknown}}{{end}}</p>
+</div>
 {{template "tableTools" .Items.Table}}
 <table>
 {{template "tableHead" .Items.Table}}
