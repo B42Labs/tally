@@ -1762,8 +1762,8 @@ components:
         One resource as the projection holds it: what its event history says it
         is right now.
       required: [cloud, platform, resource_type, resource_id, project_id, state,
-                 size, created_at, deleted_at, last_event_type, last_event_at,
-                 last_payload]
+                 size, created_at, deleted_at, first_event_at, last_event_type,
+                 last_event_at, last_payload]
       properties:
         cloud:
           type: string
@@ -1809,6 +1809,19 @@ components:
           format: date-time
           nullable: true
           description: When the resource was deleted, null while it lives.
+        first_event_at:
+          type: string
+          format: date-time
+          description: >-
+            When the earliest event folded into this row happened. Every row
+            carries it, so it answers for a resource whose history opens with
+            something other than a create and leaves `created_at` null; where
+            the history does open with a create the two hold the same instant.
+            It is unscoped the way `created_at` is, so on a resource that
+            changed projects it is the first event of the project it came from
+            and predates the reader's ownership. It says when the resource
+            entered the record, not what anyone owes: what a project is billed
+            for is the lifecycle's `intervals`.
         last_event_type:
           type: string
           description: >-

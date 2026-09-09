@@ -223,12 +223,18 @@ func TestListResourcesOverHTTP(t *testing.T) {
 			}
 		})
 
-		t.Run("created_at is null for a history that never showed a create", func(t *testing.T) {
+		t.Run("a history that never showed a create carries first_event_at alone", func(t *testing.T) {
 			orphan := byResourceID(t, list.Items, "vol-orphan")
 
 			if orphan.CreatedAt != nil {
 				t.Errorf("created_at = %v, want null for a history that starts with an update",
 					*orphan.CreatedAt)
+			}
+			// The row is placed in time by its first event instead, which is the
+			// update the history opens with.
+			if !orphan.FirstEventAt.Equal(fleetChanged) {
+				t.Errorf("first_event_at = %v, want %v, the update the history starts with",
+					orphan.FirstEventAt, fleetChanged)
 			}
 		})
 	})
@@ -273,6 +279,11 @@ func TestListResourcesOverHTTP(t *testing.T) {
 		}
 		if got.CreatedAt == nil || !got.CreatedAt.Equal(fleetCreated) {
 			t.Errorf("created_at = %v, want %v", got.CreatedAt, fleetCreated)
+		}
+		// The history opens with the create, so the two instants agree.
+		if !got.FirstEventAt.Equal(fleetCreated) {
+			t.Errorf("first_event_at = %v, want %v, the create the history starts with",
+				got.FirstEventAt, fleetCreated)
 		}
 		if got.DeletedAt != nil {
 			t.Errorf("deleted_at = %v, want null", *got.DeletedAt)

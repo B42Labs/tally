@@ -181,7 +181,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","created_at":"2026-07-01T03:17:02Z","deleted_at":null,"last_event_at":"2026-07-02T05:36:15Z","last_event_type":"compute.instance.power_off","last_payload":{"provider":{"oslo_event_type":"compute.instance.power_off.end"},"state":"shutoff"},"platform":"openstack","project_id":"d5a8024946ddf673277b9e2490643a2c","resource_id":"079faae9-9d39-426f-a963-769cb12aa629","resource_type":"instance","size":{"disk_gb":20,"flavor":"m1.small","ram_gb":2,"vcpus":1},"state":"shutoff"}],"next_cursor":"WyJvcy1zaW0iLCJpbnN0YW5jZSIsIjA3OWZhYWU5LTlkMzktNDI2Zi1hOTYzLTc2OWNiMTJhYTYyOSJd"}
+   {"items":[{"cloud":"os-sim","created_at":"2026-07-01T03:17:02Z","deleted_at":null,"first_event_at":"2026-07-01T03:17:02Z","last_event_at":"2026-07-02T05:36:15Z","last_event_type":"compute.instance.power_off","last_payload":{"provider":{"oslo_event_type":"compute.instance.power_off.end"},"state":"shutoff"},"platform":"openstack","project_id":"d5a8024946ddf673277b9e2490643a2c","resource_id":"079faae9-9d39-426f-a963-769cb12aa629","resource_type":"instance","size":{"disk_gb":20,"flavor":"m1.small","ram_gb":2,"vcpus":1},"state":"shutoff"}],"next_cursor":"WyJvcy1zaW0iLCJpbnN0YW5jZSIsIjA3OWZhYWU5LTlkMzktNDI2Zi1hOTYzLTc2OWNiMTJhYTYyOSJd"}
    ```
 
    That is one row of the projection. Its `state` is `shutoff`, the state the
