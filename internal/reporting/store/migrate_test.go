@@ -38,6 +38,20 @@ var chainVersions = func() []int64 {
 // does not need the rollback tests below rewritten.
 var afterInit = chainVersions[1:]
 
+// aboveNine is every version the chain carries above 9, oldest first. Four of
+// the assertions below roll down to 9 to put migration 0010's constraints back
+// in play, and every version above it comes down and goes back up with them, so
+// they name the tail this way for the reason afterInit is derived.
+var aboveNine = chainVersions[9:]
+
+// newestFirst is versions in the order a rollback reports them, which is the
+// reverse of the order they were applied in.
+func newestFirst(versions []int64) []int64 {
+	reversed := slices.Clone(versions)
+	slices.Reverse(reversed)
+	return reversed
+}
+
 // wantTables is every table migration 0001 creates, sorted.
 var wantTables = []string{
 	"api_tokens",
@@ -414,9 +428,9 @@ func TestMigrate(t *testing.T) {
 			_, err := db.Store.Pool().Exec(t.Context(),
 				`INSERT INTO current_resources
 				   (cloud, platform, resource_type, resource_id, project_id, state,
-				    last_event_type, last_event_at)
+				    last_event_type, last_event_at, first_event_at)
 				 VALUES ($1, $2, 'volume', 'vol-virtual-projection', 'p-virtual',
-				         'available', 'volume.create.end', now())`,
+				         'available', 'volume.create.end', now(), now())`,
 				row.cloud, row.platform)
 			if err == nil {
 				t.Errorf("a resource under the platform %q and the cloud %q was stored, so its cost attributes to a project that owns none",
@@ -461,7 +475,7 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MigrateDownTo(9) error = %v, want the rollback to tolerate the constraints that are gone", err)
 		}
-		if want := []int64{10}; !slices.Equal(rolledBack, want) {
+		if want := newestFirst(aboveNine); !slices.Equal(rolledBack, want) {
 			t.Errorf("MigrateDownTo(9) = %v, want %v", rolledBack, want)
 		}
 	})
@@ -516,7 +530,7 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Migrate() error = %v, want nil once the reader is gone", err)
 		}
-		if want := []int64{10}; !slices.Equal(applied, want) {
+		if want := aboveNine; !slices.Equal(applied, want) {
 			t.Errorf("Migrate() = %v, want %v", applied, want)
 		}
 	})
@@ -562,12 +576,16 @@ func TestMigrate(t *testing.T) {
 		if err := tx.Rollback(t.Context()); err != nil {
 			t.Fatalf("ending the run's snapshot: %v", err)
 		}
-		rolledBack, err = store.MigrateDownTo(t.Context(), rolling, 9)
+		retried, err := store.MigrateDownTo(t.Context(), rolling, 9)
 		if err != nil {
 			t.Fatalf("MigrateDownTo(9) error = %v, want nil once the reader is gone", err)
 		}
-		if want := []int64{10}; !slices.Equal(rolledBack, want) {
-			t.Errorf("MigrateDownTo(9) = %v, want %v", rolledBack, want)
+		// The attempt that gave up reports nothing, and it had still taken every
+		// migration above 0010 down before it reached the constraint: those touch
+		// current_resources alone, and the reader holds projects. What the rerun
+		// carries is the one migration the lock stopped.
+		if want := []int64{10}; !slices.Equal(retried, want) {
+			t.Errorf("MigrateDownTo(9) = %v, want %v once the reader is gone", retried, want)
 		}
 	})
 
@@ -617,7 +635,7 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Migrate() error = %v, want nil once the row is gone", err)
 		}
-		if want := []int64{10}; !slices.Equal(applied, want) {
+		if want := aboveNine; !slices.Equal(applied, want) {
 			t.Errorf("Migrate() = %v, want %v", applied, want)
 		}
 

@@ -478,7 +478,8 @@ func (q *Queries) GetAPITokenForUpdate(ctx context.Context, id uuid.UUID) (ApiTo
 
 const getCurrentResource = `-- name: GetCurrentResource :one
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
 `
@@ -507,13 +508,15 @@ func (q *Queries) GetCurrentResource(ctx context.Context, arg GetCurrentResource
 		&i.LastEventType,
 		&i.LastEventAt,
 		&i.LastPayload,
+		&i.FirstEventAt,
 	)
 	return i, err
 }
 
 const getCurrentResourceForUpdate = `-- name: GetCurrentResourceForUpdate :one
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
 FOR UPDATE
@@ -541,6 +544,7 @@ func (q *Queries) GetCurrentResourceForUpdate(ctx context.Context, arg GetCurren
 		&i.LastEventType,
 		&i.LastEventAt,
 		&i.LastPayload,
+		&i.FirstEventAt,
 	)
 	return i, err
 }
@@ -1001,7 +1005,8 @@ func (q *Queries) ListActiveAttributingRelations(ctx context.Context, arg ListAc
 
 const listCurrentResources = `-- name: ListCurrentResources :many
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE ($1::text IS NULL OR cloud = $1)
   AND ($2::text IS NULL OR platform = $2)
@@ -1076,6 +1081,7 @@ func (q *Queries) ListCurrentResources(ctx context.Context, arg ListCurrentResou
 			&i.LastEventType,
 			&i.LastEventAt,
 			&i.LastPayload,
+			&i.FirstEventAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1818,8 +1824,9 @@ func (q *Queries) UpdateProjectRelation(ctx context.Context, arg UpdateProjectRe
 const upsertCurrentResource = `-- name: UpsertCurrentResource :exec
 INSERT INTO current_resources (cloud, platform, resource_type, resource_id,
                                project_id, state, size, created_at, deleted_at,
-                               last_event_type, last_event_at, last_payload)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                               last_event_type, last_event_at, last_payload,
+                               first_event_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (cloud, resource_type, resource_id) DO UPDATE
 SET platform = EXCLUDED.platform,
     project_id = EXCLUDED.project_id,
@@ -1829,7 +1836,8 @@ SET platform = EXCLUDED.platform,
     deleted_at = EXCLUDED.deleted_at,
     last_event_type = EXCLUDED.last_event_type,
     last_event_at = EXCLUDED.last_event_at,
-    last_payload = EXCLUDED.last_payload
+    last_payload = EXCLUDED.last_payload,
+    first_event_at = EXCLUDED.first_event_at
 `
 
 type UpsertCurrentResourceParams struct {
@@ -1845,6 +1853,7 @@ type UpsertCurrentResourceParams struct {
 	LastEventType string
 	LastEventAt   pgtype.Timestamptz
 	LastPayload   []byte
+	FirstEventAt  pgtype.Timestamptz
 }
 
 func (q *Queries) UpsertCurrentResource(ctx context.Context, arg UpsertCurrentResourceParams) error {
@@ -1861,6 +1870,7 @@ func (q *Queries) UpsertCurrentResource(ctx context.Context, arg UpsertCurrentRe
 		arg.LastEventType,
 		arg.LastEventAt,
 		arg.LastPayload,
+		arg.FirstEventAt,
 	)
 	return err
 }

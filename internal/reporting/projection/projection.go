@@ -173,8 +173,9 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key, m *metrics.Metrics) error {
 		history[i] = stored
 	}
 
-	// The query orders the history, so its final event is what the row reports as
-	// the last one seen.
+	// The query orders the history, so its first event is the one the row
+	// reports as the earliest and its final event the one it reports as the
+	// last seen.
 	last := history[len(history)-1]
 	tl := timeline.Build(history)
 
@@ -182,6 +183,7 @@ func Replay(ctx context.Context, tx pgx.Tx, key Key, m *metrics.Metrics) error {
 		platform:      last.Platform,
 		projectID:     last.ProjectID,
 		size:          []byte(emptySize),
+		firstEventAt:  history[0].Timestamp,
 		createdAt:     tl.CreatedAt,
 		deletedAt:     tl.DeletedAt,
 		lastEventType: last.EventType,
@@ -342,10 +344,15 @@ func CompareKey(a, b Key) int {
 // payload as the JSON the columns take, so a row read back from the database
 // carries them through the fold untouched.
 type snapshot struct {
-	platform      string
-	projectID     string
-	state         string
-	size          []byte
+	platform  string
+	projectID string
+	state     string
+	size      []byte
+	// firstEventAt is the earliest event folded into the row. It is not
+	// optional the way createdAt is: a row is written only where there is a
+	// history to derive it from, so every row has one, whether or not that
+	// history opens with a create.
+	firstEventAt  time.Time
 	createdAt     *time.Time
 	deletedAt     *time.Time
 	lastEventType string
@@ -377,6 +384,12 @@ func (s *snapshot) fold(e event.Stored) error {
 	payload, err := json.Marshal(e.Payload)
 	if err != nil {
 		return fmt.Errorf("marshaling the payload of event %s: %w", e.EventID, err)
+	}
+	// A batch holding an event older than the row's last_event_at goes to
+	// Replay instead of here, so the first event folded onto a row that has
+	// none is the earliest one that row will ever see.
+	if s.firstEventAt.IsZero() {
+		s.firstEventAt = e.Timestamp
 	}
 	s.platform, s.projectID = e.Platform, e.ProjectID
 	s.lastEventType, s.lastEventAt, s.lastPayload = e.EventType, e.Timestamp, payload
@@ -435,6 +448,7 @@ func loadRow(ctx context.Context, q *sqlcgen.Queries, key Key) (snapshot, bool, 
 		projectID:     row.ProjectID,
 		state:         row.State,
 		size:          row.Size,
+		firstEventAt:  row.FirstEventAt.Time,
 		createdAt:     timePtr(row.CreatedAt),
 		deletedAt:     timePtr(row.DeletedAt),
 		lastEventType: row.LastEventType,
@@ -453,6 +467,7 @@ func upsert(ctx context.Context, q *sqlcgen.Queries, key Key, s snapshot) error 
 		ProjectID:     s.projectID,
 		State:         s.state,
 		Size:          s.size,
+		FirstEventAt:  pgtype.Timestamptz{Time: s.firstEventAt, Valid: true},
 		CreatedAt:     timestamptz(s.createdAt),
 		DeletedAt:     timestamptz(s.deletedAt),
 		LastEventType: s.lastEventType,

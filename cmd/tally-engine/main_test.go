@@ -2160,9 +2160,10 @@ func (f pipelineFixture) seedInstance(t *testing.T, cloud, resourceID, projectID
 
 	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id, project_id,
-		                                state, size, created_at, deleted_at, last_event_type, last_event_at)
+		                                state, size, created_at, deleted_at, last_event_type, last_event_at,
+		                                first_event_at)
 		 VALUES ($1, 'openstack', 'instance', $2, $3, 'deleted', $4::jsonb, $5, $6,
-		         'compute.instance.delete.end', $6)`,
+		         'compute.instance.delete.end', $6, $5)`,
 		cloud, resourceID, projectID, size, created, deleted); err != nil {
 		t.Fatalf("seeding the projection row of %s: %v", resourceID, err)
 	}

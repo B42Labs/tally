@@ -29,8 +29,9 @@ func TestMeterAgainstTheReportingDatabase(t *testing.T) {
 
 	if _, err := db.Store.Pool().Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id, project_id,
-		                                state, created_at, last_event_type, last_event_at)
-		 VALUES ($1, $2, $3, $4, 'proj-456', 'active', $5, 'compute.instance.resize.end', $6)`,
+		                                state, created_at, last_event_type, last_event_at,
+		                                first_event_at)
+		 VALUES ($1, $2, $3, $4, 'proj-456', 'active', $5, 'compute.instance.resize.end', $6, $5)`,
 		metered.Cloud, metered.Platform, metered.ResourceType, metered.ResourceID,
 		created, resized); err != nil {
 		t.Fatalf("seeding the projection row: %v", err)

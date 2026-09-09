@@ -80,7 +80,8 @@ ORDER BY platform, resource_type;
 
 -- name: GetCurrentResourceForUpdate :one
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3
 FOR UPDATE;
@@ -88,8 +89,9 @@ FOR UPDATE;
 -- name: UpsertCurrentResource :exec
 INSERT INTO current_resources (cloud, platform, resource_type, resource_id,
                                project_id, state, size, created_at, deleted_at,
-                               last_event_type, last_event_at, last_payload)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                               last_event_type, last_event_at, last_payload,
+                               first_event_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (cloud, resource_type, resource_id) DO UPDATE
 SET platform = EXCLUDED.platform,
     project_id = EXCLUDED.project_id,
@@ -99,7 +101,8 @@ SET platform = EXCLUDED.platform,
     deleted_at = EXCLUDED.deleted_at,
     last_event_type = EXCLUDED.last_event_type,
     last_event_at = EXCLUDED.last_event_at,
-    last_payload = EXCLUDED.last_payload;
+    last_payload = EXCLUDED.last_payload,
+    first_event_at = EXCLUDED.first_event_at;
 
 -- The history of one resource. Two callers read it: the projection replay, which
 -- folds every event there is under no scope and no bound, and the two
@@ -180,7 +183,8 @@ LIMIT sqlc.arg('page_size');
 
 -- name: ListCurrentResources :many
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE (sqlc.narg('cloud')::text IS NULL OR cloud = sqlc.narg('cloud'))
   AND (sqlc.narg('platform')::text IS NULL OR platform = sqlc.narg('platform'))
@@ -219,7 +223,8 @@ LIMIT sqlc.arg('page_size');
 -- without the row lock: a read must not make a writer wait on it.
 -- name: GetCurrentResource :one
 SELECT cloud, platform, resource_type, resource_id, project_id, state, size,
-       created_at, deleted_at, last_event_type, last_event_at, last_payload
+       created_at, deleted_at, last_event_type, last_event_at, last_payload,
+       first_event_at
 FROM current_resources
 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3;
 

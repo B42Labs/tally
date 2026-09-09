@@ -352,9 +352,10 @@ func seedStatsBulkFleet(t *testing.T, a api, first, last int) {
 
 	if _, err := a.store.Pool().Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id,
-		                                project_id, state, last_event_type, last_event_at)
+		                                project_id, state, last_event_type, last_event_at,
+		                                first_event_at)
 		 SELECT $1, $2, 'volume', 'vol-stats-bulk-' || n, 'stats-bulk-project-' || n,
-		        'available', 'volume.create', $3::timestamptz
+		        'available', 'volume.create', $3::timestamptz, $3::timestamptz
 		 FROM generate_series($4::int, $5::int) AS n`,
 		statsCloudA, fixturePlatform, statsCreated, first, last); err != nil {
 		t.Fatalf("writing a fleet past the bound: %v", err)

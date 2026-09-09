@@ -50,10 +50,12 @@ type projectionRow struct {
 	lastEventType string
 	lastEventAt   pgtype.Timestamptz
 	lastPayload   map[string]any
+	firstEventAt  pgtype.Timestamptz
 }
 
 // want is the row a step is expected to leave behind. A nil createdAt or
-// deletedAt is the NULL column.
+// deletedAt is the NULL column; firstEventAt has none, because a row is written
+// only where there is a history to derive it from.
 type want struct {
 	state         string
 	size          map[string]any
@@ -62,6 +64,7 @@ type want struct {
 	deletedAt     *time.Time
 	lastEventType string
 	lastEventAt   time.Time
+	firstEventAt  time.Time
 }
 
 func TestApply(t *testing.T) {
@@ -77,6 +80,7 @@ func TestApply(t *testing.T) {
 			size:          sizeGB(10),
 			projectID:     projectA,
 			createdAt:     &createTime,
+			firstEventAt:  createTime,
 			lastEventType: "volume.create",
 			lastEventAt:   createTime,
 		})
@@ -99,6 +103,7 @@ func TestApply(t *testing.T) {
 			size:          sizeGB(20),
 			projectID:     projectB,
 			createdAt:     &createTime,
+			firstEventAt:  createTime,
 			lastEventType: "volume.resize",
 			lastEventAt:   resizeTime,
 		})
@@ -113,6 +118,7 @@ func TestApply(t *testing.T) {
 			size:          sizeGB(20),
 			projectID:     projectB,
 			createdAt:     &createTime,
+			firstEventAt:  createTime,
 			deletedAt:     &deleteTime,
 			lastEventType: "volume.delete",
 			lastEventAt:   deleteTime,
@@ -162,6 +168,7 @@ func TestApply(t *testing.T) {
 			size:          sizeGB(20),
 			projectID:     projectA,
 			createdAt:     &createTime,
+			firstEventAt:  createTime,
 			deletedAt:     &deleteTime,
 			lastEventType: "volume.delete",
 			lastEventAt:   deleteTime,
@@ -220,6 +227,7 @@ func TestApply(t *testing.T) {
 					size:          sizeGB(10),
 					projectID:     projectA,
 					createdAt:     &createTime,
+					firstEventAt:  createTime,
 					lastEventType: "volume.update",
 					lastEventAt:   resizeTime,
 				})
@@ -249,6 +257,12 @@ func TestReplay(t *testing.T) {
 		// the first event's timestamp.
 		if row.createdAt.Valid {
 			t.Errorf("created at = %s, want NULL", row.createdAt.Time)
+		}
+		// The first event is known either way, which is what places such a
+		// resource in time at all.
+		if !row.firstEventAt.Valid || !row.firstEventAt.Time.Equal(createTime) {
+			t.Errorf("first event at = %v, want %s, the timestamp of the update the history opens with",
+				row.firstEventAt, createTime)
 		}
 		if row.state != "paused" {
 			t.Errorf("state = %q, want %q", row.state, "paused")
@@ -729,12 +743,12 @@ func readRow(t *testing.T, db storetest.DB, key projection.Key) (projectionRow, 
 	var row projectionRow
 	err := db.Store.Pool().QueryRow(t.Context(),
 		`SELECT platform, project_id, state, size, created_at, deleted_at,
-		        last_event_type, last_event_at, last_payload
+		        last_event_type, last_event_at, last_payload, first_event_at
 		 FROM current_resources
 		 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3`,
 		key.Cloud, key.ResourceType, key.ResourceID,
 	).Scan(&row.platform, &row.projectID, &row.state, &row.size, &row.createdAt, &row.deletedAt,
-		&row.lastEventType, &row.lastEventAt, &row.lastPayload)
+		&row.lastEventType, &row.lastEventAt, &row.lastPayload, &row.firstEventAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return projectionRow{}, false
 	}
@@ -767,6 +781,7 @@ func assertRow(t *testing.T, db storetest.DB, key projection.Key, w want) {
 	if got.platform != platform {
 		t.Errorf("platform = %q, want %q", got.platform, platform)
 	}
+	assertTime(t, "first event at", got.firstEventAt, &w.firstEventAt)
 	assertTime(t, "created at", got.createdAt, w.createdAt)
 	assertTime(t, "deleted at", got.deletedAt, w.deletedAt)
 	if got.lastEventType != w.lastEventType {

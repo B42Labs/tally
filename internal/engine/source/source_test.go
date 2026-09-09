@@ -1028,8 +1028,10 @@ func seedResource(t *testing.T, pool *pgxpool.Pool, r source.Resource, createdAt
 
 	if _, err := pool.Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id, project_id,
-		                                state, created_at, deleted_at, last_event_type, last_event_at)
-		 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, 'instance.update', now())`,
+		                                state, created_at, deleted_at, last_event_type, last_event_at,
+		                                first_event_at)
+		 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, 'instance.update', now(),
+		         coalesce($6::timestamptz, now()))`,
 		r.Cloud, r.Platform, r.ResourceType, r.ResourceID, projectID, createdAt, deletedAt); err != nil {
 		t.Fatalf("seeding the projection row of %s/%s: %v", r.ResourceType, r.ResourceID, err)
 	}

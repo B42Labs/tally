@@ -403,11 +403,12 @@ func seedPlanResources(t *testing.T, db storetest.DB) {
 
 	if _, err := db.Store.Pool().Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id,
-		                                project_id, state, last_event_type, last_event_at)
-		 VALUES ($1, $2, 'volume',   'vol-plan-1', $3, 'available', 'volume.create',   $5),
-		        ($1, $2, 'volume',   'vol-plan-2', $4, 'in-use',    'volume.update',   $5),
-		        ($1, $2, 'instance', 'i-plan-1',   $3, 'active',    'instance.create', $5),
-		        ($6, $2, 'instance', 'i-plan-2',   $4, 'deleted',   'instance.delete', $5)`,
+		                                project_id, state, last_event_type, last_event_at,
+		                                first_event_at)
+		 VALUES ($1, $2, 'volume',   'vol-plan-1', $3, 'available', 'volume.create',   $5, $5),
+		        ($1, $2, 'volume',   'vol-plan-2', $4, 'in-use',    'volume.update',   $5, $5),
+		        ($1, $2, 'instance', 'i-plan-1',   $3, 'active',    'instance.create', $5, $5),
+		        ($6, $2, 'instance', 'i-plan-2',   $4, 'deleted',   'instance.delete', $5, $5)`,
 		planCloud, planPlatform, planProject, planOtherProject, planWindowStart,
 		planOtherCloud); err != nil {
 		t.Fatalf("seeding the projection: %v", err)
