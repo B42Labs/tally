@@ -1,8 +1,13 @@
 package httpui
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
@@ -12,8 +17,17 @@ import (
 
 // projectsData is one page of the registry with the link to the next one.
 type projectsData struct {
-	Items    []projectRow
+	Items    listing[projectRow]
 	NextLink string
+}
+
+// projectColumns is the registry listing.
+var projectColumns = []column[projectRow]{
+	textCol("cloud", func(r projectRow) string { return r.Project.Cloud }),
+	textCol("external id", func(r projectRow) string { return r.Project.ExternalId }),
+	textCol("name", func(r projectRow) string { return optString(r.Project.Name, r.Project.ExternalId) }),
+	textCol("platform", func(r projectRow) string { return r.Project.Platform }),
+	textCol("registered", func(r projectRow) string { return stamp(r.Project.CreatedAt) }),
 }
 
 // projectRow is one registered project and its own page.
@@ -26,14 +40,46 @@ type projectRow struct {
 // ran this month, and what every run billed it.
 type projectData struct {
 	Project    httpapi.Project
-	Relations  []httpapi.Relation
-	Related    []relatedRow
-	Activity   []httpapi.ProjectActivity
+	Relations  listing[httpapi.Relation]
+	Related    listing[relatedRow]
+	Activity   listing[httpapi.ProjectActivity]
 	From       time.Time
 	To         time.Time
 	Key        string
-	Statements []projectStatementRow
+	Statements listing[projectStatementRow]
 }
+
+// The columns of a project page's tables.
+var (
+	relationColumns = []column[httpapi.Relation]{
+		textCol("relation type", func(r httpapi.Relation) string { return r.RelationType }),
+		textCol("source", func(r httpapi.Relation) string { return r.SourceId.String() }),
+		textCol("target", func(r httpapi.Relation) string { return r.TargetId.String() }),
+		textCol("valid from", func(r httpapi.Relation) string { return stamp(r.ValidFrom) }),
+		textCol("valid to", func(r httpapi.Relation) string { return optStamp(r.ValidTo) }),
+	}
+	relatedColumns = []column[relatedRow]{
+		textCol("project", func(r relatedRow) string {
+			return optString(r.Related.Project.Name, r.Related.Project.ExternalId)
+		}),
+		textCol("cloud", func(r relatedRow) string { return r.Related.Project.Cloud }),
+		textCol("relation type", func(r relatedRow) string { return r.Related.RelationType }),
+		countCol("depth", func(r relatedRow) int64 { return int64(r.Related.Depth) }),
+	}
+	activityColumns = []column[httpapi.ProjectActivity]{
+		textCol("resource type", func(r httpapi.ProjectActivity) string { return r.ResourceType }),
+		countCol("created", func(r httpapi.ProjectActivity) int64 { return int64(r.Created) }),
+		countCol("deleted", func(r httpapi.ProjectActivity) int64 { return int64(r.Deleted) }),
+		countCol("active now", func(r httpapi.ProjectActivity) int64 { return int64(r.ActiveNow) }),
+		countCol("minutes", func(r httpapi.ProjectActivity) int64 { return r.TotalMinutes }),
+	}
+	projectStatementColumns = []column[projectStatementRow]{
+		textCol("period", func(r projectStatementRow) string { return stamp(r.Row.PeriodFrom) }),
+		textCol("run kind", func(r projectStatementRow) string { return r.Row.Kind }),
+		textCol("run status", func(r projectStatementRow) string { return r.Row.Status }),
+		numberCol("total", func(r projectStatementRow) decimal.Decimal { return r.Row.Total }),
+	}
+)
 
 // relatedRow is one project a traversal reached and its own page.
 type relatedRow struct {
@@ -73,22 +119,25 @@ func (h *handlers) projects(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, projectRow{Project: project, Link: link("/project", "id", project.Id.String())})
 	}
 
-	data := projectsData{Items: rows}
+	data := projectsData{Items: tabulate(r, "projects", projectColumns, rows)}
+	if list.NextCursor != nil || query.Cursor != "" {
+		data.Items = data.Items.paged()
+	}
 	if list.NextCursor != nil {
-		data.NextLink = link("/projects",
-			"platform", query.Platform, "cloud", query.Cloud, "cursor", *list.NextCursor)
+		data.NextLink = nextLink(r, *list.NextCursor)
 	}
 	h.render(w, r, "projects", page{Title: "Projects", Sources: src, Data: data})
 }
 
-// project shows one project. The statements are read under the key the engine
-// stores them by, which is the pair of cloud and external id rather than the
-// id the API addresses the project with.
+// project shows one project. It is addressed by the id the API assigns, or by
+// the pair a resource names its project with, cloud and external id, which the
+// registry resolves to that id first. The statements are read under the key
+// the engine stores them by, which is that same pair.
 func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var src sources
 
-	id, err := uuidParameter(r, "id")
+	id, err := h.projectID(ctx, r, &src)
 	if err != nil {
 		h.failFrom(w, r, err, src)
 		return
@@ -150,19 +199,61 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	data := projectData{
 		Project:    project,
-		Relations:  relations.Items,
-		Related:    reached,
-		Activity:   summary.ResourceTypes,
+		Relations:  tabulate(r, "relations", relationColumns, relations.Items),
+		Related:    tabulate(r, "related", relatedColumns, reached),
+		Activity:   tabulate(r, "activity", activityColumns, summary.ResourceTypes),
 		From:       from,
 		To:         to,
 		Key:        key,
-		Statements: rows,
+		Statements: tabulate(r, "statements", projectStatementColumns, rows),
 	}
 	h.render(w, r, "project", page{
 		Title:   "Project " + optString(project.Name, project.ExternalId),
 		Sources: src,
 		Data:    data,
 	})
+}
+
+// projectID reads which project the page is about: the id parameter when it
+// is there, and otherwise the project registered under the cloud and
+// external_id parameters, which is how a resource names its project. The pair
+// is looked up through the project list filtered by both, and the answer is
+// checked for an exact match on each, so a project of another pair never stands
+// in. A pair nothing is registered under fails the way an unknown id does.
+func (h *handlers) projectID(ctx context.Context, r *http.Request, src *sources) (uuid.UUID, error) {
+	query := r.URL.Query()
+	if query.Get("id") != "" || query.Get("external_id") == "" {
+		return uuidParameter(r, "id")
+	}
+
+	cloud, err := stringParameter(r, "cloud")
+	if err != nil {
+		return uuid.Nil, err
+	}
+	externalID := query.Get("external_id")
+
+	list, request, err := h.api.ListProjects(ctx, reporting.ProjectsQuery{Cloud: cloud, ExternalID: externalID})
+	src.api(request)
+	if err != nil {
+		return uuid.Nil, apiFailed(err)
+	}
+	for _, project := range list.Items {
+		if project.Cloud == cloud && project.ExternalId == externalID {
+			return project.Id, nil
+		}
+	}
+	return uuid.Nil, nothingRegistered(
+		fmt.Errorf("no project is registered under the cloud %s and the external id %s", cloud, externalID))
+}
+
+// projectLink is the page of the project a resource names, addressed by the
+// pair the resource carries rather than by the id the API assigns, which the
+// project page resolves. A resource that names no project gets no link.
+func projectLink(cloud, externalID string) string {
+	if externalID == "" {
+		return ""
+	}
+	return link("/project", "cloud", cloud, "external_id", externalID)
 }
 
 // firstOfThisMonthUTC is the start of the month now falls in. The summary
