@@ -1,20 +1,42 @@
 /* The console's only asset. No font, no image, no second stylesheet: a page
-   loads this file and nothing else. */
+   loads this file and nothing else.
+
+   Every colour is a token with a light and a dark value. The page follows the
+   operating system's setting on its own, and a data-theme attribute on the
+   root element, set from the viewer's cookie, pins it to one side. */
 
 :root {
-  --ink: #1b1e22;
-  --muted: #5b6570;
-  --line: #d6dae0;
-  --panel: #f4f6f8;
-  --accent: #2f5d8a;
-  --warn: #8a3b2f;
+  color-scheme: light dark;
+  --paper: light-dark(#ffffff, #15181c);
+  --ink: light-dark(#1b1e22, #e4e8ec);
+  --muted: light-dark(#5b6570, #98a3ae);
+  --line: light-dark(#d6dae0, #2f363e);
+  --panel: light-dark(#f4f6f8, #1e2329);
+  --stripe: light-dark(#f9fafb, #191d22);
+  --accent: light-dark(#2f5d8a, #86b6e6);
+  --warn: light-dark(#8a3b2f, #e59283);
+  --label: #ffffff;
+  --lane: light-dark(#9aa4b0, #6b7683);
+  --state-running: light-dark(#2f7d4f, #3f9a63);
+  --state-available: light-dark(#4a8fbd, #5aa2d1);
+  --state-stopped: light-dark(#a4761f, #b98a2b);
+  --state-paused: light-dark(#6f5aa8, #8874c0);
+  --state-deleted: light-dark(#8a3b2f, #b0503f);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 body {
   max-width: 74rem;
   margin: 0 auto;
   padding: 1.5rem;
-  background: #ffffff;
+  background: var(--paper);
   color: var(--ink);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 15px;
@@ -23,6 +45,8 @@ body {
 
 nav {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 1rem;
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--line);
@@ -32,6 +56,10 @@ nav a {
   color: var(--accent);
   font-weight: 600;
   text-decoration: none;
+}
+
+nav a:hover {
+  text-decoration: underline;
 }
 
 a {
@@ -53,6 +81,167 @@ h3 {
   margin: 1rem 0 0.5rem;
 }
 
+/* Controls share one look: the theme buttons, the filter box and its button. */
+button,
+input[type="search"],
+input[type="datetime-local"] {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button:focus-visible,
+input[type="search"]:focus-visible,
+input[type="datetime-local"]:focus-visible,
+th a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input[type="search"],
+input[type="datetime-local"] {
+  background: var(--paper);
+}
+
+input[type="search"] {
+  min-width: 14rem;
+}
+
+/* The fleet switch is three links drawn as one control, the way the theme
+   buttons are, and the presets are plain links with the current one in bold. */
+.switch {
+  display: inline-flex;
+}
+
+.switch a {
+  margin-left: -1px;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.switch a:first-child {
+  margin-left: 0;
+  border-radius: 3px 0 0 3px;
+}
+
+.switch a:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+.switch a:hover {
+  border-color: var(--accent);
+}
+
+.switch a[aria-current="true"] {
+  position: relative;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--paper);
+}
+
+p.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+
+p.presets span {
+  color: var(--muted);
+}
+
+p.presets span + a,
+p.presets a + span {
+  margin-left: 0.4rem;
+}
+
+p.presets a[aria-current="true"] {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+p.axis {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* The theme switch sits at the right end of the navigation, as one control of
+   three pressed-or-not buttons. */
+form.theme {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+form.theme span {
+  margin-right: 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+form.theme button {
+  margin-left: -1px;
+  border-radius: 0;
+}
+
+form.theme button:first-of-type {
+  margin-left: 0;
+  border-radius: 3px 0 0 3px;
+}
+
+form.theme button:last-of-type {
+  border-radius: 0 3px 3px 0;
+}
+
+form.theme button[aria-pressed="true"] {
+  position: relative;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--paper);
+}
+
+/* The filter form above a table. */
+form.tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+form.tools label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+form.tools .count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
 table {
   width: 100%;
   margin: 0.5rem 0 1rem;
@@ -68,15 +257,139 @@ td {
 }
 
 th {
+  position: sticky;
+  top: 0;
   background: var(--panel);
+  box-shadow: 0 1px 0 var(--line);
   font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
+/* A heading that sorts is a link in the heading's own colour, and the heading
+   the table is sorted by carries the direction. */
+th a {
+  color: inherit;
+  text-decoration: none;
+}
+
+th a:hover {
+  text-decoration: underline;
+}
+
+th[aria-sort] a {
+  color: var(--accent);
+}
+
+th[aria-sort="ascending"] a::after {
+  content: " \25B2";
+  font-size: 0.7em;
+}
+
+th[aria-sort="descending"] a::after {
+  content: " \25BC";
+  font-size: 0.7em;
+}
+
+/* Every other row is tinted, so the eye keeps its row across a wide table,
+   and the row under the pointer is tinted more. */
+tbody tr:nth-child(even) {
+  background: var(--stripe);
+}
+
+tbody tr:hover {
+  background: var(--panel);
+}
+
+/* A numeric column is as narrow as its numbers, right-aligned under a heading
+   aligned the same way, so a value stands under the name it belongs to and
+   next to the values it compares with. */
+th.number,
 td.number {
   text-align: right;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+th.number {
+  width: 1%;
+  padding-left: 1.25rem;
+}
+
+td.number {
+  padding-left: 1.25rem;
+}
+
+/* An identifier is set in a monospace face, so it stands apart from prose and
+   two of them compare character by character. */
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+/* A value of exactly zero steps back, so the amounts that are not zero stand
+   out of a bill that is mostly zeros. */
+.zero {
+  color: var(--muted);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* A period's total closes the period's rows. */
+tr.subtotal td {
+  font-weight: 600;
+  border-bottom: 2px solid var(--line);
+}
+
+/* A line item of a bill is a block that folds. Its summary line names the
+   item and carries its total at the right end. */
+details.item {
+  margin: 0.75rem 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  scroll-margin-top: 1rem;
+}
+
+/* The block the page was scrolled to is outlined, so the reader lands on it. */
+details.item:target {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+details.item > summary {
+  padding: 0.5rem 0.75rem;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+details.item > summary:hover {
+  color: var(--accent);
+}
+
+details.item > summary .total {
+  float: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+details.item > summary .muted {
+  margin-left: 0.5rem;
+}
+
+details.item[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+details.item > p {
+  margin: 0.5rem 0.75rem 0;
+  font-size: 0.85rem;
+}
+
+details.item > table {
+  width: calc(100% - 1.5rem);
+  margin: 0.5rem 0.75rem 0.75rem;
 }
 
 pre {
@@ -136,6 +449,24 @@ svg {
   margin: 0.5rem 0 1rem;
 }
 
+/* A drawing inside a cell keeps the row at the row's height. */
+td svg {
+  margin: 0;
+}
+
+/* A document inside a cell folds, so a listing stays one line per row until
+   the reader opens the one they are after. */
+details.cell > summary {
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+details.cell > pre {
+  margin-top: 0.35rem;
+  min-width: 24rem;
+}
+
 svg text {
   fill: var(--ink);
   font-family: system-ui, sans-serif;
@@ -143,7 +474,7 @@ svg text {
 }
 
 svg text.label {
-  fill: #ffffff;
+  fill: var(--label);
 }
 
 svg text.axis {
@@ -157,30 +488,30 @@ svg text.axis {
 
 /* A timeline lane whose state has no colour of its own. */
 .lane {
-  fill: #9aa4b0;
+  fill: var(--lane);
 }
 
 .state-active,
 .state-in-use {
-  fill: #2f7d4f;
+  fill: var(--state-running);
 }
 
 .state-available {
-  fill: #4a8fbd;
+  fill: var(--state-available);
 }
 
 .state-shutoff,
 .state-suspended {
-  fill: #a4761f;
+  fill: var(--state-stopped);
 }
 
 .state-paused,
 .state-hibernated {
-  fill: #6f5aa8;
+  fill: var(--state-paused);
 }
 
 .state-deleted {
-  fill: #8a3b2f;
+  fill: var(--state-deleted);
 }
 
 /* An interval that has not ended is drawn to the edge of the picture, which is

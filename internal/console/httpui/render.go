@@ -64,11 +64,23 @@ func parsePages() (map[string]*template.Template, error) {
 }
 
 // page is what a template is executed with: the heading the layout prints,
-// where the page's numbers came from, and the page's own data.
+// where the page's numbers came from, and the page's own data. Theme and Back
+// are filled in by render and fail, because they come from the request rather
+// than from the handler: the theme the viewer chose, and the path the theme
+// form sends the viewer back to, which is the page it stands on.
 type page struct {
 	Title   string
 	Sources []Source
 	Data    any
+	Theme   string
+	Back    string
+}
+
+// forRequest fills in what the layout takes from the request.
+func (p page) forRequest(r *http.Request) page {
+	p.Theme = themeFrom(r)
+	p.Back = r.URL.RequestURI()
+	return p
 }
 
 // render writes one page. The template is executed into a buffer first: a
@@ -86,7 +98,7 @@ func (h *handlers) render(w http.ResponseWriter, r *http.Request, name string, p
 	}
 
 	var body bytes.Buffer
-	if err := tpl.ExecuteTemplate(&body, "layout", p); err != nil {
+	if err := tpl.ExecuteTemplate(&body, "layout", p.forRequest(r)); err != nil {
 		h.fail(w, r, http.StatusServiceUnavailable, "the page could not be rendered",
 			fmt.Errorf("rendering the page %s: %w", name, err), p.Sources)
 		return
