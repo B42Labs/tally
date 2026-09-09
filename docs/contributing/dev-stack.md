@@ -281,6 +281,69 @@ first, and `make down && make up` is the way to a clean cluster.
 [Run a simulated month against the dev cluster](/how-to/simulator/run-a-month)
 takes the stack through one month step by step.
 
+## The demo
+
+`make demo` is the whole demonstration in one target. It brings the cluster up,
+publishes a month, registers what bills it, meters it, finalizes the run, books
+the notifications the simulator held back as a correction, and then serves the
+[demo console](/reference/command-line/tally-console) on all of it. What it
+leaves behind is the state a walk-through needs: a month whose resources and
+events are ingested, a finalized run with its project statements, a correction
+with its credit notes and deltas, and a registry carrying a customer, a partner
+and the two Gardener projects.
+
+Every step is one the [tutorials](/tutorials/) take by hand, in the order those
+lessons take them.
+
+1. `make up` and `make simulator-up`, the latter with the held-back switch on
+   and the project registration on, so the month arrives with its tenants and
+   its Gardener projects registered.
+2. The clock's factor is set to 0, which puts the rest of the month on the bus
+   at once. The target then waits for three things: the simulator holding the
+   share it keeps back, the broker and the collector's outbox running empty
+   behind it, and the last hour of the month standing in VictoriaMetrics, which
+   is what says the pushed series are all there.
+3. The classic tenants of the month are grouped under `DEMO_CUSTOMER` at a
+   discount on every membership, and the month's CI tenant is put under
+   `DEMO_PARTNER` at a discount and a commission. That is what gives the
+   statements an adjustments table and the run a kickback to settle.
+4. The catalog is imported, the month is metered and the run is finalized. The
+   engine calls run under a port-forward to VictoriaMetrics: the dev overlay
+   measures the egress of an instance with a metricsql query, and the Gateway
+   publishes the store over HTTPS alone, which the engine has no CA setting
+   for.
+5. The held-back notifications are released and delivered, and what arrived
+   after the finalized run read the period is booked as a correction, which is
+   finalized in its turn.
+6. `make console` serves the result until Ctrl-C. The console starts again with
+   `make console` alone, which touches none of the above.
+
+The steps between the two `make` calls are four targets of their own,
+`demo-drain`, `demo-registry`, `demo-bill` and `demo-correct`, the first of
+which runs twice, so a demo that is being repeated can run one of them without
+the others.
+
+The target carries on from what stands rather than starting over. The cluster
+is reused, a project that is registered is found in place, a relation that is
+already active is answered 409 by the registry and left as it is, a catalog
+that is imported is not imported again, and a period an earlier demo finalized
+keeps the run that closed it: the engine refuses to meter a finalized month,
+and a month nothing arrived late for is not corrected either. `make down && make up`
+is what starts the month over.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DEMO_PERIOD` | `2026-07` | The month the demo simulates and bills, as `YYYY-MM`. It is the month the tutorials pin, so the console shows the numbers those lessons print, and it stays a past month whatever today is. |
+| `DEMO_PRICING` | `pricing/2026-03.yaml` | The catalog the run rates against, imported once and then referred to by the version it carries. |
+| `DEMO_CUSTOMER` | `acme` | The meta-project the month's classic tenants are grouped under. |
+| `DEMO_PARTNER` | `cloudhouse` | The partner the month's CI tenant is managed by. |
+| `DEMO_CUSTOMER_DISCOUNT` | `0.10` | The discount every membership of the customer carries. |
+| `DEMO_PARTNER_DISCOUNT` | `0.15` | The discount the partner's relation carries. |
+| `DEMO_PARTNER_KICKBACK` | `0.10` | The commission the partner is owed on what it manages. |
+| `DEMO_VM_PORT` | `8428` | The port on 127.0.0.1 the engine reaches VictoriaMetrics through while the demo bills the month. |
+| `DEMO_WAIT_ATTEMPTS` | `60` | How many reads one wait of the demo may take. |
+| `DEMO_WAIT_SECONDS` | `10` | How long it waits between two of them, which puts the budget of one wait at ten minutes. |
+
 ## The make targets
 
 The table below is rendered from the `## target: description` comments of the
@@ -298,6 +361,7 @@ The table below is rendered from the `## target: description` comments of the
 | `simulator-down` | stop the simulator stack and drop its volumes |
 | `ca` | print the dev CA certificate, for curl --cacert and browser trust |
 | `console` | run the demo console against the dev cluster |
+| `demo` | prepare the whole demo month and serve the console on it |
 | `test` | run the test suite |
 | `lint` | run golangci-lint |
 | `fmt` | format every Go file with gofumpt, through golangci-lint's formatter |
@@ -331,7 +395,9 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   builds the server types with.
 - `SQLC_VERSION` (`v1.31.1`) is the sqlc release `generate` builds the query
   code with.
-- The `SIM_` set belongs to the simulator stack and is in the table above.
+- The `SIM_` set belongs to the simulator stack and is in the table above,
+  and the `DEMO_` set belongs to `demo` and is in the table under
+  [the demo](#the-demo).
 - `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
   127.0.0.1, and the port of the URL it prints.
 

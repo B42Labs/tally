@@ -117,6 +117,69 @@ TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.i
 # The engine's database, on the same listener beside the reporting one.
 TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 
+# What `demo` prepares. The month is the one the tutorials pin, so a console
+# demo shows the numbers the documentation describes, and it stays a past month
+# whatever today is, which is what the engine bills. It names the simulated
+# month and the billing period at once, because the two are the same month:
+# `make demo DEMO_PERIOD=2026-05` moves both.
+DEMO_PERIOD ?= 2026-07
+# The catalog the run rates against. It is imported once and then referred to by
+# the version it carries, so a second demo imports nothing.
+DEMO_PRICING ?= pricing/2026-03.yaml
+# The customer the month's classic tenants are grouped under and the partner its
+# CI tenant is managed by. They are what puts an adjustments table in the
+# statements the console shows and a kickback beside the totals. Which tenant is
+# which is read off the registry rather than pinned here, so the pair holds for
+# every seed and every month; demo-registry says how.
+DEMO_CUSTOMER ?= acme
+DEMO_PARTNER ?= cloudhouse
+# The rates those two relations carry, as the pricing adjustments format writes
+# them: a discount on every membership, and a discount with a commission on the
+# managed tenant.
+DEMO_CUSTOMER_DISCOUNT ?= 0.10
+DEMO_PARTNER_DISCOUNT ?= 0.15
+DEMO_PARTNER_KICKBACK ?= 0.10
+# The port the engine calls of `demo` reach VictoriaMetrics through. The dev
+# overlay measures the egress of an instance with a metricsql query, and the
+# Gateway publishes the store over HTTPS alone, which the engine has no CA
+# setting for: the two billing steps port-forward the Service for as long as
+# they run.
+DEMO_VM_PORT ?= 8428
+# How long one wait of `demo` may take: DEMO_WAIT_ATTEMPTS reads
+# DEMO_WAIT_SECONDS apart, ten minutes by default. A month at factor 0 is on the
+# bus in a minute and delivered in three on the machine the tutorials were
+# captured on, and the budget is that with room for a slower one.
+DEMO_WAIT_ATTEMPTS ?= 60
+DEMO_WAIT_SECONDS ?= 10
+
+# The three compose addresses `demo` reads the month's progress on, the ones
+# `simulator-up` prints. deploy/compose/compose.yaml binds every one of them to
+# 127.0.0.1, and the broker's management API answers the credential its image is
+# started with.
+SIM_CONTROL_URL := http://127.0.0.1:8091
+SIM_COLLECTOR_URL := http://127.0.0.1:8090
+SIM_BROKER_URL := http://127.0.0.1:15672
+
+# The two cluster URLs `demo` calls, the ones `up` prints. Both go through the
+# Gateway, so both are verified against the dev CA in tally-ca.crt.
+DEMO_API_URL := https://api.tally.127-0-0-1.nip.io:8443
+DEMO_VM_URL := https://vm.tally.127-0-0-1.nip.io:8443
+
+# The engine reads the Reporting API's database through the tally_engine login
+# role rather than through tally: migration 0008 of the reporting chain grants
+# the group role it is a member of SELECT on the four tables metering reads, and
+# a deployment connects the way this line does.
+TALLY_DEV_ENGINE_REPORTING_DB_URL ?= postgres://tally_engine:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
+
+# The environment every engine call of `demo` runs under: the engine's own
+# database, the reporting one it meters from, the counter sources of the dev
+# overlay, and the VictoriaMetrics those counters are measured against, which is
+# the port-forward the billing steps hold open.
+DEMO_ENGINE_ENV = TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' \
+	TALLY_ENGINE_REPORTING_DB_URL='$(TALLY_DEV_ENGINE_REPORTING_DB_URL)' \
+	TALLY_ENGINE_COUNTER_SOURCES='$(DEV_OVERLAY)/counter-sources.yaml' \
+	TALLY_ENGINE_VM_URL='http://127.0.0.1:$(DEMO_VM_PORT)'
+
 # Read from the manifests rather than pinned a second time here, so
 # `check-alerting` always validates the configs with the versions the cluster
 # runs.
@@ -135,7 +198,8 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
-	images simulator-up simulator-down console docs docs-build
+	images simulator-up simulator-down console demo demo-drain demo-registry \
+	demo-bill demo-correct docs docs-build
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
 # stack, and an engine given less than this spends the readiness waits of `up`
@@ -440,6 +504,248 @@ console:
 	TALLY_CONSOLE_HTTP_PORT='$(CONSOLE_PORT)' \
 	TALLY_CONSOLE_API_TOKEN="$$token" \
 	go run ./cmd/tally-console
+
+# demo_await polls one condition of the demo pipeline until it holds. $(1) is
+# the shell command that answers it, tried once every DEMO_WAIT_SECONDS, and
+# $(2) is what the message calls the thing that never arrived.
+#
+# A condition that never holds ends the run. The steps behind a wait bill the
+# month, and billing one that is not all there is worse than a demo that stops
+# and says which half is missing.
+define demo_await
+	@attempt=1; \
+	until $(1); do \
+		if [ "$$attempt" -ge '$(DEMO_WAIT_ATTEMPTS)' ]; then \
+			echo '' >&2; \
+			echo 'ERROR: $(2), after $(DEMO_WAIT_ATTEMPTS) reads $(DEMO_WAIT_SECONDS)s apart.' >&2; \
+			echo '       docker compose -f deploy/compose/compose.yaml logs says what the' >&2; \
+			echo '       simulator and the collector are doing.' >&2; \
+			echo '       make demo is safe to run again: it carries on from what stands.' >&2; \
+			exit 1; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		sleep '$(DEMO_WAIT_SECONDS)'; \
+	done
+endef
+
+# `demo` is the whole demonstration in one target. It brings the cluster up,
+# publishes a month onto the bus and finishes it at once, registers the customer
+# and the partner that bill it, meters the month, finalizes it, books the
+# notifications the simulator held back as a correction, and then serves the
+# console on all of it. Every step is one an operator takes by hand in the
+# tutorials, in the order those lessons take them, so the console shows a month
+# that went through the lifecycle rather than a fixture somebody wrote.
+#
+# It carries on from what stands rather than starting over: `up` reuses the
+# cluster, a project that is registered is found in place, a relation that is
+# active is answered 409 and left as it is, a catalog that is imported is not
+# imported again, and a period an earlier demo finalized keeps the run that
+# closed it. `make down && make up` is what starts the month over.
+#
+# The four steps below are targets of their own so that a repeated demo can run
+# one of them alone, and so the pipeline reads as the steps it is made of.
+## demo: prepare the whole demo month and serve the console on it
+demo:
+	$(MAKE) up
+	$(MAKE) simulator-up SIM_PERIOD='$(DEMO_PERIOD)' SIM_FAULTS=held-back SIM_REGISTER_PROJECTS=true
+	@echo '==> finishing the simulated month at once'
+	$(call demo_await,curl -fsS '$(SIM_CONTROL_URL)/clock' >/dev/null 2>&1,the simulator control endpoint never answered)
+	@curl -fsS -X PUT -d '{"factor": 0}' '$(SIM_CONTROL_URL)/clock' >/dev/null
+	@# The run holds once the last regular notification is on the bus. That is
+	@# the flag the release of the correction step is granted on; the published
+	@# count reaches its hold value a moment earlier and is no signal to act on.
+	$(call demo_await,curl -fsS '$(SIM_CONTROL_URL)/clock' | jq -e '.holding' >/dev/null,the simulator never reached the end of the month)
+	$(MAKE) demo-drain
+	@# The engine measures an instance's egress against the pushed series, and
+	@# the pusher runs beside the publishing loop rather than with it. The last
+	@# hour of the month standing in the store is what says it is through, so
+	@# the run below bills a month whose traffic is all there.
+	@echo '==> waiting for the pushed series to reach VictoriaMetrics'
+	$(call demo_await,curl -fsS --cacert tally-ca.crt -G '$(DEMO_VM_URL)/api/v1/query' --data-urlencode 'query=count(count_over_time(openstack_identity_projects{cloud="$(SIM_CLOUD)"}[1h]))' --data-urlencode "time=$$(curl -fsS '$(SIM_CONTROL_URL)/clock' | jq -r .period_to)" | jq -e '.data.result | length > 0' >/dev/null,the last hour of the month never reached VictoriaMetrics)
+	$(MAKE) demo-registry
+	$(MAKE) demo-bill
+	@echo '==> releasing the notifications the simulator held back'
+	@# 409 is the answer to a release that already happened, which is what a
+	@# second demo against a stack nobody restarted gets. Both mean the held
+	@# share is on the bus, and the drain below waits for it either way.
+	@code="$$(curl -sS -o /dev/null -w '%{http_code}' -X POST '$(SIM_CONTROL_URL)/release')"; \
+	case "$$code" in \
+	200|409) ;; \
+	*) echo "ERROR: the release was answered $$code, not 200 or 409" >&2; exit 1;; \
+	esac
+	$(MAKE) demo-drain
+	$(MAKE) demo-correct
+	@echo
+	@echo 'The demo stands:'
+	@echo '  $(DEMO_PERIOD) on $(SIM_CLOUD) is ingested, metered, finalized and corrected'
+	@echo '  the classic tenants bill under $(DEMO_CUSTOMER), the CI tenant under $(DEMO_PARTNER)'
+	@echo '  the two Gardener projects carry the cost of the tenants their shoots run on'
+	@echo
+	@echo 'The console follows. Ctrl-C ends it, and make console starts it again'
+	@echo 'without touching any of the above.'
+	$(MAKE) console
+
+# demo-drain waits until nothing of the month is in flight any more: the broker
+# holds no message, and the collector's outbox is empty behind it. `demo` waits
+# twice, once for the month and once for the notifications the release lets out,
+# which is why this is a target of its own.
+#
+# The empty broker is half of it because the outbox is empty between two batches
+# as well, and a month still coming off the bus would pass a read of the outbox
+# alone. What was delivered is no signal at all: a month that is ingested already
+# is deduplicated by the Reporting API, which accepts none of it and leaves
+# tally_collector_delivered_total at zero, and that is the ordinary case of a
+# second demo.
+demo-drain:
+	@echo '==> waiting for the bus and the outbox to run empty'
+	$(call demo_await,curl -fsS -u guest:guest '$(SIM_BROKER_URL)/api/overview' | jq -e '.queue_totals.messages == 0' >/dev/null && curl -fsS '$(SIM_COLLECTOR_URL)/metrics' | awk '/^tally_collector_consumed_total/ { c += $$2 } /^tally_collector_buffer_depth/ { b = $$2 } END { exit !(c > 0 && b == 0) }',the month never came off the bus and out of the outbox)
+
+# demo-registry puts the month's classic tenants under one customer and its CI
+# tenant under one partner. That is what gives the statements the console shows
+# an adjustments table and the run a kickback to settle; the attribution of the
+# two Gardener projects is registered by the simulator itself, under
+# SIM_REGISTER_PROJECTS.
+#
+# Which project is which is read off the names the simulator registers a month
+# under: the CI tenant is `ci`, an infrastructure tenant of a Gardener project
+# carries that project in its name, and every other row of the cloud is a
+# classic tenant a customer bills. A row registered by hand before the simulator
+# reached it keeps the name it was given, and is grouped as the classic tenant it
+# then looks like.
+#
+# Every step of it is idempotent, because a second demo runs it again: a virtual
+# project is looked up by its key before it is registered, and a relation that is
+# already active is answered 409 by the registry and left as it stands.
+#
+# The admin api token is the one `simulator-up` issued for the registration and
+# wrote into deploy/compose/.env. Nothing here issues a second one: a token is
+# printed once and lives until it is revoked, and a demo that minted one per run
+# would leave a row per run behind.
+demo-registry:
+	@echo '==> grouping the tenants under $(DEMO_CUSTOMER) and $(DEMO_PARTNER)'
+	@token="$$(sed -n 's/^TALLY_SIM_API_TOKEN=//p' deploy/compose/.env 2>/dev/null || true)"; \
+	if [ -z "$$token" ]; then \
+		echo 'ERROR: deploy/compose/.env carries no admin api token.' >&2; \
+		echo '       make simulator-up writes one there under' >&2; \
+		echo '       SIM_REGISTER_PROJECTS=true, which is how make demo runs it.' >&2; \
+		exit 1; \
+	fi; \
+	api() { curl -fsS --cacert tally-ca.crt -H "Authorization: Bearer $$token" "$$@"; }; \
+	admin() { TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin "$$@"; }; \
+	virtual() { \
+		id="$$(api "$(DEMO_API_URL)/api/v1/projects?cloud=$$2&external_id=$$3" | jq -r '.items[0].id // empty')"; \
+		if [ -z "$$id" ]; then \
+			id="$$(admin "create-$$1" --external-id "$$3" --name "$$4")"; \
+		fi; \
+		printf '%s' "$$id"; \
+	}; \
+	relate() { \
+		body="$$(jq -n --arg target "$$2" --arg type "$$4" --arg from '$(DEMO_PERIOD)-01T00:00:00Z' --argjson adjustments "$$5" \
+			'{target_id: $$target, relation_type: $$type, valid_from: $$from, metadata: {pricing_adjustments: $$adjustments}}')"; \
+		code="$$(curl -sS -o /dev/null -w '%{http_code}' --cacert tally-ca.crt \
+			-H "Authorization: Bearer $$token" -H 'Content-Type: application/json' \
+			-X POST -d "$$body" "$(DEMO_API_URL)/api/v1/projects/$$1/relations")"; \
+		case "$$code" in \
+		201) echo "    $$1 is now $$4 $$3";; \
+		409) echo "    $$1 is $$4 $$3 already";; \
+		*) echo "ERROR: the relation of project $$1 was answered $$code, not 201 or 409" >&2; exit 1;; \
+		esac; \
+	}; \
+	customer="$$(virtual meta-project meta '$(DEMO_CUSTOMER)' '$(DEMO_CUSTOMER)')"; \
+	partner="$$(virtual partner partner '$(DEMO_PARTNER)' '$(DEMO_PARTNER)')"; \
+	projects="$$(api "$(DEMO_API_URL)/api/v1/projects?cloud=$(SIM_CLOUD)")"; \
+	members="$$(printf '%s' "$$projects" | jq -r '.items[] | select(.name != "ci") | select((.name | startswith("Infrastructure tenant of ")) | not) | .id')"; \
+	managed="$$(printf '%s' "$$projects" | jq -r '.items[] | select(.name == "ci") | .id')"; \
+	if [ -z "$$members$$managed" ]; then \
+		echo '    no project of $(SIM_CLOUD) is registered, so nothing is grouped and the'; \
+		echo '    statements carry no adjustments'; \
+	fi; \
+	for id in $$members; do \
+		relate "$$id" "$$customer" '$(DEMO_CUSTOMER)' member_of '[{"type": "project_discount", "rate": "$(DEMO_CUSTOMER_DISCOUNT)", "scope": "all", "description": "$(DEMO_CUSTOMER) group discount"}]'; \
+	done; \
+	for id in $$managed; do \
+		relate "$$id" "$$partner" '$(DEMO_PARTNER)' managed_by '[{"type": "discount", "rate": "$(DEMO_PARTNER_DISCOUNT)", "scope": "all", "description": "$(DEMO_PARTNER) end-customer discount"}, {"type": "kickback", "rate": "$(DEMO_PARTNER_KICKBACK)", "scope": "all", "description": "$(DEMO_PARTNER) commission"}]'; \
+	done
+
+# demo-bill imports the catalog, meters the month and finalizes the run it left.
+#
+# A period an earlier demo finalized keeps that run: the engine refuses to meter
+# a finalized month, and what arrived since is booked by demo-correct rather
+# than by a second run.
+demo-bill:
+	@$(KUBECTL) -n $(NAMESPACE) port-forward svc/victoriametrics '$(DEMO_VM_PORT):8428' >/dev/null 2>&1 & \
+	forward=$$!; \
+	trap 'kill $$forward 2>/dev/null || true' EXIT; \
+	ready=; \
+	for attempt in $$(seq '$(DEMO_WAIT_ATTEMPTS)'); do \
+		if curl -fsS 'http://127.0.0.1:$(DEMO_VM_PORT)/health' >/dev/null 2>&1; then ready=yes; break; fi; \
+		sleep 1; \
+	done; \
+	if [ -z "$$ready" ]; then \
+		echo 'ERROR: the port-forward to VictoriaMetrics never answered on 127.0.0.1:$(DEMO_VM_PORT).' >&2; \
+		echo '       The engine measures the egress of an instance there, so the run' >&2; \
+		echo '       below would bill the month without its traffic.' >&2; \
+		exit 1; \
+	fi; \
+	version="$$(awk '/^version:/ { gsub(/"/, "", $$2); print $$2; exit }' '$(DEMO_PRICING)')"; \
+	if $(DEMO_ENGINE_ENV) go run ./cmd/tally-engine pricing list | grep -q "^$$version "; then \
+		echo "==> the pricing catalog $$version is imported already"; \
+	else \
+		echo "==> importing the pricing catalog $$version"; \
+		$(DEMO_ENGINE_ENV) go run ./cmd/tally-engine pricing import '$(DEMO_PRICING)'; \
+	fi; \
+	status="$$($(DEMO_ENGINE_ENV) go run ./cmd/tally-engine periods list | awk '$$1 == "$(DEMO_PERIOD)" { print $$2 }')"; \
+	if [ "$$status" = finalized ]; then \
+		echo '==> $(DEMO_PERIOD) is finalized already: the run that closed it stands'; \
+	else \
+		echo '==> metering $(DEMO_PERIOD)'; \
+		run="$$($(DEMO_ENGINE_ENV) go run ./cmd/tally-engine run --period '$(DEMO_PERIOD)' | tee /dev/stderr | awk '/^run .* completed for/ { print $$2 }')"; \
+		if [ -z "$$run" ]; then \
+			echo 'ERROR: the run printed no run id to finalize.' >&2; \
+			exit 1; \
+		fi; \
+		echo "==> finalizing run $$run"; \
+		$(DEMO_ENGINE_ENV) go run ./cmd/tally-engine finalize --period '$(DEMO_PERIOD)' --run "$$run"; \
+	fi
+
+# demo-correct books what reached the reporting database after the finalized run
+# read it, which is the share the release let out, as a correction: one credit
+# note per project it moved, and the finalized run left as it is.
+#
+# A month nothing arrived late for is left alone rather than corrected, because
+# a correction that moves nothing is a run row that says nothing. That is what a
+# second demo finds, having booked the held share the first time.
+#
+# The port-forward is the one demo-bill holds open, started again here: the
+# counters a correction meters are measured the way a run's are.
+demo-correct:
+	@$(KUBECTL) -n $(NAMESPACE) port-forward svc/victoriametrics '$(DEMO_VM_PORT):8428' >/dev/null 2>&1 & \
+	forward=$$!; \
+	trap 'kill $$forward 2>/dev/null || true' EXIT; \
+	ready=; \
+	for attempt in $$(seq '$(DEMO_WAIT_ATTEMPTS)'); do \
+		if curl -fsS 'http://127.0.0.1:$(DEMO_VM_PORT)/health' >/dev/null 2>&1; then ready=yes; break; fi; \
+		sleep 1; \
+	done; \
+	if [ -z "$$ready" ]; then \
+		echo 'ERROR: the port-forward to VictoriaMetrics never answered on 127.0.0.1:$(DEMO_VM_PORT).' >&2; \
+		exit 1; \
+	fi; \
+	echo '==> looking for what arrived after the finalized run'; \
+	late="$$($(DEMO_ENGINE_ENV) go run ./cmd/tally-engine detect-late --period '$(DEMO_PERIOD)')"; \
+	printf '%s\n' "$$late"; \
+	if printf '%s' "$$late" | grep -q 'no events arrived later'; then \
+		echo '==> nothing arrived late: the finalized month stands as it is'; \
+	else \
+		echo '==> booking them as a correction of $(DEMO_PERIOD)'; \
+		correction="$$($(DEMO_ENGINE_ENV) go run ./cmd/tally-engine correct --period '$(DEMO_PERIOD)' | tee /dev/stderr | awk '/completed as a correction/ { print $$2 }')"; \
+		if [ -z "$$correction" ]; then \
+			echo 'ERROR: the correction printed no run id to finalize.' >&2; \
+			exit 1; \
+		fi; \
+		echo "==> finalizing correction $$correction"; \
+		$(DEMO_ENGINE_ENV) go run ./cmd/tally-engine finalize --period '$(DEMO_PERIOD)' --run "$$correction"; \
+	fi
 
 ## test: run the test suite
 test:
