@@ -10,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/store"
+	"github.com/b42labs/tally/internal/engine/adjustments"
 	"github.com/b42labs/tally/internal/engine/statements"
 )
 
@@ -19,9 +20,29 @@ type runData struct {
 	Run          store.Run
 	CorrectsLink string
 	CatalogLink  string
-	Statements   []statementBar
-	Deltas       []store.Delta
+	Statements   listing[statementBar]
+	Deltas       listing[store.Delta]
 }
+
+// The columns of a run page's tables. The share bar draws the total and is
+// sorted through it.
+var (
+	statementColumns = []column[statementBar]{
+		textCol("project", func(r statementBar) string { return r.Row.Key }),
+		numberCol("total", func(r statementBar) decimal.Decimal { return r.Row.Total }),
+		plainCol[statementBar]("share"),
+	}
+	deltaColumns = []column[store.Delta]{
+		textCol("cloud", func(r store.Delta) string { return r.Cloud }),
+		textCol("project", func(r store.Delta) string { return r.ProjectID }),
+		textCol("resource type", func(r store.Delta) string { return r.ResourceType }),
+		textCol("resource", func(r store.Delta) string { return r.ResourceID }),
+		textCol("dimension", func(r store.Delta) string { return r.Dimension }),
+		numberCol("old", func(r store.Delta) decimal.Decimal { return r.OldAmount }),
+		numberCol("new", func(r store.Delta) decimal.Decimal { return r.NewAmount }),
+		numberCol("delta", func(r store.Delta) decimal.Decimal { return r.Delta }),
+	}
+)
 
 // statementBar is one project's total of a run, drawn against the largest total
 // the run produced.
@@ -31,14 +52,31 @@ type statementBar struct {
 	Link  string
 }
 
-// statementData is one stored statement document rendered as the bill it is.
+// statementData is one stored statement document rendered as the bill it is:
+// its head, its adjustments, its own line items as one section, and one
+// section per related cost.
 type statementData struct {
-	Key      string
-	Cloud    string
-	Project  string
-	RunID    uuid.UUID
-	RunLink  string
-	Document statements.Document
+	Key         string
+	Cloud       string
+	Project     string
+	RunID       uuid.UUID
+	RunLink     string
+	Document    statements.Document
+	Adjustments listing[adjustments.Line]
+	Items       billSection
+	Related     []billSection
+}
+
+// adjustmentColumns is the adjustments table of a statement.
+var adjustmentColumns = []column[adjustments.Line]{
+	textCol("type", func(r adjustments.Line) string { return r.Type }),
+	textCol("relation type", func(r adjustments.Line) string { return r.RelationType }),
+	textCol("target", func(r adjustments.Line) string { return r.RelationTarget }),
+	textCol("scope", func(r adjustments.Line) string { return r.Scope }),
+	textCol("description", func(r adjustments.Line) string { return r.Description }),
+	numberCol("rate", func(r adjustments.Line) decimal.Decimal { return r.Rate.Decimal }),
+	numberCol("base", func(r adjustments.Line) decimal.Decimal { return r.Base.Decimal }),
+	numberCol("amount", func(r adjustments.Line) decimal.Decimal { return r.Amount.Decimal }),
 }
 
 // run shows what one metering run produced. The deltas of a correction run are
@@ -74,7 +112,11 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := runData{Run: run, Statements: statementBars(id, billed), Deltas: deltas}
+	data := runData{
+		Run:        run,
+		Statements: tabulate(r, "statements", statementColumns, statementBars(id, billed)),
+		Deltas:     tabulate(r, "deltas", deltaColumns, deltas),
+	}
 	if run.CorrectsRunID != uuid.Nil {
 		data.CorrectsLink = link("/run", "id", run.CorrectsRunID.String())
 	}
@@ -120,17 +162,29 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := statementData{
-		Key:      key,
-		Cloud:    absent,
-		Project:  key,
-		RunID:    runID,
-		RunLink:  link("/run", "id", runID.String()),
-		Document: document,
+		Key:         key,
+		Cloud:       absent,
+		Project:     key,
+		RunID:       runID,
+		RunLink:     link("/run", "id", runID.String()),
+		Document:    document,
+		Adjustments: tabulate(r, "adjustments", adjustmentColumns, document.Adjustments),
 	}
 	// A key this cannot read is shown as it is stored: the page is about that
 	// stored row, and a guessed pair would name one nothing was stored under.
+	// The resource links need the cloud, and a key without one links nothing.
+	linkCloud := ""
 	if cloud, project, keyErr := statements.ParseKey(key); keyErr == nil {
-		data.Cloud, data.Project = cloud, project
+		data.Cloud, data.Project, linkCloud = cloud, project, cloud
+	}
+
+	data.Items = buildBillSection(r, itemsTable, itemAnchor, linkCloud, document.Currency, document.LineItems)
+	for index := range document.RelatedCosts {
+		related := &document.RelatedCosts[index]
+		prefix := fmt.Sprintf("rc-%d", index)
+		section := buildBillSection(r, prefix, prefix+"-"+itemAnchor, linkCloud, document.Currency, related.LineItems)
+		section.Related = related
+		data.Related = append(data.Related, section)
 	}
 
 	h.render(w, r, "statement", page{

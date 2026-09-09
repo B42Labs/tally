@@ -2,12 +2,13 @@
 <dl>
 <dt>cloud</dt><dd>{{.Resource.Cloud}}</dd>
 <dt>platform</dt><dd>{{.Resource.Platform}}</dd>
-<dt>project</dt><dd>{{.Resource.ProjectId}}</dd>
+<dt>project</dt><dd>{{if .ProjectLink}}<a href="{{.ProjectLink}}">{{.Resource.ProjectId}}</a>{{else}}{{.Resource.ProjectId}}{{end}}</dd>
 <dt>resource type</dt><dd>{{.Resource.ResourceType}}</dd>
 <dt>resource</dt><dd>{{.Resource.ResourceId}}</dd>
 <dt>state</dt><dd>{{.Resource.State}}</dd>
-<dt>created</dt><dd>{{optStamp .Resource.CreatedAt}}</dd>
+<dt>created</dt><dd>{{.Created}}</dd>
 <dt>deleted</dt><dd>{{optStamp .Resource.DeletedAt}}</dd>
+<dt>lifetime</dt><dd>{{.Lifetime}}</dd>
 <dt>last event</dt><dd>{{.Resource.LastEventType}} at {{stamp .Resource.LastEventAt}}</dd>
 </dl>
 
@@ -48,10 +49,11 @@
 <dt>run status</dt><dd>{{.Run.Status}}</dd>
 {{if .CatalogLink}}<dt>pricing</dt><dd><a href="{{.CatalogLink}}">{{.Run.PricingVersion}}</a></dd>{{end}}
 </dl>
+{{template "tableTools" .Segments.Table}}
 <table>
-<thead><tr><th>state</th><th>from</th><th>to</th><th>seconds</th><th>dimension</th><th>amount</th><th>currency</th></tr></thead>
+{{template "tableHead" .Segments.Table}}
 <tbody>
-{{range .Segments}}<tr>
+{{range .Segments.Rows}}<tr>
 <td>{{.State}}</td>
 <td>{{stamp .From}}</td>
 <td>{{stamp .To}}</td>
@@ -60,7 +62,7 @@
 <td class="number">{{amount .Amount}}</td>
 <td>{{.Currency}}</td>
 </tr>
-{{else}}<tr><td colspan="7">this run metered no interval of the resource</td></tr>
+{{else}}<tr><td colspan="7">{{emptyText .Segments.Table "this run metered no interval of the resource"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{else}}
@@ -68,16 +70,17 @@
 {{end}}
 
 <h2>Events</h2>
+{{template "tableTools" .Events.Table}}
 <table>
-<thead><tr><th>timestamp</th><th>event type</th><th>source</th><th>project</th></tr></thead>
+{{template "tableHead" .Events.Table}}
 <tbody>
-{{range .Events}}<tr>
+{{range .Events.Rows}}<tr>
 <td>{{stamp .Timestamp}}</td>
 <td>{{.EventType}}</td>
 <td>{{.Source}}</td>
 <td>{{.ProjectId}}</td>
 </tr>
-{{else}}<tr><td colspan="4">this resource has no event</td></tr>
+{{else}}<tr><td colspan="4">{{emptyText .Events.Table "this resource has no event"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}

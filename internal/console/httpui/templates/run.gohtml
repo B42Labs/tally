@@ -12,27 +12,30 @@
 </dl>
 
 <h2>Statements</h2>
-{{if .Statements}}
+{{if .Statements.Table.Total}}
+{{template "tableTools" .Statements.Table}}
 <table>
-<thead><tr><th>project</th><th>total</th><th>share</th></tr></thead>
+{{template "tableHead" .Statements.Table}}
 <tbody>
-{{range .Statements}}<tr>
+{{range .Statements.Rows}}<tr>
 <td><a href="{{.Link}}">{{.Row.Key}}</a></td>
 <td class="number">{{amount .Row.Total}} {{.Row.Currency}}</td>
 <td><svg width="640" height="14" viewBox="0 0 640 14"><rect class="bar" x="0" y="1" width="{{.Width}}" height="12"></rect></svg></td>
 </tr>
+{{else}}<tr><td colspan="3">{{emptyText .Statements.Table "this run produced no statement"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{else}}
 <p>this run produced no statement</p>
 {{end}}
 
-{{if .Deltas}}
+{{if .Deltas.Table.Total}}
 <h2>What this run moved</h2>
+{{template "tableTools" .Deltas.Table}}
 <table>
-<thead><tr><th>cloud</th><th>project</th><th>resource type</th><th>resource</th><th>dimension</th><th>old</th><th>new</th><th>delta</th></tr></thead>
+{{template "tableHead" .Deltas.Table}}
 <tbody>
-{{range .Deltas}}<tr>
+{{range .Deltas.Rows}}<tr>
 <td>{{.Cloud}}</td>
 <td>{{.ProjectID}}</td>
 <td>{{.ResourceType}}</td>
@@ -42,6 +45,7 @@
 <td class="number">{{amount .NewAmount}}</td>
 <td class="number">{{amount .Delta}} {{.Currency}}</td>
 </tr>
+{{else}}<tr><td colspan="8">{{emptyText .Deltas.Table "this run moved nothing"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}

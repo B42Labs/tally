@@ -27,21 +27,152 @@ environment, under the names the settings table below lists.
 | --- | --- |
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
-| `/project?id=` | API: the project, its relations, the projects a traversal reaches, its summary over the current month. Engine: one row per statement of the project. |
-| `/resources` | API: one page of resources, filtered by `cloud`, `project_id`, `resource_type`, `state`, `status`, `cursor`. |
+| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the current month. Engine: one row per statement of the project. |
+| `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console keeps the rows that existed in the window `from` and `to` or at the instant `at`, now by default, and prints each one's lifetime in hours. Each row links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
 | `/run?id=` | Engine: the run, its statements, its correction deltas. |
-| `/statement?run=&key=` | Engine: one statement document rendered as a bill. |
+| `/statement?run=&key=` | Engine: one statement document rendered as a bill: its head, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. |
 | `/static/console.css` | The embedded stylesheet, the only asset the pages load. |
+| `/theme` | Nothing. The one route that is not a page: it takes the theme form's POST, keeps the choice in a cookie, and sends the viewer back. |
 
 Every identifier travels in a query parameter rather than in a path segment,
 because a cloud name, a resource id and a statement key may each carry a slash.
 
+A resource names its project by cloud and external id, not by the id the API
+assigns, so the project links on the resource pages carry that pair. The
+project page resolves it through the project list filtered by both, an exact
+match on each, and a pair nothing is registered under is answered 404.
+
 Paging is one page per request. A listing the API answered with a cursor carries
 a next link that repeats the filters and adds that cursor, and nothing follows a
 cursor on its own.
+
+## Sorting and filtering
+
+Every listing table can be sorted by a column and filtered by a text, and both
+happen on the console's side of the wire. The console ships no JavaScript, so a
+heading is a link that reloads the page with the order in the query string, and
+the filter box above a table is a form that reloads it with the text. Two
+parameters carry the state of one table, named after the table so that the
+tables of one page keep their own:
+
+| Parameter | Value |
+| --- | --- |
+| `<table>.sort` | The key of a column, which is its heading with spaces as underscores: `resource_type`. A leading hyphen sorts descending: `-count`. A key no column carries leaves the rows in the order they were read. |
+| `<table>.q` | A text. A row stays when any of its cells contains the text, compared without regard to case. Whitespace around the text is dropped. |
+
+So `/?stats.sort=-count&stats.q=os-sim` shows the resource counts of `os-sim`
+with the largest first.
+
+The first click on a heading sorts text ascending and a number descending, and
+the next click flips the direction. Text sorts by its lower-cased form; a
+number sorts by its value, so 10 comes after 2. A column that draws a bar
+neither sorts nor filters. A filtered table says how many of its rows match,
+and one the filter emptied says so in place of the rows. The filter form
+carries every other parameter of the page along as hidden inputs, so applying
+a filter keeps the page's identifiers, its cursor, and the order and filter of
+every other table.
+
+The tables and their names per page:
+
+| Page | Tables |
+| --- | --- |
+| `/` | `stats`, `events`, `rejected`, `periods`, `runs` |
+| `/projects` | `projects` |
+| `/project` | `relations`, `related`, `activity`, `statements` |
+| `/resources` | `resources` |
+| `/resource` | `segments`, `events` |
+| `/pricing` | `models` |
+| `/catalog` | `dimensions` |
+| `/run` | `statements`, `deltas` |
+| `/statement` | `adjustments`; `items` and `rc-<n>`, the summaries of the line items and of the n-th related cost; `li-<n>` and `rc-<n>-li-<n>`, the metric tables of the items, which sort and carry no filter |
+
+A paged listing, `/projects` and `/resources`, is sorted and filtered within
+the page the API answered, which its row count says, and its next link carries
+both parameters along. The timeline of a resource page draws every segment
+whatever the segment table is filtered to.
+
+A statement is rendered in sections, the project's own line items and then one
+per related cost. A section opens with a summary table of its items, resource
+type, resource, description, hours and total, sorted by total descending until
+the viewer sorts it otherwise. The resource of a row leads to the item's detail
+block below, and the blocks follow the summary's order and filter, so filtering
+the summary to one resource shows that resource's detail alone. Every block
+starts folded. The resource of a summary row leads to its block unfolded: the
+link names the block in `open` and in its fragment, so the page comes back
+with that block open and scrolled to, and any other block unfolds by hand. A
+block's heading links the resource's page, and its table holds one row per
+metric of every period, with the period's total as a row of its own. A description that
+only repeats the item's type and id is left out. A value of exactly zero is
+printed in the muted colour, so the amounts that are not zero stand out.
+
+## The fleet over a window and at an instant
+
+The resource list is read under one status and shown over a window or at an
+instant. The status is the API's own filter, chosen with the switch above the
+table: `active` serves the rows whose state is not deleted and is the default,
+`deleted` serves those alone, and `all` serves both. A `status` that is none of
+the three is answered 400. Switching the status drops the cursor, because a
+cursor positions a walk through one status and means nothing in another. A
+deleted resource is only on the page when the status admits it, so looking
+back starts with switching the status to `all`.
+
+The window and the instant are the console's filters, applied to the rows the
+API served. Each of `from`, `to` and `at` is read as RFC 3339 or as the form
+the inputs write, `2026-03-15T12:00`, which carries no zone and is read as UTC;
+one that does not parse is answered 400.
+
+The window is `from` and `to`, half-open: a resource existed in it when it was
+created before `to` and not deleted at or before `from`. Either bound may be
+left out, which leaves the window open on that side, and a `to` that is not
+after `from` is answered 400. The window presets are the last 24 hours, the
+last 7 days, this month, last month, and all, which is no window.
+
+The instant is `at`: a resource existed at it when it was created at or before
+it and not deleted at or before it; a resource whose history shows no create
+has no creation time and is taken to have existed all along. With neither a
+window nor an instant the page shows what exists now, so it opens on what runs
+right now. With a window and no instant it shows everything that lived in the
+window. With an instant, inside a window or not, it shows what existed at that
+instant. The instant presets are now, offered while there is no window, 24
+hours ago, 7 days ago, the start of this month, the start of last month, and
+clear, offered while an instant is pinned inside a window. The instant input
+stays empty while nothing is pinned, so applying a window does not pin the
+instant to now on the way.
+
+The page asks the API for 1000 rows, the most one page carries, so that the
+filters are applied to as much of the fleet as one call holds; the fleet of the
+simulated month fits. A page the API followed with a cursor, or one reached by
+a cursor, counts its rows as one page, and its next link carries the status,
+the window and the instant along. The line above the table says how many of
+the rows the API served the filters kept, and a page the filters emptied says
+so in place of the rows.
+
+Every row prints its lifetime in hours at two places: from its creation to
+its deletion, or to now for a resource still there, whatever the window and
+the instant are. A resource whose history starts without a create has no
+creation time, which the API leaves null and the fold reports as
+`history_starts_without_create`; the row prints `unknown` for its creation and
+its lifetime, and the line above the table counts such rows. The resource page
+names the event such a history starts with and counts the lifetime from it,
+which is where the fold starts the intervals a run bills. The last payload of
+a row is folded under a line that counts its keys, so the listing stays one
+line per row until a payload is opened.
+
+## Theme
+
+The pages follow the operating system's light or dark setting on their own. The
+form at the right end of the navigation bar pins one side: it posts `theme` as
+`light`, `dark` or `auto` to `/theme`, together with `back`, the path of the
+page it stands on. `light` and `dark` are kept in the cookie `theme` for a
+year, and `auto` deletes it. The console answers 303 to `back`, or to `/` when
+`back` is not a path of the console, so the form cannot send the viewer
+elsewhere. A page renders the cookie's value as the `data-theme` attribute of
+its root element, which the stylesheet reads, and a request without the cookie
+renders no attribute. A `theme` that is none of the three is answered 400 on
+the error page, and a GET of `/theme` 405.
 
 Every page ends with a provenance panel naming the reads it was built from: each
 Reporting API request as its method and path with the query string, and each
@@ -53,7 +184,7 @@ that is missing or unreadable, 404 for a lookup that found nothing and for an
 API 404, 502 for a Reporting API call that failed or that the API refused the
 token for, and 503 for an engine query that failed or a stored document that
 does not decode. A path the console has no page for is answered 404 on that same
-error page.
+error page, and a route asked with a method it does not answer 405.
 
 Amounts are rendered at two decimal places and quantities at four, the scales
 the engine rounds them to. A catalog price is rendered with the digits the

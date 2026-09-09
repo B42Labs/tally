@@ -56,12 +56,44 @@ type segmentGroup struct {
 	Amount decimal.Decimal
 }
 
-// buildTimeline lays both lanes out over one window: the earliest start of
-// either lane to the latest end. An interval that is still open ends at now.
+// scale maps instants onto the user units of one picture, from its start at
+// the left edge to its end at the right one. An instant outside the span is
+// drawn at the edge it lies beyond.
 //
 // The geometry is integer seconds and integer user units from end to end. A
 // picture is not money, but a float here would make the same page render
 // differently on two machines for no gain at all.
+type scale struct {
+	start   time.Time
+	seconds int64
+	width   int64
+}
+
+// newScale spans start to end over width units. A span shorter than a second,
+// and one that is empty because everything happened at one instant, still has
+// to divide.
+func newScale(start, end time.Time, width int64) scale {
+	seconds := int64(end.Sub(start) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return scale{start: start, seconds: seconds, width: width}
+}
+
+// x is where an instant falls.
+func (s scale) x(t time.Time) int64 {
+	seconds := int64(t.Sub(s.start) / time.Second)
+	if seconds < 0 {
+		return 0
+	}
+	if seconds > s.seconds {
+		return s.width
+	}
+	return seconds * s.width / s.seconds
+}
+
+// buildTimeline lays both lanes out over one window: the earliest start of
+// either lane to the latest end. An interval that is still open ends at now.
 func buildTimeline(intervals []httpapi.LifecycleInterval, groups []segmentGroup, now time.Time) timeline {
 	line := timeline{Width: chartWidth}
 
@@ -70,16 +102,8 @@ func buildTimeline(intervals []httpapi.LifecycleInterval, groups []segmentGroup,
 		return line
 	}
 	line.Start, line.End = start, end
-
-	// A window shorter than a second, and one that is empty because everything
-	// happened at one instant, still has to divide.
-	spanSeconds := int64(end.Sub(start) / time.Second)
-	if spanSeconds < 1 {
-		spanSeconds = 1
-	}
-	x := func(t time.Time) int64 {
-		return int64(t.Sub(start)/time.Second) * chartWidth / spanSeconds
-	}
+	sc := newScale(start, end, chartWidth)
+	x := sc.x
 
 	for _, interval := range intervals {
 		drawn := lane{X: x(interval.From), Class: stateClass(interval.State), Label: interval.State}

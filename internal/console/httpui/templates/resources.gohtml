@@ -1,19 +1,32 @@
 {{define "content"}}
+<form class="tools fleet" method="get" action="{{.Fleet.Path}}">
+{{range .Fleet.Hidden}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}<span class="switch">{{range .Fleet.Switch}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span>
+<label>from <input type="datetime-local" name="from" value="{{.Fleet.From}}"></label>
+<label>to <input type="datetime-local" name="to" value="{{.Fleet.To}}"></label>
+<label>at <input type="datetime-local" name="at" value="{{.Fleet.At}}"></label>
+<button type="submit">apply</button>
+<span class="count">{{.Fleet.Count}}</span>
+</form>
+<p class="presets"><span>window</span>{{range .Fleet.WindowPresets}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}<span>instant</span>{{range .Fleet.Presets}}<a href="{{.Link}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</p>
+<p class="axis">every instant is UTC; a lifetime runs from the creation to the deletion, or to now{{if .Fleet.Unknown}}; {{.Fleet.Unknown}}{{end}}</p>
+{{template "tableTools" .Items.Table}}
 <table>
-<thead><tr><th>cloud</th><th>platform</th><th>project</th><th>resource type</th><th>resource</th><th>state</th><th>created</th><th>deleted</th><th>last payload</th></tr></thead>
+{{template "tableHead" .Items.Table}}
 <tbody>
-{{range .Items}}<tr>
+{{range .Items.Rows}}<tr>
 <td>{{.Resource.Cloud}}</td>
 <td>{{.Resource.Platform}}</td>
-<td>{{.Resource.ProjectId}}</td>
+<td>{{if .ProjectLink}}<a href="{{.ProjectLink}}">{{.Resource.ProjectId}}</a>{{else}}{{.Resource.ProjectId}}{{end}}</td>
 <td>{{.Resource.ResourceType}}</td>
 <td><a href="{{.Link}}">{{.Resource.ResourceId}}</a></td>
 <td>{{.Resource.State}}</td>
-<td>{{optStamp .Resource.CreatedAt}}</td>
+<td>{{unknownStamp .Resource.CreatedAt}}</td>
 <td>{{optStamp .Resource.DeletedAt}}</td>
-<td><pre>{{pretty .Resource.LastPayload}}</pre></td>
+<td class="number">{{if .Lived}}{{amount .Lifetime}}{{else}}unknown{{end}}</td>
+<td>{{if .PayloadSummary}}<details class="cell"><summary>{{.PayloadSummary}}</summary><pre>{{pretty .Resource.LastPayload}}</pre></details>{{else}}none{{end}}</td>
 </tr>
-{{else}}<tr><td colspan="9">no resource matched</td></tr>
+{{else}}<tr><td colspan="10">{{if .Fleet.Empty}}{{.Fleet.Empty}}{{else}}{{emptyText .Items.Table "no resource matched"}}{{end}}</td></tr>
 {{end}}</tbody>
 </table>
 {{if .NextLink}}<p><a href="{{.NextLink}}">next page</a></p>{{end}}

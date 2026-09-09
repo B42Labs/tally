@@ -1,9 +1,9 @@
 {{define "content"}}
 <dl>
 <dt>cloud</dt><dd>{{.Cloud}}</dd>
-<dt>project</dt><dd>{{.Project}}</dd>
+<dt>project</dt><dd><code>{{.Project}}</code></dd>
 <dt>platform</dt><dd>{{.Document.Platform}}</dd>
-<dt>run</dt><dd><a href="{{.RunLink}}">{{.RunID}}</a></dd>
+<dt>run</dt><dd><a href="{{.RunLink}}"><code>{{.RunID}}</code></a></dd>
 <dt>billing period</dt><dd>{{.Document.BillingPeriod.From}} to {{.Document.BillingPeriod.To}}</dd>
 <dt>total</dt><dd>{{amount .Document.Total.Decimal}} {{.Document.Currency}}</dd>
 {{with .Document.BaseCost}}<dt>base cost</dt><dd>{{amount .Decimal}}</dd>{{end}}
@@ -11,61 +11,81 @@
 {{with .Document.KickbackTotal}}<dt>kickback total</dt><dd>{{amount .Decimal}}</dd>{{end}}
 </dl>
 
-{{if .Document.Adjustments}}
+{{if .Adjustments.Table.Total}}
 <h2>Adjustments</h2>
+{{template "tableTools" .Adjustments.Table}}
 <table>
-<thead><tr><th>type</th><th>relation type</th><th>target</th><th>scope</th><th>description</th><th>rate</th><th>base</th><th>amount</th></tr></thead>
+{{template "tableHead" .Adjustments.Table}}
 <tbody>
-{{range .Document.Adjustments}}<tr>
+{{range .Adjustments.Rows}}<tr>
 <td>{{.Type}}</td>
 <td>{{.RelationType}}</td>
-<td>{{.RelationTarget}}</td>
+<td><code>{{.RelationTarget}}</code></td>
 <td>{{.Scope}}</td>
 <td>{{.Description}}</td>
 <td class="number">{{rate .Rate.Decimal}}</td>
 <td class="number">{{amount .Base.Decimal}}</td>
-<td class="number">{{amount .Amount.Decimal}}</td>
+<td class="number{{zeroClass .Amount.Decimal}}">{{amount .Amount.Decimal}}</td>
 </tr>
+{{else}}<tr><td colspan="8">{{emptyText .Adjustments.Table "this statement carries no adjustment"}}</td></tr>
 {{end}}</tbody>
 </table>
 {{end}}
 
 <h2>Line items</h2>
-{{template "lineItems" .Document.LineItems}}
+{{template "billSection" .Items}}
 
-{{range .Document.RelatedCosts}}
-<h2>Related cost of {{.ProjectID}}</h2>
+{{range .Related}}
+<h2>Related cost of <code>{{.Related.ProjectID}}</code></h2>
 <dl>
-<dt>relation type</dt><dd>{{.RelationType}}</dd>
-<dt>project</dt><dd>{{.ProjectID}}</dd>
-<dt>platform</dt><dd>{{.Platform}}</dd>
-<dt>total</dt><dd>{{amount .Total.Decimal}}</dd>
+<dt>relation type</dt><dd>{{.Related.RelationType}}</dd>
+<dt>project</dt><dd><code>{{.Related.ProjectID}}</code></dd>
+<dt>platform</dt><dd>{{.Related.Platform}}</dd>
+<dt>total</dt><dd>{{amount .Related.Total.Decimal}} {{.Currency}}</dd>
 </dl>
-{{template "lineItems" .LineItems}}
+{{template "billSection" .}}
 {{end}}
 {{end}}
 
-{{define "lineItems"}}
-{{range .}}
-<h3>{{.ResourceType}} {{.ResourceID}}</h3>
-<dl>
-<dt>platform</dt><dd>{{.Platform}}</dd>
-<dt>description</dt><dd>{{.Description}}</dd>
-<dt>total</dt><dd>{{amount .Total.Decimal}}</dd>
-</dl>
+{{/* billSection is one section of the bill: the summary table of its items,
+     then the detail block of every item the summary shows, in its order. */}}
+{{define "billSection"}}
+{{if .Summary.Table.Total}}
+{{template "tableTools" .Summary.Table}}
 <table>
-<thead><tr><th>state</th><th>hours</th><th>usage</th><th>cost</th><th>state modifier</th></tr></thead>
+{{template "tableHead" .Summary.Table}}
 <tbody>
-{{range .Periods}}<tr>
-<td>{{.State}}</td>
-<td class="number">{{amount .Hours.Decimal}}</td>
-<td>{{range $metric, $value := .Usage}}{{$metric}}: {{quantity $value.Decimal}}<br>{{end}}</td>
-<td>{{range $dimension, $value := .Cost}}{{$dimension}}: {{amount $value.Decimal}}<br>{{end}}</td>
-<td class="number">{{quantity .StateModifier.Decimal}}</td>
+{{range .Summary.Rows}}<tr>
+<td>{{.ResourceType}}</td>
+<td><a href="{{.OpenLink}}"><code>{{.ResourceID}}</code></a></td>
+<td>{{.Description}}</td>
+<td class="number">{{amount .Hours}}</td>
+<td class="number{{zeroClass .Total}}">{{amount .Total}} {{$.Currency}}</td>
 </tr>
+{{else}}<tr><td colspan="5">{{emptyText .Summary.Table "this section holds no line item"}}</td></tr>
 {{end}}</tbody>
 </table>
+{{range .Summary.Rows}}
+<details class="item" id="{{.Anchor}}"{{if .Open}} open{{end}}>
+<summary><span>{{.ResourceType}} <code>{{.ResourceID}}</code></span>{{if .Description}} <span class="muted">{{.Description}}</span>{{end}}<span class="total{{zeroClass .Total}}">{{amount .Total}} {{$.Currency}}</span></summary>
+{{if .ResourceLink}}<p class="muted"><a href="{{.ResourceLink}}">the resource's page</a></p>{{end}}
+<table>
+{{template "tableHead" .Metrics.Table}}
+<tbody>
+{{range .Metrics.Rows}}<tr{{if .Subtotal}} class="subtotal"{{end}}>
+<td>{{.State}}</td>
+<td class="number">{{amount .Hours}}</td>
+<td>{{.Metric}}</td>
+<td class="number{{zeroClass .Usage}}">{{if not .Subtotal}}{{quantity .Usage}}{{end}}</td>
+<td class="number{{zeroClass .Cost}}">{{amount .Cost}}</td>
+<td class="number">{{quantity .Modifier}}</td>
+</tr>
+{{else}}<tr><td colspan="6">this item holds no period</td></tr>
+{{end}}</tbody>
+</table>
+</details>
+{{end}}
 {{else}}
-<p>this statement holds no line item</p>
+<p>this section holds no line item</p>
 {{end}}
 {{end}}
