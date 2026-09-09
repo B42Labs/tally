@@ -90,9 +90,9 @@ var (
 )
 
 // resources lists one page of the projection under the status the viewer
-// chose, and of that page the rows that existed in the window or at the
-// instant. The page is the widest the API serves, so the filters are applied
-// to as much of the fleet as one call can hold.
+// chose, and of that page the rows the instant or the window it is read at
+// keeps. The page is the widest the API serves, so the filters are applied to
+// as much of the fleet as one call can hold.
 func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var src sources
@@ -125,7 +125,7 @@ func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	rows := make([]resourceRow, 0, len(list.Items))
 	unknown := 0
 	for _, resource := range list.Items {
-		if !keep(resource, fleet, now) {
+		if !keep(resource, fleet) {
 			continue
 		}
 		lifetime, lived := lifetimeHours(resource, now)

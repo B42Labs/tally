@@ -41,10 +41,56 @@ func TestReadFleet(t *testing.T) {
 	t.Run("refuses what it cannot read", func(t *testing.T) {
 		t.Parallel()
 
-		for _, query := range []string{"status=zombie", "at=yesterday", "at=2026-13-01T00:00"} {
+		for _, query := range []string{"status=zombie", "at=yesterday", "at=2026-13-01T00:00", "mode=whenever"} {
 			if _, err := readFleet(httptest.NewRequest("GET", "/resources?"+query, nil), testNow); err == nil {
 				t.Errorf("readFleet(%s) accepted it", query)
 			}
+		}
+	})
+
+	t.Run("the mode says which way the fleet is read", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			query  string
+			window bool
+		}{
+			{"", false},
+			{"at=2026-03-03T00:00", false},
+			{"mode=window", true},
+			{"from=2026-03-01T00:00", true},
+			{"to=2026-03-08T00:00", true},
+			{"mode=instant&from=2026-03-01T00:00", false},
+		}
+		for _, tc := range cases {
+			state, err := readFleet(httptest.NewRequest("GET", "/resources?"+tc.query, nil), testNow)
+			if err != nil {
+				t.Fatalf("readFleet(%s) error = %v", tc.query, err)
+			}
+			if state.Window != tc.window {
+				t.Errorf("readFleet(%s) window = %v, want %v", tc.query, state.Window, tc.window)
+			}
+		}
+	})
+
+	t.Run("each way ignores what the other one is asked with", func(t *testing.T) {
+		t.Parallel()
+
+		state, err := readFleet(httptest.NewRequest(
+			"GET", "/resources?mode=window&at=yesterday&from=2026-03-01T00:00", nil), testNow)
+		if err != nil {
+			t.Fatalf("readFleet() error = %v", err)
+		}
+		if state.Pinned || state.From == nil {
+			t.Errorf("state = %+v, want the window alone", state)
+		}
+
+		if state, err = readFleet(httptest.NewRequest(
+			"GET", "/resources?mode=instant&from=nonsense&at=2026-03-03T00:00", nil), testNow); err != nil {
+			t.Fatalf("readFleet() error = %v", err)
+		}
+		if state.From != nil || !state.Pinned {
+			t.Errorf("state = %+v, want the instant alone", state)
 		}
 	})
 }
@@ -153,7 +199,7 @@ func TestKeep(t *testing.T) {
 	at := func(day int) time.Time { return time.Date(2026, 3, day, 0, 0, 0, 0, time.UTC) }
 	window := func(from, to int) fleetState {
 		f, t := at(from), at(to)
-		return fleetState{From: &f, To: &t}
+		return fleetState{Window: true, From: &f, To: &t}
 	}
 
 	cases := []struct {
@@ -170,13 +216,14 @@ func TestKeep(t *testing.T) {
 		{"a window keeps what outlives it", alive, window(5, 8), true},
 		{"a window drops what ended at its start", gone, window(10, 12), false},
 		{"a window drops what began at its end", gone, window(1, 3), false},
-		{"a window open at the end keeps what began after the start", gone, fleetState{From: pointerTo(at(5))}, true},
-		{"a window open at the start drops what began at the end", gone, fleetState{To: pointerTo(at(3))}, false},
-		{"an instant inside a window narrows to it", gone, fleetState{From: pointerTo(at(1)), To: pointerTo(at(12)), At: at(11), Pinned: true}, false},
-		{"an instant alone keeps what existed at it", gone, fleetState{At: at(5), Pinned: true}, true},
+		{"a window open at the end keeps what began after the start", gone, fleetState{Window: true, From: pointerTo(at(5))}, true},
+		{"a window open at the start drops what began at the end", gone, fleetState{Window: true, To: pointerTo(at(3))}, false},
+		{"a window without a bound keeps what is long gone", gone, fleetState{Window: true}, true},
+		{"an instant keeps what existed at it", gone, fleetState{At: at(5), Pinned: true}, true},
+		{"an instant drops what was gone by then", gone, fleetState{At: at(11), Pinned: true}, false},
 	}
 	for _, tc := range cases {
-		if got := keep(tc.resource, tc.state, testNow); got != tc.want {
+		if got := keep(tc.resource, tc.state); got != tc.want {
 			t.Errorf("%s: keep() = %v, want %v", tc.name, got, tc.want)
 		}
 	}

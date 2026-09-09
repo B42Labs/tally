@@ -28,7 +28,7 @@ environment, under the names the settings table below lists.
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
 | `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the current month. Engine: one row per statement of the project. |
-| `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console keeps the rows that existed in the window `from` and `to` or at the instant `at`, now by default, and prints each one's lifetime in hours. Each row links its project by cloud and external id, and folds its last payload. |
+| `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
@@ -111,51 +111,61 @@ metric of every period, with the period's total as a row of its own. A descripti
 only repeats the item's type and id is left out. A value of exactly zero is
 printed in the muted colour, so the amounts that are not zero stand out.
 
-## The fleet over a window and at an instant
+## The fleet at an instant and over a window
 
-The resource list is read under one status and shown over a window or at an
-instant. The status is the API's own filter, chosen with the switch above the
-table: `active` serves the rows whose state is not deleted and is the default,
-`deleted` serves those alone, and `all` serves both. A `status` that is none of
-the three is answered 400. Switching the status drops the cursor, because a
-cursor positions a walk through one status and means nothing in another. A
-deleted resource is only on the page when the status admits it, so looking
-back starts with switching the status to `all`.
+The resource list is read under one status, and that page is then read one of
+two ways. The status is the API's own filter, chosen with the switch on the
+`show` line above the table: `active` serves the rows whose state is not
+deleted and is the default, `deleted` serves those alone, and `all` serves
+both. A `status` that is none of the three is answered 400. Switching the
+status drops the cursor, because a cursor positions a walk through one status
+and means nothing in another. A deleted resource is only on the page when the
+status admits it, so looking back starts with switching the status to `all`.
 
-The window and the instant are the console's filters, applied to the rows the
-API served. Each of `from`, `to` and `at` is read as RFC 3339 or as the form
-the inputs write, `2026-03-15T12:00`, which carries no zone and is read as UTC;
-one that does not parse is answered 400.
+The two ways are the console's own filters, applied to the rows the API
+served, and the switch on the `when` line chooses between them: **at an
+instant**, which answers what runs right now or what ran at one moment, and
+**over a window**, which answers what lived between two moments. The page
+draws the inputs and the presets of the chosen way alone, so a window and an
+instant are never asked for at once. Which way a request means is `mode`,
+either `instant` or `window`; a request that names no mode means the window
+when it carries `from` or `to`, and the instant otherwise. A `mode` that is
+neither is answered 400. What the other way would be asked with is ignored,
+so a stale `at` on a window page changes nothing, and switching ways drops the
+parameters of the way being left.
+
+Each of `at`, `from` and `to` is read as RFC 3339 or as the form the inputs
+write, `2026-03-15T12:00`, which carries no zone and is read as UTC; one that
+does not parse is answered 400.
+
+The instant is `at`, and the page opens on it: a resource existed at it when
+it was created at or before it and not deleted at or before it; a resource
+whose history shows no create has no creation time and is taken to have
+existed all along. Without `at` the instant is now, so the page opens on what
+runs right now. The instant presets are now, which is no parameter at all, 24
+hours ago, 7 days ago, the start of this month and the start of last month.
+The instant input stays empty while nothing is pinned, so the page opens on
+now without claiming an instant was chosen.
 
 The window is `from` and `to`, half-open: a resource existed in it when it was
 created before `to` and not deleted at or before `from`. Either bound may be
 left out, which leaves the window open on that side, and a `to` that is not
-after `from` is answered 400. The window presets are the last 24 hours, the
-last 7 days, this month, last month, and all, which is no window.
-
-The instant is `at`: a resource existed at it when it was created at or before
-it and not deleted at or before it; a resource whose history shows no create
-has no creation time and is taken to have existed all along. With neither a
-window nor an instant the page shows what exists now, so it opens on what runs
-right now. With a window and no instant it shows everything that lived in the
-window. With an instant, inside a window or not, it shows what existed at that
-instant. The instant presets are now, offered while there is no window, 24
-hours ago, 7 days ago, the start of this month, the start of last month, and
-clear, offered while an instant is pinned inside a window. The instant input
-stays empty while nothing is pinned, so applying a window does not pin the
-instant to now on the way.
+after `from` is answered 400. A window with neither bound holds every row of
+the page, whenever it lived. The window presets are the last 24 hours, the
+last 7 days, this month, last month, and any time, which is the window with
+neither bound.
 
 The page asks the API for 1000 rows, the most one page carries, so that the
 filters are applied to as much of the fleet as one call holds; the fleet of the
 simulated month fits. A page the API followed with a cursor, or one reached by
 a cursor, counts its rows as one page, and its next link carries the status,
-the window and the instant along. The line above the table says how many of
-the rows the API served the filters kept, and a page the filters emptied says
-so in place of the rows.
+the mode, the window and the instant along. The line beside the status switch
+says how many of the rows the API served the filters kept and what they were
+kept for, and a page the filters emptied says so in place of the rows.
 
 Every row prints its lifetime in hours at two places: from its creation to
-its deletion, or to now for a resource still there, whatever the window and
-the instant are. A resource whose history starts without a create has no
+its deletion, or to now for a resource still there, whatever the page is read
+at. A resource whose history starts without a create has no
 creation time, which the API leaves null and the fold reports as
 `history_starts_without_create`; the row prints `unknown` for its creation and
 its lifetime, and the line above the table counts such rows. The resource page

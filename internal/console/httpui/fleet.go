@@ -15,18 +15,23 @@ import (
 )
 
 // The resources page lists the part of the fleet the Reporting API serves
-// under one status, and of those rows the ones that existed over a window or
-// at an instant. The status is the API's own filter, active by default. The
-// window and the instant are the console's, applied to the rows the API
-// served.
+// under one status, and of those rows the ones the chosen time keeps. The
+// status is the API's own filter, active by default. The time is the
+// console's, applied to the rows the API served.
 //
-// The window is from and to, a half-open span: a resource existed in it when
-// it was created before to and not deleted at or before from. The instant is
-// at: a resource existed at it when it was created at or before it and not
-// deleted at or before it. Without a window and without an instant the page
-// shows what exists now, so it opens on what runs right now. With a window and
-// no instant it shows everything that lived in the window. With an instant,
-// whether inside a window or not, it shows what existed at that instant.
+// A viewer reads the fleet one of two ways, and never both at once: at an
+// instant, which answers what runs right now or what ran at one moment, or
+// over a window, which answers what lived between two moments. Which of the
+// two a request means is the mode parameter, and a request that names none
+// means the window when it carries a bound of one and the instant otherwise.
+// The parameters of the other way are ignored rather than combined, so one
+// page is one question.
+//
+// The instant is at, now when it is absent: a resource existed at it when it
+// was created at or before it and not deleted at or before it. The window is
+// from and to, a half-open span: a resource existed in it when it was created
+// before to and not deleted at or before from. A window with neither bound is
+// every row the page holds, whenever it lived.
 //
 // A deleted resource is only on the page when the status admits it, so
 // looking back starts with switching the status to all. Every row carries the
@@ -46,9 +51,15 @@ const (
 	atLayout = "2006-01-02T15:04"
 	// The query parameters of the fleet controls.
 	statusParameter = "status"
+	modeParameter   = "mode"
 	fromParameter   = "from"
 	toParameter     = "to"
 	atParameter     = "at"
+	// The two ways the fleet is read. The instant is the default and travels
+	// as no parameter at all; the window is named, because a window with
+	// neither bound is otherwise indistinguishable from the instant.
+	modeInstant = "instant"
+	modeWindow  = "window"
 	// resourceTable is the name the resource listing's sort and filter
 	// parameters carry.
 	resourceTable = "resources"
@@ -58,27 +69,27 @@ const (
 // prints them. The first is the API's default and the page's.
 var statuses = []string{"active", "deleted", "all"}
 
-// fleetState is what the request says about the fleet: which part of it, over
-// which window, and at which instant. A nil bound is a window open on that
-// side, and Pinned is false while no instant was named, which is now when
-// there is no window either.
+// fleetState is what the request says about the fleet: which part of it, and
+// which time it is read at. Window says which of the two ways was asked for,
+// and the members of the other way are left at their zero values. A nil bound
+// is a window open on that side, and Pinned is false while no instant was
+// named, which is now.
 type fleetState struct {
 	Status string
+	Window bool
 	From   *time.Time
 	To     *time.Time
 	At     time.Time
 	Pinned bool
 }
 
-// windowed reports whether either bound of the window is set.
-func (s fleetState) windowed() bool {
-	return s.From != nil || s.To != nil
-}
-
-// readFleet reads the status, the window and the instant, each falling back
-// to its default when absent. A status the API does not serve, a bound or an
-// instant that does not parse, and a window that ends before it starts are
-// refused the way any unreadable parameter is.
+// readFleet reads the status and the time the fleet is read at, each falling
+// back to its default when absent. Only the parameters of the mode in effect
+// are read: what the other way would have been asked with says nothing about
+// this page and is not held against the request either. A status the API does
+// not serve, a mode that is neither way, a bound or an instant that does not
+// parse, and a window that ends before it starts are refused the way any
+// unreadable parameter is.
 func readFleet(r *http.Request, now time.Time) (fleetState, error) {
 	query := r.URL.Query()
 	state := fleetState{Status: statuses[0], At: now}
@@ -90,6 +101,29 @@ func readFleet(r *http.Request, now time.Time) (fleetState, error) {
 		state.Status = status
 	}
 
+	switch mode := query.Get(modeParameter); mode {
+	case "":
+		// A link written before the modes, or by hand, names a window by
+		// carrying a bound of one.
+		state.Window = query.Get(fromParameter) != "" || query.Get(toParameter) != ""
+	case modeWindow:
+		state.Window = true
+	case modeInstant:
+	default:
+		return fleetState{}, &paramError{name: modeParameter, reason: "is not instant or window"}
+	}
+
+	if !state.Window {
+		if at := query.Get(atParameter); at != "" {
+			parsed, err := parseInstant(at)
+			if err != nil {
+				return fleetState{}, &paramError{name: atParameter, reason: "is not an instant: " + err.Error()}
+			}
+			state.At, state.Pinned = parsed, true
+		}
+		return state, nil
+	}
+
 	var err error
 	if state.From, err = optionalInstant(query, fromParameter); err != nil {
 		return fleetState{}, err
@@ -99,14 +133,6 @@ func readFleet(r *http.Request, now time.Time) (fleetState, error) {
 	}
 	if state.From != nil && state.To != nil && !state.To.After(*state.From) {
 		return fleetState{}, &paramError{name: toParameter, reason: "is not after from"}
-	}
-
-	if at := query.Get(atParameter); at != "" {
-		parsed, err := parseInstant(at)
-		if err != nil {
-			return fleetState{}, &paramError{name: atParameter, reason: "is not an instant: " + err.Error()}
-		}
-		state.At, state.Pinned = parsed, true
 	}
 	return state, nil
 }
@@ -134,24 +160,20 @@ func parseInstant(text string) (time.Time, error) {
 	return time.ParseInLocation(atLayout, text, time.UTC)
 }
 
-// keep reports whether a row is shown: inside the window where one is set,
-// and existing at the instant where one is pinned, or at now when neither is
-// there.
-func keep(resource httpapi.Resource, state fleetState, now time.Time) bool {
+// keep reports whether a row is shown: existing at the instant the page is
+// read at, or having lived inside the window it is read over. A window with
+// neither bound keeps every row.
+func keep(resource httpapi.Resource, state fleetState) bool {
+	if !state.Window {
+		return existedAt(resource, state.At)
+	}
 	if state.From != nil && resource.DeletedAt != nil && !resource.DeletedAt.After(*state.From) {
 		return false
 	}
 	if state.To != nil && resource.CreatedAt != nil && !resource.CreatedAt.Before(*state.To) {
 		return false
 	}
-	switch {
-	case state.Pinned:
-		return existedAt(resource, state.At)
-	case state.windowed():
-		return true
-	default:
-		return existedAt(resource, now)
-	}
+	return true
 }
 
 // existedAt reports whether a resource existed at an instant: created at or
@@ -265,19 +287,22 @@ type choice struct {
 }
 
 // fleetView is what the template renders above the resource table: the status
-// switch, the three inputs with the hidden fields their form carries, the
-// presets of the window and of the instant, and what the filters left of the
-// page.
+// switch, the switch between the two ways of reading the fleet, the inputs of
+// the way in effect with the hidden fields their form carries, that way's
+// presets, and what the filters left of the page.
 type fleetView struct {
-	Path          string
-	Hidden        []field
-	Switch        []choice
-	From          string
-	To            string
-	At            string
-	WindowPresets []choice
-	Presets       []choice
-	Count         string
+	Path   string
+	Hidden []field
+	Switch []choice
+	Modes  []choice
+	// Windowed says which inputs the form draws, the two bounds of a window
+	// or the one instant, so that a page never asks for both.
+	Windowed bool
+	From     string
+	To       string
+	At       string
+	Presets  []choice
+	Count    string
 	// Empty is what the table says when the filters left nothing of a page
 	// that held rows; a page the API served empty says what it always said.
 	Empty string
@@ -286,27 +311,51 @@ type fleetView struct {
 	Unknown string
 }
 
-// buildFleetView lays the controls out for one request. The status links drop
-// the cursor, because a cursor positions a walk through one status and means
-// nothing in another; the window and the instant keep it, because they filter
-// the page the cursor named. The instant input is left empty while nothing is
-// pinned, so that applying a window does not pin the instant to now on the
-// way.
+// buildFleetView lays the controls out for one request. Every link the page
+// draws is built over the parameters of the mode in effect alone, so that
+// following one never leaves a page asking two questions at once; the switch
+// to the other mode is what drops the one and names the other. The status
+// links drop the cursor, because a cursor positions a walk through one status
+// and means nothing in another, while the time links keep it, because they
+// filter the page the cursor named. The instant input is left empty while
+// nothing is pinned, so that the page opens on now without claiming an
+// instant was chosen.
 func buildFleetView(
 	r *http.Request, state fleetState, now time.Time, kept, total, unknown int, paged bool,
 ) fleetView {
 	values := r.URL.Query()
 	view := fleetView{
-		Path:    r.URL.Path,
-		From:    inputValue(state.From),
-		To:      inputValue(state.To),
-		Unknown: unknownText(unknown),
+		Path:     r.URL.Path,
+		Windowed: state.Window,
+		From:     inputValue(state.From),
+		To:       inputValue(state.To),
+		Unknown:  unknownText(unknown),
 	}
 	if state.Pinned {
 		view.At = state.At.UTC().Format(atLayout)
 	}
 
-	own := []string{fromParameter, toParameter, atParameter}
+	// The two modes as their own links, each dropping what the other one is
+	// asked with. The one in effect is what every other link on the page is
+	// built over.
+	asInstant := maps.Clone(values)
+	asInstant.Del(fromParameter)
+	asInstant.Del(toParameter)
+	asInstant.Del(modeParameter)
+	asWindow := maps.Clone(values)
+	asWindow.Del(atParameter)
+	asWindow.Set(modeParameter, modeWindow)
+	view.Modes = []choice{
+		{Label: "at an instant", Link: href(r.URL.Path, asInstant), Current: !state.Window},
+		{Label: "over a window", Link: href(r.URL.Path, asWindow), Current: state.Window},
+	}
+
+	base := asInstant
+	if state.Window {
+		base = asWindow
+	}
+
+	own := []string{modeParameter, fromParameter, toParameter, atParameter}
 	for _, key := range slices.Sorted(maps.Keys(values)) {
 		if slices.Contains(own, key) {
 			continue
@@ -319,7 +368,7 @@ func buildFleetView(
 	}
 
 	for _, status := range statuses {
-		linked := maps.Clone(values)
+		linked := maps.Clone(base)
 		linked.Del("cursor")
 		linked.Set(statusParameter, status)
 		if status == statuses[0] {
@@ -330,8 +379,11 @@ func buildFleetView(
 		})
 	}
 
-	view.WindowPresets = windowPresets(r.URL.Path, values, state, now)
-	view.Presets = instantPresets(r.URL.Path, values, state, now)
+	if state.Window {
+		view.Presets = windowPresets(r.URL.Path, base, state, now)
+	} else {
+		view.Presets = instantPresets(r.URL.Path, base, state, now)
+	}
 	view.Count = fleetCount(state, kept, total, paged)
 	if total > 0 && kept == 0 {
 		view.Empty = "no resource of this page " + existence(state, 1)
@@ -348,8 +400,9 @@ func inputValue(bound *time.Time) string {
 	return bound.UTC().Format(atLayout)
 }
 
-// windowPresets are the windows one click away, four spans behind now that a
-// demo month is read over, and all, which is no window at all.
+// windowPresets are the windows one click away: four spans behind now that a
+// demo month is read over, and any time, which is the window with neither
+// bound and holds every row the page carries.
 func windowPresets(path string, values url.Values, state fleetState, now time.Time) []choice {
 	monthStart := firstOfThisMonthUTC(now)
 	spans := []struct {
@@ -362,27 +415,28 @@ func windowPresets(path string, values url.Values, state fleetState, now time.Ti
 		{"last month", monthStart.AddDate(0, -1, 0), monthStart},
 	}
 
-	var list []choice
+	list := make([]choice, 0, len(spans)+1)
 	for _, span := range spans {
 		linked := maps.Clone(values)
 		linked.Set(fromParameter, stamp(span.from))
 		linked.Set(toParameter, stamp(span.to))
-		list = append(list, choice{
-			Label:   span.label,
-			Link:    href(path, linked),
-			Current: state.From != nil && state.To != nil && state.From.Equal(span.from) && state.To.Equal(span.to),
-		})
+		current := state.From != nil && state.To != nil &&
+			state.From.Equal(span.from) && state.To.Equal(span.to)
+		list = append(list, choice{Label: span.label, Link: href(path, linked), Current: current})
 	}
 
 	linked := maps.Clone(values)
 	linked.Del(fromParameter)
 	linked.Del(toParameter)
-	return append(list, choice{Label: "all", Link: href(path, linked), Current: !state.windowed()})
+	return append(list, choice{
+		Label:   "any time",
+		Link:    href(path, linked),
+		Current: state.From == nil && state.To == nil,
+	})
 }
 
 // instantPresets are the instants one click away: now, which is no parameter
-// at all and is offered while there is no window, four points behind it, and
-// clear, which unpins the instant inside a window.
+// at all, and four points behind it that a demo month is read at.
 func instantPresets(path string, values url.Values, state fleetState, now time.Time) []choice {
 	monthStart := firstOfThisMonthUTC(now)
 	points := []struct {
@@ -397,10 +451,7 @@ func instantPresets(path string, values url.Values, state fleetState, now time.T
 
 	unpinned := maps.Clone(values)
 	unpinned.Del(atParameter)
-	var list []choice
-	if !state.windowed() {
-		list = append(list, choice{Label: "now", Link: href(path, unpinned), Current: !state.Pinned})
-	}
+	list := []choice{{Label: "now", Link: href(path, unpinned), Current: !state.Pinned}}
 	for _, point := range points {
 		linked := maps.Clone(values)
 		linked.Set(atParameter, stamp(point.at))
@@ -409,9 +460,6 @@ func instantPresets(path string, values url.Values, state fleetState, now time.T
 			Link:    href(path, linked),
 			Current: state.Pinned && state.At.Equal(point.at),
 		})
-	}
-	if state.windowed() && state.Pinned {
-		list = append(list, choice{Label: "clear", Link: href(path, unpinned)})
 	}
 	return list
 }
@@ -431,17 +479,19 @@ func fleetCount(state fleetState, kept, total int, paged bool) string {
 // the number the subject has.
 func existence(state fleetState, subjects int) string {
 	switch {
-	case state.Pinned:
+	case !state.Window && state.Pinned:
 		return "existed at " + stamp(state.At)
+	case !state.Window && subjects == 1:
+		return "exists now"
+	case !state.Window:
+		return "exist now"
 	case state.From != nil && state.To != nil:
 		return "existed between " + stamp(*state.From) + " and " + stamp(*state.To)
 	case state.From != nil:
 		return "existed since " + stamp(*state.From)
 	case state.To != nil:
 		return "existed before " + stamp(*state.To)
-	case subjects == 1:
-		return "exists now"
 	default:
-		return "exist now"
+		return "existed at some time"
 	}
 }
