@@ -501,6 +501,27 @@ details.cell > pre {
   min-width: 24rem;
 }
 
+/* A table inside a cell carries what one row is made of, the resources of one
+   resource type for example. It is wider than the cell it folds out of, and
+   its heading does not stick, because it scrolls with the row rather than with
+   the page. */
+details.cell > table.nested {
+  width: auto;
+  min-width: 34rem;
+  margin: 0.35rem 0 0.25rem;
+}
+
+table.nested th {
+  position: static;
+  background: none;
+  font-size: 0.75rem;
+}
+
+table.nested th,
+table.nested td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+}
+
 svg text {
   fill: var(--ink);
   font-family: system-ui, sans-serif;

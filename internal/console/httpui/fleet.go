@@ -161,16 +161,23 @@ func parseInstant(text string) (time.Time, error) {
 }
 
 // keep reports whether a row is shown: existing at the instant the page is
-// read at, or having lived inside the window it is read over. A window with
-// neither bound keeps every row.
+// read at, or having lived inside the window it is read over.
 func keep(resource httpapi.Resource, state fleetState) bool {
 	if !state.Window {
 		return existedAt(resource, state.At)
 	}
-	if state.From != nil && resource.DeletedAt != nil && !resource.DeletedAt.After(*state.From) {
+	return livedBetween(resource, state.From, state.To)
+}
+
+// livedBetween reports whether a resource lived inside a half-open window: it
+// was created before to and not deleted at or before from. A nil bound is a
+// window open on that side, and a window with neither bound holds every
+// resource, whenever it lived.
+func livedBetween(resource httpapi.Resource, from, to *time.Time) bool {
+	if from != nil && resource.DeletedAt != nil && !resource.DeletedAt.After(*from) {
 		return false
 	}
-	if state.To != nil && resource.CreatedAt != nil && !resource.CreatedAt.Before(*state.To) {
+	if to != nil && resource.CreatedAt != nil && !resource.CreatedAt.Before(*to) {
 		return false
 	}
 	return true
