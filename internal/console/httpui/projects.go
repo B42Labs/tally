@@ -37,16 +37,29 @@ type projectRow struct {
 }
 
 // projectData is one project from both sides: what the registry holds, what it
-// ran this month, and what every run billed it.
+// ran over the window the viewer reads, and what every run billed it.
 type projectData struct {
 	Project    httpapi.Project
 	Relations  listing[relationRow]
 	Related    listing[relatedRow]
 	Activity   listing[httpapi.ProjectActivity]
+	Window     windowView
 	From       time.Time
 	To         time.Time
 	Key        string
 	Statements listing[projectStatementRow]
+}
+
+// windowView is the control above a table that reads one window: the two
+// inputs with the hidden fields their form carries the page through, and the
+// spans one click away. It is the window half of the fleet controls, drawn the
+// same way, for a page whose numbers are a window and nothing else.
+type windowView struct {
+	Path    string
+	Hidden  []field
+	From    string
+	To      string
+	Presets []choice
 }
 
 // The columns of a project page's tables.
@@ -148,6 +161,13 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var src sources
 
+	now := h.now()
+	from, to, err := readWindow(r, now)
+	if err != nil {
+		h.failFrom(w, r, err, src)
+		return
+	}
+
 	id, err := h.projectID(ctx, r, &src)
 	if err != nil {
 		h.failFrom(w, r, err, src)
@@ -175,8 +195,6 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	from := firstOfThisMonthUTC(h.now())
-	to := from.AddDate(0, 1, 0)
 	summary, request, err := h.api.GetProjectSummary(ctx, id, from, to)
 	src.api(request)
 	if err != nil {
@@ -222,6 +240,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		Relations:  tabulate(r, "relations", relationColumns, listed),
 		Related:    tabulate(r, "related", relatedColumns, reached),
 		Activity:   tabulate(r, "activity", activityColumns, summary.ResourceTypes),
+		Window:     buildWindowView(r, from, to, now),
 		From:       from,
 		To:         to,
 		Key:        key,
@@ -232,6 +251,53 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		Sources: src,
 		Data:    data,
 	})
+}
+
+// readWindow reads the window a project's activity is summarized over: the
+// bounds from and to, each in either form an instant is written in, and this
+// month when the request names neither. The summary route takes both bounds,
+// so a request that carries one and not the other is refused rather than
+// answered over half a window it never asked for, and a window that ends no
+// later than it starts is refused the way the fleet's is.
+func readWindow(r *http.Request, now time.Time) (from, to time.Time, err error) {
+	query := r.URL.Query()
+	first, second := query.Get(fromParameter), query.Get(toParameter)
+	if first == "" && second == "" {
+		start := firstOfThisMonthUTC(now)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+	if first == "" {
+		return time.Time{}, time.Time{}, missingParameter(fromParameter)
+	}
+	if second == "" {
+		return time.Time{}, time.Time{}, missingParameter(toParameter)
+	}
+
+	if from, err = parseInstant(first); err != nil {
+		return time.Time{}, time.Time{}, unreadableInstant(fromParameter, err)
+	}
+	if to, err = parseInstant(second); err != nil {
+		return time.Time{}, time.Time{}, unreadableInstant(toParameter, err)
+	}
+	if !to.After(from) {
+		return time.Time{}, time.Time{}, &paramError{name: toParameter, reason: "is not after from"}
+	}
+	return from, to, nil
+}
+
+// buildWindowView lays the window control out for one request. The presets are
+// the fleet's spans over the same bounds, so the two pages are read the same
+// way, and the form carries the rest of the page through, the project the page
+// is about included.
+func buildWindowView(r *http.Request, from, to, now time.Time) windowView {
+	values := r.URL.Query()
+	return windowView{
+		Path:    r.URL.Path,
+		Hidden:  hiddenFields(values, fromParameter, toParameter),
+		From:    from.UTC().Format(atLayout),
+		To:      to.UTC().Format(atLayout),
+		Presets: spanPresets(r.URL.Path, values, &from, &to, now),
+	}
 }
 
 // projectID reads which project the page is about: the id parameter when it

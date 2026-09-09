@@ -117,7 +117,7 @@ func readFleet(r *http.Request, now time.Time) (fleetState, error) {
 		if at := query.Get(atParameter); at != "" {
 			parsed, err := parseInstant(at)
 			if err != nil {
-				return fleetState{}, &paramError{name: atParameter, reason: "is not an instant: " + err.Error()}
+				return fleetState{}, unreadableInstant(atParameter, err)
 			}
 			state.At, state.Pinned = parsed, true
 		}
@@ -145,7 +145,7 @@ func optionalInstant(query url.Values, name string) (*time.Time, error) {
 	}
 	parsed, err := parseInstant(text)
 	if err != nil {
-		return nil, &paramError{name: name, reason: "is not an instant: " + err.Error()}
+		return nil, unreadableInstant(name, err)
 	}
 	return &parsed, nil
 }
@@ -355,17 +355,7 @@ func buildFleetView(
 		base = asWindow
 	}
 
-	own := []string{modeParameter, fromParameter, toParameter, atParameter}
-	for _, key := range slices.Sorted(maps.Keys(values)) {
-		if slices.Contains(own, key) {
-			continue
-		}
-		for _, value := range values[key] {
-			if value != "" {
-				view.Hidden = append(view.Hidden, field{Name: key, Value: value})
-			}
-		}
-	}
+	view.Hidden = hiddenFields(values, modeParameter, fromParameter, toParameter, atParameter)
 
 	for _, status := range statuses {
 		linked := maps.Clone(base)
@@ -391,6 +381,25 @@ func buildFleetView(
 	return view
 }
 
+// hiddenFields is every parameter of a page as a form carries it through,
+// except the ones the form asks for itself. A form that submits its page keeps
+// the page's identifiers, its cursor, and the order and filter of every table
+// on it that way.
+func hiddenFields(values url.Values, own ...string) []field {
+	var list []field
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		if slices.Contains(own, key) {
+			continue
+		}
+		for _, value := range values[key] {
+			if value != "" {
+				list = append(list, field{Name: key, Value: value})
+			}
+		}
+	}
+	return list
+}
+
 // inputValue is what a datetime-local input shows for a bound: the bound, or
 // nothing for a side the window is open on.
 func inputValue(bound *time.Time) string {
@@ -400,10 +409,10 @@ func inputValue(bound *time.Time) string {
 	return bound.UTC().Format(atLayout)
 }
 
-// windowPresets are the windows one click away: four spans behind now that a
-// demo month is read over, and any time, which is the window with neither
-// bound and holds every row the page carries.
-func windowPresets(path string, values url.Values, state fleetState, now time.Time) []choice {
+// spanPresets are the four windows one click away, the spans behind now that a
+// demo month is read over. Both bounds travel in every link, so a preset says
+// the whole window rather than half of one.
+func spanPresets(path string, values url.Values, from, to *time.Time, now time.Time) []choice {
 	monthStart := firstOfThisMonthUTC(now)
 	spans := []struct {
 		label    string
@@ -415,20 +424,27 @@ func windowPresets(path string, values url.Values, state fleetState, now time.Ti
 		{"last month", monthStart.AddDate(0, -1, 0), monthStart},
 	}
 
-	list := make([]choice, 0, len(spans)+1)
+	list := make([]choice, 0, len(spans))
 	for _, span := range spans {
 		linked := maps.Clone(values)
 		linked.Set(fromParameter, stamp(span.from))
 		linked.Set(toParameter, stamp(span.to))
-		current := state.From != nil && state.To != nil &&
-			state.From.Equal(span.from) && state.To.Equal(span.to)
-		list = append(list, choice{Label: span.label, Link: href(path, linked), Current: current})
+		list = append(list, choice{
+			Label:   span.label,
+			Link:    href(path, linked),
+			Current: from != nil && to != nil && from.Equal(span.from) && to.Equal(span.to),
+		})
 	}
+	return list
+}
 
+// windowPresets are the spans the fleet is read over and any time, which is
+// the window with neither bound and holds every row the page carries.
+func windowPresets(path string, values url.Values, state fleetState, now time.Time) []choice {
 	linked := maps.Clone(values)
 	linked.Del(fromParameter)
 	linked.Del(toParameter)
-	return append(list, choice{
+	return append(spanPresets(path, values, state.From, state.To, now), choice{
 		Label:   "any time",
 		Link:    href(path, linked),
 		Current: state.From == nil && state.To == nil,
