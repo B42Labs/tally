@@ -89,10 +89,22 @@
 {{template "tableHead" .Statements.Table}}
 <tbody>
 {{range .Statements.Rows}}<tr>
-<td><a href="{{.Link}}">{{stamp .Row.PeriodFrom}}</a></td>
+<td><details class="cell"><summary>{{stamp .From}}</summary>
+<table class="nested">
+<thead><tr><th>statement</th><th>run kind</th><th>run status</th><th class="number">total</th></tr></thead>
+<tbody>
+{{range .Statements}}<tr{{if not .Standing}} class="muted"{{end}}>
+<td><a href="{{.Link}}">open</a></td>
 <td>{{.Row.Kind}}</td>
-<td>{{.Row.Status}}</td>
+<td>{{.Row.Status}}{{if not .Standing}}, replaced{{end}}</td>
 <td class="number">{{amount .Row.Total}} {{.Row.Currency}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</details></td>
+<td>{{.Status}}</td>
+<td class="number">{{len .Statements}}</td>
+<td class="number">{{range $i, $t := .Totals}}{{if $i}} + {{end}}{{amount $t.Total}} {{$t.Currency}}{{else}}none{{end}}</td>
 </tr>
 {{else}}<tr><td colspan="4">{{emptyText .Statements.Table "no run has billed this project"}}</td></tr>
 {{end}}</tbody>
