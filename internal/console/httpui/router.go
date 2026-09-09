@@ -5,16 +5,21 @@
 // page carries a script element or an event handler attribute, and it loads
 // exactly one asset, /static/console.css. What a viewer sees is what the
 // handler rendered, and a page that shows a number read that number itself.
+// Sorting and filtering a table are links and a form that reload the page
+// with the table's state in the query string, and the theme is a form that
+// posts the choice to /theme, the one route that is not a page: it keeps the
+// choice in a cookie and sends the viewer back.
 //
 // Every identifier travels in a query parameter rather than in a path segment.
 // A cloud name, a resource id and a statement key may each carry a slash, and a
 // path segment would either split such an identifier in two or hide it behind
 // an escape that a proxy in front of the console is free to normalize away.
 //
-// Nothing here writes. The pages read the Reporting API for projects,
-// resources, lifecycles, stats and refused events, and the engine database for
-// everything monetary. A failure of either side reaches the viewer as one error
-// page naming what failed, and the same wrapped error goes to the log.
+// Nothing here writes to either side. The pages read the Reporting API for
+// projects, resources, lifecycles, stats and refused events, and the engine
+// database for everything monetary. A failure of either side reaches the
+// viewer as one error page naming what failed, and the same wrapped error goes
+// to the log.
 package httpui
 
 import (
@@ -135,7 +140,9 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/run", h.run)
 	r.Get("/statement", h.statement)
 	r.Get("/static/console.css", h.stylesheet)
+	r.Post(themeRoute, h.theme)
 	r.NotFound(h.notFound)
+	r.MethodNotAllowed(h.methodNotAllowed)
 
 	return r, nil
 }
@@ -158,6 +165,14 @@ func (h *handlers) stylesheet(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) notFound(w http.ResponseWriter, r *http.Request) {
 	h.fail(w, r, http.StatusNotFound, "no such page",
 		fmt.Errorf("the path %s is not part of the console", r.URL.Path), nil)
+}
+
+// methodNotAllowed answers a route asked with the wrong method, which is the
+// theme route fetched rather than posted. It lands on the error page for the
+// reason notFound does.
+func (h *handlers) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	h.fail(w, r, http.StatusMethodNotAllowed, "the method is not allowed",
+		fmt.Errorf("the path %s does not answer %s", r.URL.Path, r.Method), nil)
 }
 
 // link builds one href. The pairs are parameter names and values, encoded once

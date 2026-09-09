@@ -1,7 +1,8 @@
 {{define "layout"}}<!DOCTYPE html>
-<html lang="en">
+<html lang="en"{{if .Theme}} data-theme="{{.Theme}}"{{end}}>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tally console: {{.Title}}</title>
 <link rel="stylesheet" href="/static/console.css">
 </head>
@@ -11,6 +12,13 @@
 <a href="/projects">Projects</a>
 <a href="/resources">Resources</a>
 <a href="/pricing">Pricing</a>
+<form class="theme" method="post" action="/theme">
+<input type="hidden" name="back" value="{{.Back}}">
+<span>theme</span>
+<button name="theme" value="auto"{{if not .Theme}} aria-pressed="true"{{end}}>auto</button>
+<button name="theme" value="light"{{if eq .Theme "light"}} aria-pressed="true"{{end}}>light</button>
+<button name="theme" value="dark"{{if eq .Theme "dark"}} aria-pressed="true"{{end}}>dark</button>
+</form>
 </nav>
 <main>
 <h1>{{.Title}}</h1>
@@ -25,4 +33,22 @@
 </footer>
 </body>
 </html>
+{{end}}
+
+{{/* tableTools is the filter form above a table. Every other parameter of the
+     page rides along as a hidden input, so the filter keeps the page's
+     identifiers, its cursor, and the order and filter of every other table. */}}
+{{define "tableTools"}}<form class="tools" method="get" action="{{.Path}}">
+{{range .Hidden}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}<label>filter <input type="search" name="{{.QueryName}}" value="{{.Query}}" placeholder="any column"></label>
+<button type="submit">apply</button>
+{{if .Query}}<a href="{{.ClearLink}}">clear</a>{{end}}
+<span class="count">{{.Count}}</span>
+</form>
+{{end}}
+
+{{/* tableHead prints the headings. A heading that can sort is a link, the one
+     the table is sorted by says which way in aria-sort, and the heading of a
+     numeric column is aligned over its numbers. */}}
+{{define "tableHead"}}<thead><tr>{{range .Headers}}{{if .Link}}<th{{if .Numeric}} class="number"{{end}}{{if .Sort}} aria-sort="{{.Sort}}"{{end}}><a href="{{.Link}}">{{.Label}}</a></th>{{else}}<th>{{.Label}}</th>{{end}}{{end}}</tr></thead>
 {{end}}
