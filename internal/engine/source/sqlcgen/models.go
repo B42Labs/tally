@@ -42,6 +42,7 @@ type CurrentResource struct {
 	LastEventType string
 	LastEventAt   pgtype.Timestamptz
 	LastPayload   []byte
+	FirstEventAt  pgtype.Timestamptz
 }
 
 type Event struct {

@@ -238,6 +238,7 @@ func seed(t *testing.T, db storetest.DB, g group, resourceID string) {
 		Size:          []byte(`{}`),
 		LastEventType: g.resourceType + ".create",
 		LastEventAt:   pgtype.Timestamptz{Time: lastEventAt, Valid: true},
+		FirstEventAt:  pgtype.Timestamptz{Time: lastEventAt, Valid: true},
 	}); err != nil {
 		t.Fatalf("seeding the projection row of %s: %v", resourceID, err)
 	}

@@ -35,7 +35,7 @@ database and talks to no API.
    ```
 
    ```text
-   migration 10 applied
+   migration 11 applied
    ```
 
 2. Issue the credential for the cloud the collector reports under:

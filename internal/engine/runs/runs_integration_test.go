@@ -257,8 +257,9 @@ func (f fixture) seedCandidate(t *testing.T, r resource) {
 
 	if _, err := f.reporting.Store.Pool().Exec(t.Context(),
 		`INSERT INTO current_resources (cloud, platform, resource_type, resource_id, project_id,
-		                                state, size, created_at, deleted_at, last_event_type, last_event_at)
-		 VALUES ($1, $2, $3, $4, $5, 'deleted', $6::jsonb, $7, $8, 'compute.instance.delete.end', $8)`,
+		                                state, size, created_at, deleted_at, last_event_type, last_event_at,
+		                                first_event_at)
+		 VALUES ($1, $2, $3, $4, $5, 'deleted', $6::jsonb, $7, $8, 'compute.instance.delete.end', $8, $7)`,
 		r.cloud, platform, resourceType, r.id, r.project, r.size, r.created, r.deleted); err != nil {
 		t.Fatalf("seeding the projection row of %s: %v", r.id, err)
 	}

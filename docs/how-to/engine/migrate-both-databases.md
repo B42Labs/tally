@@ -283,8 +283,8 @@ says the rows are gone. The dump taken first is what they come back from.
    ```
 
    ```text
-   migration 9 applied
    migration 10 applied
+   migration 11 applied
    migration 1 applied
    migration 2 applied
    ```
