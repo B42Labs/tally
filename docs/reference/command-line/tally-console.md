@@ -25,16 +25,19 @@ environment, under the names the settings table below lists.
 
 | Route | What it reads |
 | --- | --- |
-| `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, the 20 newest runs. |
+| `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, each linking its own page and the run that finalized it; the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
 | `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into. Engine: every statement of the project, grouped into the periods that were billed, and for a partner what every run settles for it. |
 | `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
-| `/run?id=` | Engine: the run, the stats it stored, its statements, its correction deltas. |
+| `/period?month=` | Engine: the billing period, every run of it, and what each run's statements add up to per currency. |
+| `/run?id=` | Engine: the run, linking its period; the stats it stored; its statements; the files the JSON export writes for it, `run.json` and `kickbacks.json`, and what it settles for each partner; its correction deltas. |
 | `/statement?run=&key=` | Engine: the run, and one statement document rendered as a bill: its head, the file the JSON export writes for it, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. The document of a correction run is a credit note and is rendered as one: its head carries the deltas, its adjustments what changed, and each item's block one row per dimension. |
 | `/statement.json?run=&key=` | Engine: the run and the statement. Not a page: the bytes `tally-engine export --format json` writes for the statement, served as `application/json`, and with `download` set as an attachment. |
+| `/run.json?run=` | Engine: the run, its statements and what it settles. Not a page: the `run.json` `tally-engine export --format json` writes for the run, served as `application/json`, and with `download` set as an attachment. |
+| `/kickbacks.json?run=` | Engine: the same read. Not a page: the `kickbacks.json` `tally-engine export --format json` writes for the run, served the same way. |
 | `/static/console.css` | The embedded stylesheet, the only asset the pages load. |
 | `/theme` | Nothing. Not a page: it takes the theme form's POST, keeps the choice in a cookie, and sends the viewer back. |
 
@@ -156,7 +159,8 @@ The tables and their names per page:
 | `/resource` | `segments`, `events` |
 | `/pricing` | `models` |
 | `/catalog` | `dimensions` |
-| `/run` | `statements`, `deltas`; the lists of what the run reported, `warnings`, `metering_warnings`, `counter_warnings`, `attribution_warnings`, `adjustment_warnings`, `unpriced`, `unreadable`, `unregistered_projects` and `violations` |
+| `/period` | `runs` |
+| `/run` | `statements`, `settlement`, `deltas`; the lists of what the run reported, `warnings`, `metering_warnings`, `counter_warnings`, `attribution_warnings`, `adjustment_warnings`, `unpriced`, `unreadable`, `unregistered_projects` and `violations` |
 | `/statement` | `adjustments`; `items` and `rc-<n>`, the summaries of the line items and of the n-th related cost; `li-<n>` and `rc-<n>-li-<n>`, the metric tables of the items, which sort and carry no filter. A credit note carries the same names, its `li-<n>` tables holding one row per dimension |
 
 A paged listing, `/projects` and `/resources`, is sorted and filtered within
@@ -192,6 +196,30 @@ one row per dimension, with the amount the corrected run billed, the amount
 the correction rated and the delta. A document stored under a correction run
 that names no run it corrects is not a credit note and is answered 503.
 
+## A billing period
+
+A billing period has a page of its own, `/period?month=`, addressed by the
+month in the `YYYY-MM` form `tally-engine` reads `--period` in:
+`/period?month=2026-07`. A `month` that is missing or not of that form is
+answered 400, and a month no run ever opened, which has no billing period, 404.
+The overview's period table links every month to its page, and every run page
+links the month the run billed.
+
+The head says where the month stands: its status, `open`, `grace` or
+`finalized`, when it was finalized and by which run, linking that run's page,
+and what the month bills. What it bills is the sum of the statements of the
+runs that stand, by the rule the project page adds one project up by: a run
+stands when it is `completed` or `finalized`, which is the regular run and
+every correction booked against it. A month billed in two currencies prints
+each sum on its own.
+
+The `runs` table lists every run the engine recorded for the month, in the
+order the runs started, so a correction stands under the run it corrects. Each
+row carries the run's kind, status, pricing version, start and completion, how
+many statements it wrote and what they add up to, and links the run's page. A
+`superseded`, `failed` or `running` run is drawn in the muted colour and says
+it counts for nothing.
+
 ## The export of a statement
 
 The statement page carries, under its head, the file
@@ -224,6 +252,38 @@ nothing else. One name differs from the export's: of two statements of one run
 whose file names differ in ASCII case alone, the export writes the second under
 the SHA-256 digest of its key, and the console, which reads one statement at a
 time, names each after its key.
+
+## The export of a run
+
+The run page carries, below its statements, the two files that
+`tally-engine export --format json` writes for the run beside them:
+`run.json`, the index naming every statement file with its cloud, its project
+and its total, and `kickbacks.json`, what the run settles for its partners.
+Each is folded under its name and its size in bytes, and two links lead to
+`/run.json` and `/kickbacks.json`, which serve the same bytes on their own:
+`open` shows them in the browser, and `download` saves them under the name the
+export gives the file. The files of every run share those two names, so two
+downloads into one directory collide there the way two exports into one
+directory would. The index is the one an export writes without `--rollup`,
+and it names no rollup document.
+
+The console reads the run through the export's own read and hands it to the
+export's own renderers, so the page and the routes show what an export of the
+run writes, byte for byte. That includes every statement document: a statement
+the export refuses, one holding a member the engine's types do not have, makes
+the export refuse the whole run. The page then shows the export's error in
+place of the files, and both routes answer 503. A run that does not stand, a
+`superseded`, `failed` or `running` one, is not exported, which is the rule
+`tally-engine export` applies: its page says so in place of the files, and
+both routes answer 404.
+
+Below the files, the `settlement` table lays `kickbacks.json` out: one
+row per partner and currency, with the number of projects the kickbacks came
+off and what the run owes the partner, read off the document rather than added
+up again. A partner links its own page. A correction's rows are the difference
+to the run it corrects, negative where usage was corrected down, which the
+page says above the table. A run that owes no partner says so in place of the
+rows.
 
 ## What a run reported
 
@@ -342,10 +402,11 @@ engine read under the name its query carries in
 
 A failure renders one error page carrying the wrapped error: 400 for a parameter
 that is missing or unreadable, 404 for a lookup that found nothing, for an API
-404 and for the file of a statement whose run is not exported, 502 for a
-Reporting API call that failed or that the API refused the token for, and 503
-for an engine query that failed or a stored document that does not decode or
-that the export refuses. A path the console has no page for is answered 404 on
+404 and for a file of a statement or of a run whose run is not exported, 502
+for a Reporting API call that failed or that the API refused the token for, and
+503 for an engine query that failed, a stored document that does not decode or
+that the export refuses, and the files of a run whose statements the export
+refuses. A path the console has no page for is answered 404 on
 that same error page, and a route asked with a method it does not answer 405.
 
 Amounts are rendered at two decimal places and quantities at four, the scales
