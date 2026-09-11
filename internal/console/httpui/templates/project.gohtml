@@ -78,7 +78,7 @@
 {{range .Resources}}<tr>
 <td><a href="{{.Link}}">{{.Resource.ResourceId}}</a></td>
 <td>{{.Resource.State}}</td>
-<td>{{unknownStamp .Resource.CreatedAt}}</td>
+<td>{{.Created}}</td>
 <td>{{optStamp .Resource.DeletedAt}}</td>
 <td class="number">{{if .Lived}}{{amount .Lifetime}}{{else}}unknown{{end}}</td>
 </tr>

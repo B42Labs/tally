@@ -154,6 +154,65 @@ func TestLifetimeStart(t *testing.T) {
 	}
 }
 
+func TestCreatedText(t *testing.T) {
+	t.Parallel()
+
+	instant := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name     string
+		resource httpapi.Resource
+		want     string
+	}{
+		{"a creation", httpapi.Resource{CreatedAt: &instant}, "2026-03-01T00:00:00Z"},
+		{"a first event without a creation", httpapi.Resource{FirstEventAt: instant}, "2026-03-01T00:00:00Z, first event"},
+		{"neither", httpapi.Resource{}, "unknown"},
+	}
+	for _, tc := range cases {
+		if got := createdText(tc.resource); got != tc.want {
+			t.Errorf("%s: createdText() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestWithoutCreateText(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"no row with a first event", firstEventText(0), ""},
+		{
+			"one row with a first event", firstEventText(1),
+			"1 row has no creation, because its history starts without a create: " +
+				"it shows its first event instead, and its lifetime runs from that event",
+		},
+		{
+			"two rows with a first event", firstEventText(2),
+			"2 rows have no creation, because their histories start without a create: " +
+				"they show their first event instead, and their lifetime runs from that event",
+		},
+		{"no row without either", unknownText(0), ""},
+		{
+			"one row without either", unknownText(1),
+			"1 row has no creation and no lifetime, because its history starts without a create " +
+				"and the API served no first event for it",
+		},
+		{
+			"two rows without either", unknownText(2),
+			"2 rows have no creation and no lifetime, because their histories start without a create " +
+				"and the API served no first event for them",
+		},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
 func TestScale(t *testing.T) {
 	t.Parallel()
 

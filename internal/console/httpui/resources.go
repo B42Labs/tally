@@ -28,20 +28,23 @@ var resourceColumns = []column[resourceRow]{
 	textCol("resource type", func(r resourceRow) string { return r.Resource.ResourceType }),
 	textCol("resource", func(r resourceRow) string { return r.Resource.ResourceId }),
 	textCol("state", func(r resourceRow) string { return r.Resource.State }),
-	textCol("created", func(r resourceRow) string { return unknownStamp(r.Resource.CreatedAt) }),
+	textCol("created", func(r resourceRow) string { return r.Created }),
 	textCol("deleted", func(r resourceRow) string { return optStamp(r.Resource.DeletedAt) }),
 	numberCol("lifetime hours", func(r resourceRow) decimal.Decimal { return r.Lifetime }),
 	textCol("last payload", func(r resourceRow) string { return pretty(r.Resource.LastPayload) }),
 }
 
-// resourceRow is one resource, its own page, the page of its project, how
-// long it has lived, and what its folded payload says.
+// resourceRow is one resource, its own page, the page of its project, what
+// its created cell prints, how long it has lived, and what its folded payload
+// says.
 type resourceRow struct {
 	Resource    httpapi.Resource
 	Link        string
 	ProjectLink string
-	// Lifetime is the resource's hours from creation to deletion or to now,
-	// and Lived is false for a resource whose history shows no create.
+	Created     string
+	// Lifetime is the resource's hours from its creation, or its first event
+	// for a history that shows no create, to deletion or to now, and Lived is
+	// false only for a row carrying neither.
 	Lifetime       decimal.Decimal
 	Lived          bool
 	PayloadSummary string
@@ -123,20 +126,26 @@ func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows := make([]resourceRow, 0, len(list.Items))
-	unknown := 0
+	// A row without a creation is counted by what it shows instead: its first
+	// event, or unknown when the API served none.
+	fromFirstEvent, unknown := 0, 0
 	for _, resource := range list.Items {
 		if !keep(resource, fleet) {
 			continue
 		}
 		lifetime, lived := lifetimeHours(resource, now)
-		if !lived {
+		switch {
+		case !lived:
 			unknown++
+		case resource.CreatedAt == nil:
+			fromFirstEvent++
 		}
 		rows = append(rows, resourceRow{
 			Resource: resource,
 			Link: link("/resource",
 				"cloud", resource.Cloud, "type", resource.ResourceType, "id", resource.ResourceId),
 			ProjectLink:    projectLink(resource.Cloud, resource.ProjectId),
+			Created:        createdText(resource),
 			Lifetime:       lifetime,
 			Lived:          lived,
 			PayloadSummary: payloadSummary(resource.LastPayload),
@@ -147,7 +156,7 @@ func (h *handlers) resources(w http.ResponseWriter, r *http.Request) {
 	// reached by a cursor: a fleet that fits one page is the whole fleet.
 	paged := list.NextCursor != nil || query.Cursor != ""
 	data := resourcesData{
-		Fleet: buildFleetView(r, fleet, now, len(rows), len(list.Items), unknown, paged),
+		Fleet: buildFleetView(r, fleet, now, len(rows), len(list.Items), fromFirstEvent, unknown, paged),
 		Items: tabulate(r, resourceTable, resourceColumns, rows),
 	}
 	if paged {

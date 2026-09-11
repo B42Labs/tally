@@ -15,8 +15,9 @@ import (
 // absent is what a template prints where a value is not there: a timestamp
 // that was never written, a payload nothing stored, a modifier map a catalog
 // entry left out. unknown is what it prints where a value exists but the
-// console cannot know it: the creation of a resource whose history starts
-// without a create, and the lifetime that would follow from it.
+// console cannot know it: the creation and the lifetime of a resource whose
+// history starts without a create when the API served no first event for it
+// either, and on a resource page the creation of such a history.
 const (
 	absent  = "none"
 	unknown = "unknown"
@@ -33,7 +34,6 @@ func funcMap() template.FuncMap {
 		"price":         price,
 		"stamp":         stamp,
 		"optStamp":      optStamp,
-		"unknownStamp":  unknownStamp,
 		"zeroStamp":     zeroStamp,
 		"idText":        idText,
 		"optString":     optString,
@@ -104,15 +104,6 @@ func stamp(t time.Time) string {
 func optStamp(t *time.Time) string {
 	if t == nil {
 		return absent
-	}
-	return stamp(*t)
-}
-
-// unknownStamp renders an instant the API leaves null because it does not
-// know it, the creation of a resource whose history starts without a create.
-func unknownStamp(t *time.Time) string {
-	if t == nil {
-		return unknown
 	}
 	return stamp(*t)
 }
