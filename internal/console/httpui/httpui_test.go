@@ -187,6 +187,18 @@ type fakeStore struct {
 	periods    []store.Period
 	periodsErr error
 
+	// The three reads of a period page. periodAsked holds the instant each of
+	// them was asked for, in the order they were asked.
+	period      store.Period
+	periodErr   error
+	periodAsked []time.Time
+
+	periodRuns    []store.Run
+	periodRunsErr error
+
+	runTotals    []store.RunTotal
+	runTotalsErr error
+
 	runs      []store.Run
 	runsErr   error
 	runsLimit int32
@@ -232,6 +244,21 @@ type fakeStore struct {
 
 func (f *fakeStore) ListPeriods(context.Context) ([]store.Period, error) {
 	return f.periods, f.periodsErr
+}
+
+func (f *fakeStore) GetPeriod(_ context.Context, from time.Time) (store.Period, error) {
+	f.periodAsked = append(f.periodAsked, from)
+	return f.period, f.periodErr
+}
+
+func (f *fakeStore) ListRunsForPeriod(_ context.Context, from time.Time) ([]store.Run, error) {
+	f.periodAsked = append(f.periodAsked, from)
+	return f.periodRuns, f.periodRunsErr
+}
+
+func (f *fakeStore) ListRunTotalsForPeriod(_ context.Context, from time.Time) ([]store.RunTotal, error) {
+	f.periodAsked = append(f.periodAsked, from)
+	return f.runTotals, f.runTotalsErr
 }
 
 func (f *fakeStore) ListRuns(_ context.Context, limit int32) ([]store.Run, error) {
@@ -486,8 +513,9 @@ var (
 	// the relations table links to.
 	testSourceID = uuid.MustParse("55555555-5555-4555-8555-555555555555")
 	testTargetID = uuid.MustParse("66666666-6666-4666-8666-666666666666")
-	// The two other runs of the period testRunID closed: the regular run it
-	// replaced, and the correction booked against it.
+	// The other runs of the period testRunID closed: a regular run that failed,
+	// the regular run testRunID replaced, and the correction booked against it.
+	testFailedRunID     = uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	testSupersededRunID = uuid.MustParse("77777777-7777-4777-8777-777777777777")
 	testCorrectionRunID = uuid.MustParse("88888888-8888-4888-8888-888888888888")
 	testKey             = statements.Key("os-sim", "p-1")
@@ -614,6 +642,55 @@ func fullStore(t *testing.T) *fakeStore {
 		periods: []store.Period{{
 			From: testPeriod, To: testPeriod.AddDate(0, 1, 0), Status: "open",
 		}},
+		// March as its period page reads it: closed by testRunID, and holding a
+		// run that failed, the run testRunID replaced, and the correction booked
+		// against testRunID.
+		period: store.Period{
+			From:           testPeriod,
+			To:             testPeriod.AddDate(0, 1, 0),
+			Status:         "finalized",
+			FinalizedRunID: testRunID,
+			FinalizedAt:    time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC),
+		},
+		periodRuns: []store.Run{
+			{
+				ID:             testFailedRunID,
+				Kind:           "regular",
+				Status:         "failed",
+				PricingVersion: "2026-03",
+				StartedAt:      time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				ID:             testSupersededRunID,
+				Kind:           "regular",
+				Status:         "superseded",
+				PricingVersion: "2026-03",
+				StartedAt:      time.Date(2026, 4, 1, 6, 0, 0, 0, time.UTC),
+				CompletedAt:    time.Date(2026, 4, 1, 6, 1, 0, 0, time.UTC),
+			},
+			{
+				ID:             testRunID,
+				Kind:           "regular",
+				Status:         "finalized",
+				PricingVersion: "2026-03",
+				StartedAt:      time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC),
+				CompletedAt:    time.Date(2026, 4, 2, 0, 1, 0, 0, time.UTC),
+			},
+			{
+				ID:             testCorrectionRunID,
+				Kind:           "correction",
+				CorrectsRunID:  testRunID,
+				Status:         "finalized",
+				PricingVersion: "2026-03",
+				StartedAt:      time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC),
+				CompletedAt:    time.Date(2026, 4, 10, 0, 1, 0, 0, time.UTC),
+			},
+		},
+		runTotals: []store.RunTotal{
+			{RunID: testSupersededRunID, Currency: "EUR", Statements: 2, Total: mustDecimal(t, "150.00")},
+			{RunID: testRunID, Currency: "EUR", Statements: 2, Total: mustDecimal(t, "192.45")},
+			{RunID: testCorrectionRunID, Currency: "EUR", Statements: 1, Total: mustDecimal(t, "-2.55")},
+		},
 		runs:   []store.Run{run},
 		run:    run,
 		runErr: nil,
@@ -735,6 +812,7 @@ func pagePaths() []string {
 		"/catalog?version=2026-03",
 		"/run?id=" + testRunID.String(),
 		"/statement?run=" + testRunID.String() + "&key=" + url.QueryEscape(testKey),
+		"/period?month=2026-03",
 	}
 }
 
@@ -852,6 +930,31 @@ func TestOverviewPage(t *testing.T) {
 			if !strings.Contains(body, want) {
 				t.Errorf("the footer does not name %q", want)
 			}
+		}
+	})
+
+	t.Run("a period links its page and the run that closed it", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/")
+		periods := section(t, body, "Billing periods", "Metering runs")
+		if !strings.Contains(periods, `<a href="/period?month=2026-03">2026-03-01T00:00:00Z</a>`) {
+			t.Errorf("the period does not link its page:\n%s", periods)
+		}
+		if !strings.Contains(periods, "<td>none</td>") {
+			t.Errorf("the open period names a run that closed it:\n%s", periods)
+		}
+
+		engine := fullStore(t)
+		engine.periods = []store.Period{engine.period}
+		handler, _ = serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ = get(t, handler, "/")
+		periods = section(t, body, "Billing periods", "Metering runs")
+		if !strings.Contains(periods, `<a href="/run?id=`+testRunID.String()+`">`+testRunID.String()+`</a>`) {
+			t.Errorf("the finalized period does not link the run that closed it:\n%s", periods)
 		}
 	})
 }
@@ -1498,6 +1601,268 @@ func TestRunPage(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPeriodPage(t *testing.T) {
+	t.Parallel()
+
+	const periodPath = "/period?month=2026-03"
+
+	t.Run("a finalized month", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, periodPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"<title>tally console: Billing period 2026-03</title>",
+			"<dt>status</dt><dd>finalized</dd>",
+			"<dt>finalized at</dt><dd>2026-04-05T00:00:00Z</dd>",
+			`<dt>finalized by</dt><dd><a href="/run?id=` + testRunID.String() + `">`,
+			"<dt>billed</dt><dd>189.90 EUR</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+		// The failed run billed nothing and the superseded one was replaced, so
+		// neither is added up: 192.45 and -2.55 are, and 150.00 is not.
+		if strings.Contains(body, "339.90") {
+			t.Error("the page adds the superseded run up as well")
+		}
+	})
+
+	t.Run("every run of the month in the order it started", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		runs := section(t, body, "Runs", "Where this page came from")
+		last := -1
+		for _, id := range []uuid.UUID{testFailedRunID, testSupersededRunID, testRunID, testCorrectionRunID} {
+			at := strings.Index(runs, `<a href="/run?id=`+id.String()+`"><code>`+id.String()+`</code></a>`)
+			if at < 0 {
+				t.Fatalf("the run table does not link the run %s:\n%s", id, runs)
+			}
+			if at < last {
+				t.Errorf("the run %s is listed before the run that started ahead of it", id)
+			}
+			last = at
+		}
+		if got := strings.Count(body, `<tr class="muted">`); got != 2 {
+			t.Errorf("the page mutes %d rows, want the failed and the superseded run", got)
+		}
+		if got := strings.Count(body, "counts for nothing"); got != 2 {
+			t.Errorf("the page says %d times that a run counts for nothing, want 2", got)
+		}
+		for _, want := range []string{"150.00 EUR", "192.45 EUR", "-2.55 EUR"} {
+			if !strings.Contains(runs, want) {
+				t.Errorf("the run table does not carry %q", want)
+			}
+		}
+		failed := periodRunOf(t, runs, testFailedRunID)
+		if !strings.Contains(failed, "<td>none</td>") || !strings.Contains(failed, `<td class="number">none</td>`) {
+			t.Errorf("the failed run does not print none as its completion and as its total:\n%s", failed)
+		}
+	})
+
+	t.Run("a month billed in two currencies", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.runTotals = append(engine.runTotals,
+			store.RunTotal{RunID: testRunID, Currency: "USD", Statements: 1, Total: mustDecimal(t, "10.00")})
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		if !strings.Contains(body, "<dt>billed</dt><dd>189.90 EUR + 10.00 USD</dd>") {
+			t.Errorf("the head does not add each currency up on its own:\n%s", body)
+		}
+		regular := periodRunOf(t, section(t, body, "Runs", "Where this page came from"), testRunID)
+		if !strings.Contains(regular, "192.45 EUR + 10.00 USD") || !strings.Contains(regular, `<td class="number">3</td>`) {
+			t.Errorf("the regular run does not carry both currencies and three statements:\n%s", regular)
+		}
+	})
+
+	t.Run("a total whose run the listing does not hold", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.runTotals = append(engine.runTotals, store.RunTotal{
+			RunID:      uuid.MustParse("99999999-9999-4999-8999-999999999999"),
+			Currency:   "EUR",
+			Statements: 1,
+			Total:      mustDecimal(t, "1000.00"),
+		})
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		if !strings.Contains(body, "<dt>billed</dt><dd>189.90 EUR</dd>") {
+			t.Errorf("a total of a run the page does not show changed what the month bills:\n%s", body)
+		}
+	})
+
+	t.Run("an open month", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.period = store.Period{From: testPeriod, To: testPeriod.AddDate(0, 1, 0), Status: "open"}
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		for _, want := range []string{"<dt>finalized at</dt><dd>none</dd>", "<dt>finalized by</dt><dd>none</dd>"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a month without a run", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.periodRuns, engine.runTotals = nil, nil
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		status, body, _ := get(t, handler, periodPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d", status, http.StatusOK)
+		}
+		for _, want := range []string{"no run has been recorded for this period", "<dt>billed</dt><dd>none</dd>"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "<table>") {
+			t.Error("the page draws a run table with nothing in it")
+		}
+	})
+
+	t.Run("a month whose every run was replaced", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.periodRuns = []store.Run{engine.periodRuns[1]}
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		if !strings.Contains(body, "<dt>billed</dt><dd>none</dd>") {
+			t.Errorf("a month whose runs were all replaced bills something:\n%s", body)
+		}
+		if got := strings.Count(body, `<tr class="muted">`); got != 1 {
+			t.Errorf("the page mutes %d rows, want the superseded run", got)
+		}
+	})
+
+	t.Run("the run table filters", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, periodPath+"&runs.q=correction")
+		if !strings.Contains(body, "1 of 4 rows match") {
+			t.Errorf("the filter does not say what matched:\n%s", body)
+		}
+	})
+
+	t.Run("no such month", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.periodErr = fmt.Errorf("GetPeriod: %w", pgx.ErrNoRows)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		if status, body, _ := get(t, handler, periodPath); status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d:\n%s", status, http.StatusNotFound, body)
+		}
+	})
+
+	t.Run("a read that fails", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			query string
+			set   func(f *fakeStore, err error)
+		}{
+			{query: "GetPeriod", set: func(f *fakeStore, err error) { f.periodErr = err }},
+			{query: "ListRunsForPeriod", set: func(f *fakeStore, err error) { f.periodRunsErr = err }},
+			{query: "ListRunTotalsForPeriod", set: func(f *fakeStore, err error) { f.runTotalsErr = err }},
+		}
+		for _, c := range cases {
+			engine := fullStore(t)
+			c.set(engine, fmt.Errorf("%s: %w", c.query, errors.New("connection refused")))
+			handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+			status, body, _ := get(t, handler, periodPath)
+			if status != http.StatusServiceUnavailable {
+				t.Errorf("%s: status = %d, want %d", c.query, status, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(body, c.query) {
+				t.Errorf("%s: the page does not name the read that failed:\n%s", c.query, body)
+			}
+		}
+	})
+
+	t.Run("three reads in the footer", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		_, body, _ := get(t, handler, periodPath)
+		if got := strings.Count(body, "<li><span>"); got != 3 {
+			t.Errorf("the footer lists %d reads, want 3:\n%s", got, body)
+		}
+		for _, want := range []string{"GetPeriod", "ListRunsForPeriod", "ListRunTotalsForPeriod"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the footer does not name %q", want)
+			}
+		}
+		if len(engine.periodAsked) != 3 {
+			t.Fatalf("the page asked for %d months, want 3", len(engine.periodAsked))
+		}
+		for _, asked := range engine.periodAsked {
+			if !asked.Equal(testPeriod) {
+				t.Errorf("the page asked for %s, want %s", stamp(asked), stamp(testPeriod))
+			}
+		}
+	})
+
+	t.Run("a month the page cannot read", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		for _, month := range []string{"2026-13", "2026-3", "july"} {
+			status, body, _ := get(t, handler, "/period?month="+month)
+			if status != http.StatusBadRequest {
+				t.Errorf("%s: status = %d, want %d", month, status, http.StatusBadRequest)
+			}
+			if !strings.Contains(body, "the parameter month is not a YYYY-MM month") {
+				t.Errorf("%s: the page does not say what is wrong with the month:\n%s", month, body)
+			}
+		}
+	})
+}
+
+// periodRunOf is the row the run table of a period page draws for one run,
+// from the link to the run to the end of the row.
+func periodRunOf(t *testing.T, runs string, id uuid.UUID) string {
+	t.Helper()
+
+	start := strings.Index(runs, `<a href="/run?id=`+id.String()+`">`)
+	if start < 0 {
+		t.Fatalf("the run table holds no row of %s:\n%s", id, runs)
+	}
+	end := strings.Index(runs[start:], "</tr>")
+	if end < 0 {
+		t.Fatalf("the row of %s does not end:\n%s", id, runs)
+	}
+	return runs[start : start+end]
 }
 
 func TestStatementPage(t *testing.T) {
@@ -2537,6 +2902,10 @@ func TestRequiredParameters(t *testing.T) {
 		{path: "/statement?run=not-a-uuid&key=os-sim%2Fp-1", parameter: "run"},
 		{path: "/statement.json?key=os-sim%2Fp-1", parameter: "run"},
 		{path: "/statement.json?run=" + testRunID.String(), parameter: "key"},
+		{path: "/period", parameter: "month"},
+		{path: "/period?month=2026-13", parameter: "month"},
+		{path: "/period?month=2026-3", parameter: "month"},
+		{path: "/period?month=july", parameter: "month"},
 	}
 
 	for _, c := range cases {

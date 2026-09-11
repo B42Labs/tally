@@ -18,6 +18,7 @@ import (
 // and what it moved if it corrected an earlier one.
 type runData struct {
 	Run          store.Run
+	PeriodLink   string
 	CorrectsLink string
 	CatalogLink  string
 	Stats        statsView
@@ -118,6 +119,7 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 
 	data := runData{
 		Run:        run,
+		PeriodLink: periodLink(run.PeriodFrom),
 		Stats:      buildRunStats(r, run),
 		Statements: tabulate(r, "statements", statementColumns, statementBars(id, billed)),
 		Deltas:     tabulate(r, "deltas", deltaColumns, deltas),

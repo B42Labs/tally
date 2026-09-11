@@ -41,6 +41,12 @@ func unreadableUUID(name string, err error) error {
 	return &paramError{name: name, reason: fmt.Sprintf("is not a UUID: %v", err)}
 }
 
+// unreadableMonth reports a month that was sent in a form other than the
+// YYYY-MM a billing period is named by.
+func unreadableMonth(name, value string) error {
+	return &paramError{name: name, reason: fmt.Sprintf("is not a YYYY-MM month: %q", value)}
+}
+
 // apiError tags a failure the Reporting API returned, storeError one the engine
 // database returned, and documentError a stored document that did not decode
 // into what the page renders. A handler tags an error where it receives it, so

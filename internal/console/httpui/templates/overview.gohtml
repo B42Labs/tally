@@ -53,11 +53,11 @@
 {{template "tableHead" .Periods.Table}}
 <tbody>
 {{range .Periods.Rows}}<tr>
-<td>{{stamp .From}}</td>
-<td>{{stamp .To}}</td>
-<td>{{.Status}}</td>
-<td>{{idText .FinalizedRunID}}</td>
-<td>{{zeroStamp .FinalizedAt}}</td>
+<td><a href="{{.Link}}">{{stamp .Period.From}}</a></td>
+<td>{{stamp .Period.To}}</td>
+<td>{{.Period.Status}}</td>
+<td>{{if .RunLink}}<a href="{{.RunLink}}">{{.Period.FinalizedRunID}}</a>{{else}}none{{end}}</td>
+<td>{{zeroStamp .Period.FinalizedAt}}</td>
 </tr>
 {{else}}<tr><td colspan="5">{{emptyText .Periods.Table "no period is opened"}}</td></tr>
 {{end}}</tbody>
