@@ -286,6 +286,107 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("GetPeriod reads one month", func(t *testing.T) {
+		march, err := f.store.GetPeriod(ctx, periodFrom)
+		if err != nil {
+			t.Fatalf("reading March: %v", err)
+		}
+		if stamp(march.From) != stamp(periodFrom) || stamp(march.To) != stamp(periodTo) ||
+			march.Status != "finalized" {
+			t.Errorf("got the period [%s, %s) %s, want the finalized March",
+				stamp(march.From), stamp(march.To), march.Status)
+		}
+		if march.FinalizedRunID != f.regular || stamp(march.FinalizedAt) != stamp(finalizedAt) {
+			t.Errorf("got March finalized by %s at %s, want %s at %s",
+				march.FinalizedRunID, stamp(march.FinalizedAt), f.regular, stamp(finalizedAt))
+		}
+	})
+
+	t.Run("GetPeriod names itself on a month no run opened", func(t *testing.T) {
+		_, err := f.store.GetPeriod(ctx, time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("got %v, want pgx.ErrNoRows", err)
+		}
+		if !strings.HasPrefix(err.Error(), "GetPeriod:") {
+			t.Errorf("got the message %q, want it to start with GetPeriod:", err)
+		}
+	})
+
+	t.Run("ListRunsForPeriod returns every run of a month in the order they started", func(t *testing.T) {
+		march, err := f.store.ListRunsForPeriod(ctx, periodFrom)
+		if err != nil {
+			t.Fatalf("listing the runs of March: %v", err)
+		}
+		if want := []uuid.UUID{f.regular, f.correction}; !reflect.DeepEqual(idsOf(march), want) {
+			t.Errorf("got the runs %v, want %v", idsOf(march), want)
+		}
+
+		april, err := f.store.ListRunsForPeriod(ctx, openFrom)
+		if err != nil {
+			t.Fatalf("listing the runs of April: %v", err)
+		}
+		if len(april) != 0 {
+			t.Errorf("got the runs %v of April, want none", idsOf(april))
+		}
+	})
+
+	t.Run("ListRunTotalsForPeriod adds up each run's statements per currency", func(t *testing.T) {
+		f.logs.Reset()
+		totals, err := f.store.ListRunTotalsForPeriod(ctx, periodFrom)
+		if err != nil {
+			t.Fatalf("adding up March: %v", err)
+		}
+		// The correction's one statement is not a number, which makes its sum one
+		// too: the listing leaves it out and says so.
+		if len(totals) != 1 {
+			t.Fatalf("got %d totals, want the regular run's alone: %v", len(totals), totals)
+		}
+		got := totals[0]
+		if got.RunID != f.regular || got.Currency != currency || got.Statements != 3 ||
+			got.Total.StringFixed(2) != "173.09" {
+			t.Errorf("got %s %s, %d statements, %s, want %s %s, 3 statements, 173.09",
+				got.RunID, got.Currency, got.Statements, got.Total.StringFixed(2), f.regular, currency)
+		}
+		assertSkipped(t, f.logs, "ListRunTotalsForPeriod", f.correction.String())
+
+		april, err := f.store.ListRunTotalsForPeriod(ctx, openFrom)
+		if err != nil {
+			t.Fatalf("adding up April: %v", err)
+		}
+		if len(april) != 0 {
+			t.Errorf("got %d totals of April, want none", len(april))
+		}
+	})
+
+	t.Run("LoadRunExport reads the statements and no rated record", func(t *testing.T) {
+		run, err := f.store.LoadRunExport(ctx, f.regular)
+		if err != nil {
+			t.Fatalf("loading the export of the regular run: %v", err)
+		}
+		keys := make([]string, 0, len(run.Statements))
+		for _, statement := range run.Statements {
+			keys = append(keys, statement.Key)
+		}
+		if want := []string{drKey, secondDRKey, projectKey}; !reflect.DeepEqual(keys, want) {
+			t.Errorf("got the statements %v, want %v", keys, want)
+		}
+		if len(run.Rated) != 0 || len(run.Deltas) != 0 || len(run.Kickbacks) != 0 {
+			t.Errorf("got %d rated records, %d deltas and %d kickbacks, want none of them",
+				len(run.Rated), len(run.Deltas), len(run.Kickbacks))
+		}
+		if want := []string{cloud}; !reflect.DeepEqual(run.Clouds, want) {
+			t.Errorf("got the clouds %v, want %v", run.Clouds, want)
+		}
+	})
+
+	t.Run("LoadRunExport refuses a statement total that is not a number", func(t *testing.T) {
+		_, err := f.store.LoadRunExport(ctx, f.correction)
+		if err == nil || !strings.HasPrefix(err.Error(), "LoadRunExport:") ||
+			!strings.Contains(err.Error(), "is not a number") {
+			t.Fatalf("got %v, want LoadRunExport to refuse the total that is not a number", err)
+		}
+	})
+
 	t.Run("ListStatements orders by total and breaks the tie on the key", func(t *testing.T) {
 		rows, err := f.store.ListStatements(ctx, f.regular)
 		if err != nil {

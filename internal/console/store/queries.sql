@@ -13,6 +13,32 @@ FROM runs
 ORDER BY started_at DESC
 LIMIT $1;
 
+-- The head of a period page: one month, where it stands, and which run closed
+-- it.
+-- name: GetPeriod :one
+SELECT period_from, period_to, status, finalized_run_id, finalized_at
+FROM billing_periods
+WHERE period_from = $1;
+
+-- The run table of a period page: every run of one month in the order the
+-- runs started, so a correction stands under the run it corrects.
+-- name: ListRunsForPeriod :many
+SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
+       status, clouds, stats, started_at, completed_at
+FROM runs
+WHERE period_from = $1
+ORDER BY started_at, id;
+
+-- The totals of a period page: per run of one month and currency, how many
+-- statements the run wrote and what they add up to.
+-- name: ListRunTotalsForPeriod :many
+SELECT s.run_id, s.currency, count(*) AS statements, sum(s.total)::numeric AS total
+FROM project_statements s
+JOIN runs r ON r.id = s.run_id
+WHERE r.period_from = $1
+GROUP BY s.run_id, s.currency
+ORDER BY s.run_id, s.currency;
+
 -- The header of a run page: the eleven columns a run carries.
 -- name: GetRun :one
 SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,

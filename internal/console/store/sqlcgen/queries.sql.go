@@ -11,6 +11,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getPeriod = `-- name: GetPeriod :one
+SELECT period_from, period_to, status, finalized_run_id, finalized_at
+FROM billing_periods
+WHERE period_from = $1
+`
+
+// The head of a period page: one month, where it stands, and which run closed
+// it.
+func (q *Queries) GetPeriod(ctx context.Context, periodFrom pgtype.Timestamptz) (BillingPeriod, error) {
+	row := q.db.QueryRow(ctx, getPeriod, periodFrom)
+	var i BillingPeriod
+	err := row.Scan(
+		&i.PeriodFrom,
+		&i.PeriodTo,
+		&i.Status,
+		&i.FinalizedRunID,
+		&i.FinalizedAt,
+	)
+	return i, err
+}
+
 const getPricingModel = `-- name: GetPricingModel :one
 SELECT version, valid_from, currency, imported_at, document
 FROM pricing_models
@@ -306,6 +327,49 @@ func (q *Queries) ListResourceSegments(ctx context.Context, arg ListResourceSegm
 	return items, nil
 }
 
+const listRunTotalsForPeriod = `-- name: ListRunTotalsForPeriod :many
+SELECT s.run_id, s.currency, count(*) AS statements, sum(s.total)::numeric AS total
+FROM project_statements s
+JOIN runs r ON r.id = s.run_id
+WHERE r.period_from = $1
+GROUP BY s.run_id, s.currency
+ORDER BY s.run_id, s.currency
+`
+
+type ListRunTotalsForPeriodRow struct {
+	RunID      pgtype.UUID
+	Currency   string
+	Statements int64
+	Total      pgtype.Numeric
+}
+
+// The totals of a period page: per run of one month and currency, how many
+// statements the run wrote and what they add up to.
+func (q *Queries) ListRunTotalsForPeriod(ctx context.Context, periodFrom pgtype.Timestamptz) ([]ListRunTotalsForPeriodRow, error) {
+	rows, err := q.db.Query(ctx, listRunTotalsForPeriod, periodFrom)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunTotalsForPeriodRow
+	for rows.Next() {
+		var i ListRunTotalsForPeriodRow
+		if err := rows.Scan(
+			&i.RunID,
+			&i.Currency,
+			&i.Statements,
+			&i.Total,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRuns = `-- name: ListRuns :many
 SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
        status, clouds, stats, started_at, completed_at
@@ -317,6 +381,48 @@ LIMIT $1
 // The run list of the overview page, newest first and bounded by the caller.
 func (q *Queries) ListRuns(ctx context.Context, limit int32) ([]Run, error) {
 	rows, err := q.db.Query(ctx, listRuns, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Run
+	for rows.Next() {
+		var i Run
+		if err := rows.Scan(
+			&i.ID,
+			&i.PeriodFrom,
+			&i.PeriodTo,
+			&i.Kind,
+			&i.CorrectsRunID,
+			&i.PricingVersion,
+			&i.Status,
+			&i.Clouds,
+			&i.Stats,
+			&i.StartedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunsForPeriod = `-- name: ListRunsForPeriod :many
+SELECT id, period_from, period_to, kind, corrects_run_id, pricing_version,
+       status, clouds, stats, started_at, completed_at
+FROM runs
+WHERE period_from = $1
+ORDER BY started_at, id
+`
+
+// The run table of a period page: every run of one month in the order the
+// runs started, so a correction stands under the run it corrects.
+func (q *Queries) ListRunsForPeriod(ctx context.Context, periodFrom pgtype.Timestamptz) ([]Run, error) {
+	rows, err := q.db.Query(ctx, listRunsForPeriod, periodFrom)
 	if err != nil {
 		return nil, err
 	}
