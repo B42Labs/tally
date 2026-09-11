@@ -8,9 +8,10 @@
 // Sorting and filtering a table are links and a form that reload the page
 // with the table's state in the query string, and the theme is a form that
 // posts the choice to /theme, which is not a page: it keeps the choice in a
-// cookie and sends the viewer back. /statement.json is not a page either: it
-// serves the file the JSON export writes for a statement, as the export's own
-// bytes rather than as HTML.
+// cookie and sends the viewer back. /statement.json, /run.json and
+// /kickbacks.json are not pages either: they serve the files the JSON export
+// writes for a statement and for a run, as the export's own bytes rather than
+// as HTML.
 //
 // Every identifier travels in a query parameter rather than in a path segment.
 // A cloud name, a resource id and a statement key may each carry a slash, and a
@@ -39,6 +40,7 @@ import (
 
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
+	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
 )
 
@@ -99,6 +101,7 @@ type Store interface {
 		ctx context.Context, runID uuid.UUID, cloud, resourceType, resourceID string,
 	) ([]store.Segment, error)
 	ListCorrectionDeltas(ctx context.Context, runID uuid.UUID) ([]store.Delta, error)
+	LoadRunExport(ctx context.Context, runID uuid.UUID) (export.Run, error)
 }
 
 // handlers is what every route is served from: the two read seams, the clock,
@@ -147,6 +150,8 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/run", h.run)
 	r.Get("/statement", h.statement)
 	r.Get(exportRoute, h.statementExport)
+	r.Get(runFileRoute, h.runFile)
+	r.Get(kickbacksFileRoute, h.kickbacksFile)
 	r.Get("/static/console.css", h.stylesheet)
 	r.Post(themeRoute, h.theme)
 	r.NotFound(h.notFound)

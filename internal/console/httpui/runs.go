@@ -24,6 +24,10 @@ type runData struct {
 	Stats        statsView
 	Statements   listing[statementBar]
 	Deltas       listing[store.Delta]
+	// Export is the two files the JSON export writes for the run beside its
+	// statements and what the run settles for its partners, or why there are
+	// none.
+	Export runExportView
 }
 
 // The columns of a run page's tables. The share bar draws the total and is
@@ -117,12 +121,19 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	exported, err := h.buildRunExport(r, run, &src)
+	if err != nil {
+		h.failFrom(w, r, storeFailed(err), src)
+		return
+	}
+
 	data := runData{
 		Run:        run,
 		PeriodLink: periodLink(run.PeriodFrom),
 		Stats:      buildRunStats(r, run),
 		Statements: tabulate(r, "statements", statementColumns, statementBars(id, billed)),
 		Deltas:     tabulate(r, "deltas", deltaColumns, deltas),
+		Export:     exported,
 	}
 	if run.CorrectsRunID != uuid.Nil {
 		data.CorrectsLink = link("/run", "id", run.CorrectsRunID.String())

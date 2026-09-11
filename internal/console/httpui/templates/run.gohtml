@@ -32,6 +32,33 @@
 <p>this run produced no statement</p>
 {{end}}
 
+<h2>Export</h2>
+{{with .Export}}{{if .Note}}
+<p class="muted">{{.Note}}</p>
+{{else}}{{template "exportFile" .Index}}{{template "exportFile" .Settlement}}{{end}}{{end}}
+
+{{if not .Export.Note}}
+<h2>What this run settles</h2>
+{{if eq .Run.Kind "correction"}}<p class="muted">a correction settles the difference to the run it corrects</p>
+{{end}}{{if .Export.Partners.Table.Total}}
+{{template "tableTools" .Export.Partners.Table}}
+<table>
+{{template "tableHead" .Export.Partners.Table}}
+<tbody>
+{{range .Export.Partners.Rows}}<tr>
+<td><a href="{{.Link}}"><code>{{.Beneficiary}}</code></a></td>
+<td>{{.Currency}}</td>
+<td class="number">{{.Projects}}</td>
+<td class="number{{zeroClass .Total}}">{{amount .Total}} {{.Currency}}</td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .Export.Partners.Table "this run settles nothing for a partner"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>this run settles nothing for a partner</p>
+{{end}}
+{{end}}
+
 {{if .Deltas.Table.Total}}
 <h2>What this run moved</h2>
 {{template "tableTools" .Deltas.Table}}
