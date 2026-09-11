@@ -32,8 +32,8 @@ environment, under the names the settings table below lists.
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
-| `/run?id=` | Engine: the run, its statements, its correction deltas. |
-| `/statement?run=&key=` | Engine: the run, and one statement document rendered as a bill: its head, the file the JSON export writes for it, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. |
+| `/run?id=` | Engine: the run, the stats it stored, its statements, its correction deltas. |
+| `/statement?run=&key=` | Engine: the run, and one statement document rendered as a bill: its head, the file the JSON export writes for it, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. The document of a correction run is a credit note and is rendered as one: its head carries the deltas, its adjustments what changed, and each item's block one row per dimension. |
 | `/statement.json?run=&key=` | Engine: the run and the statement. Not a page: the bytes `tally-engine export --format json` writes for the statement, served as `application/json`, and with `download` set as an attachment. |
 | `/static/console.css` | The embedded stylesheet, the only asset the pages load. |
 | `/theme` | Nothing. Not a page: it takes the theme form's POST, keeps the choice in a cookie, and sends the viewer back. |
@@ -156,8 +156,8 @@ The tables and their names per page:
 | `/resource` | `segments`, `events` |
 | `/pricing` | `models` |
 | `/catalog` | `dimensions` |
-| `/run` | `statements`, `deltas` |
-| `/statement` | `adjustments`; `items` and `rc-<n>`, the summaries of the line items and of the n-th related cost; `li-<n>` and `rc-<n>-li-<n>`, the metric tables of the items, which sort and carry no filter |
+| `/run` | `statements`, `deltas`; the lists of what the run reported, `warnings`, `metering_warnings`, `counter_warnings`, `attribution_warnings`, `adjustment_warnings`, `unpriced`, `unreadable`, `unregistered_projects` and `violations` |
+| `/statement` | `adjustments`; `items` and `rc-<n>`, the summaries of the line items and of the n-th related cost; `li-<n>` and `rc-<n>-li-<n>`, the metric tables of the items, which sort and carry no filter. A credit note carries the same names, its `li-<n>` tables holding one row per dimension |
 
 A paged listing, `/projects` and `/resources`, is sorted and filtered within
 the page the API answered, which its row count says, and its next link carries
@@ -177,6 +177,20 @@ block's heading links the resource's page, and its table holds one row per
 metric of every period, with the period's total as a row of its own. A description that
 only repeats the item's type and id is left out. A value of exactly zero is
 printed in the muted colour, so the amounts that are not zero stand out.
+
+A credit note is rendered the same way, and the run decides which of the two a
+stored document is: a correction run stores a credit note under every key, and
+the page reads it as one, which is the rule `tally-engine export` decodes a
+document by. The head names the run the note corrects and carries the base,
+net and kickback deltas where the note holds them. The adjustments table shows
+each adjustment's rate beside what the corrected run applied, what the
+correction applied and the difference. A section's summary lists resource type,
+resource and total, and it opens in the order the note lists its items: a note
+credits some items and debits others, so neither direction of the total puts
+the largest movement first, and a heading still sorts it. An item's block holds
+one row per dimension, with the amount the corrected run billed, the amount
+the correction rated and the delta. A document stored under a correction run
+that names no run it corrects is not a credit note and is answered 503.
 
 ## The export of a statement
 
@@ -210,6 +224,40 @@ nothing else. One name differs from the export's: of two statements of one run
 whose file names differ in ASCII case alone, the export writes the second under
 the SHA-256 digest of its key, and the console, which reads one statement at a
 time, names each after its key.
+
+## What a run reported
+
+The run page carries, under its head, what the run stored about itself. The
+counts come first: the snapshot, the instant up to which the run read the
+events; the candidates it considered; the usage and rated records it wrote; its
+statements, which a correction calls credit notes; its adjustment records; and
+for a correction the deltas and the adjustment deltas it wrote. A run that
+failed names the error it failed with above them.
+
+Every list of findings follows as a table of its own, drawn when it holds a
+row and named after the member of the stats it lists, which is the name the
+list carries in the `run.json` of an export:
+
+| Table | What it lists | A row leads to |
+| --- | --- | --- |
+| `warnings` | what the run found about itself: a period that had not ended | nothing |
+| `metering_warnings` | resources the metering pass warned about, a history that starts without a create for example | the resource |
+| `counter_warnings` | counters that could not be read for a resource, with the metric and the window | the resource |
+| `attribution_warnings` | projects claimed twice or sitting in a cycle, with the relation that lost | the project |
+| `adjustment_warnings` | relations whose kickbacks were dropped because their target is not a partner | nothing |
+| `unpriced` | resource types the pricing model does not price, counting the resources skipped | nothing |
+| `unreadable` | usage fields no quantity could be read from, counting the drafts | nothing |
+| `unregistered_projects` | projects the run met resources of and no registry row names | the project's resources |
+| `violations` | invariant violations, one row per violation of a resource | the resource |
+
+An unregistered project has no project page, so its row leads to the resource
+list filtered to its cloud and project under every status. A run whose lists
+are all empty says it reported no finding.
+
+A run that is still running has stored no stats, and its page says so. Stats
+the console cannot read, a value that is not JSON or a member the engine's
+types do not have, are shown as they were stored beside the reason, and the
+rest of the page stands. The page reports them and does not log them.
 
 ## The fleet at an instant and over a window
 
