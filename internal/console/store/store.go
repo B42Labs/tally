@@ -188,6 +188,15 @@ type Delta struct {
 	Currency     string
 }
 
+// RunTotal is what one run of a period billed in one currency: how many
+// statements it wrote and what they add up to.
+type RunTotal struct {
+	RunID      uuid.UUID
+	Currency   string
+	Statements int64
+	Total      decimal.Decimal
+}
+
 // ListPeriods returns every billing period, newest month first.
 func (s *Store) ListPeriods(ctx context.Context) ([]Period, error) {
 	rows, err := s.q.ListPeriods(ctx)
@@ -197,15 +206,19 @@ func (s *Store) ListPeriods(ctx context.Context) ([]Period, error) {
 
 	periods := make([]Period, 0, len(rows))
 	for _, row := range rows {
-		periods = append(periods, Period{
-			From:           timeOf(row.PeriodFrom),
-			To:             timeOf(row.PeriodTo),
-			Status:         row.Status,
-			FinalizedRunID: uuidOf(row.FinalizedRunID),
-			FinalizedAt:    timeOf(row.FinalizedAt),
-		})
+		periods = append(periods, periodOf(row))
 	}
 	return periods, nil
+}
+
+// GetPeriod returns one billing month. A month no run ever opened comes back as
+// pgx.ErrNoRows, which is what the page turns into its not-found answer.
+func (s *Store) GetPeriod(ctx context.Context, from time.Time) (Period, error) {
+	row, err := s.q.GetPeriod(ctx, pgTime(from))
+	if err != nil {
+		return Period{}, fmt.Errorf("GetPeriod: %w", err)
+	}
+	return periodOf(row), nil
 }
 
 // ListRuns returns the newest runs by start, at most limit of them.
@@ -230,6 +243,45 @@ func (s *Store) GetRun(ctx context.Context, id uuid.UUID) (Run, error) {
 		return Run{}, fmt.Errorf("GetRun: %w", err)
 	}
 	return runOf(row), nil
+}
+
+// ListRunsForPeriod returns every run of one billing month in the order the
+// runs started. A month no run was recorded for has none.
+func (s *Store) ListRunsForPeriod(ctx context.Context, from time.Time) ([]Run, error) {
+	rows, err := s.q.ListRunsForPeriod(ctx, pgTime(from))
+	if err != nil {
+		return nil, fmt.Errorf("ListRunsForPeriod: %w", err)
+	}
+
+	list := make([]Run, 0, len(rows))
+	for _, row := range rows {
+		list = append(list, runOf(row))
+	}
+	return list, nil
+}
+
+// ListRunTotalsForPeriod returns, per run of one billing month and currency,
+// how many statements the run wrote and what they add up to, by run and then
+// by currency. One statement total that is not a number makes the sum of its
+// run one too, and that sum is dropped and logged the way a listing drops any
+// such row.
+func (s *Store) ListRunTotalsForPeriod(ctx context.Context, from time.Time) ([]RunTotal, error) {
+	rows, err := s.q.ListRunTotalsForPeriod(ctx, pgTime(from))
+	if err != nil {
+		return nil, fmt.Errorf("ListRunTotalsForPeriod: %w", err)
+	}
+
+	list := make([]RunTotal, 0, len(rows))
+	for _, row := range rows {
+		id := uuidOf(row.RunID)
+		total, ok := amountOf(row.Total)
+		if !ok {
+			s.skipped("ListRunTotalsForPeriod", "run", id, "currency", row.Currency)
+			continue
+		}
+		list = append(list, RunTotal{RunID: id, Currency: row.Currency, Statements: row.Statements, Total: total})
+	}
+	return list, nil
 }
 
 // ListStatements returns the statements of a run, largest total first.
@@ -344,6 +396,21 @@ func (s *Store) ListKickbacksForBeneficiary(ctx context.Context, beneficiary str
 		}
 	}
 	return list, nil
+}
+
+// LoadRunExport returns one run with what the JSON export renders its run.json
+// and its kickbacks.json from: the run row, its statements and what it settles
+// for its partners, read through export.LoadIndex under one snapshot. The read
+// and the rendering are the export's own, for the reason
+// ListKickbacksForBeneficiary gives: a second implementation of what an ERP
+// receives would drift. A run the export does not read is refused with
+// export.ErrRunNotExportable, which errors.Is still finds.
+func (s *Store) LoadRunExport(ctx context.Context, runID uuid.UUID) (export.Run, error) {
+	run, err := export.LoadIndex(ctx, s.pool, runID)
+	if err != nil {
+		return export.Run{}, fmt.Errorf("LoadRunExport: %w", err)
+	}
+	return run, nil
 }
 
 // ListPricingModels returns the imported catalog versions, the one in force
@@ -478,6 +545,19 @@ func (s *Store) skipped(query string, keys ...any) {
 		append([]any{"query", query}, keys...)...)
 }
 
+// periodOf maps a billing period row to the value a page renders. The run that
+// closed it and when that happened read as the zero values for a month that is
+// not finalized, which is the pairing the schema admits.
+func periodOf(row sqlcgen.BillingPeriod) Period {
+	return Period{
+		From:           timeOf(row.PeriodFrom),
+		To:             timeOf(row.PeriodTo),
+		Status:         row.Status,
+		FinalizedRunID: uuidOf(row.FinalizedRunID),
+		FinalizedAt:    timeOf(row.FinalizedAt),
+	}
+}
+
 // runOf maps a run row to the value a page renders. The three nullable columns
 // each read as the absence they stand for: a regular run corrects nothing, a
 // run of a period no model priced carries no version, and a run that did not
@@ -522,6 +602,11 @@ func uuidOf(id pgtype.UUID) uuid.UUID {
 // pgUUID maps an id to the parameter the generated queries take.
 func pgUUID(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
+}
+
+// pgTime maps an instant to the parameter the generated queries take.
+func pgTime(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
 // timeOf maps a stored timestamp to UTC. A NULL column reads as the zero time:
