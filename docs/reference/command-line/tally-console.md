@@ -33,9 +33,10 @@ environment, under the names the settings table below lists.
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
 | `/run?id=` | Engine: the run, its statements, its correction deltas. |
-| `/statement?run=&key=` | Engine: one statement document rendered as a bill: its head, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. |
+| `/statement?run=&key=` | Engine: the run, and one statement document rendered as a bill: its head, the file the JSON export writes for it, its adjustments, a summary table of its line items sorted by total, and a folding detail block per item with one row per metric and period. |
+| `/statement.json?run=&key=` | Engine: the run and the statement. Not a page: the bytes `tally-engine export --format json` writes for the statement, served as `application/json`, and with `download` set as an attachment. |
 | `/static/console.css` | The embedded stylesheet, the only asset the pages load. |
-| `/theme` | Nothing. The one route that is not a page: it takes the theme form's POST, keeps the choice in a cookie, and sends the viewer back. |
+| `/theme` | Nothing. Not a page: it takes the theme form's POST, keeps the choice in a cookie, and sends the viewer back. |
 
 Every identifier travels in a query parameter rather than in a path segment,
 because a cloud name, a resource id and a statement key may each carry a slash.
@@ -177,6 +178,39 @@ metric of every period, with the period's total as a row of its own. A descripti
 only repeats the item's type and id is left out. A value of exactly zero is
 printed in the muted colour, so the amounts that are not zero stand out.
 
+## The export of a statement
+
+The statement page carries, under its head, the file
+`tally-engine export --format json` writes for the statement:
+`statement-<key>.json` for a regular run and `credit-note-<key>.json` for a
+correction, with its size in bytes. The document is folded, and two links lead
+to `/statement.json`, which serves the same bytes on their own: `open` shows
+them in the browser, and `download` saves them.
+
+The console does not print the stored document. The engine database keeps it as
+JSONB, which holds the members in an order of its own, and the export renders
+every document again in the order the
+[export formats](/reference/formats/exports) list, indented by two spaces and
+closed by a newline. The console hands the stored document to the export's own
+renderer, so what the page and the route show is the file an export of the run
+writes, byte for byte.
+
+Only a run that stands is exported, `completed` or `finalized`, which is the
+rule `tally-engine export` applies. The statement of any other run, a
+`superseded` or a `failed` one, says in place of the file that its run is not
+exported, and `/statement.json` answers 404 for it. A stored document the export
+refuses, one holding a member the engine's types do not have, shows the
+export's error in place of the file, and `/statement.json` answers 503.
+
+The file is named the way the export names it, in two parameters of
+`Content-Disposition`. `filename*` carries the name percent-encoded and is the
+one a browser reads, so the `%2F` between the cloud and the project reaches the
+saved file as it is; `filename` carries it plain for a client that reads
+nothing else. One name differs from the export's: of two statements of one run
+whose file names differ in ASCII case alone, the export writes the second under
+the SHA-256 digest of its key, and the console, which reads one statement at a
+time, names each after its key.
+
 ## The fleet at an instant and over a window
 
 The resource list is read under one status, and that page is then read one of
@@ -259,11 +293,12 @@ engine read under the name its query carries in
 [`internal/console/store/queries.sql`](https://github.com/B42Labs/tally/blob/main/internal/console/store/queries.sql).
 
 A failure renders one error page carrying the wrapped error: 400 for a parameter
-that is missing or unreadable, 404 for a lookup that found nothing and for an
-API 404, 502 for a Reporting API call that failed or that the API refused the
-token for, and 503 for an engine query that failed or a stored document that
-does not decode. A path the console has no page for is answered 404 on that same
-error page, and a route asked with a method it does not answer 405.
+that is missing or unreadable, 404 for a lookup that found nothing, for an API
+404 and for the file of a statement whose run is not exported, 502 for a
+Reporting API call that failed or that the API refused the token for, and 503
+for an engine query that failed or a stored document that does not decode or
+that the export refuses. A path the console has no page for is answered 404 on
+that same error page, and a route asked with a method it does not answer 405.
 
 Amounts are rendered at two decimal places and quantities at four, the scales
 the engine rounds them to. A catalog price is rendered with the digits the
