@@ -605,6 +605,7 @@ func fullStore(t *testing.T) *fakeStore {
 		PricingVersion: "2026-03",
 		Status:         "completed",
 		Clouds:         []string{"os-sim"},
+		Stats:          []byte(allStatsFixture),
 		StartedAt:      testPeriod.AddDate(0, 1, 0),
 		CompletedAt:    testPeriod.AddDate(0, 1, 0).Add(time.Minute),
 	}
@@ -1902,6 +1903,266 @@ func TestCreditNote(t *testing.T) {
 			strings.Count(body, "<h2>Related cost of")
 		if forms != 3 || sections != 3 {
 			t.Errorf("%d filter forms for %d sections, want 3 of each", forms, sections)
+		}
+	})
+}
+
+// allStatsFixture holds one entry in every list a run's stats carry, so the
+// run page draws each of its tables. fullStore's run carries it.
+const allStatsFixture = `{
+  "snapshot_at": "2026-04-04T00:00:00Z",
+  "candidates": 12,
+  "usage_records": 10,
+  "rated_records": 30,
+  "statements": 2,
+  "adjustment_records": 1,
+  "warnings": [{"code": "period_not_ended", "detail": "the period has not ended"}],
+  "metering_warnings": [
+    {"cloud": "os-sim", "resource_type": "instance", "resource_id": "vm-9", "code": "history_starts_without_create"}
+  ],
+  "counter_warnings": [
+    {
+      "cloud": "os-sim", "resource_type": "instance", "resource_id": "vm-8", "metric": "egress_gb",
+      "from_ts": "2026-03-01T00:00:00Z", "to_ts": "2026-04-01T00:00:00Z",
+      "code": "counter_source_failed", "detail": "connection refused"
+    }
+  ],
+  "attribution_warnings": [{"code": "attribution_cycle", "project_id": "11111111-1111-4111-8111-111111111111"}],
+  "adjustment_warnings": [
+    {
+      "code": "adjustment_kickback_target_not_partner", "relation_id": "99999999-9999-4999-8999-999999999999",
+      "target_platform": "openstack", "target_id": "p-7"
+    }
+  ],
+  "unpriced": [{"platform": "openstack", "resource_type": "image", "count": 9}],
+  "unreadable": [{"platform": "openstack", "resource_type": "volume", "field": "size_gb", "count": 2}],
+  "unregistered_projects": [{"cloud": "os-sim", "project_id": "p-9", "resources": 3}],
+  "violations": [
+    {
+      "cloud": "os-sim", "resource_type": "volume", "resource_id": "vol-1",
+      "violations": [{"invariant": "coverage", "detail": "an interval is missing"}]
+    }
+  ]
+}`
+
+// TestRunStats reads what a run stored about itself on its page.
+func TestRunStats(t *testing.T) {
+	t.Parallel()
+
+	runPath := "/run?id=" + testRunID.String()
+
+	withStats := func(t *testing.T, kind string, stats []byte) *fakeStore {
+		t.Helper()
+
+		engine := fullStore(t)
+		engine.run.Kind = kind
+		engine.run.Stats = stats
+		return engine
+	}
+	// listOf is the part of a page under one list's heading, up to the next
+	// heading of either level.
+	listOf := func(t *testing.T, body, heading string) string {
+		t.Helper()
+
+		_, after, found := strings.Cut(body, "<h3>"+heading+"</h3>")
+		if !found {
+			t.Fatalf("the page has no %q list:\n%s", heading, body)
+		}
+		if end := strings.Index(after, "<h"); end >= 0 {
+			return after[:end]
+		}
+		return after
+	}
+
+	t.Run("every list is drawn with its rows", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", []byte(allStatsFixture)), testNow)
+
+		status, body, _ := get(t, handler, runPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"<dt>snapshot</dt><dd>2026-04-04T00:00:00Z</dd>",
+			"<dt>candidates</dt><dd>12</dd>",
+			"<dt>usage records</dt><dd>10</dd>",
+			"<dt>rated records</dt><dd>30</dd>",
+			"<dt>adjustment records</dt><dd>1</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the counts do not carry %q", want)
+			}
+		}
+		lists := map[string]string{
+			"Run warnings":            "<td>period_not_ended</td>",
+			"Metering warnings":       "<td>history_starts_without_create</td>",
+			"Counter warnings":        "<td>counter_source_failed</td>",
+			"Attribution warnings":    "<td>attribution_cycle</td>",
+			"Adjustment warnings":     "<td>adjustment_kickback_target_not_partner</td>",
+			"Unpriced resource types": "<td>image</td>",
+			"Unreadable quantities":   "<td>size_gb</td>",
+			"Unregistered projects":   "<code>p-9</code>",
+			"Invariant violations":    "<td>coverage</td>",
+		}
+		for heading, row := range lists {
+			if list := listOf(t, body, heading); !strings.Contains(list, row) {
+				t.Errorf("the %s list does not carry %q:\n%s", heading, row, list)
+			}
+		}
+		if got := strings.Count(body, "<h3>"); got != len(lists) {
+			t.Errorf("the page draws %d lists, want %d", got, len(lists))
+		}
+		if strings.Contains(body, "this run reported no finding") {
+			t.Error("the page says the run found nothing")
+		}
+	})
+
+	t.Run("every finding links what it is about", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", []byte(allStatsFixture)), testNow)
+
+		_, body, _ := get(t, handler, runPath)
+		for _, want := range []string{
+			`href="/resource?cloud=os-sim&amp;id=vm-9&amp;type=instance"`,
+			`href="/resource?cloud=os-sim&amp;id=vm-8&amp;type=instance"`,
+			`href="/resource?cloud=os-sim&amp;id=vol-1&amp;type=volume"`,
+			`href="/project?id=11111111-1111-4111-8111-111111111111"`,
+			`href="/resources?cloud=os-sim&amp;project_id=p-9&amp;status=all"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q", want)
+			}
+		}
+		if list := listOf(t, body, "Attribution warnings"); !strings.Contains(list, "<td>none</td>") {
+			t.Errorf("a warning without a relation does not say so:\n%s", list)
+		}
+	})
+
+	t.Run("a filter empties one list and leaves the others", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", []byte(allStatsFixture)), testNow)
+
+		_, body, _ := get(t, handler, runPath+"&metering_warnings.q=nomatch")
+		if list := listOf(t, body, "Metering warnings"); !strings.Contains(list, "no row matches the filter") {
+			t.Errorf("the emptied list does not say so:\n%s", list)
+		}
+		if list := listOf(t, body, "Unpriced resource types"); !strings.Contains(list, "<td>image</td>") {
+			t.Errorf("the filter of one list emptied another:\n%s", list)
+		}
+	})
+
+	t.Run("a regular run counts statements and a correction credit notes and deltas", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", []byte(allStatsFixture)), testNow)
+		_, body, _ := get(t, handler, runPath)
+		if !strings.Contains(body, "<dt>statements</dt><dd>2</dd>") {
+			t.Error("a regular run does not count its statements")
+		}
+		for _, unwanted := range []string{"<dt>credit notes</dt>", "<dt>deltas</dt>", "<dt>adjustment deltas</dt>"} {
+			if strings.Contains(body, unwanted) {
+				t.Errorf("a regular run carries %q", unwanted)
+			}
+		}
+
+		correction := []byte(`{"candidates": 1, "usage_records": 1, "rated_records": 1, "statements": 6,
+			"deltas": 184, "adjustment_deltas": 5}`)
+		handler, _ = serve(t, fullAPI(t), withStats(t, "correction", correction), testNow)
+		_, body, _ = get(t, handler, runPath)
+		for _, want := range []string{
+			"<dt>credit notes</dt><dd>6</dd>", "<dt>deltas</dt><dd>184</dd>", "<dt>adjustment deltas</dt><dd>5</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("a correction does not carry %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a failed run says why", func(t *testing.T) {
+		t.Parallel()
+
+		failed := []byte(`{"candidates": 3, "usage_records": 0, "rated_records": 0, "statements": 0,
+			"error": "metering the period: boom"}`)
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", failed), testNow)
+
+		_, body, _ := get(t, handler, runPath)
+		for _, want := range []string{
+			`<p class="error">this run failed: metering the period: boom</p>`, "this run reported no finding",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("a clean run says it found nothing", func(t *testing.T) {
+		t.Parallel()
+
+		clean := []byte(`{"candidates": 1, "usage_records": 1, "rated_records": 1, "statements": 1}`)
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", clean), testNow)
+
+		_, body, _ := get(t, handler, runPath)
+		if !strings.Contains(body, "this run reported no finding") {
+			t.Errorf("the page does not say the run found nothing:\n%s", body)
+		}
+		if strings.Contains(body, "<h3>") {
+			t.Error("the page draws a list the run did not report")
+		}
+	})
+
+	t.Run("a run that stored no stats", func(t *testing.T) {
+		t.Parallel()
+
+		for _, stats := range [][]byte{[]byte("{}"), []byte("null"), nil} {
+			handler, _ := serve(t, fullAPI(t), withStats(t, "regular", stats), testNow)
+
+			status, body, _ := get(t, handler, runPath)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d for %q, want %d", status, stats, http.StatusOK)
+			}
+			if !strings.Contains(body, "this run stored no stats") || strings.Contains(body, "<h3>") {
+				t.Errorf("the page for %q does not say the run stored no stats:\n%s", stats, body)
+			}
+		}
+	})
+
+	t.Run("stats that are no JSON", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), withStats(t, "regular", []byte("not json")), testNow)
+
+		status, body, _ := get(t, handler, runPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"the console cannot read the stats this run stored:", "invalid character", "<h2>Statements</h2>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("stats holding a member the engine does not have", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t),
+			withStats(t, "regular", []byte(`{"candidates": 1, "surprise": true}`)), testNow)
+
+		status, body, _ := get(t, handler, runPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		if !strings.Contains(body, "json: unknown field &#34;surprise&#34;") {
+			t.Errorf("the page does not name the member it cannot read:\n%s", body)
+		}
+		_, stored, _ := strings.Cut(body, "<pre>")
+		if stored, _, _ = strings.Cut(stored, "</pre>"); !strings.Contains(stored, "&#34;surprise&#34;: true") {
+			t.Errorf("the page does not show what was stored:\n%s", body)
 		}
 	})
 }

@@ -14,12 +14,13 @@ import (
 	"github.com/b42labs/tally/internal/engine/statements"
 )
 
-// runData is one metering run: what it billed, and what it moved if it
-// corrected an earlier one.
+// runData is one metering run: what it reported about itself, what it billed,
+// and what it moved if it corrected an earlier one.
 type runData struct {
 	Run          store.Run
 	CorrectsLink string
 	CatalogLink  string
+	Stats        statsView
 	Statements   listing[statementBar]
 	Deltas       listing[store.Delta]
 }
@@ -117,6 +118,7 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 
 	data := runData{
 		Run:        run,
+		Stats:      buildRunStats(r, run),
 		Statements: tabulate(r, "statements", statementColumns, statementBars(id, billed)),
 		Deltas:     tabulate(r, "deltas", deltaColumns, deltas),
 	}
