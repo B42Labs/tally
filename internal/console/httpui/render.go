@@ -39,6 +39,7 @@ var pageNames = []string{
 	"run",
 	"statement",
 	"creditnote",
+	"period",
 	errorPage,
 }
 

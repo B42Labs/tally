@@ -83,6 +83,9 @@ type API interface {
 // the reason API is. *store.Store satisfies it as it is.
 type Store interface {
 	ListPeriods(ctx context.Context) ([]store.Period, error)
+	GetPeriod(ctx context.Context, from time.Time) (store.Period, error)
+	ListRunsForPeriod(ctx context.Context, from time.Time) ([]store.Run, error)
+	ListRunTotalsForPeriod(ctx context.Context, from time.Time) ([]store.RunTotal, error)
 	ListRuns(ctx context.Context, limit int32) ([]store.Run, error)
 	GetRun(ctx context.Context, id uuid.UUID) (store.Run, error)
 	ListStatements(ctx context.Context, runID uuid.UUID) ([]store.StatementRow, error)
@@ -140,6 +143,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/resource", h.resource)
 	r.Get("/pricing", h.pricing)
 	r.Get("/catalog", h.catalog)
+	r.Get("/period", h.billingPeriod)
 	r.Get("/run", h.run)
 	r.Get("/statement", h.statement)
 	r.Get(exportRoute, h.statementExport)

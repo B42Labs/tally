@@ -1,0 +1,33 @@
+{{define "content"}}
+<dl>
+<dt>period</dt><dd>{{stamp .Period.From}} to {{stamp .Period.To}}</dd>
+<dt>status</dt><dd>{{.Period.Status}}</dd>
+<dt>finalized at</dt><dd>{{zeroStamp .Period.FinalizedAt}}</dd>
+<dt>finalized by</dt><dd>{{if .FinalizedLink}}<a href="{{.FinalizedLink}}"><code>{{.Period.FinalizedRunID}}</code></a>{{else}}none{{end}}</dd>
+<dt>billed</dt><dd>{{range $i, $t := .Totals}}{{if $i}} + {{end}}{{amount $t.Total}} {{$t.Currency}}{{else}}none{{end}}</dd>
+</dl>
+<p class="muted">a period bills what the statements of its standing runs add up to: the runs that are completed or finalized, which are the regular run and every correction booked against it</p>
+
+<h2>Runs</h2>
+{{if .Runs.Table.Total}}
+{{template "tableTools" .Runs.Table}}
+<table>
+{{template "tableHead" .Runs.Table}}
+<tbody>
+{{range .Runs.Rows}}<tr{{if not .Standing}} class="muted"{{end}}>
+<td><a href="{{.Link}}"><code>{{.Run.ID}}</code></a></td>
+<td>{{.Run.Kind}}</td>
+<td>{{.Run.Status}}{{if not .Standing}}, counts for nothing{{end}}</td>
+<td>{{.Run.PricingVersion}}</td>
+<td>{{zeroStamp .Run.StartedAt}}</td>
+<td>{{zeroStamp .Run.CompletedAt}}</td>
+<td class="number">{{.Statements}}</td>
+<td class="number">{{range $i, $t := .Totals}}{{if $i}} + {{end}}{{amount $t.Total}} {{$t.Currency}}{{else}}none{{end}}</td>
+</tr>
+{{else}}<tr><td colspan="8">{{emptyText .Runs.Table "no run has been recorded for this period"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{else}}
+<p>no run has been recorded for this period</p>
+{{end}}
+{{end}}

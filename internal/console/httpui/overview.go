@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/store"
@@ -26,7 +27,7 @@ type overviewData struct {
 	Stats    listing[statRow]
 	Events   listing[httpapi.EventStatsItem]
 	Rejected listing[httpapi.DeadLetteredEvent]
-	Periods  listing[store.Period]
+	Periods  listing[billingPeriodRow]
 	Runs     listing[runRow]
 	From     time.Time
 	To       time.Time
@@ -52,12 +53,12 @@ var (
 		textCol("received at", func(r httpapi.DeadLetteredEvent) string { return stamp(r.ReceivedAt) }),
 		textCol("reason", func(r httpapi.DeadLetteredEvent) string { return r.Reason }),
 	}
-	periodColumns = []column[store.Period]{
-		textCol("from", func(r store.Period) string { return stamp(r.From) }),
-		textCol("to", func(r store.Period) string { return stamp(r.To) }),
-		textCol("status", func(r store.Period) string { return r.Status }),
-		textCol("finalized by", func(r store.Period) string { return idText(r.FinalizedRunID) }),
-		textCol("finalized at", func(r store.Period) string { return zeroStamp(r.FinalizedAt) }),
+	periodColumns = []column[billingPeriodRow]{
+		textCol("from", func(r billingPeriodRow) string { return stamp(r.Period.From) }),
+		textCol("to", func(r billingPeriodRow) string { return stamp(r.Period.To) }),
+		textCol("status", func(r billingPeriodRow) string { return r.Period.Status }),
+		textCol("finalized by", func(r billingPeriodRow) string { return idText(r.Period.FinalizedRunID) }),
+		textCol("finalized at", func(r billingPeriodRow) string { return zeroStamp(r.Period.FinalizedAt) }),
 	}
 	runColumns = []column[runRow]{
 		textCol("run", func(r runRow) string { return r.Run.ID.String() }),
@@ -134,7 +135,7 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 		Stats:    tabulate(r, "stats", statColumns, statRows(stats.Items)),
 		Events:   tabulate(r, "events", eventColumns, events.Items),
 		Rejected: tabulate(r, "rejected", rejectedColumns, rejected.Items),
-		Periods:  tabulate(r, "periods", periodColumns, periods),
+		Periods:  tabulate(r, "periods", periodColumns, billingPeriodRows(periods)),
 		Runs:     tabulate(r, "runs", runColumns, runRows(runs)),
 		From:     from,
 		To:       to,
@@ -170,6 +171,29 @@ func runRows(runs []store.Run) []runRow {
 	rows := make([]runRow, 0, len(runs))
 	for _, run := range runs {
 		rows = append(rows, runRow{Run: run, Link: link("/run", "id", run.ID.String())})
+	}
+	return rows
+}
+
+// billingPeriodRow is one billing month of the overview, the page that shows
+// it, and the page of the run that closed it, which a month that is not closed
+// has none of.
+type billingPeriodRow struct {
+	Period  store.Period
+	Link    string
+	RunLink string
+}
+
+// billingPeriodRows links every month to its period page, and a closed month
+// to the run that closed it.
+func billingPeriodRows(periods []store.Period) []billingPeriodRow {
+	rows := make([]billingPeriodRow, 0, len(periods))
+	for _, billing := range periods {
+		row := billingPeriodRow{Period: billing, Link: periodLink(billing.From)}
+		if billing.FinalizedRunID != uuid.Nil {
+			row.RunLink = link("/run", "id", billing.FinalizedRunID.String())
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }

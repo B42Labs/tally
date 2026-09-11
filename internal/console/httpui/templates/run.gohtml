@@ -1,7 +1,7 @@
 {{define "content"}}
 <dl>
 <dt>run</dt><dd>{{.Run.ID}}</dd>
-<dt>period</dt><dd>{{stamp .Run.PeriodFrom}} to {{stamp .Run.PeriodTo}}</dd>
+<dt>period</dt><dd><a href="{{.PeriodLink}}">{{stamp .Run.PeriodFrom}} to {{stamp .Run.PeriodTo}}</a></dd>
 <dt>kind</dt><dd>{{.Run.Kind}}</dd>
 <dt>status</dt><dd>{{.Run.Status}}</dd>
 <dt>clouds</dt><dd>{{range .Run.Clouds}}{{.}} {{end}}</dd>
