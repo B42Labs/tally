@@ -28,7 +28,7 @@ environment, under the names the settings table below lists.
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, each linking its own page and the run that finalized it; the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
 | `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into; for a meta-project, the `member_of` relations that reach it at the first and at the last instant of every billing period, and each member project. Engine: every statement of the project, grouped into the periods that were billed, for a partner what every run settles for it, and for a meta-project the billing periods, their runs, and the statements of every run that stands, through the export's own read. |
-| `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
+| `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's creation, or the first event of a history that starts without a create, and its lifetime in hours from that instant, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
 | `/catalog?version=` | Engine: one catalog, parsed by the engine's own parser. |
@@ -71,15 +71,17 @@ a run wrote for the project.
 Each resource type of that summary folds open into the resources of the project
 that lived in the window, by the rule the fleet reads a window by, sorted by
 their ids, each with its state, its creation, its deletion and its lifetime in
-hours, and each linking its own page. The filter above the table matches a row
-on its type and on the resources folded under it, so a resource id finds the
-type it sits in. The two numbers come from two places: the summary counts by
-folding the events of the window, and the fold lists what the projection holds
-today, so a resource the project has since handed on is counted and not listed,
-and a type the projection holds nothing of is drawn without a fold. The
-resources are read as one page of at most 1000, the widest the API serves, and
-a project that holds more says under the table that a type may have run
-resources the fold does not name.
+hours, and each linking its own page; a resource whose history starts without
+a create shows its first event in place of its creation and counts its
+lifetime from it, as the resource list does. The filter above the table
+matches a row on its type and on the resources folded under it, so a resource
+id finds the type it sits in. The two numbers come from two places: the
+summary counts by folding the events of the window, and the fold lists what
+the projection holds today, so a resource the project has since handed on is
+counted and not listed, and a type the projection holds nothing of is drawn
+without a fold. The resources are read as one page of at most 1000, the widest
+the API serves, and a project that holds more says under the table that a
+type may have run resources the fold does not name.
 
 The statements are one row per billing period rather than one per statement. A
 period accumulates them: the regular run that billed it, every run that
@@ -374,15 +376,17 @@ does not parse is answered 400.
 
 The instant is `at`, and the page opens on it: a resource existed at it when
 it was created at or before it and not deleted at or before it; a resource
-whose history shows no create has no creation time and is taken to have
-existed all along. Without `at` the instant is now, so the page opens on what
-runs right now. The instant presets are now, which is no parameter at all, 24
-hours ago, 7 days ago, the start of this month and the start of last month.
-The instant input stays empty while nothing is pinned, so the page opens on
-now without claiming an instant was chosen.
+whose history starts without a create is taken to have existed from its first
+event, the `first_event_at` the API serves on every row, and only a row the API
+serves without one is taken to have existed all along. Without `at` the instant
+is now, so the page opens on what runs right now. The instant presets are now,
+which is no parameter at all, 24 hours ago, 7 days ago, the start of this month
+and the start of last month. The instant input stays empty while nothing is
+pinned, so the page opens on now without claiming an instant was chosen.
 
 The window is `from` and `to`, half-open: a resource existed in it when it was
-created before `to` and not deleted at or before `from`. Either bound may be
+created before `to`, or had its first event before `to` when its history starts
+without a create, and was not deleted at or before `from`. Either bound may be
 left out, which leaves the window open on that side, and a `to` that is not
 after `from` is answered 400. A window with neither bound holds every row of
 the page, whenever it lived. The window presets are the last 24 hours, the
@@ -399,14 +403,20 @@ kept for, and a page the filters emptied says so in place of the rows.
 
 Every row prints its lifetime in hours at two places: from its creation to
 its deletion, or to now for a resource still there, whatever the page is read
-at. A resource whose history starts without a create has no
-creation time, which the API leaves null and the fold reports as
-`history_starts_without_create`; the row prints `unknown` for its creation and
-its lifetime, and the line above the table counts such rows. The resource page
-names the event such a history starts with and counts the lifetime from it,
-which is where the fold starts the intervals a run bills. The last payload of
-a row is folded under a line that counts its keys, so the listing stays one
-line per row until a payload is opened.
+at. A resource whose history starts without a create has no creation time,
+which the API leaves null and the fold reports as
+`history_starts_without_create`. Its row prints the instant of its first event
+in the `created` column, followed by `, first event`, and counts its lifetime
+from that instant, which is where the fold starts the intervals a run bills;
+the line above the table counts such rows. The instant leads the cell, so
+sorting by `created` keeps such a row in time order among the creations, and
+filtering for `first event` finds such rows alone. A row the API serves
+without `first_event_at`, which only a Reporting API older than that field
+does, prints `unknown` for its creation and its lifetime and is counted on a
+line of its own. The resource page names the event such a history starts with
+and counts the lifetime from it. The last payload of a row is folded under a
+line that counts its keys, so the listing stays one line per row until a
+payload is opened.
 
 ## Theme
 
