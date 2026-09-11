@@ -113,18 +113,27 @@ func buildBillSection(
 	}
 }
 
-// buildItemRow lays one item out, summary and detail alike.
-func buildItemRow(r *http.Request, anchor, cloud string, item statements.LineItem) itemRow {
+// openLink is the page with the detail block under anchor unfolded and
+// scrolled to, and whether the request is already that page: the link names
+// the block in the open parameter and in its fragment. A statement's items and
+// a credit note's items are opened the same way.
+func openLink(r *http.Request, anchor string) (string, bool) {
 	values := r.URL.Query()
 	opened := maps.Clone(values)
 	opened.Set(openParameter, anchor)
+	return href(r.URL.Path, opened) + "#" + anchor, values.Get(openParameter) == anchor
+}
+
+// buildItemRow lays one item out, summary and detail alike.
+func buildItemRow(r *http.Request, anchor, cloud string, item statements.LineItem) itemRow {
+	opening, open := openLink(r, anchor)
 	row := itemRow{
 		Anchor:       anchor,
-		OpenLink:     href(r.URL.Path, opened) + "#" + anchor,
+		OpenLink:     opening,
 		ResourceType: item.ResourceType,
 		ResourceID:   item.ResourceID,
 		Total:        item.Total.Decimal,
-		Open:         values.Get(openParameter) == anchor,
+		Open:         open,
 	}
 	if item.Description != item.ResourceType+" "+item.ResourceID {
 		row.Description = item.Description
