@@ -115,12 +115,41 @@ func TestExistedAt(t *testing.T) {
 		{"deleted after the instant", httpapi.Resource{CreatedAt: &created, DeletedAt: &deleted}, between, true},
 		{"deleted at the instant", httpapi.Resource{CreatedAt: &created, DeletedAt: &deleted}, deleted, false},
 		{"deleted before the instant", httpapi.Resource{CreatedAt: &created, DeletedAt: &deleted}, deleted.Add(time.Hour), false},
-		{"a history without a create", httpapi.Resource{}, before, true},
-		{"a history without a create that ended", httpapi.Resource{DeletedAt: &deleted}, deleted.Add(time.Hour), false},
+		{"a history without a create before its first event", httpapi.Resource{FirstEventAt: created}, before, false},
+		{"a history without a create at its first event", httpapi.Resource{FirstEventAt: created}, created, true},
+		{"a history without a create after its first event", httpapi.Resource{FirstEventAt: created}, between, true},
+		{"a history without a create that ended", httpapi.Resource{FirstEventAt: created, DeletedAt: &deleted}, deleted.Add(time.Hour), false},
+		{"a row with neither a creation nor a first event", httpapi.Resource{}, before, true},
+		{"a row with neither a creation nor a first event that ended", httpapi.Resource{DeletedAt: &deleted}, deleted.Add(time.Hour), false},
 	}
 	for _, tc := range cases {
 		if got := existedAt(tc.resource, tc.at); got != tc.want {
 			t.Errorf("%s: existedAt() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLifetimeStart(t *testing.T) {
+	t.Parallel()
+
+	first := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	created := first.Add(24 * time.Hour)
+
+	cases := []struct {
+		name     string
+		resource httpapi.Resource
+		want     time.Time
+		ok       bool
+	}{
+		{"a creation", httpapi.Resource{CreatedAt: &first}, first, true},
+		{"a first event without a creation", httpapi.Resource{FirstEventAt: first}, first, true},
+		{"a creation after the first event", httpapi.Resource{CreatedAt: &created, FirstEventAt: first}, created, true},
+		{"neither", httpapi.Resource{}, time.Time{}, false},
+	}
+	for _, tc := range cases {
+		got, ok := lifetimeStart(tc.resource)
+		if !got.Equal(tc.want) || ok != tc.ok {
+			t.Errorf("%s: lifetimeStart() = %v, %v, want %v, %v", tc.name, got, ok, tc.want, tc.ok)
 		}
 	}
 }
@@ -162,8 +191,23 @@ func TestLifetimeHours(t *testing.T) {
 		t.Errorf("a resource still there = %s, %v, want 348 hours to now", hours, lived)
 	}
 
+	hours, lived = lifetimeHours(httpapi.Resource{FirstEventAt: created}, testNow)
+	if !lived || hours.String() != "348" {
+		t.Errorf("a history without a create = %s, %v, want 348 hours from its first event", hours, lived)
+	}
+
+	hours, lived = lifetimeHours(httpapi.Resource{FirstEventAt: created, DeletedAt: &deleted}, testNow)
+	if !lived || hours.String() != "1.5" {
+		t.Errorf("a deleted history without a create = %s, %v, want 1.5 hours", hours, lived)
+	}
+
+	hours, lived = lifetimeHours(httpapi.Resource{CreatedAt: &created, FirstEventAt: created.Add(-24 * time.Hour)}, testNow)
+	if !lived || hours.String() != "348" {
+		t.Errorf("a creation after the first event = %s, %v, want 348 hours from the creation", hours, lived)
+	}
+
 	if _, lived = lifetimeHours(httpapi.Resource{}, testNow); lived {
-		t.Error("a history without a create has a lifetime")
+		t.Error("a row with neither a creation nor a first event has a lifetime")
 	}
 
 	later := testNow.Add(time.Hour)
@@ -196,6 +240,10 @@ func TestKeep(t *testing.T) {
 	deleted := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
 	gone := httpapi.Resource{CreatedAt: &created, DeletedAt: &deleted}
 	alive := httpapi.Resource{CreatedAt: &created}
+	// orphan is gone's history without its create, and unplaced is one the API
+	// served no first event for either.
+	orphan := httpapi.Resource{FirstEventAt: created, DeletedAt: &deleted}
+	unplaced := httpapi.Resource{DeletedAt: &deleted}
 	at := func(day int) time.Time { return time.Date(2026, 3, day, 0, 0, 0, 0, time.UTC) }
 	window := func(from, to int) fleetState {
 		f, t := at(from), at(to)
@@ -221,6 +269,10 @@ func TestKeep(t *testing.T) {
 		{"a window without a bound keeps what is long gone", gone, fleetState{Window: true}, true},
 		{"an instant keeps what existed at it", gone, fleetState{At: at(5), Pinned: true}, true},
 		{"an instant drops what was gone by then", gone, fleetState{At: at(11), Pinned: true}, false},
+		{"a window drops a history without a create that began at its end", orphan, window(1, 3), false},
+		{"a window keeps a history without a create that began in it", orphan, window(1, 5), true},
+		{"a window open at the start drops a history without a create that began at the end", orphan, fleetState{Window: true, To: pointerTo(at(3))}, false},
+		{"a window keeps a row with neither a creation nor a first event", unplaced, window(1, 3), true},
 	}
 	for _, tc := range cases {
 		if got := keep(tc.resource, tc.state); got != tc.want {

@@ -31,7 +31,9 @@ import (
 // was created at or before it and not deleted at or before it. The window is
 // from and to, a half-open span: a resource existed in it when it was created
 // before to and not deleted at or before from. A window with neither bound is
-// every row the page holds, whenever it lived.
+// every row the page holds, whenever it lived. Every rule here reads a
+// resource whose history starts without a create from its first event, the
+// instant the fold starts billing it at.
 //
 // A deleted resource is only on the page when the status admits it, so
 // looking back starts with switching the status to all. Every row carries the
@@ -169,39 +171,58 @@ func keep(resource httpapi.Resource, state fleetState) bool {
 	return livedBetween(resource, state.From, state.To)
 }
 
+// lifetimeStart is the instant a resource's lifetime is counted from: its
+// creation, or for a history that starts without a create its first event,
+// which is where the fold starts the intervals a run bills. ok is false for a
+// row that carries neither, which is what a Reporting API older than
+// first_event_at serves.
+func lifetimeStart(resource httpapi.Resource) (start time.Time, ok bool) {
+	if resource.CreatedAt != nil {
+		return *resource.CreatedAt, true
+	}
+	if resource.FirstEventAt.IsZero() {
+		return time.Time{}, false
+	}
+	return resource.FirstEventAt, true
+}
+
 // livedBetween reports whether a resource lived inside a half-open window: it
-// was created before to and not deleted at or before from. A nil bound is a
-// window open on that side, and a window with neither bound holds every
-// resource, whenever it lived.
+// was created, or had its first event, before to and was not deleted at or
+// before from. A nil bound is a window open on that side, and a window with
+// neither bound holds every resource, whenever it lived.
 func livedBetween(resource httpapi.Resource, from, to *time.Time) bool {
 	if from != nil && resource.DeletedAt != nil && !resource.DeletedAt.After(*from) {
 		return false
 	}
-	if to != nil && resource.CreatedAt != nil && !resource.CreatedAt.Before(*to) {
-		return false
+	if to != nil {
+		if start, ok := lifetimeStart(resource); ok && !start.Before(*to) {
+			return false
+		}
 	}
 	return true
 }
 
 // existedAt reports whether a resource existed at an instant: created at or
 // before it, and not deleted at or before it. A resource whose history shows
-// no create has no created_at and is taken to have existed all along.
+// no create is read from its first event instead, and only a row carrying
+// neither is taken to have existed all along.
 func existedAt(resource httpapi.Resource, at time.Time) bool {
-	if resource.CreatedAt != nil && resource.CreatedAt.After(at) {
+	if start, ok := lifetimeStart(resource); ok && start.After(at) {
 		return false
 	}
 	return resource.DeletedAt == nil || resource.DeletedAt.After(at)
 }
 
-// lifetimeHours is how long a resource has lived, from its creation to its
-// deletion or to now for one still there, in hours at the two places the
-// bills carry hours at. A resource whose history shows no create has no
-// creation time, and reports that its lifetime is unknown.
+// lifetimeHours is how long a resource has lived, from its creation or, for a
+// history that shows no create, its first event, to its deletion or to now for
+// one still there, in hours at the two places the bills carry hours at. A row
+// carrying neither reports that its lifetime is unknown.
 func lifetimeHours(resource httpapi.Resource, now time.Time) (decimal.Decimal, bool) {
-	if resource.CreatedAt == nil {
+	start, ok := lifetimeStart(resource)
+	if !ok {
 		return decimal.Zero, false
 	}
-	return hoursBetween(*resource.CreatedAt, lifetimeEnd(resource, now)), true
+	return hoursBetween(start, lifetimeEnd(resource, now)), true
 }
 
 // lifetimeEnd is where a lifetime stops: the deletion, or now for a resource
