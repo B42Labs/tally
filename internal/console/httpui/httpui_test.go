@@ -92,8 +92,23 @@ func (f *fakeAPI) GetProject(_ context.Context, id uuid.UUID) (httpapi.Project, 
 	return f.project, apiRequest("/api/v1/projects/"+id.String(), nil), f.projectErr
 }
 
-func (f *fakeAPI) ListProjectRelations(_ context.Context, id uuid.UUID) (httpapi.RelationList, reporting.Request, error) {
-	return f.relations, apiRequest("/api/v1/projects/"+id.String()+"/relations", nil), f.relationsErr
+func (f *fakeAPI) ListProjectRelations(
+	_ context.Context, id uuid.UUID, q reporting.RelationsQuery,
+) (httpapi.RelationList, reporting.Request, error) {
+	// The query is encoded the way the client encodes it: a filter that was not
+	// set does not travel, and the instant keeps its fraction.
+	query := url.Values{}
+	if q.Direction != "" {
+		query.Set("direction", q.Direction)
+	}
+	if q.RelationType != "" {
+		query.Set("relation_type", q.RelationType)
+	}
+	if !q.At.IsZero() {
+		query.Set("at", q.At.UTC().Format(time.RFC3339Nano))
+	}
+	request := apiRequest("/api/v1/projects/"+id.String()+"/relations", query)
+	return f.relations, request, f.relationsErr
 }
 
 func (f *fakeAPI) ListRelatedProjects(

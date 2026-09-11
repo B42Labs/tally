@@ -127,6 +127,15 @@ type ProjectsQuery struct {
 	Cursor     string
 }
 
+// RelationsQuery narrows a relation list. Every field is optional: an empty
+// Direction or RelationType filters nothing, and a zero At is now.
+type RelationsQuery struct {
+	// Direction is incoming, outgoing or both, the values the route takes.
+	Direction    string
+	RelationType string
+	At           time.Time
+}
+
 // ResourcesQuery narrows a resource list. Every field is optional, and an empty
 // one filters nothing.
 type ResourcesQuery struct {
@@ -172,10 +181,25 @@ func (c *Client) GetProject(ctx context.Context, id uuid.UUID) (httpapi.Project,
 	return project, request, nil
 }
 
-// ListProjectRelations reads the relations one project has right now.
-func (c *Client) ListProjectRelations(ctx context.Context, id uuid.UUID) (httpapi.RelationList, Request, error) {
+// ListProjectRelations reads the relations one project has at one instant,
+// narrowed by q. A zero query reads them as they stand now, in both
+// directions and of every type.
+func (c *Client) ListProjectRelations(
+	ctx context.Context, id uuid.UUID, q RelationsQuery,
+) (httpapi.RelationList, Request, error) {
+	query := url.Values{}
+	setFilter(query, "direction", q.Direction)
+	setFilter(query, "relation_type", q.RelationType)
+	// The instant keeps its fraction rather than going through formatInstant:
+	// the last instant of a billing period is a microsecond before the next one
+	// starts, and rounded to the second it would miss a relation that began in
+	// that second.
+	if !q.At.IsZero() {
+		query.Set("at", q.At.UTC().Format(time.RFC3339Nano))
+	}
+
 	var relations httpapi.RelationList
-	request, err := c.get(ctx, projectRoute(id, "/relations"), &relations)
+	request, err := c.get(ctx, withQuery(projectRoute(id, "/relations"), query), &relations)
 	if err != nil {
 		return httpapi.RelationList{}, request, err
 	}

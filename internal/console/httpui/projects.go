@@ -290,7 +290,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	relations, request, err := h.api.ListProjectRelations(ctx, id)
+	relations, request, err := h.api.ListProjectRelations(ctx, id, reporting.RelationsQuery{})
 	src.api(request)
 	if err != nil {
 		h.failFrom(w, r, apiFailed(err), src)
