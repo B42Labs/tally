@@ -27,6 +27,7 @@ import (
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
 	"github.com/b42labs/tally/internal/core/money"
+	"github.com/b42labs/tally/internal/engine/export"
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
@@ -199,6 +200,9 @@ type fakeStore struct {
 	runTotals    []store.RunTotal
 	runTotalsErr error
 
+	runExport    export.Run
+	runExportErr error
+
 	runs      []store.Run
 	runsErr   error
 	runsLimit int32
@@ -312,6 +316,10 @@ func (f *fakeStore) ListResourceSegments(
 
 func (f *fakeStore) ListCorrectionDeltas(context.Context, uuid.UUID) ([]store.Delta, error) {
 	return f.deltas, f.deltasErr
+}
+
+func (f *fakeStore) LoadRunExport(context.Context, uuid.UUID) (export.Run, error) {
+	return f.runExport, f.runExportErr
 }
 
 // serve builds the console over two fakes and hands back the log it writes, so
@@ -690,6 +698,38 @@ func fullStore(t *testing.T) *fakeStore {
 			{RunID: testSupersededRunID, Currency: "EUR", Statements: 2, Total: mustDecimal(t, "150.00")},
 			{RunID: testRunID, Currency: "EUR", Statements: 2, Total: mustDecimal(t, "192.45")},
 			{RunID: testCorrectionRunID, Currency: "EUR", Statements: 1, Total: mustDecimal(t, "-2.55")},
+		},
+		// What an export of testRunID renders from: its one statement, and the
+		// kickback the partner cloudhouse is owed for it.
+		runExport: export.Run{
+			ID:             testRunID,
+			Kind:           "regular",
+			PeriodFrom:     testPeriod,
+			PeriodTo:       testPeriod.AddDate(0, 1, 0),
+			Status:         "completed",
+			PricingVersion: "2026-03",
+			Clouds:         []string{"os-sim"},
+			StartedAt:      testPeriod.AddDate(0, 1, 0),
+			CompletedAt:    testPeriod.AddDate(0, 1, 0).Add(time.Minute),
+			Stats:          json.RawMessage("{}"),
+			Statements: []statements.Statement{{
+				Key:      testKey,
+				Document: goldenStatement(t),
+				Total:    mustDecimal(t, "128.45"),
+				Currency: "EUR",
+			}},
+			Kickbacks: []export.Kickback{{
+				Beneficiary:  "cloudhouse",
+				Currency:     "EUR",
+				StatementKey: testKey,
+				Cloud:        "os-sim",
+				ProjectID:    "p-1",
+				RelationID:   testSourceID,
+				Scope:        "all",
+				Rate:         mustDecimal(t, "0.100000"),
+				Base:         mustDecimal(t, "128.45"),
+				Amount:       mustDecimal(t, "12.85"),
+			}},
 		},
 		runs:   []store.Run{run},
 		run:    run,
@@ -2806,6 +2846,365 @@ func relatedCostDocument(t *testing.T) []byte {
 	return raw
 }
 
+func TestRunExport(t *testing.T) {
+	t.Parallel()
+
+	runPath := "/run?id=" + testRunID.String()
+	query := "?run=" + testRunID.String()
+	routes := []string{"/run.json", "/kickbacks.json"}
+
+	t.Run("the page shows the two files the export writes", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, runPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"<code>run.json</code>",
+			"<code>kickbacks.json</code>",
+			`<a href="/run.json?run=` + testRunID.String() + `">open</a>`,
+			`<a href="/run.json?download=1&amp;run=` + testRunID.String() + `">download</a>`,
+			`<a href="/kickbacks.json?run=` + testRunID.String() + `">open</a>`,
+			`<a href="/kickbacks.json?download=1&amp;run=` + testRunID.String() + `">download</a>`,
+			`<a href="/period?month=2026-03">`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+		if got := strings.Count(body, "<li><span>"); got != 4 {
+			t.Errorf("the footer lists %d reads, want 4:\n%s", got, body)
+		}
+		for _, want := range []string{"GetRun", "ListStatements", "ListCorrectionDeltas", "LoadRunExport"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the footer does not name %q", want)
+			}
+		}
+	})
+
+	t.Run("the settlement of a run", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, runPath)
+		settles := section(t, body, "What this run settles", "What this run moved")
+		for _, want := range []string{
+			`href="/project?cloud=partner&amp;external_id=cloudhouse"`,
+			"<code>cloudhouse</code>",
+			`<td class="number">1</td>`,
+			"12.85 EUR",
+		} {
+			if !strings.Contains(settles, want) {
+				t.Errorf("the settlement does not carry %q:\n%s", want, settles)
+			}
+		}
+		if strings.Contains(body, "a correction settles the difference") {
+			t.Error("a regular run's settlement says it is a difference")
+		}
+	})
+
+	t.Run("the settlement is read off the rendered document", func(t *testing.T) {
+		t.Parallel()
+
+		if owed, err := readSettlement([]byte("not json")); err == nil || owed != nil {
+			t.Errorf("readSettlement() = %v, %v, want no rows and an error", owed, err)
+		}
+		owed, err := readSettlement([]byte(`{"beneficiaries":[]}`))
+		if err != nil || len(owed) != 0 {
+			t.Errorf("readSettlement() = %v, %v, want no rows and no error", owed, err)
+		}
+	})
+
+	t.Run("the files of a regular run are the export's", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.run, engine.runExport = goldenRegularExport(t)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		golden := "?run=" + engine.run.ID.String()
+		for _, name := range []string{"run.json", "kickbacks.json"} {
+			want := exportGolden(t, "regular", name)
+			status, header, body := fetch(t, handler, "/"+name+golden)
+			if status != http.StatusOK {
+				t.Fatalf("%s: status = %d, want %d:\n%s", name, status, http.StatusOK, body)
+			}
+			if got := header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("%s: content type = %q, want application/json", name, got)
+			}
+			if got, disposition := header.Get("Content-Disposition"),
+				"inline; filename="+name+"; filename*=UTF-8''"+name; got != disposition {
+				t.Errorf("%s: content disposition = %q, want %q", name, got, disposition)
+			}
+			if !bytes.Equal(body, want) {
+				t.Errorf("%s: body =\n%s\nwant the golden\n%s", name, body, want)
+			}
+
+			_, header, _ = fetch(t, handler, "/"+name+golden+"&download=1")
+			if got := header.Get("Content-Disposition"); !strings.HasPrefix(got, "attachment; filename="+name) {
+				t.Errorf("%s: content disposition = %q, want an attachment", name, got)
+			}
+		}
+
+		_, page, _ := get(t, handler, "/run?id="+engine.run.ID.String())
+		documents := exportPattern.FindAllStringSubmatch(page, -1)
+		if len(documents) != 2 {
+			t.Fatalf("the page folds %d documents, want run.json and kickbacks.json:\n%s", len(documents), page)
+		}
+		for i, name := range []string{"run.json", "kickbacks.json"} {
+			want := exportGolden(t, "regular", name)
+			if got := html.UnescapeString(documents[i][1]); got != string(want) {
+				t.Errorf("the page shows\n%s\nwant the golden %s\n%s", got, name, want)
+			}
+			if size := "<code>" + name + "</code>, " + strconv.Itoa(len(want)) + " bytes"; !strings.Contains(page, size) {
+				t.Errorf("the page does not carry %q", size)
+			}
+		}
+	})
+
+	t.Run("the files of a correction are the export's", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.run, engine.runExport = goldenCorrectionExport(t)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		golden := "?run=" + engine.run.ID.String()
+		for _, name := range []string{"run.json", "kickbacks.json"} {
+			want := exportGolden(t, "correction", name)
+			if _, _, body := fetch(t, handler, "/"+name+golden); !bytes.Equal(body, want) {
+				t.Errorf("%s: body =\n%s\nwant the golden\n%s", name, body, want)
+			}
+		}
+
+		_, page, _ := get(t, handler, "/run?id="+engine.run.ID.String())
+		for _, want := range []string{
+			"a correction settles the difference to the run it corrects",
+			"this run settles nothing for a partner",
+		} {
+			if !strings.Contains(page, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, page)
+			}
+		}
+	})
+
+	t.Run("a run that billed and settles nothing", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.runExport.Statements, engine.runExport.Kickbacks = nil, nil
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		if _, _, body := fetch(t, handler, "/run.json"+query); !bytes.Contains(body, []byte(`"statements": []`)) {
+			t.Errorf("run.json does not list an empty statement list:\n%s", body)
+		}
+		if _, _, body := fetch(t, handler, "/kickbacks.json"+query); !bytes.Contains(body, []byte(`"beneficiaries": []`)) {
+			t.Errorf("kickbacks.json does not list an empty beneficiary list:\n%s", body)
+		}
+		if _, page, _ := get(t, handler, runPath); !strings.Contains(page, "this run settles nothing for a partner") {
+			t.Errorf("the page does not say the run settles nothing:\n%s", page)
+		}
+	})
+
+	t.Run("a run the export does not read", func(t *testing.T) {
+		t.Parallel()
+
+		for _, status := range []string{"superseded", "failed", "running"} {
+			engine := fullStore(t)
+			engine.run.Status = status
+			handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+			want := "is " + status + ", and only a completed or finalized run is exported"
+			code, page, _ := get(t, handler, runPath)
+			if code != http.StatusOK {
+				t.Fatalf("%s: page status = %d, want %d", status, code, http.StatusOK)
+			}
+			if !strings.Contains(page, want) {
+				t.Errorf("%s: the page does not say its run is not exported:\n%s", status, page)
+			}
+			for _, unwanted := range []string{`<details class="export">`, "What this run settles", "LoadRunExport"} {
+				if strings.Contains(page, unwanted) {
+					t.Errorf("%s: the page carries %q", status, unwanted)
+				}
+			}
+			for _, route := range routes {
+				code, body, _ := get(t, handler, route+query)
+				if code != http.StatusNotFound {
+					t.Errorf("%s: %s status = %d, want %d", status, route, code, http.StatusNotFound)
+				}
+				if !strings.Contains(body, want) {
+					t.Errorf("%s: %s does not say why:\n%s", status, route, body)
+				}
+			}
+		}
+	})
+
+	t.Run("a statement the export refuses", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		golden := goldenStatement(t)
+		engine.runExport.Statements[0].Document = append([]byte(`{"invoice_number":"2026-03-0001",`), golden[1:]...)
+		handler, logged := serve(t, fullAPI(t), engine, testNow)
+
+		code, page, _ := get(t, handler, runPath)
+		if code != http.StatusOK {
+			t.Fatalf("page status = %d, want %d: the run page stands without the files", code, http.StatusOK)
+		}
+		if !strings.Contains(page, "the export refuses this run") || !strings.Contains(page, "invoice_number") {
+			t.Errorf("the page does not carry the export's refusal:\n%s", page)
+		}
+		if strings.Contains(page, `<details class="export">`) {
+			t.Error("the page shows a file of a run the export refuses")
+		}
+		for _, route := range routes {
+			code, body, _ := get(t, handler, route+query)
+			if code != http.StatusServiceUnavailable {
+				t.Errorf("%s status = %d, want %d", route, code, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(body, "invoice_number") {
+				t.Errorf("%s does not carry the refusal:\n%s", route, body)
+			}
+		}
+		if !strings.Contains(logged.String(), "invoice_number") {
+			t.Errorf("the refusal did not reach the log:\n%s", logged.String())
+		}
+	})
+
+	t.Run("the export cannot be read", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.runExportErr = fmt.Errorf("LoadRunExport: %w", errors.New("connection refused"))
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		for _, path := range []string{runPath, "/run.json" + query, "/kickbacks.json" + query} {
+			code, body, _ := get(t, handler, path)
+			if code != http.StatusServiceUnavailable {
+				t.Errorf("%s: status = %d, want %d", path, code, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(body, "LoadRunExport") {
+				t.Errorf("%s: the page does not name the read that failed:\n%s", path, body)
+			}
+		}
+	})
+
+	t.Run("a run that moved while it was read", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.runExportErr = fmt.Errorf("LoadRunExport: %w", fmt.Errorf(
+			"%w: run %s is superseded, and only a completed or finalized run is exported",
+			export.ErrRunNotExportable, testRunID))
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		code, page, _ := get(t, handler, runPath)
+		if code != http.StatusOK || !strings.Contains(page, "is superseded, and only") {
+			t.Errorf("page status = %d, want %d and the reason:\n%s", code, http.StatusOK, page)
+		}
+		for _, route := range routes {
+			if code, body, _ := get(t, handler, route+query); code != http.StatusNotFound {
+				t.Errorf("%s status = %d, want %d:\n%s", route, code, http.StatusNotFound, body)
+			}
+		}
+	})
+
+	t.Run("no such run", func(t *testing.T) {
+		t.Parallel()
+
+		for _, c := range []struct {
+			err  error
+			want int
+		}{
+			{err: fmt.Errorf("GetRun: %w", pgx.ErrNoRows), want: http.StatusNotFound},
+			{err: fmt.Errorf("GetRun: %w", errors.New("connection refused")), want: http.StatusServiceUnavailable},
+		} {
+			engine := fullStore(t)
+			engine.runErr = c.err
+			handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+			if code, body, _ := get(t, handler, "/run.json"+query); code != c.want {
+				t.Errorf("%v: status = %d, want %d:\n%s", c.err, code, c.want, body)
+			}
+		}
+	})
+}
+
+// goldenRegularExport is the export package's regular golden run as the run page
+// reads it: the run row, and the run the export renders run.json and
+// kickbacks.json from, whose two files are that run's goldens.
+func goldenRegularExport(t *testing.T) (store.Run, export.Run) {
+	t.Helper()
+
+	id := uuid.MustParse("3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4")
+	started := time.Date(2026, 4, 4, 0, 0, 0, 0, time.UTC)
+	row := store.Run{
+		ID: id, PeriodFrom: testPeriod, PeriodTo: testPeriod.AddDate(0, 1, 0),
+		Kind: "regular", PricingVersion: "2026-03", Status: "finalized",
+		Stats: []byte("{}"), StartedAt: started, CompletedAt: started.Add(time.Minute),
+	}
+	return row, export.Run{
+		ID: id, Kind: "regular", PeriodFrom: testPeriod, PeriodTo: testPeriod.AddDate(0, 1, 0),
+		Status: "finalized", PricingVersion: "2026-03", Clouds: []string{},
+		StartedAt: started, CompletedAt: started.Add(time.Minute), Stats: json.RawMessage("{}"),
+		// In the order the export reads them, which is by key: os-dr sorts before
+		// os-prod.
+		Statements: []statements.Statement{{
+			Key:      "os-dr/proj-789",
+			Document: exportGolden(t, "regular", "statement-os-dr%2Fproj-789.json"),
+			Total:    mustDecimal(t, "22.32"),
+			Currency: "EUR",
+		}, {
+			Key:      "os-prod/proj-456",
+			Document: goldenStatement(t),
+			Total:    mustDecimal(t, "128.45"),
+			Currency: "EUR",
+		}},
+	}
+}
+
+// goldenCorrectionExport is the correction of that run, the same way.
+func goldenCorrectionExport(t *testing.T) (store.Run, export.Run) {
+	t.Helper()
+
+	id := uuid.MustParse("4b9d2c17-6e85-4f3a-8a01-c5d4e6f7a8b9")
+	corrects := uuid.MustParse("3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4")
+	started := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	row := store.Run{
+		ID: id, PeriodFrom: testPeriod, PeriodTo: testPeriod.AddDate(0, 1, 0),
+		Kind: "correction", CorrectsRunID: corrects, PricingVersion: "2026-03", Status: "finalized",
+		Stats: []byte("{}"), StartedAt: started, CompletedAt: started.Add(time.Minute),
+	}
+	return row, export.Run{
+		ID: id, Kind: "correction", CorrectsRunID: corrects,
+		PeriodFrom: testPeriod, PeriodTo: testPeriod.AddDate(0, 1, 0),
+		Status: "finalized", PricingVersion: "2026-03", Clouds: []string{},
+		StartedAt: started, CompletedAt: started.Add(time.Minute), Stats: json.RawMessage("{}"),
+		Statements: []statements.Statement{{
+			Key:      "os-prod/proj-456",
+			Document: goldenCreditNote(t),
+			Total:    mustDecimal(t, "-24.00"),
+			Currency: "EUR",
+		}},
+	}
+}
+
+// exportGolden reads one golden file of the export package, which is what an
+// export of that run wrote.
+func exportGolden(t *testing.T, run, name string) []byte {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "engine", "export", "testdata", "golden", run, name))
+	if err != nil {
+		t.Fatalf("reading the golden %s of the %s run: %v", name, run, err)
+	}
+	return raw
+}
+
 func TestCatalogPage(t *testing.T) {
 	t.Parallel()
 
@@ -2906,6 +3305,10 @@ func TestRequiredParameters(t *testing.T) {
 		{path: "/period?month=2026-13", parameter: "month"},
 		{path: "/period?month=2026-3", parameter: "month"},
 		{path: "/period?month=july", parameter: "month"},
+		{path: "/run.json", parameter: "run"},
+		{path: "/run.json?run=not-a-uuid", parameter: "run"},
+		{path: "/kickbacks.json", parameter: "run"},
+		{path: "/kickbacks.json?run=not-a-uuid", parameter: "run"},
 	}
 
 	for _, c := range cases {

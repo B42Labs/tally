@@ -53,10 +53,11 @@
 {{define "tableHead"}}<thead><tr>{{range .Headers}}{{if .Link}}<th{{if .Numeric}} class="number"{{end}}{{if .Sort}} aria-sort="{{.Sort}}"{{end}}><a href="{{.Link}}">{{.Label}}</a></th>{{else}}<th>{{.Label}}</th>{{end}}{{end}}</tr></thead>
 {{end}}
 
-{{/* statementExport is the file the JSON export writes for one stored
-     document, or the note saying why there is none. The statement page and the
-     credit-note page both print it under their Export heading. */}}
-{{define "statementExport"}}{{if .File}}
+{{/* exportFile is one file the JSON export writes, or the note saying why
+     there is none. The statement page and the credit-note page print the file
+     of their document under their Export heading, and the run page the two
+     files of its run. */}}
+{{define "exportFile"}}{{if .File}}
 <p><code>{{.File}}</code>, {{.Size}} bytes, as <code>tally-engine export --format json</code> writes it: <a href="{{.OpenLink}}">open</a>, <a href="{{.DownloadLink}}">download</a></p>
 <details class="export">
 <summary>the document</summary>
