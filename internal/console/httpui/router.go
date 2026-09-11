@@ -7,8 +7,10 @@
 // handler rendered, and a page that shows a number read that number itself.
 // Sorting and filtering a table are links and a form that reload the page
 // with the table's state in the query string, and the theme is a form that
-// posts the choice to /theme, the one route that is not a page: it keeps the
-// choice in a cookie and sends the viewer back.
+// posts the choice to /theme, which is not a page: it keeps the choice in a
+// cookie and sends the viewer back. /statement.json is not a page either: it
+// serves the file the JSON export writes for a statement, as the export's own
+// bytes rather than as HTML.
 //
 // Every identifier travels in a query parameter rather than in a path segment.
 // A cloud name, a resource id and a statement key may each carry a slash, and a
@@ -140,6 +142,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/catalog", h.catalog)
 	r.Get("/run", h.run)
 	r.Get("/statement", h.statement)
+	r.Get(exportRoute, h.statementExport)
 	r.Get("/static/console.css", h.stylesheet)
 	r.Post(themeRoute, h.theme)
 	r.NotFound(h.notFound)

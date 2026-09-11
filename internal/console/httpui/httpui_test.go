@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -680,6 +681,20 @@ func goldenStatement(t *testing.T) []byte {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the golden statement: %v", err)
+	}
+	return raw
+}
+
+// goldenCreditNote is the credit note the engine's export golden holds for the
+// correction of that month.
+func goldenCreditNote(t *testing.T) []byte {
+	t.Helper()
+
+	path := filepath.Join("..", "..", "engine", "export", "testdata", "golden", "correction",
+		"credit-note-os-prod%2Fproj-456.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the golden credit note: %v", err)
 	}
 	return raw
 }
@@ -1574,6 +1589,239 @@ func TestStatementPage(t *testing.T) {
 	})
 }
 
+func TestStatementExport(t *testing.T) {
+	t.Parallel()
+
+	query := "?run=" + testRunID.String() + "&key=" + url.QueryEscape(testKey)
+	statementPath := "/statement" + query
+	exportPath := "/statement.json" + query
+
+	t.Run("the page shows the file the export writes", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, statementPath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		golden := goldenStatement(t)
+		for _, want := range []string{
+			"<code>statement-os-sim%2Fp-1.json</code>, " + strconv.Itoa(len(golden)) + " bytes",
+			`<a href="/statement.json?key=os-sim%2Fp-1&amp;run=` + testRunID.String() + `">open</a>`,
+			`<a href="/statement.json?download=1&amp;key=os-sim%2Fp-1&amp;run=` + testRunID.String() +
+				`">download</a>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+		if got := exportedDocument(t, body); got != string(golden) {
+			t.Errorf("the page shows\n%s\nwant the golden statement\n%s", got, golden)
+		}
+	})
+
+	t.Run("the route serves the bytes the export writes", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		for _, c := range []struct{ path, disposition string }{
+			{path: exportPath, disposition: "inline"},
+			{path: exportPath + "&download=1", disposition: "attachment"},
+		} {
+			status, header, body := fetch(t, handler, c.path)
+			if status != http.StatusOK {
+				t.Fatalf("%s: status = %d, want %d:\n%s", c.path, status, http.StatusOK, body)
+			}
+			if got := header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("%s: content type = %q, want application/json", c.path, got)
+			}
+			want := c.disposition + "; filename=statement-os-sim%2Fp-1.json; " +
+				"filename*=UTF-8''statement-os-sim%252Fp-1.json"
+			if got := header.Get("Content-Disposition"); got != want {
+				t.Errorf("%s: content disposition = %q, want %q", c.path, got, want)
+			}
+			if golden := goldenStatement(t); !bytes.Equal(body, golden) {
+				t.Errorf("%s: body =\n%s\nwant the golden statement\n%s", c.path, body, golden)
+			}
+		}
+	})
+
+	t.Run("a document stored in another member order", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.statement.Document = reorderedDocument(t, goldenStatement(t))
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		golden := goldenStatement(t)
+		if _, _, body := fetch(t, handler, exportPath); !bytes.Equal(body, golden) {
+			t.Errorf("the route serves\n%s\nwant the golden statement\n%s", body, golden)
+		}
+		_, page, _ := get(t, handler, statementPath)
+		if got := exportedDocument(t, page); got != string(golden) {
+			t.Errorf("the page shows\n%s\nwant the golden statement\n%s", got, golden)
+		}
+	})
+
+	t.Run("the credit note of a correction", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.run = store.Run{
+			ID:            testCorrectionRunID,
+			PeriodFrom:    testPeriod,
+			PeriodTo:      testPeriod.AddDate(0, 1, 0),
+			Kind:          "correction",
+			CorrectsRunID: testRunID,
+			Status:        "finalized",
+		}
+		engine.statement = store.Statement{
+			Document: goldenCreditNote(t),
+			Total:    mustDecimal(t, "-24.00"),
+			Currency: "EUR",
+		}
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		correction := "?run=" + testCorrectionRunID.String() + "&key=" + url.QueryEscape(testKey)
+		status, header, body := fetch(t, handler, "/statement.json"+correction)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		if golden := goldenCreditNote(t); !bytes.Equal(body, golden) {
+			t.Errorf("body =\n%s\nwant the golden credit note\n%s", body, golden)
+		}
+		if got := header.Get("Content-Disposition"); !strings.HasSuffix(got, "credit-note-os-sim%252Fp-1.json") {
+			t.Errorf("content disposition = %q, want it to name the credit note", got)
+		}
+		if _, page, _ := get(t, handler, "/statement"+correction); !strings.Contains(page,
+			"<code>credit-note-os-sim%2Fp-1.json</code>") {
+			t.Errorf("the page does not name the credit note:\n%s", page)
+		}
+	})
+
+	t.Run("a run the export does not read", func(t *testing.T) {
+		t.Parallel()
+
+		for _, status := range []string{"superseded", "failed"} {
+			engine := fullStore(t)
+			engine.run.Status = status
+			handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+			want := "is " + status + ", and only a completed or finalized run is exported"
+			code, page, _ := get(t, handler, statementPath)
+			if code != http.StatusOK {
+				t.Fatalf("%s: page status = %d, want %d", status, code, http.StatusOK)
+			}
+			if !strings.Contains(page, want) || strings.Contains(page, `<details class="export">`) {
+				t.Errorf("%s: the page does not say its run is not exported, or shows a file:\n%s", status, page)
+			}
+			code, body, _ := get(t, handler, exportPath)
+			if code != http.StatusNotFound {
+				t.Errorf("%s: route status = %d, want %d", status, code, http.StatusNotFound)
+			}
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: the route does not say why:\n%s", status, body)
+			}
+		}
+	})
+
+	t.Run("a document the export refuses", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		golden := goldenStatement(t)
+		engine.statement.Document = append([]byte(`{"invoice_number":"2026-03-0001",`), golden[1:]...)
+		handler, logged := serve(t, fullAPI(t), engine, testNow)
+
+		code, page, _ := get(t, handler, statementPath)
+		if code != http.StatusOK {
+			t.Fatalf("page status = %d, want %d: the bill stands without the file", code, http.StatusOK)
+		}
+		if !strings.Contains(page, "the export refuses this statement") || !strings.Contains(page, "invoice_number") {
+			t.Errorf("the page does not carry the export's refusal:\n%s", page)
+		}
+		code, body, _ := get(t, handler, exportPath)
+		if code != http.StatusServiceUnavailable {
+			t.Errorf("route status = %d, want %d", code, http.StatusServiceUnavailable)
+		}
+		if !strings.Contains(body, "invoice_number") || !strings.Contains(logged.String(), "invoice_number") {
+			t.Errorf("the refusal did not reach the page and the log:\n%s\n%s", body, logged.String())
+		}
+	})
+
+	t.Run("no such statement", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.statementErr = fmt.Errorf("GetStatement: %w", pgx.ErrNoRows)
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+
+		if code, _, _ := get(t, handler, exportPath); code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", code, http.StatusNotFound)
+		}
+	})
+}
+
+// fetch asks the console for one route and reads the whole answer, headers
+// included, for a route whose headers are part of what it serves.
+func fetch(t *testing.T, handler http.Handler, path string) (status int, header http.Header, body []byte) {
+	t.Helper()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+
+	result := recorder.Result()
+	defer func() { _ = result.Body.Close() }()
+
+	read, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatalf("reading the answer of %s: %v", path, err)
+	}
+	return result.StatusCode, result.Header, read
+}
+
+// exportPattern finds the document the export section of a statement page
+// shows.
+var exportPattern = regexp.MustCompile(
+	`(?s)<details class="export">\s*<summary>the document</summary>\s*<pre>(.*?)</pre>`)
+
+// exportedDocument is the document a statement page shows as the export's
+// file, with the escaping the template put on it taken off again.
+func exportedDocument(t *testing.T, body string) string {
+	t.Helper()
+
+	match := exportPattern.FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("the page shows no exported document:\n%s", body)
+	}
+	return html.UnescapeString(match[1])
+}
+
+// reorderedDocument is a document with its members in another order and
+// without its whitespace, the way JSONB hands a stored one back in an order of
+// its own: here the keys of every object sorted by their bytes. The numbers
+// keep the text they were stored as.
+func reorderedDocument(t *testing.T, document []byte) []byte {
+	t.Helper()
+
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatalf("decoding the document: %v", err)
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encoding the document: %v", err)
+	}
+	if bytes.Equal(body, document) {
+		t.Fatal("the document came back in the order it was stored in")
+	}
+	return body
+}
+
 // relatedCostDocument is a statement whose costs are one attributed project's,
 // which the golden statement holds none of.
 func relatedCostDocument(t *testing.T) []byte {
@@ -1709,6 +1957,8 @@ func TestRequiredParameters(t *testing.T) {
 		{path: "/statement?key=os-sim%2Fp-1", parameter: "run"},
 		{path: "/statement?run=" + testRunID.String(), parameter: "key"},
 		{path: "/statement?run=not-a-uuid&key=os-sim%2Fp-1", parameter: "run"},
+		{path: "/statement.json?key=os-sim%2Fp-1", parameter: "run"},
+		{path: "/statement.json?run=" + testRunID.String(), parameter: "key"},
 	}
 
 	for _, c := range cases {
@@ -2807,7 +3057,7 @@ func TestBill(t *testing.T) {
 		handler, _ := serve(t, fullAPI(t), billStore(t), testNow)
 
 		_, body, _ := get(t, handler, statementPath+"&items.q=vm-4")
-		if strings.Count(body, "<details") != 1 || !strings.Contains(body, `id="li-1"`) {
+		if strings.Count(body, `<details class="item"`) != 1 || !strings.Contains(body, `id="li-1"`) {
 			t.Errorf("the blocks do not follow the filter:\n%s", body)
 		}
 		if !strings.Contains(body, "1 of 2 rows match") {
