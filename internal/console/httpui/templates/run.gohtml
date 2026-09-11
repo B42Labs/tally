@@ -11,6 +11,9 @@
 {{if .CorrectsLink}}<dt>corrects</dt><dd><a href="{{.CorrectsLink}}">{{.Run.CorrectsRunID}}</a></dd>{{end}}
 </dl>
 
+<h2>What this run reported</h2>
+{{template "runStats" .Stats}}
+
 <h2>Statements</h2>
 {{if .Statements.Table.Total}}
 {{template "tableTools" .Statements.Table}}
@@ -48,5 +51,188 @@
 {{else}}<tr><td colspan="8">{{emptyText .Deltas.Table "this run moved nothing"}}</td></tr>
 {{end}}</tbody>
 </table>
+{{end}}
+{{end}}
+
+{{/* runStats is what a run stored about itself: its counts, the error it
+     failed with, and every list of findings its passes reported, one table
+     per list that holds anything. A table only a filter emptied stays drawn,
+     so it can say so. */}}
+{{define "runStats"}}
+{{if .Unreadable}}
+<p class="muted">the console cannot read the stats this run stored: {{.Unreadable}}</p>
+<pre>{{.Raw}}</pre>
+{{else if not .Stored}}
+<p class="muted">this run stored no stats</p>
+{{else}}
+{{with .Values.Error}}<p class="error">this run failed: {{.}}</p>{{end}}
+<dl>
+<dt>snapshot</dt><dd>{{optStamp .Values.SnapshotAt}}</dd>
+<dt>candidates</dt><dd>{{.Values.Candidates}}</dd>
+<dt>usage records</dt><dd>{{.Values.UsageRecords}}</dd>
+<dt>rated records</dt><dd>{{.Values.RatedRecords}}</dd>
+<dt>{{if .Correction}}credit notes{{else}}statements{{end}}</dt><dd>{{.Values.Statements}}</dd>
+<dt>adjustment records</dt><dd>{{.Values.AdjustmentRecords}}</dd>
+{{if .Correction}}<dt>deltas</dt><dd>{{.Values.Deltas}}</dd>
+<dt>adjustment deltas</dt><dd>{{.Values.AdjustmentDeltas}}</dd>
+{{end}}</dl>
+{{if eq .Findings 0}}
+<p>this run reported no finding</p>
+{{else}}
+
+{{if .Warnings.Table.Total}}
+<h3>Run warnings</h3>
+{{template "tableTools" .Warnings.Table}}
+<table>
+{{template "tableHead" .Warnings.Table}}
+<tbody>
+{{range .Warnings.Rows}}<tr>
+<td>{{.Code}}</td>
+<td>{{.Detail}}</td>
+</tr>
+{{else}}<tr><td colspan="2">{{emptyText .Warnings.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .MeteringWarnings.Table.Total}}
+<h3>Metering warnings</h3>
+{{template "tableTools" .MeteringWarnings.Table}}
+<table>
+{{template "tableHead" .MeteringWarnings.Table}}
+<tbody>
+{{range .MeteringWarnings.Rows}}<tr>
+<td>{{.Code}}</td>
+<td>{{.Cloud}}</td>
+<td>{{.ResourceType}}</td>
+<td><a href="{{.Link}}"><code>{{.ResourceID}}</code></a></td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .MeteringWarnings.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .CounterWarnings.Table.Total}}
+<h3>Counter warnings</h3>
+{{template "tableTools" .CounterWarnings.Table}}
+<table>
+{{template "tableHead" .CounterWarnings.Table}}
+<tbody>
+{{range .CounterWarnings.Rows}}<tr>
+<td>{{.Code}}</td>
+<td>{{.Cloud}}</td>
+<td>{{.ResourceType}}</td>
+<td><a href="{{.Link}}"><code>{{.ResourceID}}</code></a></td>
+<td>{{.Metric}}</td>
+<td>{{stamp .FromTS}}</td>
+<td>{{stamp .ToTS}}</td>
+<td>{{.Detail}}</td>
+</tr>
+{{else}}<tr><td colspan="8">{{emptyText .CounterWarnings.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .AttributionWarnings.Table.Total}}
+<h3>Attribution warnings</h3>
+{{template "tableTools" .AttributionWarnings.Table}}
+<table>
+{{template "tableHead" .AttributionWarnings.Table}}
+<tbody>
+{{range .AttributionWarnings.Rows}}<tr>
+<td>{{.Code}}</td>
+<td><a href="{{.Link}}"><code>{{.ProjectID}}</code></a></td>
+<td>{{.Relation}}</td>
+</tr>
+{{else}}<tr><td colspan="3">{{emptyText .AttributionWarnings.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .AdjustmentWarnings.Table.Total}}
+<h3>Adjustment warnings</h3>
+{{template "tableTools" .AdjustmentWarnings.Table}}
+<table>
+{{template "tableHead" .AdjustmentWarnings.Table}}
+<tbody>
+{{range .AdjustmentWarnings.Rows}}<tr>
+<td>{{.Code}}</td>
+<td><code>{{.RelationID}}</code></td>
+<td>{{.TargetPlatform}}</td>
+<td><code>{{.TargetID}}</code></td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .AdjustmentWarnings.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .Unpriced.Table.Total}}
+<h3>Unpriced resource types</h3>
+{{template "tableTools" .Unpriced.Table}}
+<table>
+{{template "tableHead" .Unpriced.Table}}
+<tbody>
+{{range .Unpriced.Rows}}<tr>
+<td>{{.Platform}}</td>
+<td>{{.ResourceType}}</td>
+<td class="number">{{.Count}}</td>
+</tr>
+{{else}}<tr><td colspan="3">{{emptyText .Unpriced.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .UnreadableQuantities.Table.Total}}
+<h3>Unreadable quantities</h3>
+{{template "tableTools" .UnreadableQuantities.Table}}
+<table>
+{{template "tableHead" .UnreadableQuantities.Table}}
+<tbody>
+{{range .UnreadableQuantities.Rows}}<tr>
+<td>{{.Platform}}</td>
+<td>{{.ResourceType}}</td>
+<td>{{.Field}}</td>
+<td class="number">{{.Count}}</td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .UnreadableQuantities.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .UnregisteredProjects.Table.Total}}
+<h3>Unregistered projects</h3>
+{{template "tableTools" .UnregisteredProjects.Table}}
+<table>
+{{template "tableHead" .UnregisteredProjects.Table}}
+<tbody>
+{{range .UnregisteredProjects.Rows}}<tr>
+<td>{{.Cloud}}</td>
+<td><a href="{{.Link}}"><code>{{.ProjectID}}</code></a></td>
+<td class="number">{{.Resources}}</td>
+</tr>
+{{else}}<tr><td colspan="3">{{emptyText .UnregisteredProjects.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .Violations.Table.Total}}
+<h3>Invariant violations</h3>
+{{template "tableTools" .Violations.Table}}
+<table>
+{{template "tableHead" .Violations.Table}}
+<tbody>
+{{range .Violations.Rows}}<tr>
+<td>{{.Cloud}}</td>
+<td>{{.ResourceType}}</td>
+<td><a href="{{.Link}}"><code>{{.ResourceID}}</code></a></td>
+<td>{{.Invariant}}</td>
+<td>{{.Detail}}</td>
+</tr>
+{{else}}<tr><td colspan="5">{{emptyText .Violations.Table "nothing is listed"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+{{end}}
 {{end}}
 {{end}}
