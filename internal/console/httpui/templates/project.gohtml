@@ -127,6 +127,39 @@
 </table>
 {{end}}
 
+{{with .Rollup}}
+<h2>Rollup</h2>
+{{if .Note}}<p>{{.Note}}</p>
+{{else}}{{template "tableTools" .Periods.Table}}
+<table>
+{{template "tableHead" .Periods.Table}}
+<tbody>
+{{range .Periods.Rows}}<tr>
+<td><details class="cell"><summary>{{stamp .From}}</summary>
+<table class="nested">
+<thead><tr><th>member</th><th>cloud</th><th>statement</th><th>run kind</th><th class="number">total</th></tr></thead>
+<tbody>
+{{range .Members}}<tr>
+<td><a href="{{.ProjectLink}}">{{.Member.ProjectID}}</a></td>
+<td>{{.Member.Cloud}}</td>
+<td><a href="{{.StatementLink}}">open</a></td>
+<td>{{.Run.Kind}}</td>
+<td class="number">{{amount .Member.Total}} {{.Member.Currency}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</details></td>
+<td>{{.Status}}</td>
+<td class="number">{{.Count}}</td>
+<td class="number">{{range $i, $t := .Totals}}{{if $i}} + {{end}}{{amount $t.Total}} {{$t.Currency}}{{else}}none{{end}}</td>
+</tr>
+{{else}}<tr><td colspan="4">{{emptyText .Periods.Table "no run has billed a member of this meta-project"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+<p class="axis">the membership is read from the registry when this page is read, at the first and the last instant of each period, and is not stored with the run: a relation created or closed since changes what an earlier period shows, and a membership that began and ended inside a period is not counted here, although tally-engine export --rollup member_of counts it</p>
+{{end}}
+
 <h2>Statements</h2>
 {{template "tableTools" .Statements.Table}}
 <table>
