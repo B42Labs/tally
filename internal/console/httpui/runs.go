@@ -65,6 +65,9 @@ type statementData struct {
 	Adjustments listing[adjustments.Line]
 	Items       billSection
 	Related     []billSection
+	// Export is the file the JSON export writes for the statement, or why
+	// there is none.
+	Export exportView
 }
 
 // adjustmentColumns is the adjustments table of a statement.
@@ -132,7 +135,9 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 }
 
 // statement shows one stored document as a bill. The document is what the run
-// wrote: the page decodes it and prints it, and computes none of it again.
+// wrote: the page decodes it and prints it, and computes none of it again. The
+// run is read for the file the export writes beside the bill, which its kind
+// names and its status decides whether there is one at all.
 func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 	var src sources
 
@@ -161,6 +166,13 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	run, err := h.store.GetRun(r.Context(), runID)
+	src.query("GetRun")
+	if err != nil {
+		h.failFrom(w, r, storeFailed(err), src)
+		return
+	}
+
 	data := statementData{
 		Key:         key,
 		Cloud:       absent,
@@ -169,6 +181,7 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 		RunLink:     link("/run", "id", runID.String()),
 		Document:    document,
 		Adjustments: tabulate(r, "adjustments", adjustmentColumns, document.Adjustments),
+		Export:      buildExportView(run, key, stored.Document),
 	}
 	// A key this cannot read is shown as it is stored: the page is about that
 	// stored row, and a guessed pair would name one nothing was stored under.

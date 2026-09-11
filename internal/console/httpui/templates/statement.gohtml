@@ -11,6 +11,17 @@
 {{with .Document.KickbackTotal}}<dt>kickback total</dt><dd>{{amount .Decimal}}</dd>{{end}}
 </dl>
 
+<h2>Export</h2>
+{{with .Export}}{{if .File}}
+<p><code>{{.File}}</code>, {{.Size}} bytes, as <code>tally-engine export --format json</code> writes it: <a href="{{.OpenLink}}">open</a>, <a href="{{.DownloadLink}}">download</a></p>
+<details class="export">
+<summary>the document</summary>
+<pre>{{.JSON}}</pre>
+</details>
+{{else}}
+<p class="muted">{{.Note}}</p>
+{{end}}{{end}}
+
 {{if .Adjustments.Table.Total}}
 <h2>Adjustments</h2>
 {{template "tableTools" .Adjustments.Table}}

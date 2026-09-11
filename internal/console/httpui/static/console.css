@@ -501,6 +501,19 @@ details.cell > pre {
   min-width: 24rem;
 }
 
+/* The file the JSON export writes for a statement folds under the head of the
+   page. Opened, it scrolls within the viewport rather than within the few
+   lines a payload in a cell gets. */
+details.export > summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+details.export > pre {
+  max-height: 70vh;
+  margin-top: 0.35rem;
+}
+
 /* A table inside a cell carries what one row is made of, the resources of one
    resource type for example. It is wider than the cell it folds out of, and
    its heading does not stick, because it scrolls with the row rather than with
