@@ -27,7 +27,7 @@ environment, under the names the settings table below lists.
 | --- | --- |
 | `/` | Reporting API: resource counts by cloud, resource type and state; event counts of the last 24 hours per hour; the five newest refused events. Engine: the billing periods, each linking its own page and the run that finalized it; the 20 newest runs. |
 | `/projects` | API: one page of projects, filtered by `platform`, `cloud`, `cursor`. |
-| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into. Engine: every statement of the project, grouped into the periods that were billed, and for a partner what every run settles for it. |
+| `/project?id=` or `/project?cloud=&external_id=` | API: the project, addressed by its id or resolved from the pair a resource names it with, its relations, the projects a traversal reaches, its summary over the window `from` and `to`, this month by default, and one page of the project's resources, which the summary rows fold open into; for a meta-project, the `member_of` relations that reach it at the first and at the last instant of every billing period, and each member project. Engine: every statement of the project, grouped into the periods that were billed, for a partner what every run settles for it, and for a meta-project the billing periods, their runs, and the statements of every run that stands, through the export's own read. |
 | `/resources` | API: one page of up to 1000 resources under `status`, filtered by `cloud`, `project_id`, `resource_type`, `state`, `cursor`. The console reads that page one of two ways, chosen with `mode`: at the instant `at`, now by default, or over the window `from` and `to`. It prints each kept row's lifetime in hours, links its project by cloud and external id, and folds its last payload. |
 | `/resource?cloud=&type=&id=` | API: the lifecycle. Engine: the newest run that metered the resource, or the one `run=` names, and its rated segments; a timeline of both. |
 | `/pricing` | Engine: the imported catalog versions. |
@@ -118,6 +118,32 @@ for a project of platform `partner` and for no other, because the beneficiary
 column holds an external id alone and a project of another platform could carry
 the same one.
 
+A meta-project carries one more table, `rollup`, which is what its members are
+billed. A meta-project owns no resources and has no statement of its own: every
+project that is `member_of` it is billed on its own statement. The table is one
+row per billing period, with the status of the regular run that stands, the
+number of members and what the runs that stand billed them, folding open into
+one row per member and run: the member's project id, linking its page, its
+cloud, a link to its statement, the run kind and the total. The sum is the one
+`tally-engine export --rollup member_of` writes, by the engine's own function:
+a member is counted one relation deep, once per meta-project however often its
+membership was closed and opened again, under each of two meta-projects it
+belongs to, and with its statement's total, related costs included. A period
+adds up the runs that stand the way the statements table does, so a
+correction's credit notes move the group's period the way they move each
+member's. The window of the page does not apply to the table.
+
+The membership is read through the Reporting API when the page is read: the
+`member_of` relations that reach the meta-project at the first instant of the
+period and at its last microsecond. A relation created or closed after the fact
+therefore changes what an earlier period shows, the way it changes an export,
+and a membership that began and ended inside a period is valid at neither
+instant and is not counted, although the export counts it; the page says so
+under the table. A run whose members the engine refuses to sum, one that billed
+them in two currencies, is reported in place of the table, and a run that stops
+standing while the page is read is left out. The table is drawn for a project
+of platform `meta` and for no other.
+
 Paging is one page per request. A listing the API answered with a cursor carries
 a next link that repeats the filters and adds that cursor, and nothing follows a
 cursor on its own.
@@ -154,7 +180,7 @@ The tables and their names per page:
 | --- | --- |
 | `/` | `stats`, `events`, `rejected`, `periods`, `runs` |
 | `/projects` | `projects` |
-| `/project` | `relations`, `related`, `activity`, `kickbacks`, `statements` |
+| `/project` | `relations`, `related`, `activity`, `kickbacks`, `rollup`, `statements` |
 | `/resources` | `resources` |
 | `/resource` | `segments`, `events` |
 | `/pricing` | `models` |
