@@ -61,6 +61,9 @@ type projectData struct {
 	To         time.Time
 	Key        string
 	Statements listing[periodRow]
+	// Rollup is what the members of a meta-project are billed, per period,
+	// and nil for every project that is not one.
+	Rollup *rollupView
 }
 
 // activityRow is one resource type of a project over the window: what the
@@ -352,6 +355,17 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 
 	periods := periodRows(billed, key)
 
+	// What the members of a meta-project are billed. A meta-project owns no
+	// resources and has no statement of its own, so this is the money its page
+	// shows, and it is read for a meta-project and for no other project.
+	var rollup *rollupView
+	if project.Platform == projectcore.PlatformMeta {
+		if rollup, err = h.buildRollup(r, project, &src); err != nil {
+			h.failFrom(w, r, err, src)
+			return
+		}
+	}
+
 	// What a partner is owed. Only a partner is ever a beneficiary, and the
 	// column holds the external id alone, so the read is made for a partner
 	// and for no other project: another platform's project of the same
@@ -377,6 +391,7 @@ func (h *handlers) project(w http.ResponseWriter, r *http.Request) {
 		Key:        key,
 		Statements: tabulate(r, "statements", projectPeriodColumns, periods),
 		Kickbacks:  tabulate(r, "kickbacks", settlementColumns, settlementRows(settled)),
+		Rollup:     rollup,
 	}
 	h.render(w, r, "project", page{
 		Title:   "Project " + optString(project.Name, project.ExternalId),

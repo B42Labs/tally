@@ -46,9 +46,19 @@ type fakeAPI struct {
 
 	project    httpapi.Project
 	projectErr error
+	// members answers GetProject for the projects a membership names, and
+	// memberErr fails every such read; any other id is answered with project.
+	members   map[uuid.UUID]httpapi.Project
+	memberErr error
 
 	relations    httpapi.RelationList
 	relationsErr error
+	// relationsQueries is every relation read a page asked for, in order. A
+	// read at an instant is answered from memberships, keyed by the instant as
+	// the client sends it, and a read at no instant from relations.
+	relationsQueries []reporting.RelationsQuery
+	memberships      map[string][]httpapi.Relation
+	membershipsErr   error
 
 	related    httpapi.RelatedProjectList
 	relatedErr error
@@ -89,12 +99,18 @@ func (f *fakeAPI) ListProjects(
 }
 
 func (f *fakeAPI) GetProject(_ context.Context, id uuid.UUID) (httpapi.Project, reporting.Request, error) {
-	return f.project, apiRequest("/api/v1/projects/"+id.String(), nil), f.projectErr
+	request := apiRequest("/api/v1/projects/"+id.String(), nil)
+	if member, held := f.members[id]; held {
+		return member, request, f.memberErr
+	}
+	return f.project, request, f.projectErr
 }
 
 func (f *fakeAPI) ListProjectRelations(
 	_ context.Context, id uuid.UUID, q reporting.RelationsQuery,
 ) (httpapi.RelationList, reporting.Request, error) {
+	f.relationsQueries = append(f.relationsQueries, q)
+
 	// The query is encoded the way the client encodes it: a filter that was not
 	// set does not travel, and the instant keeps its fraction.
 	query := url.Values{}
@@ -104,10 +120,15 @@ func (f *fakeAPI) ListProjectRelations(
 	if q.RelationType != "" {
 		query.Set("relation_type", q.RelationType)
 	}
+	at := ""
 	if !q.At.IsZero() {
-		query.Set("at", q.At.UTC().Format(time.RFC3339Nano))
+		at = q.At.UTC().Format(time.RFC3339Nano)
+		query.Set("at", at)
 	}
 	request := apiRequest("/api/v1/projects/"+id.String()+"/relations", query)
+	if at != "" {
+		return httpapi.RelationList{Items: f.memberships[at]}, request, f.membershipsErr
+	}
 	return f.relations, request, f.relationsErr
 }
 
@@ -217,6 +238,12 @@ type fakeStore struct {
 
 	runExport    export.Run
 	runExportErr error
+	// runExports answers LoadRunExport per run ahead of runExport, and
+	// runExportErrs fails the run it names; runExportsAsked holds every run
+	// LoadRunExport was asked for, in order.
+	runExports      map[uuid.UUID]export.Run
+	runExportErrs   map[uuid.UUID]error
+	runExportsAsked []uuid.UUID
 
 	runs      []store.Run
 	runsErr   error
@@ -333,7 +360,14 @@ func (f *fakeStore) ListCorrectionDeltas(context.Context, uuid.UUID) ([]store.De
 	return f.deltas, f.deltasErr
 }
 
-func (f *fakeStore) LoadRunExport(context.Context, uuid.UUID) (export.Run, error) {
+func (f *fakeStore) LoadRunExport(_ context.Context, id uuid.UUID) (export.Run, error) {
+	f.runExportsAsked = append(f.runExportsAsked, id)
+	if err := f.runExportErrs[id]; err != nil {
+		return export.Run{}, err
+	}
+	if run, held := f.runExports[id]; held {
+		return run, nil
+	}
 	return f.runExport, f.runExportErr
 }
 
@@ -1533,6 +1567,527 @@ func section(t *testing.T, body, from, to string) string {
 		t.Fatalf("the page has no %q heading:\n%s", to, body)
 	}
 	return before
+}
+
+// The two member_of relations of the meta-project world: one valid all of
+// March, and one opened in the middle of it, which only the read at the end of
+// the month finds.
+var (
+	testMemberRelationID     = uuid.MustParse("99999999-9999-4999-8999-999999999999")
+	testLateMemberRelationID = uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+)
+
+// The instants the membership of a month is read at, as the client sends them
+// and the fake API keys its answers: the first instant and the last
+// microsecond of March and of April.
+const (
+	marchFirst = "2026-03-01T00:00:00Z"
+	marchLast  = "2026-03-31T23:59:59.999999Z"
+	aprilFirst = "2026-04-01T00:00:00Z"
+	aprilLast  = "2026-04-30T23:59:59.999999Z"
+)
+
+// metaProjectAPI is the Reporting API of the meta-project acme, whose members
+// p-1 and p-2 are billed on statements of their own: p-1 is a member all of
+// March, p-2 from the middle of it.
+func metaProjectAPI(t *testing.T) *fakeAPI {
+	t.Helper()
+
+	api := fullAPI(t)
+	api.project = httpapi.Project{
+		Id:         testProjectID,
+		Cloud:      "meta",
+		ExternalId: "acme",
+		Platform:   "meta",
+		Name:       pointerTo("acme"),
+		Metadata:   map[string]interface{}{},
+		CreatedAt:  testPeriod,
+	}
+
+	opened := time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)
+	member := httpapi.Relation{
+		Id: testMemberRelationID, RelationType: "member_of", SourceId: testSourceID, TargetId: testProjectID,
+		ValidFrom: testPeriod, Metadata: map[string]interface{}{}, CreatedAt: testPeriod,
+	}
+	late := httpapi.Relation{
+		Id: testLateMemberRelationID, RelationType: "member_of", SourceId: testTargetID, TargetId: testProjectID,
+		ValidFrom: opened, Metadata: map[string]interface{}{}, CreatedAt: opened,
+	}
+	api.memberships = map[string][]httpapi.Relation{
+		marchFirst: {member},
+		marchLast:  {late, member},
+	}
+	api.members = map[uuid.UUID]httpapi.Project{
+		testSourceID: {
+			Id: testSourceID, Cloud: "os-sim", ExternalId: "p-1", Platform: "openstack",
+			Metadata: map[string]interface{}{}, CreatedAt: testPeriod,
+		},
+		testTargetID: {
+			Id: testTargetID, Cloud: "os-sim", ExternalId: "p-2", Platform: "openstack",
+			Metadata: map[string]interface{}{}, CreatedAt: testPeriod,
+		},
+	}
+	return api
+}
+
+// metaProjectStore is the engine side of that world: March, closed by
+// testRunID, which billed p-1, p-2 and p-3, a project that is no member, and
+// the correction booked against it, which credits p-1. The failed and the
+// superseded run of the month stay among its runs.
+func metaProjectStore(t *testing.T) *fakeStore {
+	t.Helper()
+
+	engine := fullStore(t)
+	engine.periods = []store.Period{{
+		From:           testPeriod,
+		To:             testPeriod.AddDate(0, 1, 0),
+		Status:         "finalized",
+		FinalizedRunID: testRunID,
+		FinalizedAt:    time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC),
+	}}
+	engine.projectStatements = nil
+	engine.runExports = map[uuid.UUID]export.Run{
+		testRunID: billedRun(t, testRunID, "regular",
+			billedLine{"os-sim/p-1", "128.45", "EUR"},
+			billedLine{"os-sim/p-2", "64.00", "EUR"},
+			billedLine{"os-sim/p-3", "10.00", "EUR"}),
+		testCorrectionRunID: billedRun(t, testCorrectionRunID, "correction",
+			billedLine{"os-sim/p-1", "-2.55", "EUR"}),
+	}
+	return engine
+}
+
+// billedLine is one statement of a run's export as the rollup reads it: the key
+// it is stored under, its total and its currency.
+type billedLine struct{ key, total, currency string }
+
+// billedRun is the export of one finalized March run holding the statements
+// given.
+func billedRun(t *testing.T, id uuid.UUID, kind string, lines ...billedLine) export.Run {
+	t.Helper()
+
+	run := export.Run{
+		ID:         id,
+		Kind:       kind,
+		Status:     "finalized",
+		PeriodFrom: testPeriod,
+		PeriodTo:   testPeriod.AddDate(0, 1, 0),
+	}
+	for _, line := range lines {
+		run.Statements = append(run.Statements, statements.Statement{
+			Key: line.key, Total: mustDecimal(t, line.total), Currency: line.currency,
+		})
+	}
+	return run
+}
+
+// servedRollup serves one page of the console and hands back the whole page and
+// what its rollup section prints, failing the test on any status but 200.
+func servedRollup(t *testing.T, api API, engine Store, path string) (body, rollup string) {
+	t.Helper()
+
+	handler, _ := serve(t, api, engine, testNow)
+	status, body, _ := get(t, handler, path)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+	}
+	return body, section(t, body, "Rollup", "Statements")
+}
+
+// TestMetaProjectRollup pins what a meta-project's page shows of its members:
+// one row per period, summed by the engine's own rollup over the runs that
+// stand, with the membership read at the first and the last instant of the
+// period.
+func TestMetaProjectRollup(t *testing.T) {
+	t.Parallel()
+
+	page := "/project?id=" + testProjectID.String()
+	noMember := "no run has billed a member of this meta-project"
+
+	t.Run("a period sums what the runs that stand billed its members", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		for _, want := range []string{
+			`<details class="cell"><summary>2026-03-01T00:00:00Z</summary>`,
+			"<td>finalized</td>",
+			`<td class="number">2</td>`,
+			// The 128.45 and 64.00 the regular run billed p-1 and p-2, less the
+			// 2.55 the correction credits p-1.
+			`<td class="number">189.90 EUR</td>`,
+		} {
+			if !strings.Contains(rollup, want) {
+				t.Errorf("the rollup lacks %q:\n%s", want, rollup)
+			}
+		}
+	})
+
+	t.Run("a period folds open into every member of every run", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		for _, want := range []string{
+			`<a href="/project?cloud=os-sim&amp;external_id=p-1">p-1</a>`,
+			`<a href="/project?cloud=os-sim&amp;external_id=p-2">p-2</a>`,
+			`<a href="/statement?key=os-sim%2Fp-1&amp;run=` + testRunID.String() + `">open</a>`,
+			`<a href="/statement?key=os-sim%2Fp-2&amp;run=` + testRunID.String() + `">open</a>`,
+			`<a href="/statement?key=os-sim%2Fp-1&amp;run=` + testCorrectionRunID.String() + `">open</a>`,
+			"<td>regular</td>",
+			"<td>correction</td>",
+			`<td class="number">128.45 EUR</td>`,
+			`<td class="number">64.00 EUR</td>`,
+			`<td class="number">-2.55 EUR</td>`,
+		} {
+			if !strings.Contains(rollup, want) {
+				t.Errorf("the rollup lacks %q:\n%s", want, rollup)
+			}
+		}
+		if got := strings.Count(rollup, ">open</a>"); got != 3 {
+			t.Errorf("the period folds open into %d member rows, want 3:\n%s", got, rollup)
+		}
+		if strings.Contains(rollup, "p-3") {
+			t.Errorf("a project that is no member is summed:\n%s", rollup)
+		}
+	})
+
+	t.Run("the membership is read at the first and the last instant of the period", func(t *testing.T) {
+		t.Parallel()
+
+		api := metaProjectAPI(t)
+		servedRollup(t, api, metaProjectStore(t), page)
+
+		want := []reporting.RelationsQuery{
+			{},
+			{Direction: "incoming", RelationType: "member_of", At: testPeriod},
+			{
+				Direction:    "incoming",
+				RelationType: "member_of",
+				At:           time.Date(2026, 3, 31, 23, 59, 59, 999999000, time.UTC),
+			},
+		}
+		if len(api.relationsQueries) != len(want) {
+			t.Fatalf("the page made %d relation reads, want %d: %+v",
+				len(api.relationsQueries), len(want), api.relationsQueries)
+		}
+		for i, got := range api.relationsQueries {
+			if got.Direction != want[i].Direction || got.RelationType != want[i].RelationType ||
+				!got.At.Equal(want[i].At) {
+				t.Errorf("relation read %d = %+v, want %+v", i, got, want[i])
+			}
+		}
+	})
+
+	t.Run("a member both instants read is counted once per run", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		if got := strings.Count(rollup, ">p-1</a>"); got != 2 {
+			t.Errorf("p-1 is listed %d times, want once under each of the two runs:\n%s", got, rollup)
+		}
+	})
+
+	t.Run("a member only the last instant reads is counted", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		if !strings.Contains(rollup, ">p-2</a>") || !strings.Contains(rollup, `<td class="number">64.00 EUR</td>`) {
+			t.Errorf("the member of the second half of the month is missing:\n%s", rollup)
+		}
+	})
+
+	t.Run("only the runs that stand are loaded", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		servedRollup(t, metaProjectAPI(t), engine, page)
+		if got, want := fmt.Sprint(engine.runExportsAsked), fmt.Sprint([]uuid.UUID{testRunID, testCorrectionRunID}); got != want {
+			t.Errorf("the exports of %s were loaded, want %s", got, want)
+		}
+	})
+
+	t.Run("the panel names every read the rollup made", func(t *testing.T) {
+		t.Parallel()
+
+		body, _ := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		for _, want := range []string{
+			"relation_type=member_of",
+			"at=2026-03-31T23%3A59%3A59.999999Z",
+			"GET /api/v1/projects/" + testSourceID.String(),
+			"ListPeriods",
+			"ListRunsForPeriod",
+			"LoadRunExport",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the panel does not name %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("the page says what the membership read misses", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		if !strings.Contains(rollup, "a membership that began and ended inside a period is not counted here") {
+			t.Errorf("the rollup does not say what it misses:\n%s", rollup)
+		}
+	})
+
+	t.Run("the filter finds a period by the members under it", func(t *testing.T) {
+		t.Parallel()
+
+		_, rollup := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page+"&rollup.q=p-2")
+		if !strings.Contains(rollup, "1 of 1 row match") {
+			t.Errorf("the filter does not match a period on a member under it:\n%s", rollup)
+		}
+		_, rollup = servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page+"&rollup.q=nomatch")
+		if !strings.Contains(rollup, "no row matches the filter") {
+			t.Errorf("the emptied table does not say so:\n%s", rollup)
+		}
+	})
+
+	t.Run("every table carries its form and no script is loaded", func(t *testing.T) {
+		t.Parallel()
+
+		body, _ := servedRollup(t, metaProjectAPI(t), metaProjectStore(t), page)
+		if tables, forms := strings.Count(body, "<table>"), strings.Count(body, `<form class="tools"`); tables != forms {
+			t.Errorf("%d tables and %d filter forms", tables, forms)
+		}
+		if strings.Contains(body, "<script") {
+			t.Error("the page carries a script element")
+		}
+	})
+
+	t.Run("no billing period reads no membership", func(t *testing.T) {
+		t.Parallel()
+
+		api, engine := metaProjectAPI(t), metaProjectStore(t)
+		engine.periods = nil
+		_, rollup := servedRollup(t, api, engine, page)
+		if !strings.Contains(rollup, noMember) {
+			t.Errorf("an empty rollup does not say so:\n%s", rollup)
+		}
+		if len(api.relationsQueries) != 1 || api.relationsQueries[0] != (reporting.RelationsQuery{}) {
+			t.Errorf("the page read the relations %+v, want the relations table's read alone", api.relationsQueries)
+		}
+		if len(engine.runExportsAsked) != 0 {
+			t.Errorf("the exports of %v were loaded, want none", engine.runExportsAsked)
+		}
+	})
+
+	t.Run("a membership neither instant reads leaves the runs unread", func(t *testing.T) {
+		t.Parallel()
+
+		api, engine := metaProjectAPI(t), metaProjectStore(t)
+		api.memberships = nil
+		_, rollup := servedRollup(t, api, engine, page)
+		if !strings.Contains(rollup, noMember) {
+			t.Errorf("an empty rollup does not say so:\n%s", rollup)
+		}
+		if len(engine.periodAsked) != 0 || len(engine.runExportsAsked) != 0 {
+			t.Errorf("the runs of %v and the exports of %v were read, want none",
+				engine.periodAsked, engine.runExportsAsked)
+		}
+	})
+
+	t.Run("a month no relation reaches is read no further", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		april := testPeriod.AddDate(0, 1, 0)
+		engine.periods = append([]store.Period{{From: april, To: april.AddDate(0, 1, 0), Status: "open"}},
+			engine.periods...)
+		_, rollup := servedRollup(t, metaProjectAPI(t), engine, page)
+		if len(engine.periodAsked) != 1 || !engine.periodAsked[0].Equal(testPeriod) {
+			t.Errorf("the runs of %v were read, want those of March alone", engine.periodAsked)
+		}
+		if !strings.Contains(rollup, "<summary>2026-03-01T00:00:00Z</summary>") ||
+			strings.Contains(rollup, "2026-04-01T00:00:00Z") {
+			t.Errorf("the rollup does not hold March alone:\n%s", rollup)
+		}
+	})
+
+	t.Run("the periods are listed oldest first", func(t *testing.T) {
+		t.Parallel()
+
+		api, engine := metaProjectAPI(t), metaProjectStore(t)
+		april := testPeriod.AddDate(0, 1, 0)
+		engine.periods = append([]store.Period{{From: april, To: april.AddDate(0, 1, 0), Status: "open"}},
+			engine.periods...)
+		api.memberships[aprilFirst] = api.memberships[marchFirst]
+		api.memberships[aprilLast] = api.memberships[marchLast]
+		_, rollup := servedRollup(t, api, engine, page)
+		march := strings.Index(rollup, "<summary>2026-03-01T00:00:00Z</summary>")
+		later := strings.Index(rollup, "<summary>2026-04-01T00:00:00Z</summary>")
+		if march < 0 || later < 0 || march > later {
+			t.Errorf("March does not come before April:\n%s", rollup)
+		}
+	})
+
+	t.Run("a period whose runs all stopped standing has no row", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		for i := range engine.periodRuns {
+			if engine.periodRuns[i].Status != "failed" {
+				engine.periodRuns[i].Status = "superseded"
+			}
+		}
+		body, rollup := servedRollup(t, metaProjectAPI(t), engine, page)
+		if !strings.Contains(rollup, noMember) {
+			t.Errorf("a period standing at nothing has a row:\n%s", rollup)
+		}
+		if strings.Contains(body, "GET /api/v1/projects/"+testSourceID.String()) {
+			t.Error("a member was read for a period no run stands in")
+		}
+		if len(engine.runExportsAsked) != 0 {
+			t.Errorf("the exports of %v were loaded, want none", engine.runExportsAsked)
+		}
+	})
+
+	t.Run("a run that billed no member adds nothing", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		engine.runExports[testCorrectionRunID] = billedRun(t, testCorrectionRunID, "correction",
+			billedLine{"os-sim/p-3", "-2.55", "EUR"})
+		_, rollup := servedRollup(t, metaProjectAPI(t), engine, page)
+		if !strings.Contains(rollup, `<td class="number">192.45 EUR</td>`) {
+			t.Errorf("the correction of a project that is no member moved the group:\n%s", rollup)
+		}
+		if got := strings.Count(rollup, ">open</a>"); got != 2 {
+			t.Errorf("the period folds open into %d member rows, want 2:\n%s", got, rollup)
+		}
+	})
+
+	t.Run("a project that is no meta-project reads no rollup", func(t *testing.T) {
+		t.Parallel()
+
+		partner := fullAPI(t)
+		partner.project.Platform, partner.project.Cloud, partner.project.ExternalId = "partner", "partner", "cloudhouse"
+		for _, api := range []*fakeAPI{fullAPI(t), partner} {
+			engine := fullStore(t)
+			handler, _ := serve(t, api, engine, testNow)
+			status, body, _ := get(t, handler, page)
+			if status != http.StatusOK {
+				t.Fatalf("%s: status = %d, want %d", api.project.Platform, status, http.StatusOK)
+			}
+			if strings.Contains(body, "<h2>Rollup</h2>") || strings.Contains(body, "ListPeriods") {
+				t.Errorf("%s: the page reads a rollup", api.project.Platform)
+			}
+			if len(api.relationsQueries) != 1 || api.relationsQueries[0] != (reporting.RelationsQuery{}) {
+				t.Errorf("%s: the page read the relations %+v, want the relations table's read alone",
+					api.project.Platform, api.relationsQueries)
+			}
+			if len(engine.runExportsAsked) != 0 {
+				t.Errorf("%s: the exports of %v were loaded, want none", api.project.Platform, engine.runExportsAsked)
+			}
+		}
+	})
+
+	t.Run("a read the rollup cannot make fails the page", func(t *testing.T) {
+		t.Parallel()
+
+		refused := errors.New("connection refused")
+		endpoint := "http://127.0.0.1:1/api/v1/projects/"
+		cases := []struct {
+			name   string
+			fail   func(api *fakeAPI, engine *fakeStore)
+			status int
+			wants  []string
+		}{
+			{
+				name:   "the billing periods",
+				fail:   func(_ *fakeAPI, engine *fakeStore) { engine.periodsErr = errors.New("ListPeriods: connection refused") },
+				status: http.StatusServiceUnavailable,
+				wants:  []string{"ListPeriods: connection refused"},
+			},
+			{
+				name: "the membership",
+				fail: func(api *fakeAPI, _ *fakeStore) {
+					api.membershipsErr = fmt.Errorf("calling %s: %w", endpoint+testProjectID.String()+"/relations", refused)
+				},
+				status: http.StatusBadGateway,
+				wants:  []string{"connection refused", "relation_type=member_of"},
+			},
+			{
+				name: "a member project",
+				fail: func(api *fakeAPI, _ *fakeStore) {
+					api.memberErr = fmt.Errorf("calling %s: %w", endpoint+testSourceID.String(), refused)
+				},
+				status: http.StatusBadGateway,
+				wants:  []string{"connection refused", "GET /api/v1/projects/" + testSourceID.String()},
+			},
+			{
+				name: "the runs of the period",
+				fail: func(_ *fakeAPI, engine *fakeStore) {
+					engine.periodRunsErr = errors.New("ListRunsForPeriod: connection refused")
+				},
+				status: http.StatusServiceUnavailable,
+				wants:  []string{"ListRunsForPeriod: connection refused"},
+			},
+			{
+				name: "the export of a run",
+				fail: func(_ *fakeAPI, engine *fakeStore) {
+					engine.runExportErrs = map[uuid.UUID]error{testRunID: errors.New("LoadRunExport: connection refused")}
+				},
+				status: http.StatusServiceUnavailable,
+				wants:  []string{"LoadRunExport: connection refused"},
+			},
+		}
+		for _, tc := range cases {
+			api, engine := metaProjectAPI(t), metaProjectStore(t)
+			tc.fail(api, engine)
+			handler, logged := serve(t, api, engine, testNow)
+
+			status, body, _ := get(t, handler, page)
+			if status != tc.status {
+				t.Errorf("%s: status = %d, want %d:\n%s", tc.name, status, tc.status, body)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s: the page does not name %q:\n%s", tc.name, want, body)
+				}
+			}
+			if !strings.Contains(logged.String(), tc.wants[0]) {
+				t.Errorf("%s: the log does not carry %q:\n%s", tc.name, tc.wants[0], logged.String())
+			}
+		}
+	})
+
+	t.Run("a run that stopped standing is left out", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		engine.runExportErrs = map[uuid.UUID]error{
+			testCorrectionRunID: fmt.Errorf("LoadRunExport: %w: run %s is superseded",
+				export.ErrRunNotExportable, testCorrectionRunID),
+		}
+		_, rollup := servedRollup(t, metaProjectAPI(t), engine, page)
+		if !strings.Contains(rollup, `<td class="number">192.45 EUR</td>`) {
+			t.Errorf("the run that stopped standing is counted:\n%s", rollup)
+		}
+	})
+
+	t.Run("the engine's refusal stands in place of the table", func(t *testing.T) {
+		t.Parallel()
+
+		engine := metaProjectStore(t)
+		engine.runExports[testRunID] = billedRun(t, testRunID, "regular",
+			billedLine{"os-sim/p-1", "128.45", "EUR"},
+			billedLine{"os-sim/p-2", "64.00", "USD"})
+		_, rollup := servedRollup(t, metaProjectAPI(t), engine, page)
+		want := "the engine refuses the rollup of run " + testRunID.String() +
+			": the rollup of meta/acme holds statements in EUR and in USD"
+		if !strings.Contains(rollup, want) {
+			t.Errorf("the rollup does not carry the refusal %q:\n%s", want, rollup)
+		}
+		if strings.Contains(rollup, "<table") {
+			t.Errorf("a refused rollup draws a table:\n%s", rollup)
+		}
+		if !strings.Contains(rollup, "is not counted here") {
+			t.Errorf("a refused rollup drops the membership note:\n%s", rollup)
+		}
+	})
 }
 
 func TestPricingPage(t *testing.T) {
