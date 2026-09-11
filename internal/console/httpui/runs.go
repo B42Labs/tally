@@ -173,22 +173,16 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cloud, project, linkCloud := splitKey(key)
 	data := statementData{
 		Key:         key,
-		Cloud:       absent,
-		Project:     key,
+		Cloud:       cloud,
+		Project:     project,
 		RunID:       runID,
 		RunLink:     link("/run", "id", runID.String()),
 		Document:    document,
 		Adjustments: tabulate(r, "adjustments", adjustmentColumns, document.Adjustments),
 		Export:      buildExportView(run, key, stored.Document),
-	}
-	// A key this cannot read is shown as it is stored: the page is about that
-	// stored row, and a guessed pair would name one nothing was stored under.
-	// The resource links need the cloud, and a key without one links nothing.
-	linkCloud := ""
-	if cloud, project, keyErr := statements.ParseKey(key); keyErr == nil {
-		data.Cloud, data.Project, linkCloud = cloud, project, cloud
 	}
 
 	data.Items = buildBillSection(r, itemsTable, itemAnchor, linkCloud, document.Currency, document.LineItems)
@@ -205,6 +199,19 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 		Sources: src,
 		Data:    data,
 	})
+}
+
+// splitKey reads the pair a statement key was built from. A key this cannot
+// read is shown as it is stored: the page is about that stored row, and a
+// guessed pair would name one nothing was stored under. The resource links
+// need the cloud, and a key without one links nothing, which an empty linkCloud
+// says.
+func splitKey(key string) (cloud, project, linkCloud string) {
+	parsedCloud, parsedProject, err := statements.ParseKey(key)
+	if err != nil {
+		return absent, key, ""
+	}
+	return parsedCloud, parsedProject, parsedCloud
 }
 
 // readStatement decodes a stored document and refuses one that is not a
