@@ -26,7 +26,7 @@ import (
 // The two files the settlement is written to: the document by the JSON writer
 // and the table by the CSV writer.
 const (
-	kickbacksJSONFileName = "kickbacks.json"
+	KickbacksJSONFileName = "kickbacks.json"
 	kickbacksCSVFileName  = "kickbacks.csv"
 )
 
@@ -379,7 +379,7 @@ func KickbacksJSON(run Run) ([]byte, error) {
 
 	body, err := marshal(document)
 	if err != nil {
-		return nil, fmt.Errorf("rendering %s of run %s: %w", kickbacksJSONFileName, run.ID, err)
+		return nil, fmt.Errorf("rendering %s of run %s: %w", KickbacksJSONFileName, run.ID, err)
 	}
 	return body, nil
 }

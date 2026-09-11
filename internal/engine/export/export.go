@@ -6,7 +6,8 @@
 // JSON and the CSV file writers are the first implementations of the interface,
 // and an ERP adapter is another one rather than a change to the loader.
 // LoadKickbacks is that read narrowed to the partner settlement, for the report
-// that renders nothing else.
+// that renders nothing else, and LoadIndex to the statements and the
+// settlement, for a reader that shows the index and the settlement of a run.
 //
 // The package writes nothing to the database, and only a completed or a
 // finalized run is loaded at all: the superseded, failed and running rows a
@@ -172,7 +173,7 @@ type BillingExporter interface {
 // naming the row that carries them: an export short of a value, or holding a
 // zero where a number was meant, is one nobody can tell from a correct one.
 func Load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error) {
-	return load(ctx, pool, runID, true)
+	return load(ctx, pool, runID, reads{statements: true, records: true})
 }
 
 // LoadKickbacks reads one run and what it settles for its partners, under the
@@ -183,14 +184,33 @@ func Load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error)
 // of rows, each with a usage object to decode, so reading them would hold the
 // snapshot and its pooled connection for a decode nothing is rendered from.
 func LoadKickbacks(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error) {
-	return load(ctx, pool, runID, false)
+	return load(ctx, pool, runID, reads{})
 }
 
-// load is the read the two share. artifacts says whether the statements, the
-// rated records and a correction's deltas are read on top of the run row and
-// the kickbacks, which is what separates a full export from the settlement
-// report.
-func load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID, artifacts bool) (Run, error) {
+// LoadIndex reads one run with what RunJSON and KickbacksJSON render from it:
+// the run row, its statements and what it settles for its partners, under the
+// snapshot and with the refusals Load applies, and without the rated records
+// and a correction's deltas: three queries for a regular run and four for a
+// correction. A reader that shows the index and the settlement of a run renders
+// neither of the two, and a month of rated records is tens of thousands of rows
+// to read and decode.
+func LoadIndex(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) (Run, error) {
+	return load(ctx, pool, runID, reads{statements: true})
+}
+
+// reads is what load reads on top of the run row and its kickbacks, which is
+// what the three reads differ in: a full export reads both, the index the
+// statements alone, and the settlement report neither.
+type reads struct {
+	// statements is the documents the run billed.
+	statements bool
+	// records is the rated records and, for a correction, its deltas.
+	records bool
+}
+
+// load is the read the three share: the run row and its kickbacks, and on top
+// of them what reads asks for.
+func load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID, what reads) (Run, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Run{}, fmt.Errorf("reading the run %s: %w", runID, err)
@@ -243,10 +263,12 @@ func load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID, artifacts bo
 		run.Clouds = []string{}
 	}
 
-	if artifacts {
+	if what.statements {
 		if run.Statements, err = loadStatements(ctx, q, id, runID); err != nil {
 			return Run{}, err
 		}
+	}
+	if what.records {
 		if run.Rated, err = loadRated(ctx, q, id, runID); err != nil {
 			return Run{}, err
 		}

@@ -606,6 +606,84 @@ func TestExportGolden(t *testing.T) {
 	}
 }
 
+// TestRunJSON pins the index a reader renders on its own against the run.json
+// the JSON writer puts beside the documents, which TestExportGolden pins in
+// turn. A reader that shows a run's index calls this rather than JSONFiles, so
+// a difference here is a page showing an index no export writes.
+func TestRunJSON(t *testing.T) {
+	cases := []struct {
+		name   string
+		run    func(t *testing.T) export.Run
+		golden string
+	}{
+		{name: "a regular run", run: regularRun, golden: "regular"},
+		{name: "a correction", run: correctionRun, golden: "correction"},
+		{name: "a rolled-up run", run: rollupRun, golden: "rollup"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := export.RunJSON(c.run(t))
+			if err != nil {
+				t.Fatalf("RunJSON() error = %v, want nil", err)
+			}
+			want := read(t, filepath.Join("testdata", "golden", c.golden, runFile))
+			if !bytes.Equal(got, want) {
+				t.Errorf("RunJSON() =\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+
+	t.Run("a run that billed nobody", func(t *testing.T) {
+		run := regularRun(t)
+		run.Statements = nil
+
+		got, err := export.RunJSON(run)
+		if err != nil {
+			t.Fatalf("RunJSON() error = %v, want nil", err)
+		}
+		if !bytes.Contains(got, []byte(`"statements": []`)) {
+			t.Errorf("RunJSON() =\n%s\nwant an empty statement list rather than a null", got)
+		}
+	})
+
+	// The statements TestJSONFilesRefusals has the export refuse, which refuse
+	// the index the same way.
+	refusals := []struct {
+		name     string
+		key      string
+		document string
+	}{
+		{name: "a document that is not an object", key: statementKey, document: `[1,2]`},
+		{
+			name: "a document holding a field the type does not have",
+			key:  statementKey,
+			document: `{"billing_period":{"from":"2026-03-01T00:00:00Z","to":"2026-04-01T00:00:00Z"},` +
+				`"project_id":"proj-456","invoice_number":"2026-03-0001"}`,
+		},
+		{name: "a key that is not cloud/project", key: "proj-456", document: `{"project_id":"proj-456"}`},
+	}
+	for _, c := range refusals {
+		t.Run(c.name, func(t *testing.T) {
+			run := regularRun(t)
+			run.Statements = []statements.Statement{{
+				Key:      c.key,
+				Document: []byte(c.document),
+				Total:    decimal.RequireFromString("128.45"),
+				Currency: currency,
+			}}
+
+			got, err := export.RunJSON(run)
+			if err == nil || !strings.Contains(err.Error(), c.key) {
+				t.Fatalf("RunJSON() error = %v, want the statement %s refused", err, c.key)
+			}
+			if got != nil {
+				t.Errorf("RunJSON() = %s, want no bytes beside the refusal", got)
+			}
+		})
+	}
+}
+
 // TestExportReplacesAnEarlierExport pins what exporting one run into one
 // directory twice does. The second pass has to produce the bytes of the first,
 // and it has to write over what is there rather than beside it: an operator who

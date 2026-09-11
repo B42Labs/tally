@@ -18,8 +18,8 @@ import (
 	"github.com/b42labs/tally/internal/engine/statements"
 )
 
-// runFileName is the index every JSON export carries beside its documents.
-const runFileName = "run.json"
+// RunFileName is the index every JSON export carries beside its documents.
+const RunFileName = "run.json"
 
 // The two prefixes a document file carries. What a regular run bills a project
 // is a statement, and what a correction hands it is a credit note, so the name
@@ -190,6 +190,66 @@ type rollupEntry struct {
 // cancelable, and stopping halfway through would leave the directory holding
 // part of an export.
 func (j JSONFiles) Export(_ context.Context, run Run) error {
+	index, documents, err := renderIndex(run)
+	if err != nil {
+		return err
+	}
+
+	kickbacks, err := KickbacksJSON(run)
+	if err != nil {
+		return err
+	}
+
+	body, err := marshal(index)
+	if err != nil {
+		return fmt.Errorf("rendering %s of run %s: %w", RunFileName, run.ID, err)
+	}
+
+	if err := prepareDir(j.Dir); err != nil {
+		return err
+	}
+	files := make([]artifact, 0, len(documents)+1)
+	for _, entry := range index.Statements {
+		files = append(files, artifact{name: entry.File, body: documents[entry.File]})
+	}
+	// The rollup documents follow the statements they sum, so a reader that picks
+	// one up finds every invoice it names beside it.
+	if index.Rollup != nil {
+		for _, entry := range index.Rollup.Documents {
+			files = append(files, artifact{name: entry.File, body: documents[entry.File]})
+		}
+	}
+	// The settlement goes in with the documents rather than after the index, so
+	// it is on stable storage before run.json names the month. No document takes
+	// its name away from it: DocumentFileName prefixes every one of them with
+	// statement- or credit-note-, and RollupFileName every group's with rollup-.
+	files = append(files, artifact{name: KickbacksJSONFileName, body: kickbacks})
+	return writeIndexedFiles(j.Dir, files, artifact{name: RunFileName, body: body})
+}
+
+// RunJSON renders the run.json JSONFiles writes for the run: the index of the
+// run, one entry per document beside the file the document is written to, and
+// the rollup where the run carries one. The documents are rendered on the way,
+// because a statement the export refuses refuses the index with it, so a reader
+// that shows a run's index shows one only for a run an export writes.
+func RunJSON(run Run) ([]byte, error) {
+	index, _, err := renderIndex(run)
+	if err != nil {
+		return nil, err
+	}
+	body, err := marshal(index)
+	if err != nil {
+		return nil, fmt.Errorf("rendering %s of run %s: %w", RunFileName, run.ID, err)
+	}
+	return body, nil
+}
+
+// renderIndex renders what an export of the run writes beside the settlement:
+// the index, and every document it names, keyed by the name the document is
+// written under. A statement whose key or whose stored document is refused
+// refuses the whole index, which is what keeps Export from touching the
+// directory for such a run.
+func renderIndex(run Run) (runDocument, map[string][]byte, error) {
 	index := runDocument{
 		RunID:      run.ID.String(),
 		Kind:       run.Kind,
@@ -236,11 +296,11 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 	for _, statement := range run.Statements {
 		cloud, projectID, err := statements.ParseKey(statement.Key)
 		if err != nil {
-			return fmt.Errorf("the statement %s of run %s: %w", statement.Key, run.ID, err)
+			return runDocument{}, nil, fmt.Errorf("the statement %s of run %s: %w", statement.Key, run.ID, err)
 		}
 		document, err := RenderStatement(run.ID, run.Kind, statement)
 		if err != nil {
-			return err
+			return runDocument{}, nil, err
 		}
 		name := uniqueName(folded, documentPrefix(run.Kind), statement.Key)
 		documents[name] = document
@@ -265,7 +325,7 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 		for _, group := range run.Rollup.Groups {
 			body, err := renderRollup(run, *run.Rollup, group, written)
 			if err != nil {
-				return err
+				return runDocument{}, nil, err
 			}
 			// Two targets whose keys differ in ASCII case alone resolve to one file
 			// on APFS, SMB and NTFS, so the second of such a pair takes its digest
@@ -282,37 +342,7 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 			})
 		}
 	}
-
-	kickbacks, err := KickbacksJSON(run)
-	if err != nil {
-		return err
-	}
-
-	body, err := marshal(index)
-	if err != nil {
-		return fmt.Errorf("rendering %s of run %s: %w", runFileName, run.ID, err)
-	}
-
-	if err := prepareDir(j.Dir); err != nil {
-		return err
-	}
-	files := make([]artifact, 0, len(documents)+1)
-	for _, entry := range index.Statements {
-		files = append(files, artifact{name: entry.File, body: documents[entry.File]})
-	}
-	// The rollup documents follow the statements they sum, so a reader that picks
-	// one up finds every invoice it names beside it.
-	if index.Rollup != nil {
-		for _, entry := range index.Rollup.Documents {
-			files = append(files, artifact{name: entry.File, body: documents[entry.File]})
-		}
-	}
-	// The settlement goes in with the documents rather than after the index, so
-	// it is on stable storage before run.json names the month. No document takes
-	// its name away from it: DocumentFileName prefixes every one of them with
-	// statement- or credit-note-, and RollupFileName every group's with rollup-.
-	files = append(files, artifact{name: kickbacksJSONFileName, body: kickbacks})
-	return writeIndexedFiles(j.Dir, files, artifact{name: runFileName, body: body})
+	return index, documents, nil
 }
 
 // RenderStatement re-renders one stored document the way the JSON export writes
