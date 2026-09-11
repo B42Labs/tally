@@ -76,12 +76,14 @@ type activityRow struct {
 	Searched  string
 }
 
-// projectResourceRow is one resource under a type, its own page, and how long
-// it has lived. It is the resources page's row without the columns that only
-// make sense beside resources of other projects.
+// projectResourceRow is one resource under a type, its own page, what its
+// created cell prints, and how long it has lived. It is the resources page's
+// row without the columns that only make sense beside resources of other
+// projects.
 type projectResourceRow struct {
 	Resource httpapi.Resource
 	Link     string
+	Created  string
 	Lifetime decimal.Decimal
 	Lived    bool
 }
@@ -423,6 +425,7 @@ func activityRows(
 			Resource: resource,
 			Link: link("/resource",
 				"cloud", resource.Cloud, "type", resource.ResourceType, "id", resource.ResourceId),
+			Created:  createdText(resource),
 			Lifetime: lifetime,
 			Lived:    lived,
 		})

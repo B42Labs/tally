@@ -606,6 +606,7 @@ func fullAPI(t *testing.T) *fakeAPI {
 		State:         "active",
 		Size:          map[string]interface{}{"vcpus": 4},
 		CreatedAt:     &created,
+		FirstEventAt:  created,
 		LastEventAt:   created,
 		LastEventType: "instance.create.end",
 		LastPayload:   &map[string]interface{}{"state": "active"},
@@ -5043,35 +5044,217 @@ func TestHistoryWithoutCreate(t *testing.T) {
 	t.Parallel()
 
 	// orphan is the fixture's resource without a creation, the way the API
-	// serves a history that starts without a create.
+	// serves a history that starts without a create: no created_at, and the
+	// first event at the instant the history opens with.
 	orphan := func(t *testing.T) *fakeAPI {
 		t.Helper()
 
 		api := fullAPI(t)
 		api.resources.Items[0].CreatedAt = nil
+		api.resources.Items[0].FirstEventAt = testPeriod
 		api.lifecycle.Resource.CreatedAt = nil
 		api.lifecycle.Warnings = []string{"history_starts_without_create"}
 		return api
 	}
 
-	t.Run("the listing says the creation and the lifetime are unknown", func(t *testing.T) {
+	t.Run("the listing shows the first event and counts the lifetime from it", func(t *testing.T) {
 		t.Parallel()
 
 		handler, _ := serve(t, orphan(t), fullStore(t), testNow)
 
 		_, body, _ := get(t, handler, "/resources")
 		for _, want := range []string{
-			"<td>unknown</td>\n<td>none</td>\n<td class=\"number\">unknown</td>",
-			"1 row has no creation and no lifetime, because its history starts without a create</p>",
+			"<td>2026-03-01T00:00:00Z, first event</td>\n<td>none</td>\n<td class=\"number\">348.00</td>",
+			"; 1 row has no creation, because its history starts without a create: " +
+				"it shows its first event instead, and its lifetime runs from that event</p>",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("the listing lacks %q:\n%s", want, body)
 			}
 		}
+		if strings.Contains(body, "<td>unknown</td>") {
+			t.Errorf("the listing still calls the creation unknown:\n%s", body)
+		}
+	})
 
-		handler, _ = serve(t, fullAPI(t), fullStore(t), testNow)
-		if _, body, _ = get(t, handler, "/resources"); strings.Contains(body, "no creation") {
-			t.Error("a fleet with every creation known is told about unknown ones")
+	t.Run("a fleet with every creation known is told about neither", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources")
+		for _, unwanted := range []string{"no creation", ", first event"} {
+			if strings.Contains(body, unwanted) {
+				t.Errorf("a fleet with every creation known carries %q:\n%s", unwanted, body)
+			}
+		}
+	})
+
+	t.Run("an empty page counts nothing", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.Items = nil
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/resources")
+		if status != http.StatusOK || !strings.Contains(body, "no resource matched") {
+			t.Errorf("status = %d, body:\n%s", status, body)
+		}
+		for _, unwanted := range []string{"no creation", "first event"} {
+			if strings.Contains(body, unwanted) {
+				t.Errorf("an empty page carries %q:\n%s", unwanted, body)
+			}
+		}
+	})
+
+	t.Run("a row the API served without a first event stays unknown", func(t *testing.T) {
+		t.Parallel()
+
+		// A Reporting API older than first_event_at serves no such member,
+		// which the client decodes as the zero instant.
+		api := orphan(t)
+		api.resources.Items[0].FirstEventAt = time.Time{}
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources")
+		for _, want := range []string{
+			"<td>unknown</td>\n<td>none</td>\n<td class=\"number\">unknown</td>",
+			"; 1 row has no creation and no lifetime, because its history starts without a create " +
+				"and the API served no first event for it</p>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the listing lacks %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "first event</td>") {
+			t.Errorf("the listing names a first event it was not served:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, "/project?id="+testProjectID.String())
+		activity := section(t, body, "What this project ran", "Statements")
+		for _, want := range []string{"<td>unknown</td>", `<td class="number">unknown</td>`} {
+			if !strings.Contains(activity, want) {
+				t.Errorf("the fold lacks %q:\n%s", want, activity)
+			}
+		}
+	})
+
+	t.Run("the instant and the window place the row at its first event", func(t *testing.T) {
+		t.Parallel()
+
+		api := orphan(t)
+		api.resources.Items[0].FirstEventAt = testPeriod.Add(48 * time.Hour)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?at=2026-03-02T00:00:00Z")
+		if strings.Contains(body, ">vm-1</a>") || !strings.Contains(body, "0 of 1 row existed at 2026-03-02T00:00:00Z") {
+			t.Errorf("the row is on the page before its first event:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, "/resources?at=2026-03-03T00:00:00Z")
+		for _, want := range []string{
+			">vm-1</a>",
+			"1 of 1 row existed at 2026-03-03T00:00:00Z",
+			`<td class="number">300.00</td>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page at the first event lacks %q:\n%s", want, body)
+			}
+		}
+
+		_, body, _ = get(t, handler, "/resources?from=2026-02-01T00:00:00Z&to=2026-03-03T00:00:00Z")
+		if !strings.Contains(body, "no resource of this page existed between 2026-02-01T00:00:00Z and 2026-03-03T00:00:00Z") {
+			t.Errorf("a window ending at the first event keeps the row:\n%s", body)
+		}
+	})
+
+	t.Run("sorting and filtering by the creation place the first event among the creations", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		second := api.resources.Items[0]
+		second.ResourceId, second.CreatedAt, second.FirstEventAt = "vm-2", nil, testPeriod.Add(-24*time.Hour)
+		api.resources.Items = append(api.resources.Items, second)
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/resources?resources.sort=created")
+		earlier, later := strings.Index(body, ">vm-2</a>"), strings.Index(body, ">vm-1</a>")
+		if earlier < 0 || later < 0 || earlier > later {
+			t.Errorf("sorting by the creation does not put the earlier first event first:\n%s", body)
+		}
+
+		_, body, _ = get(t, handler, "/resources?resources.q=first+event")
+		if !strings.Contains(body, ">vm-2</a>") || strings.Contains(body, ">vm-1</a>") {
+			t.Errorf("filtering for the first event keeps the wrong rows:\n%s", body)
+		}
+	})
+
+	t.Run("the project page folds the row open from its first event", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, orphan(t), fullStore(t), testNow)
+
+		_, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		activity := section(t, body, "What this project ran", "Statements")
+		for _, want := range []string{"<td>2026-03-01T00:00:00Z, first event</td>", `<td class="number">348.00</td>`} {
+			if !strings.Contains(activity, want) {
+				t.Errorf("the fold lacks %q:\n%s", want, activity)
+			}
+		}
+	})
+
+	t.Run("a project window before the first event folds nothing", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, orphan(t), fullStore(t), testNow)
+
+		// Taken to have existed all along, the row would be folded here.
+		_, body, _ := get(t, handler,
+			"/project?id="+testProjectID.String()+"&from=2026-02-01T00:00&to=2026-02-15T00:00")
+		activity := section(t, body, "What this project ran", "Statements")
+		if strings.Contains(activity, ">vm-1</a>") || !strings.Contains(activity, "<td>instance</td>") {
+			t.Errorf("a window before the first event folds the row open:\n%s", activity)
+		}
+	})
+
+	t.Run("a project without resources folds nothing", func(t *testing.T) {
+		t.Parallel()
+
+		api := fullAPI(t)
+		api.resources.Items = nil
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/project?id="+testProjectID.String())
+		activity := section(t, body, "What this project ran", "Statements")
+		if status != http.StatusOK || !strings.Contains(activity, "<td>instance</td>") {
+			t.Errorf("status = %d, the fold:\n%s", status, activity)
+		}
+		for _, unwanted := range []string{"first event", "unknown"} {
+			if strings.Contains(activity, unwanted) {
+				t.Errorf("an empty fold carries %q:\n%s", unwanted, activity)
+			}
+		}
+	})
+
+	t.Run("a first event the client could not decode fails both pages", func(t *testing.T) {
+		t.Parallel()
+
+		endpoint := "https://api.example/api/v1/resources"
+		api := fullAPI(t)
+		// What the client returns for a first_event_at that is not an instant.
+		api.resourcesErr = fmt.Errorf("decoding the answer of %s: %w", endpoint, errors.New(
+			`parsing time "yesterday" as "2006-01-02T15:04:05Z07:00": cannot parse "yesterday" as "2006"`))
+		handler, _ := serve(t, api, fullStore(t), testNow)
+
+		for _, path := range []string{"/resources", "/project?id=" + testProjectID.String()} {
+			status, body, _ := get(t, handler, path)
+			if status != http.StatusBadGateway || !strings.Contains(body, "the Reporting API call failed") {
+				t.Errorf("%s: status = %d, body:\n%s", path, status, body)
+			}
+			if !strings.Contains(body, endpoint) {
+				t.Errorf("%s: the page does not name the endpoint:\n%s", path, body)
+			}
 		}
 	})
 

@@ -186,6 +186,23 @@ func lifetimeStart(resource httpapi.Resource) (start time.Time, ok bool) {
 	return resource.FirstEventAt, true
 }
 
+// firstEventMark follows the instant a created cell prints for a history that
+// starts without a create, so the cell says which instant it is.
+const firstEventMark = ", first event"
+
+// createdText is what a resource's created cell prints: its creation, the
+// instant of its first event marked as such, or unknown for a row carrying
+// neither.
+func createdText(resource httpapi.Resource) string {
+	if resource.CreatedAt != nil {
+		return stamp(*resource.CreatedAt)
+	}
+	if resource.FirstEventAt.IsZero() {
+		return unknown
+	}
+	return stamp(resource.FirstEventAt) + firstEventMark
+}
+
 // livedBetween reports whether a resource lived inside a half-open window: it
 // was created, or had its first event, before to and was not deleted at or
 // before from. A nil bound is a window open on that side, and a window with
@@ -279,17 +296,37 @@ func firstEvent(events []httpapi.StoredEvent) (httpapi.StoredEvent, bool) {
 	return first, true
 }
 
+// firstEventText is the line the resources page adds for the rows whose
+// history starts without a create and that show their first event instead,
+// and nothing when there is none.
+func firstEventText(rows int) string {
+	switch rows {
+	case 0:
+		return ""
+	case 1:
+		return "1 row has no creation, because its history starts without a create: " +
+			"it shows its first event instead, and its lifetime runs from that event"
+	default:
+		return fmt.Sprintf(
+			"%d rows have no creation, because their histories start without a create: "+
+				"they show their first event instead, and their lifetime runs from that event", rows)
+	}
+}
+
 // unknownText is the line the resources page adds for the rows whose history
-// starts without a create, and nothing when there is none.
+// starts without a create and that the API served no first event for either,
+// and nothing when there is none.
 func unknownText(rows int) string {
 	switch rows {
 	case 0:
 		return ""
 	case 1:
-		return "1 row has no creation and no lifetime, because its history starts without a create"
+		return "1 row has no creation and no lifetime, because its history starts without a create " +
+			"and the API served no first event for it"
 	default:
 		return fmt.Sprintf(
-			"%d rows have no creation and no lifetime, because their histories start without a create", rows)
+			"%d rows have no creation and no lifetime, because their histories start without a create "+
+				"and the API served no first event for them", rows)
 	}
 }
 
@@ -334,8 +371,11 @@ type fleetView struct {
 	// Empty is what the table says when the filters left nothing of a page
 	// that held rows; a page the API served empty says what it always said.
 	Empty string
-	// Unknown counts the rows kept whose history starts without a create,
-	// and is empty when there is none.
+	// FirstEvent counts the rows kept whose history starts without a create
+	// and that show their first event instead, and is empty when there is none.
+	FirstEvent string
+	// Unknown counts the rows kept whose history starts without a create and
+	// that the API served no first event for, and is empty when there is none.
 	Unknown string
 }
 
@@ -349,15 +389,16 @@ type fleetView struct {
 // nothing is pinned, so that the page opens on now without claiming an
 // instant was chosen.
 func buildFleetView(
-	r *http.Request, state fleetState, now time.Time, kept, total, unknown int, paged bool,
+	r *http.Request, state fleetState, now time.Time, kept, total, fromFirstEvent, unknown int, paged bool,
 ) fleetView {
 	values := r.URL.Query()
 	view := fleetView{
-		Path:     r.URL.Path,
-		Windowed: state.Window,
-		From:     inputValue(state.From),
-		To:       inputValue(state.To),
-		Unknown:  unknownText(unknown),
+		Path:       r.URL.Path,
+		Windowed:   state.Window,
+		From:       inputValue(state.From),
+		To:         inputValue(state.To),
+		FirstEvent: firstEventText(fromFirstEvent),
+		Unknown:    unknownText(unknown),
 	}
 	if state.Pinned {
 		view.At = state.At.UTC().Format(atLayout)
