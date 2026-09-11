@@ -63,6 +63,14 @@ const (
 	statusFinalized = "finalized"
 )
 
+// Exportable reports whether a run of this status is exported: a completed or
+// a finalized one. Load refuses every other status, and a reader that shows a
+// statement's file asks the same question before it renders one, so the two
+// cannot disagree about which runs an ERP receives.
+func Exportable(status string) bool {
+	return status == statusCompleted || status == statusFinalized
+}
+
 // Run is one run as an exporter receives it: its row, its statements, its rated
 // records, the kickbacks it settles, and, for a correction, its deltas. It is
 // everything the file writers below need, so an exporter runs with no database
@@ -202,7 +210,7 @@ func load(ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID, artifacts bo
 		}
 		return Run{}, fmt.Errorf("reading the run %s: %w", runID, err)
 	}
-	if row.Status != statusCompleted && row.Status != statusFinalized {
+	if !Exportable(row.Status) {
 		return Run{}, fmt.Errorf("%w: run %s is %s, and only a completed or finalized run is exported",
 			ErrRunNotExportable, runID, row.Status)
 	}

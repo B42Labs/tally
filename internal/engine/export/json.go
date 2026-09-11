@@ -238,7 +238,7 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 		if err != nil {
 			return fmt.Errorf("the statement %s of run %s: %w", statement.Key, run.ID, err)
 		}
-		document, err := renderDocument(run, statement)
+		document, err := RenderStatement(run.ID, run.Kind, statement)
 		if err != nil {
 			return err
 		}
@@ -315,29 +315,35 @@ func (j JSONFiles) Export(_ context.Context, run Run) error {
 	return writeIndexedFiles(j.Dir, files, artifact{name: runFileName, body: body})
 }
 
-// renderDocument re-renders one stored document. The document is decoded into
-// the type its run's kind renders and marshalled again, which is what turns the
-// key order JSONB stores an object in back into the field order the concept
-// prints it in. Unknown fields are refused rather than dropped: a document the
-// engine's own types do not hold every field of is one this version cannot
-// render without losing part of it.
-func renderDocument(run Run, statement statements.Statement) ([]byte, error) {
+// RenderStatement re-renders one stored document the way the JSON export writes
+// it. The document is decoded into the type the run's kind renders, a statement
+// or a credit note, and marshalled again, which is what turns the key order
+// JSONB stores an object in back into the field order the concept prints it in.
+// Unknown fields are refused rather than dropped: a document the engine's own
+// types do not hold every field of is one this version cannot render without
+// losing part of it.
+//
+// The bytes are the file DocumentFileName names, and JSONFiles writes them from
+// here, so a reader that shows a statement's file shows what an export of the
+// run writes rather than a copy of it. Of the statement only the key and the
+// document are read, and the run id names the run in an error.
+func RenderStatement(runID uuid.UUID, kind string, statement statements.Statement) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(statement.Document))
 	decoder.DisallowUnknownFields()
 
 	var document any = &statements.Document{}
-	if run.Kind == runs.KindCorrection {
+	if kind == runs.KindCorrection {
 		document = &corrections.CreditNote{}
 	}
 	if err := decoder.Decode(document); err != nil {
 		return nil, fmt.Errorf("decoding the stored document of statement %s of run %s: %w",
-			statement.Key, run.ID, err)
+			statement.Key, runID, err)
 	}
 
 	body, err := marshal(document)
 	if err != nil {
 		return nil, fmt.Errorf("rendering the document of statement %s of run %s: %w",
-			statement.Key, run.ID, err)
+			statement.Key, runID, err)
 	}
 	return body, nil
 }

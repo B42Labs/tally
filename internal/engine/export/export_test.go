@@ -1494,6 +1494,107 @@ func TestJSONFilesRefusals(t *testing.T) {
 	}
 }
 
+// TestRenderStatement pins the bytes one statement renders to against the file
+// the JSON writer puts it in, which TestExportGolden pins in turn. A reader
+// that shows a statement's file calls this rather than JSONFiles, so a
+// difference here is a page showing a file no export writes.
+func TestRenderStatement(t *testing.T) {
+	cases := []struct {
+		name   string
+		run    func(t *testing.T) export.Run
+		golden string
+	}{
+		{name: "the statements of a regular run", run: regularRun, golden: "regular"},
+		{name: "the credit note of a correction", run: correctionRun, golden: "correction"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run := c.run(t)
+			for _, statement := range run.Statements {
+				got, err := export.RenderStatement(run.ID, run.Kind, statement)
+				if err != nil {
+					t.Fatalf("RenderStatement(%s) error = %v, want nil", statement.Key, err)
+				}
+				file := export.DocumentFileName(run.Kind, statement.Key)
+				want := read(t, filepath.Join("testdata", "golden", c.golden, file))
+				if !bytes.Equal(got, want) {
+					t.Errorf("RenderStatement(%s) =\n%s\nwant %s\n%s", statement.Key, got, file, want)
+				}
+			}
+		})
+	}
+
+	t.Run("a document stored in another member order", func(t *testing.T) {
+		run := regularRun(t)
+		statement := run.Statements[1]
+		statement.Document = reordered(t, statement.Document)
+
+		got, err := export.RenderStatement(run.ID, run.Kind, statement)
+		if err != nil {
+			t.Fatalf("RenderStatement() error = %v, want nil", err)
+		}
+		if want := read(t, filepath.Join("testdata", "golden", "regular", statementFile)); !bytes.Equal(got, want) {
+			t.Errorf("RenderStatement() =\n%s\nwant\n%s", got, want)
+		}
+	})
+
+	t.Run("a document holding a field the type does not have", func(t *testing.T) {
+		run := regularRun(t)
+		statement := run.Statements[1]
+		statement.Document = []byte(`{"project_id":"proj-456","invoice_number":"2026-03-0001"}`)
+
+		_, err := export.RenderStatement(run.ID, run.Kind, statement)
+		if err == nil {
+			t.Fatal("RenderStatement() error = nil, want the document refused")
+		}
+		for _, want := range []string{statementKey, regularRunID.String(), "invoice_number"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("RenderStatement() error = %v, want it to name %s", err, want)
+			}
+		}
+	})
+}
+
+// reordered is a document with its members in another order and without its
+// whitespace, the way JSONB hands a stored one back in an order of its own:
+// here the keys of every object sorted by their bytes. The numbers keep the
+// text they were stored as, so only the order and the layout differ.
+func reordered(t *testing.T, document []byte) []byte {
+	t.Helper()
+
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatalf("decoding the document: %v", err)
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encoding the document: %v", err)
+	}
+	if bytes.Equal(body, document) {
+		t.Fatal("the document came back in the order it was stored in")
+	}
+	return body
+}
+
+// TestExportable pins which run statuses an export is produced from: the two
+// that bill, and none of the three a period keeps for audit.
+func TestExportable(t *testing.T) {
+	for status, want := range map[string]bool{
+		"completed":  true,
+		"finalized":  true,
+		"running":    false,
+		"failed":     false,
+		"superseded": false,
+	} {
+		if got := export.Exportable(status); got != want {
+			t.Errorf("Exportable(%q) = %t, want %t", status, got, want)
+		}
+	}
+}
+
 // TestExportOntoAFile pins what an --out that names an existing file reports.
 // The path is an operator's, and mkdir is the first thing either writer does
 // with it, so the error names the directory it could not create and carries the
