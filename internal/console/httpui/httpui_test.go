@@ -1589,6 +1589,323 @@ func TestStatementPage(t *testing.T) {
 	})
 }
 
+// creditNoteDocument is a credit note carrying what the golden one does not: a
+// second item, a related cost, an adjustment and the three deltas. Its items
+// are listed in an order that is not their order by total, so the page shows
+// whether it keeps the note's order.
+const creditNoteDocument = `{
+  "billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+  "project_id": "p-1",
+  "platform": "openstack",
+  "corrects_run_id": "22222222-2222-4222-8222-222222222222",
+  "line_items": [
+    {
+      "resource_type": "instance", "resource_id": "vm-5", "platform": "openstack",
+      "dimensions": {
+        "vcpus": {"old": 16.98, "new": 15.83, "delta": -1.15},
+        "ram_gb": {"old": 8.50, "new": 7.93, "delta": -0.57}
+      },
+      "total": -1.72
+    },
+    {
+      "resource_type": "instance", "resource_id": "vm-7", "platform": "openstack",
+      "dimensions": {"vcpus": {"old": 1.00, "new": 1.50, "delta": 0.50}},
+      "total": 0.50
+    }
+  ],
+  "related_costs": [
+    {
+      "relation_type": "infrastructure_tenant", "project_id": "p-2", "platform": "openstack",
+      "line_items": [
+        {
+          "resource_type": "instance", "resource_id": "vm-6", "platform": "openstack",
+          "dimensions": {"vcpus": {"old": 2.00, "new": 1.64, "delta": -0.36}},
+          "total": -0.36
+        }
+      ],
+      "total": -0.36
+    }
+  ],
+  "base_delta": -1.58,
+  "adjustments": [
+    {
+      "type": "project_discount", "relation_type": "member_of", "relation_target": "acme",
+      "relation_id": "99999999-9999-4999-8999-999999999999", "scope": "all",
+      "rate": 0.100000, "old": -87.66, "new": -87.50, "delta": 0.16
+    }
+  ],
+  "net_delta": -1.42,
+  "kickback_delta": 0.00,
+  "total": -1.42,
+  "currency": "EUR"
+}`
+
+// TestCreditNote reads a statement of a correction run, which is a credit note.
+// The export block of the page prints the same numbers as JSON, so every value
+// is looked for as the bill's own markup or inside the bill's sections, which
+// the export block stands above.
+func TestCreditNote(t *testing.T) {
+	t.Parallel()
+
+	notePath := "/statement?run=" + testCorrectionRunID.String() + "&key=" + url.QueryEscape(testKey)
+
+	noteStore := func(t *testing.T, document string) *fakeStore {
+		t.Helper()
+
+		engine := fullStore(t)
+		engine.run = store.Run{
+			ID:            testCorrectionRunID,
+			PeriodFrom:    testPeriod,
+			PeriodTo:      testPeriod.AddDate(0, 1, 0),
+			Kind:          "correction",
+			CorrectsRunID: testRunID,
+			Status:        "finalized",
+		}
+		engine.statement = store.Statement{Document: []byte(document), Currency: "EUR"}
+		return engine
+	}
+
+	t.Run("the golden credit note shows its dimensions", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, string(goldenCreditNote(t))), testNow)
+
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"<h1>Credit note os-sim/p-1</h1>",
+			`href="/run?id=3f1e6a58-9c24-4d0b-8f77-2a5c1b93e0d4"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+		bill := section(t, body, "Line items", "")
+		for _, want := range []string{
+			"<td>disk_gb</td>", `<td class="number">59.52</td>`, `<td class="number">49.92</td>`,
+			`<td class="number">-9.60</td>`,
+			"<td>ram_gb</td>", `<td class="number">29.76</td>`, `<td class="number">24.96</td>`,
+			`<td class="number">-4.80</td>`,
+			"<td>vcpus</td>", "-24.00 EUR",
+		} {
+			if !strings.Contains(bill, want) {
+				t.Errorf("the bill does not carry %q:\n%s", want, bill)
+			}
+		}
+	})
+
+	t.Run("a note without adjustments shows none of their terms", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, string(goldenCreditNote(t))), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		for _, unwanted := range []string{
+			">hours<", "<dt>base delta</dt>", "<dt>net delta</dt>", "<dt>kickback delta</dt>", "<h2>Adjustments</h2>",
+		} {
+			if strings.Contains(body, unwanted) {
+				t.Errorf("the page carries %q, which this credit note holds none of", unwanted)
+			}
+		}
+	})
+
+	t.Run("the deltas and the adjustment changes", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, creditNoteDocument), testNow)
+
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		for _, want := range []string{
+			"<dt>base delta</dt><dd>-1.58</dd>",
+			"<dt>net delta</dt><dd>-1.42</dd>",
+			"<dt>kickback delta</dt><dd>0.00</dd>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the head does not carry %q", want)
+			}
+		}
+		adjustments := section(t, body, "Adjustments", "Line items")
+		for _, want := range []string{
+			"<td>project_discount</td>", `<td class="number">0.100000</td>`,
+			`<td class="number">-87.66</td>`, `<td class="number">-87.50</td>`, `<td class="number">0.16</td>`,
+		} {
+			if !strings.Contains(adjustments, want) {
+				t.Errorf("the adjustments do not carry %q:\n%s", want, adjustments)
+			}
+		}
+	})
+
+	t.Run("a related cost", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, creditNoteDocument), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		related := section(t, body, "Related cost of <code>p-2</code>", "")
+		for _, want := range []string{"<code>vm-6</code>", `<td class="number">-0.36</td>`} {
+			if !strings.Contains(related, want) {
+				t.Errorf("the related cost does not carry %q:\n%s", want, related)
+			}
+		}
+	})
+
+	t.Run("the items keep the note's order until one is asked for", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, creditNoteDocument), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		if strings.Contains(body, "aria-sort") {
+			t.Error("a table opens sorted")
+		}
+		items := section(t, body, "Line items", "Related cost of <code>p-2</code>")
+		first, second := strings.Index(items, "<code>vm-5</code>"), strings.Index(items, "<code>vm-7</code>")
+		if first < 0 || second < 0 || first > second {
+			t.Errorf("the items are not in the note's order:\n%s", items)
+		}
+
+		_, body, _ = get(t, handler, notePath+"&items.sort=-total")
+		items = section(t, body, "Line items", "Related cost of <code>p-2</code>")
+		first, second = strings.Index(items, "<code>vm-7</code>"), strings.Index(items, "<code>vm-5</code>")
+		if first < 0 || second < 0 || first > second {
+			t.Errorf("the items are not sorted by total:\n%s", items)
+		}
+		if !strings.Contains(items, `aria-sort="descending"`) {
+			t.Error("the sorted heading does not say so")
+		}
+	})
+
+	t.Run("the summary leads to an unfolded block", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, creditNoteDocument), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		want := `href="/statement?key=os-sim%2Fp-1&amp;open=li-0&amp;run=` + testCorrectionRunID.String() + `#li-0"`
+		if !strings.Contains(body, want) {
+			t.Errorf("the summary does not lead to the block:\n%s", body)
+		}
+		if strings.Contains(body, " open>") {
+			t.Error("a block starts unfolded")
+		}
+
+		_, body, _ = get(t, handler, notePath+"&open=li-0")
+		if !strings.Contains(body, `<details class="item" id="li-0" open>`) {
+			t.Errorf("the block the link names is not unfolded:\n%s", body)
+		}
+	})
+
+	t.Run("a note without items", func(t *testing.T) {
+		t.Parallel()
+
+		document := `{"billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+			"project_id": "p-1", "platform": "openstack",
+			"corrects_run_id": "22222222-2222-4222-8222-222222222222",
+			"line_items": [], "related_costs": [], "total": 0.00, "currency": "EUR"}`
+		handler, _ := serve(t, fullAPI(t), noteStore(t, document), testNow)
+
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+		if !strings.Contains(body, "this section holds no line item") {
+			t.Errorf("the page does not say the note holds no item:\n%s", body)
+		}
+	})
+
+	t.Run("an item without dimensions", func(t *testing.T) {
+		t.Parallel()
+
+		document := `{"billing_period": {"from": "2026-03-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+			"project_id": "p-1", "platform": "openstack",
+			"corrects_run_id": "22222222-2222-4222-8222-222222222222",
+			"line_items": [{"resource_type": "instance", "resource_id": "vm-5", "platform": "openstack",
+				"dimensions": {}, "total": 0.00}],
+			"related_costs": [], "total": 0.00, "currency": "EUR"}`
+		handler, _ := serve(t, fullAPI(t), noteStore(t, document), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		if !strings.Contains(body, "this item holds no dimension") {
+			t.Errorf("the block does not say the item holds no dimension:\n%s", body)
+		}
+	})
+
+	t.Run("a statement stored under a correction run", func(t *testing.T) {
+		t.Parallel()
+
+		handler, logged := serve(t, fullAPI(t), noteStore(t, string(goldenStatement(t))), testNow)
+
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusServiceUnavailable, body)
+		}
+		want := fmt.Sprintf("reading the credit note of %s in run %s: not a credit note document",
+			testKey, testCorrectionRunID)
+		if !strings.Contains(body, want) {
+			t.Errorf("the page does not carry %q:\n%s", want, body)
+		}
+		if !strings.Contains(logged.String(), "not a credit note document") {
+			t.Errorf("the log does not carry the failure:\n%s", logged.String())
+		}
+	})
+
+	t.Run("a document that is no JSON", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, "not json at all"), testNow)
+
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusServiceUnavailable, body)
+		}
+		for _, want := range []string{"reading the credit note of", "invalid character"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the page does not carry %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("the run cannot be read", func(t *testing.T) {
+		t.Parallel()
+
+		engine := noteStore(t, creditNoteDocument)
+		engine.runErr = fmt.Errorf("GetRun: %w", errors.New("connection refused"))
+		handler, _ := serve(t, fullAPI(t), engine, testNow)
+		status, body, _ := get(t, handler, notePath)
+		if status != http.StatusServiceUnavailable || !strings.Contains(body, "GetRun") {
+			t.Errorf("status = %d, want %d naming GetRun:\n%s", status, http.StatusServiceUnavailable, body)
+		}
+
+		engine = noteStore(t, creditNoteDocument)
+		engine.runErr = fmt.Errorf("GetRun: %w", pgx.ErrNoRows)
+		handler, _ = serve(t, fullAPI(t), engine, testNow)
+		if status, _, _ := get(t, handler, notePath); status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+	})
+
+	t.Run("every table of the note carries its form", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), noteStore(t, creditNoteDocument), testNow)
+
+		_, body, _ := get(t, handler, notePath)
+		forms := strings.Count(body, `<form class="tools"`)
+		// The dimension tables inside the items sort and carry no form, the
+		// way the metric tables of a statement do.
+		sections := strings.Count(body, "<h2>Adjustments</h2>") + strings.Count(body, "<h2>Line items</h2>") +
+			strings.Count(body, "<h2>Related cost of")
+		if forms != 3 || sections != 3 {
+			t.Errorf("%d filter forms for %d sections, want 3 of each", forms, sections)
+		}
+	})
+}
+
 func TestStatementExport(t *testing.T) {
 	t.Parallel()
 

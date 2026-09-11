@@ -1,0 +1,92 @@
+{{define "content"}}
+<dl>
+<dt>cloud</dt><dd>{{.Cloud}}</dd>
+<dt>project</dt><dd><code>{{.Project}}</code></dd>
+<dt>platform</dt><dd>{{.Note.Platform}}</dd>
+<dt>run</dt><dd><a href="{{.RunLink}}"><code>{{.RunID}}</code></a></dd>
+<dt>corrects</dt><dd><a href="{{.CorrectsLink}}"><code>{{.Note.CorrectsRunID}}</code></a></dd>
+<dt>billing period</dt><dd>{{.Note.BillingPeriod.From}} to {{.Note.BillingPeriod.To}}</dd>
+<dt>total</dt><dd>{{amount .Note.Total.Decimal}} {{.Note.Currency}}</dd>
+{{with .Note.BaseDelta}}<dt>base delta</dt><dd>{{amount .Decimal}}</dd>{{end}}
+{{with .Note.NetDelta}}<dt>net delta</dt><dd>{{amount .Decimal}}</dd>{{end}}
+{{with .Note.KickbackDelta}}<dt>kickback delta</dt><dd>{{amount .Decimal}}</dd>{{end}}
+</dl>
+
+<h2>Export</h2>
+{{template "statementExport" .Export}}
+
+{{if .Adjustments.Table.Total}}
+<h2>Adjustments</h2>
+{{template "tableTools" .Adjustments.Table}}
+<table>
+{{template "tableHead" .Adjustments.Table}}
+<tbody>
+{{range .Adjustments.Rows}}<tr>
+<td>{{.Type}}</td>
+<td>{{.RelationType}}</td>
+<td><code>{{.RelationTarget}}</code></td>
+<td>{{.Scope}}</td>
+<td class="number">{{rate .Rate.Decimal}}</td>
+<td class="number{{zeroClass .Old.Decimal}}">{{amount .Old.Decimal}}</td>
+<td class="number{{zeroClass .New.Decimal}}">{{amount .New.Decimal}}</td>
+<td class="number{{zeroClass .Delta.Decimal}}">{{amount .Delta.Decimal}}</td>
+</tr>
+{{else}}<tr><td colspan="8">{{emptyText .Adjustments.Table "this credit note carries no adjustment change"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+<h2>Line items</h2>
+{{template "creditSection" .Items}}
+
+{{range .Related}}
+<h2>Related cost of <code>{{.Related.ProjectID}}</code></h2>
+<dl>
+<dt>relation type</dt><dd>{{.Related.RelationType}}</dd>
+<dt>project</dt><dd><code>{{.Related.ProjectID}}</code></dd>
+<dt>platform</dt><dd>{{.Related.Platform}}</dd>
+<dt>total</dt><dd>{{amount .Related.Total.Decimal}} {{.Currency}}</dd>
+</dl>
+{{template "creditSection" .}}
+{{end}}
+{{end}}
+
+{{/* creditSection is one section of a credit note: the summary table of its
+     items, then the detail block of every item the summary shows, in its
+     order, each holding one row per dimension. */}}
+{{define "creditSection"}}
+{{if .Summary.Table.Total}}
+{{template "tableTools" .Summary.Table}}
+<table>
+{{template "tableHead" .Summary.Table}}
+<tbody>
+{{range .Summary.Rows}}<tr>
+<td>{{.ResourceType}}</td>
+<td><a href="{{.OpenLink}}"><code>{{.ResourceID}}</code></a></td>
+<td class="number{{zeroClass .Total}}">{{amount .Total}} {{$.Currency}}</td>
+</tr>
+{{else}}<tr><td colspan="3">{{emptyText .Summary.Table "this section holds no line item"}}</td></tr>
+{{end}}</tbody>
+</table>
+{{range .Summary.Rows}}
+<details class="item" id="{{.Anchor}}"{{if .Open}} open{{end}}>
+<summary><span>{{.ResourceType}} <code>{{.ResourceID}}</code></span><span class="total{{zeroClass .Total}}">{{amount .Total}} {{$.Currency}}</span></summary>
+{{if .ResourceLink}}<p class="muted"><a href="{{.ResourceLink}}">the resource's page</a></p>{{end}}
+<table>
+{{template "tableHead" .Dimensions.Table}}
+<tbody>
+{{range .Dimensions.Rows}}<tr>
+<td>{{.Dimension}}</td>
+<td class="number{{zeroClass .Old}}">{{amount .Old}}</td>
+<td class="number{{zeroClass .New}}">{{amount .New}}</td>
+<td class="number{{zeroClass .Delta}}">{{amount .Delta}}</td>
+</tr>
+{{else}}<tr><td colspan="4">this item holds no dimension</td></tr>
+{{end}}</tbody>
+</table>
+</details>
+{{end}}
+{{else}}
+<p>this section holds no line item</p>
+{{end}}
+{{end}}

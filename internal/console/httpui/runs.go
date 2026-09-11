@@ -136,8 +136,10 @@ func (h *handlers) run(w http.ResponseWriter, r *http.Request) {
 
 // statement shows one stored document as a bill. The document is what the run
 // wrote: the page decodes it and prints it, and computes none of it again. The
-// run is read for the file the export writes beside the bill, which its kind
-// names and its status decides whether there is one at all.
+// run is read first, because its kind decides what the document is: a
+// correction run stores a credit note under every key, which creditNote
+// renders, and every other run a statement. The run's status decides whether
+// the export writes a file for the document at all.
 func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 	var src sources
 
@@ -159,17 +161,21 @@ func (h *handlers) statement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	document, err := readStatement(stored)
-	if err != nil {
-		h.failFrom(w, r,
-			documentFailed(fmt.Errorf("reading the statement of %s in run %s: %w", key, runID, err)), src)
-		return
-	}
-
 	run, err := h.store.GetRun(r.Context(), runID)
 	src.query("GetRun")
 	if err != nil {
 		h.failFrom(w, r, storeFailed(err), src)
+		return
+	}
+	if storesCreditNotes(run) {
+		h.creditNote(w, r, run, key, stored, src)
+		return
+	}
+
+	document, err := readStatement(stored)
+	if err != nil {
+		h.failFrom(w, r,
+			documentFailed(fmt.Errorf("reading the statement of %s in run %s: %w", key, runID, err)), src)
 		return
 	}
 
