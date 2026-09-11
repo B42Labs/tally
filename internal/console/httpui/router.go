@@ -65,7 +65,9 @@ type Options struct {
 type API interface {
 	ListProjects(ctx context.Context, q reporting.ProjectsQuery) (httpapi.ProjectList, reporting.Request, error)
 	GetProject(ctx context.Context, id uuid.UUID) (httpapi.Project, reporting.Request, error)
-	ListProjectRelations(ctx context.Context, id uuid.UUID) (httpapi.RelationList, reporting.Request, error)
+	ListProjectRelations(
+		ctx context.Context, id uuid.UUID, q reporting.RelationsQuery,
+	) (httpapi.RelationList, reporting.Request, error)
 	ListRelatedProjects(ctx context.Context, id uuid.UUID) (httpapi.RelatedProjectList, reporting.Request, error)
 	GetProjectSummary(
 		ctx context.Context, id uuid.UUID, from, to time.Time,

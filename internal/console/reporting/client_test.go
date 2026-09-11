@@ -30,6 +30,10 @@ var (
 	windowTo   = time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 )
 
+// windowLast is the last microsecond of that window, which is the instant a
+// relation read asks about the end of a billing period at.
+var windowLast = windowTo.Add(-time.Microsecond)
+
 // The smallest valid answers of the routes under test. A paged list carries a
 // cursor member, an unpaged one does not.
 const (
@@ -106,7 +110,7 @@ func testClient(t *testing.T, baseURL string) *Client {
 // TestReadsCarryTheTokenAndTheQuery holds every read to the route it is
 // documented for. The path segments, the filters, and their encoding are what
 // decides whether the API answers the question a page asked, and the token has
-// to be on all ten of them.
+// to be on all twelve of them.
 func TestReadsCarryTheTokenAndTheQuery(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -142,7 +146,33 @@ func TestReadsCarryTheTokenAndTheQuery(t *testing.T) {
 			body:    emptyList,
 			wantURI: "/api/v1/projects/11111111-1111-4111-8111-111111111111/relations",
 			call: func(ctx context.Context, c *Client) (Request, error) {
-				_, request, err := c.ListProjectRelations(ctx, testProjectID)
+				_, request, err := c.ListProjectRelations(ctx, testProjectID, RelationsQuery{})
+				return request, err
+			},
+		},
+		{
+			// The instant keeps its fraction: rounded to the second, a read at
+			// the end of a billing period would miss a relation that began in
+			// its last second.
+			name: "the relations reaching one project at an instant",
+			body: emptyList,
+			wantURI: "/api/v1/projects/11111111-1111-4111-8111-111111111111/relations" +
+				"?at=2026-03-31T23%3A59%3A59.999999Z&direction=incoming&relation_type=member_of",
+			call: func(ctx context.Context, c *Client) (Request, error) {
+				_, request, err := c.ListProjectRelations(ctx, testProjectID, RelationsQuery{
+					Direction:    "incoming",
+					RelationType: "member_of",
+					At:           windowLast,
+				})
+				return request, err
+			},
+		},
+		{
+			name:    "the relations of one type",
+			body:    emptyList,
+			wantURI: "/api/v1/projects/11111111-1111-4111-8111-111111111111/relations?relation_type=member_of",
+			call: func(ctx context.Context, c *Client) (Request, error) {
+				_, request, err := c.ListProjectRelations(ctx, testProjectID, RelationsQuery{RelationType: "member_of"})
 				return request, err
 			},
 		},
@@ -386,6 +416,27 @@ func TestProblemsBecomeTypedErrors(t *testing.T) {
 			if !strings.Contains(problem.Error(), want) {
 				t.Errorf("Error() = %q, want it to name %s", problem.Error(), want)
 			}
+		}
+	})
+
+	t.Run("a relation read the API refuses", func(t *testing.T) {
+		server := answering(t, http.StatusNotFound, "application/problem+json",
+			`{"type":"urn:tally:error:not-found","title":"Not found","detail":"no such project","status":404}`)
+
+		_, request, err := testClient(t, server.URL).ListProjectRelations(context.Background(), testProjectID,
+			RelationsQuery{Direction: "incoming", RelationType: "member_of", At: windowLast})
+
+		var problem *ProblemError
+		if !errors.As(err, &problem) {
+			t.Fatalf("ListProjectRelations() error = %v, want a *ProblemError", err)
+		}
+		if problem.Status != http.StatusNotFound {
+			t.Errorf("Status = %d, want 404", problem.Status)
+		}
+		// The refused request is what the error page lists as its provenance,
+		// so it still names the instant it asked about.
+		if !strings.Contains(request.Path, "at=2026-03-31T23%3A59%3A59.999999Z") {
+			t.Errorf("Request.Path = %q, want it to carry the instant", request.Path)
 		}
 	})
 
