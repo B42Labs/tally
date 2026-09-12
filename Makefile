@@ -21,6 +21,17 @@ OAPI_CODEGEN_VERSION ?= v2.8.0
 SQLC_VERSION ?= v1.31.1
 GOLANGCI_LINT_VERSION ?= v2.13.2
 
+# The packager `deb` builds the collector's Debian package with, from the same
+# module cache as the three above.
+NFPM_VERSION ?= v2.47.0
+
+# What `deb` stamps into the package, and the architecture it builds for. The
+# repository carries no tags, so the default is a development version that
+# every release sorts above: dpkg reads 0.0.0+dev as lower than 0.1.0. A build
+# that is going somewhere passes its own, as `make deb DEB_VERSION=0.1.0`.
+DEB_VERSION ?= 0.0.0+dev
+DEB_GOARCH ?= amd64
+
 CLUSTER_NAME ?= tally
 NAMESPACE ?= tally
 DEV_OVERLAY := deploy/kubernetes/overlays/dev
@@ -198,7 +209,7 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
-	images simulator-up simulator-down console demo demo-drain demo-registry \
+	images deb simulator-up simulator-down console demo demo-drain demo-registry \
 	demo-bill demo-correct docs docs-build
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
@@ -383,6 +394,23 @@ images:
 		echo "==> building $$service"; \
 		docker build --build-arg "CMD=$$service" -t "$$service:dev" .; \
 	done
+
+# The collector is the one binary that runs on a host rather than in a cluster,
+# so it is the one that is packaged. The build flags are the Dockerfile's, so
+# the packaged binary is the image's binary. nfpm reads VERSION and GOARCH out
+# of its environment, which is why they are exported here rather than written
+# into nfpm.yaml. Docker is not involved, and neither is a tool on the host:
+# this runs on macOS as well, where the .deb it writes can be read with
+# `ar x` and `tar tzvf data.tar.gz`.
+## deb: build the Debian package of the OpenStack collector into dist/
+deb:
+	GOOS=linux GOARCH=$(DEB_GOARCH) CGO_ENABLED=0 go build -trimpath \
+		-ldflags='-s -w' -o bin/tally-openstack-collector-linux-$(DEB_GOARCH) \
+		./cmd/tally-openstack-collector
+	mkdir -p dist
+	GOARCH=$(DEB_GOARCH) VERSION='$(DEB_VERSION)' \
+		go run github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION) \
+		package --packager deb --target dist/
 
 ## down: delete the kind cluster
 down:

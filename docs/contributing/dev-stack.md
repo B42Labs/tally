@@ -355,6 +355,7 @@ The table below is rendered from the `## target: description` comments of the
 | `check-tools` | check that the tools the dev stack and the tutorials need answer |
 | `up` | create the kind cluster, install the add-ons, and deploy the dev overlay |
 | `images` | build one container image per binary |
+| `deb` | build the Debian package of the OpenStack collector into dist/ |
 | `down` | delete the kind cluster |
 | `dev` | rebuild and redeploy on change |
 | `simulator-up` | run the simulator, the collector, and a broker against the dev cluster |

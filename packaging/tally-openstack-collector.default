@@ -1,0 +1,91 @@
+# /etc/default/tally-openstack-collector: the environment of
+# tally-openstack-collector.service.
+#
+# Every variable the collector reads is here, the ones with a default commented
+# out beside it. systemd reads this file, so a line is KEY=VALUE: no export, no
+# shell quoting, and no expansion of another variable.
+#
+# The two secrets are not in this file. The broker URL and the ingest token
+# live in /etc/tally, which the tally group alone may read, and the two *_FILE
+# variables below name them. Setting a secret and its *_FILE companion at once
+# is an error the collector refuses to start on, so uncommenting
+# TALLY_OSC_AMQP_URL or TALLY_OSC_TOKEN means clearing the *_FILE line above it.
+
+# Required. The broker the notifications are consumed from. Put the whole URL,
+# password and all, into this file: amqp://user:password@rabbitmq.example:5672/
+TALLY_OSC_AMQP_URL_FILE=/etc/tally/amqp-url
+
+# Required. The token the sender authenticates with against the Reporting API.
+# Issue and revoke it with tally-reporting-admin.
+TALLY_OSC_TOKEN_FILE=/etc/tally/ingest-token
+
+# Required. The cloud every emitted event is attributed to. There is no
+# default, because a guessed cloud books usage to the wrong one.
+TALLY_OSC_CLOUD=
+
+# Required. Base URL of the Reporting API the buffered events are posted to. It
+# must be absolute and carry a host, with no trailing path: the ingest path is
+# appended to it. https unless TALLY_OSC_REPORTING_INSECURE says otherwise.
+TALLY_OSC_REPORTING_URL=
+
+# The SQLite file backing the outbox, in the state directory the package owns
+# and the unit's StateDirectory= recreates. Between the acknowledgement on the
+# bus and the delivery to the Reporting API, an event lives here and nowhere
+# else, so the file is worth backing up and worth watching the size of.
+TALLY_OSC_BUFFER_PATH=/var/lib/tally/collector/outbox.db
+
+# Log level: DEBUG, INFO, WARN, ERROR. The match is exact, so a lower-case
+# info is refused rather than read as INFO.
+#TALLY_LOG_LEVEL=INFO
+
+# Metrics switch. With the default true, GET /metrics serves the Prometheus
+# exposition; false makes the route answer 404 while the instruments keep
+# counting. The variable has no OSC infix by design.
+#TALLY_METRICS_ENABLED=true
+
+# Port the probes and the metrics route listen on. The collector serves no API
+# of its own.
+#TALLY_OSC_HTTP_PORT=8080
+
+# Service exchanges the collector binds its queue to, comma-separated. The
+# default covers nova, neutron, cinder and glance; a deployment that renamed
+# them through control_exchange lists its own, and one that runs octavia adds
+# it. The exchanges are declared passively, so the collector refuses to run
+# while one it lists is missing from the broker.
+#TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance
+
+# Notification topics bound on each exchange, comma-separated. They are the
+# notification_topics of the services being collected.
+#TALLY_OSC_TOPICS=notifications.info
+
+# Allow a plaintext Reporting API. The ingest token travels in a header on
+# every flush, and the collector runs next to the OpenStack control plane, so
+# the link to Tally crosses a network the cluster's TLS does not cover. Set
+# this to true only where that link is trusted, or for development.
+#TALLY_OSC_REPORTING_INSECURE=false
+
+# How many buffered events one POST carries. Between 1 and 1000, which is the
+# array cap of the ingest API: it answers a longer batch with 413.
+#TALLY_OSC_BATCH_MAX=500
+
+# Seconds the sender waits before posting a batch that has not filled up.
+#TALLY_OSC_FLUSH_INTERVAL_S=5
+
+# Outbox depth at which the collector stops consuming. The notifications then
+# wait on the bus instead of being dropped, which is what keeps an unreachable
+# Reporting API from costing usage data. A buffered event runs a few hundred
+# bytes, so the default reaches roughly half a gigabyte on the disk this
+# directory lives on.
+#TALLY_OSC_BUFFER_MAX_EVENTS=1000000
+
+# AMQP QoS bound: how many unacknowledged messages the broker hands out. The
+# acks follow the outbox insert, so this also bounds how much work a crash
+# replays. Times the broker's max_message_size, it is what the process may hold
+# in memory.
+#TALLY_OSC_PREFETCH=100
+
+# How many seconds the outbox may stay unusable before liveness fails as well.
+# Readiness fails immediately, and on an unreachable broker too; liveness
+# weighs the outbox alone. Under systemd nothing acts on it: the probes are
+# read by an orchestrator or by a monitoring system, not by the unit.
+#TALLY_OSC_UNHEALTHY_THRESHOLD_S=600
