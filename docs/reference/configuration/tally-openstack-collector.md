@@ -83,3 +83,10 @@ nothing else: the mode maps nothing and posts nothing.
 
 [`cmd/tally-openstack-collector/.env.example`](https://github.com/B42Labs/tally/blob/main/cmd/tally-openstack-collector/.env.example)
 lists every variable with its default and a comment.
+
+The Debian package installs the same list as
+`/etc/default/tally-openstack-collector`, which the systemd unit reads. There
+the two secrets are left to their `_FILE` companions, which name
+`/etc/tally/amqp-url` and `/etc/tally/ingest-token`;
+[install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
+has the steps.

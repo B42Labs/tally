@@ -27,6 +27,11 @@ Reporting API. What the collector guarantees between those two ends is in
   has those steps.
 - The [collector settings](/reference/configuration/tally-openstack-collector)
   page, which lists every variable this guide sets with its default.
+- A collector to point at the cloud. This guide exports the variables into a
+  shell;
+  [install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
+  puts the same settings into `/etc/default/tally-openstack-collector` and runs
+  it as a systemd service instead.
 
 ## Configure the OpenStack services
 

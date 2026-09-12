@@ -23,6 +23,10 @@ Tally sit together.
 
 ### OpenStack provider
 
+- [Install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
+  puts one collector on a control node as a systemd service, with its
+  credentials in files only it may read, and upgrades, removes or purges it
+  again.
 - [Connect the collector to an OpenStack cloud](/how-to/openstack/connect-the-collector)
   points one collector at one cloud, so its services publish the notifications
   the collector reads and that cloud's events arrive at the Reporting API.

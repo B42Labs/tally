@@ -4,6 +4,7 @@ Gardener
 Harbor
 Hetzner
 Ceilometer
+Debian
 Grafana
 Pushgateway
 Tally
