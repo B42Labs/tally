@@ -1,0 +1,47 @@
+[Unit]
+Description=Tally OpenStack event collector
+Documentation=https://b42labs.github.io/tally/how-to/openstack/install-the-debian-package
+After=network-online.target
+Wants=network-online.target
+# StartLimit* are [Unit] directives, ignored where they are put under [Service].
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=tally
+Group=tally
+EnvironmentFile=/etc/default/tally-openstack-collector
+ExecStart=/usr/bin/tally-openstack-collector
+# The collector comes up while the broker or the Reporting API is unavailable
+# and reports that through its probes rather than by exiting, so a restart here
+# follows a real fault rather than a network outage.
+Restart=on-failure
+RestartSec=5
+
+# The outbox. The package ships and owns /var/lib/tally/collector; this keeps
+# it writable under ProtectSystem=strict and recreates it should it go missing.
+StateDirectory=tally/collector
+StateDirectoryMode=0750
+
+# Hardening: an AMQP client and an HTTPS client that serves probes and metrics
+# needs no privilege at all.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
