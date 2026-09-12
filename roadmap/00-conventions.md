@@ -69,7 +69,7 @@ tally/
 ├── Dockerfile                     # multi-stage, ARG CMD → builds ./cmd/${CMD}; one image per service
 ├── Tiltfile                       # dev loop: docker_build → kind load → redeploy on change
 ├── nfpm.yaml                      # Debian package of the collector; `make deb` builds it
-├── packaging/                     # systemd unit, /etc/default file and maintainer scripts of that package
+├── packaging/                     # systemd unit, /etc/default file, maintainer scripts, release version script
 ├── api/
 │   └── reporting/openapi.yaml     # Reporting API contract (oapi-codegen input)
 ├── cmd/
@@ -120,7 +120,7 @@ tally/
 │       └── overlays/
 │           ├── dev/               # kind: namespace tally, nip.io hostnames, self-signed CA, replicas: 1
 │           └── prod/              # real hostnames + issuer; added when first deployed to a real cluster
-└── .github/workflows/ci.yaml
+└── .github/workflows/             # ci.yaml, deploy-docs.yaml, release.yaml (tag → signed release)
 ```
 
 Naming rules:

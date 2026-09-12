@@ -17,16 +17,62 @@ notifications it then consumes, and what the cloud has to publish for it, is
 ## Before you start
 
 - A Debian 12 or 13, or Ubuntu 24.04 or 26.04, host on `amd64`, with `sudo`.
-- The package file. Build it from a checkout with `make deb`, which writes
-  `dist/tally-openstack-collector_<version>_amd64.deb`, and copy that file to
-  the host. The build needs Go and nothing else, and it runs on macOS as well
-  as on Linux.
+- The package file, the `SHA256SUMS` beside it and the attestation bundle
+  `attestation.sigstore.json`, all three from the
+  [releases page](https://github.com/B42Labs/tally/releases). Copy them to the
+  host, or to the machine you check them on.
+- The [GitHub CLI](https://cli.github.com/) wherever you check them, for
+  `gh attestation verify`.
+- For a version that has no release yet, a build from a checkout with
+  `make deb`, which writes
+  `dist/tally-openstack-collector_<version>_amd64.deb`. The build needs Go and
+  nothing else and runs on macOS as well as on Linux, but it produces no
+  checksum file and no attestation, so the next section does not apply to it.
 - The broker's AMQP URL, the cloud name and the base URL of the Reporting API.
 - The ingest credential this cloud reports under.
   [Issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials)
   has those steps.
 - The [collector settings](/reference/configuration/tally-openstack-collector)
   page, which lists every variable with its default.
+
+## Verify the download
+
+1. Check the package against the checksum file. `--ignore-missing` is what lets
+   you check the package alone against a `SHA256SUMS` that also lists the SBOM:
+
+   ```sh
+   sha256sum -c --ignore-missing SHA256SUMS
+   ```
+
+   ```text
+   tally-openstack-collector_<version>_amd64.deb: OK
+   ```
+
+2. Check that the file came out of this repository's release workflow. That run
+   signs what it publishes with a short-lived Sigstore certificate and stores
+   the attestation on GitHub, so there is no key to fetch and none to import:
+
+   ```sh
+   gh attestation verify tally-openstack-collector_<version>_amd64.deb --repo B42Labs/tally
+   ```
+
+   ```text
+   ✓ Verification succeeded!
+   ```
+
+   The lines above that one name the digest that was read and how many
+   attestations were loaded.
+
+3. On a host with no route to the attestations API, check against the bundle
+   you downloaded beside the package instead:
+
+   ```sh
+   gh attestation verify tally-openstack-collector_<version>_amd64.deb \
+     --repo B42Labs/tally --bundle attestation.sigstore.json
+   ```
+
+   A file that did not come out of a release of this repository fails both
+   forms, and a file that fails here is one you do not install.
 
 ## Install the package
 
