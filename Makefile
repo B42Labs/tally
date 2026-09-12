@@ -421,11 +421,18 @@ deb:
 # module list out of the Go build info, which the -ldflags='-s -w' above leaves
 # in place. The target depends on `deb`, so the binary it reads and the package
 # a release publishes come out of one build at one version.
+#
+# syft truncates its output file before it resolves the source, so a run that
+# fails leaves an empty document behind. It writes to a temporary name here and
+# the move is a second recipe line, which make reaches only after the first one
+# succeeded: the artifact name then holds an SBOM or nothing.
 ## sbom: write the SBOM of the packaged collector into dist/
 sbom: deb
 	go run github.com/anchore/syft/cmd/syft@$(SYFT_VERSION) scan \
 		file:bin/tally-openstack-collector-linux-$(DEB_GOARCH) \
-		-o spdx-json=dist/tally-openstack-collector_$(DEB_VERSION)_$(DEB_GOARCH).spdx.json
+		-o spdx-json=dist/.sbom.tmp.json
+	mv dist/.sbom.tmp.json \
+		dist/tally-openstack-collector_$(DEB_VERSION)_$(DEB_GOARCH).spdx.json
 
 ## down: delete the kind cluster
 down:
