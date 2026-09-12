@@ -396,6 +396,13 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   builds the server types with.
 - `SQLC_VERSION` (`v1.31.1`) is the sqlc release `generate` builds the query
   code with.
+- `NFPM_VERSION` (`v2.47.0`) is the nfpm release `deb` builds the Debian
+  package with, from the same module cache as the three above.
+- `DEB_VERSION` (`0.0.0+dev`) is the version `deb` stamps into that package.
+  The repository carries no tags, so the default is a development version every
+  release sorts above; a build that is going somewhere passes its own.
+- `DEB_GOARCH` (`amd64`) is the architecture `deb` cross-compiles and packages
+  for.
 - The `SIM_` set belongs to the simulator stack and is in the table above,
   and the `DEMO_` set belongs to `demo` and is in the table under
   [the demo](#the-demo).

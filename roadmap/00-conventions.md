@@ -68,6 +68,8 @@ tally/
 ├── Makefile                       # dev entry points: make up / dev / test / lint / migrate
 ├── Dockerfile                     # multi-stage, ARG CMD → builds ./cmd/${CMD}; one image per service
 ├── Tiltfile                       # dev loop: docker_build → kind load → redeploy on change
+├── nfpm.yaml                      # Debian package of the collector; `make deb` builds it
+├── packaging/                     # systemd unit, /etc/default file and maintainer scripts of that package
 ├── api/
 │   └── reporting/openapi.yaml     # Reporting API contract (oapi-codegen input)
 ├── cmd/
