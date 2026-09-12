@@ -38,6 +38,36 @@ jobs:
       - name: alerting
         run: make check-alerting
 
+      # go test ./packaging/ reads the package definition; only a build says
+      # whether nfpm accepts it and dpkg accepts the result, and only an install
+      # exercises the maintainer scripts. The runner is Debian-derived and
+      # carries dpkg, apt and systemd, so this is the one place that runs them.
+      - name: package
+        run: |
+          set -euo pipefail
+          make deb
+          deb=$(echo dist/*.deb)
+          sudo apt-get install -y "./${deb}"
+          dpkg-deb --contents "${deb}"
+          # The ownership dpkg could not resolve at unpack time, applied by
+          # postinstall.sh once the tally user existed.
+          getent passwd tally
+          test "$(stat -c '%U:%G:%a' /var/lib/tally/collector)" = 'tally:tally:750'
+          test "$(stat -c '%U:%G:%a' /etc/tally/ingest-token)" = 'root:tally:640'
+          # An install configures nothing, so it starts nothing. is-enabled
+          # answers 1 for a disabled unit, which set -e would read as a failure.
+          test "$(systemctl is-enabled tally-openstack-collector || true)" = 'disabled'
+          # Catches a hardening directive systemd would otherwise ignore.
+          systemd-analyze verify /lib/systemd/system/tally-openstack-collector.service
+          # A purge keeps the outbox and drops the credentials. Only tally may
+          # enter the outbox directory, so that check runs under sudo: the
+          # runner cannot stat through a 0750 directory it is not in the group
+          # of, and would read the file it kept as a file that is gone.
+          sudo touch /var/lib/tally/collector/outbox.db
+          sudo apt-get purge -y tally-openstack-collector
+          sudo test -e /var/lib/tally/collector/outbox.db
+          test ! -e /etc/tally/ingest-token
+
   docs:
     runs-on: ubuntu-latest
     steps:
