@@ -1,21 +1,44 @@
-// This file pins the release to the tag that triggers it. The version a
-// release publishes is read off that tag by release-version.sh and by nothing
-// else, so the mapping is covered here rather than left to the one run that
-// would exercise it: a tag is pushed once, and a version it stamped wrongly is
-// in a package operators already downloaded. The test runs the script the way
-// the workflow does, through sh, and needs neither dpkg nor a runner.
+// This file pins the release to the tag that triggers it, and the workflow to
+// what the Makefile builds. Nothing else covers either: no pull request runs
+// the release workflow, so a target renamed out from under it, a permission
+// dropped, or an artifact attached without being signed would surface on the
+// one run that publishes, after a tag was pushed and cannot be pushed again.
+// The test runs the script the way the workflow does, through sh, and reads
+// the workflow as a file; it needs neither dpkg nor a runner.
 package packaging_test
 
 import (
 	"errors"
 	"os/exec"
+	"path"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
-// The script the release workflow reads the package version from. It is run
-// through sh, so the mode the file carries in the repository never matters.
-const releaseVersionScript = "release-version.sh"
+const (
+	// The script the release workflow reads the package version from. It is run
+	// through sh, so the mode the file carries in the repository never matters.
+	// This test runs beside it; the workflow runs from the repository root, so
+	// it names the second path.
+	releaseVersionScript   = "release-version.sh"
+	releaseVersionFromRoot = "packaging/" + releaseVersionScript
+
+	// The workflow that publishes a release, read from here.
+	releaseWorkflowPath = "../.github/workflows/release.yaml"
+
+	// The tag pattern that triggers it, and the job that does the work.
+	releaseTagPattern = "v*"
+	releaseJob        = "release"
+
+	// The bundle the attestation is written to. It is the one file a release
+	// carries that is not among the attestation's subjects, because an
+	// attestation cannot be a subject of itself.
+	attestationBundle = "dist/attestation.sigstore.json"
+)
 
 // acceptedTags are the tags the script maps rather than refuses, with the
 // version each one puts into the package. A prerelease arrives with a tilde:
@@ -96,6 +119,169 @@ func TestReleaseVersionRefusesAMissingArgument(t *testing.T) {
 	if want := "usage: release-version.sh <tag>"; !strings.Contains(stderr, want) {
 		t.Errorf("%s with no argument wrote %q to stderr, which does not carry %q", releaseVersionScript, stderr, want)
 	}
+}
+
+func TestReleaseWorkflowTriggersOnAVersionTag(t *testing.T) {
+	got := releaseWorkflow(t).On.Push.Tags
+
+	if want := []string{releaseTagPattern}; !slices.Equal(got, want) {
+		t.Fatalf("the workflow triggers on %v, want %v", got, want)
+	}
+
+	// A tag the script maps that the trigger does not match is a release
+	// nobody gets, and the run that would have said so never starts.
+	for _, tc := range acceptedTags {
+		matched, err := path.Match(releaseTagPattern, tc.tag)
+		if err != nil {
+			t.Fatalf("matching %q against %q: %v", tc.tag, releaseTagPattern, err)
+		}
+		if !matched {
+			t.Errorf("%s is a tag release-version.sh maps, but %q does not match it", tc.tag, releaseTagPattern)
+		}
+	}
+}
+
+func TestReleaseWorkflowHoldsThePermissionsTheAttestationNeeds(t *testing.T) {
+	// Dropping one of these fails the one run that publishes, and only after
+	// the package was built: contents creates the release, id-token mints the
+	// OIDC token the Sigstore certificate is issued against, and attestations
+	// stores the attestation on the repository.
+	want := map[string]string{
+		"contents":     "write",
+		"id-token":     "write",
+		"attestations": "write",
+	}
+
+	got := releaseJobOf(t).Permissions
+	if len(got) != len(want) {
+		t.Fatalf("the %s job holds %v, want exactly %v", releaseJob, got, want)
+	}
+	for name, access := range want {
+		if got[name] != access {
+			t.Errorf("the %s job holds %s: %q, want %q", releaseJob, name, got[name], access)
+		}
+	}
+}
+
+func TestReleaseWorkflowStampsTheTagIntoThePackage(t *testing.T) {
+	// The mapping lives in the script and nowhere else, and the version it
+	// produces reaches the package through the Makefile. A second copy in YAML
+	// would drift from the one the tests above cover.
+	if run := releaseStep(t, "version").Run; !strings.Contains(run, "sh "+releaseVersionFromRoot) {
+		t.Errorf("the version step does not run %s:\n%s", releaseVersionFromRoot, run)
+	}
+
+	build := releaseStep(t, "build").Run
+	for _, want := range []string{"make sbom", "DEB_VERSION="} {
+		if !strings.Contains(build, want) {
+			t.Errorf("the build step does not carry %q:\n%s", want, build)
+		}
+	}
+	if target := "\nsbom:"; !strings.Contains(read(t, makefilePath), target) {
+		t.Errorf("the Makefile has no %q target, which the build step calls", strings.TrimSpace(target))
+	}
+}
+
+func TestReleaseWorkflowAttestsEveryFileItPublishes(t *testing.T) {
+	// A file attached to a release without being a subject of the attestation
+	// is a file an operator cannot check the provenance of, and nothing else
+	// would report it.
+	attest := releaseStep(t, "attest")
+	if action := "actions/attest@"; !strings.HasPrefix(attest.Uses, action) {
+		t.Fatalf("the attest step uses %q rather than %s, so its subjects are named but not signed", attest.Uses, action)
+	}
+
+	attested := distPaths(attest.With["subject-path"])
+	published := distPaths(releaseStep(t, "publish").Run)
+
+	for _, file := range published {
+		if file == attestationBundle {
+			continue
+		}
+		if !slices.Contains(attested, file) {
+			t.Errorf("the release publishes %s, which the attest step does not name as a subject", file)
+		}
+	}
+	for _, file := range attested {
+		if !slices.Contains(published, file) {
+			t.Errorf("the attest step signs %s, which the release does not publish", file)
+		}
+	}
+	if !slices.Contains(published, attestationBundle) {
+		t.Errorf("the release does not publish %s, so a host that cannot reach the attestations API has nothing to verify against", attestationBundle)
+	}
+}
+
+// releaseWorkflow reads the release workflow. The `on` key survives yaml.v3 as
+// the string it is written as, rather than being resolved to the boolean true.
+func releaseWorkflow(t *testing.T) releaseSpec {
+	t.Helper()
+
+	var spec releaseSpec
+	if err := yaml.Unmarshal([]byte(read(t, releaseWorkflowPath)), &spec); err != nil {
+		t.Fatalf("parsing %s: %v", releaseWorkflowPath, err)
+	}
+	return spec
+}
+
+// releaseJobOf returns the job that builds and publishes the release.
+func releaseJobOf(t *testing.T) releaseJobSpec {
+	t.Helper()
+
+	job, ok := releaseWorkflow(t).Jobs[releaseJob]
+	if !ok {
+		t.Fatalf("%s carries no %s job", releaseWorkflowPath, releaseJob)
+	}
+	return job
+}
+
+// releaseStep returns one named step of that job. The steps are addressed by
+// name, so a renamed step fails here rather than silently dropping a check.
+func releaseStep(t *testing.T, name string) releaseStepSpec {
+	t.Helper()
+
+	for _, step := range releaseJobOf(t).Steps {
+		if step.Name == name {
+			return step
+		}
+	}
+	t.Fatalf("the %s job carries no step named %q", releaseJob, name)
+	return releaseStepSpec{}
+}
+
+// distPathRe matches a path into dist/ as a workflow writes one: a step's
+// subject list or the argument list of gh release create.
+var distPathRe = regexp.MustCompile(`dist/[A-Za-z0-9_.*-]+`)
+
+// distPaths returns the dist/ paths a step names, deduplicated and sorted, so
+// two lists written in different orders compare equal.
+func distPaths(step string) []string {
+	found := distPathRe.FindAllString(step, -1)
+	slices.Sort(found)
+	return slices.Compact(found)
+}
+
+// releaseSpec is the part of the workflow this file asserts over. yaml.v3
+// ignores every key not named here.
+type releaseSpec struct {
+	On struct {
+		Push struct {
+			Tags []string
+		}
+	}
+	Jobs map[string]releaseJobSpec
+}
+
+type releaseJobSpec struct {
+	Permissions map[string]string
+	Steps       []releaseStepSpec
+}
+
+type releaseStepSpec struct {
+	Name string
+	Uses string
+	With map[string]string
+	Run  string
 }
 
 // releaseVersion runs the script over the given arguments and returns what it
