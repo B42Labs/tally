@@ -356,6 +356,7 @@ The table below is rendered from the `## target: description` comments of the
 | `up` | create the kind cluster, install the add-ons, and deploy the dev overlay |
 | `images` | build one container image per binary |
 | `deb` | build the Debian package of the OpenStack collector into dist/ |
+| `sbom` | write the SBOM of the packaged collector into dist/ |
 | `down` | delete the kind cluster |
 | `dev` | rebuild and redeploy on change |
 | `simulator-up` | run the simulator, the collector, and a broker against the dev cluster |
@@ -398,6 +399,8 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   code with.
 - `NFPM_VERSION` (`v2.47.0`) is the nfpm release `deb` builds the Debian
   package with, from the same module cache as the three above.
+- `SYFT_VERSION` (`v1.51.1`) is the syft release `sbom` catalogs the packaged
+  binary with, from the same module cache as the four above.
 - `DEB_VERSION` (`0.0.0+dev`) is the version `deb` stamps into that package.
   The repository carries no tags, so the default is a development version every
   release sorts above; a build that is going somewhere passes its own.

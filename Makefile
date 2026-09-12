@@ -25,6 +25,10 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 # module cache as the three above.
 NFPM_VERSION ?= v2.47.0
 
+# The generator `sbom` catalogs the packaged binary with, from the same module
+# cache as the four above.
+SYFT_VERSION ?= v1.51.1
+
 # What `deb` stamps into the package, and the architecture it builds for. The
 # repository carries no tags, so the default is a development version that
 # every release sorts above: dpkg reads 0.0.0+dev as lower than 0.1.0. A build
@@ -209,7 +213,7 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
-	images deb simulator-up simulator-down console demo demo-drain demo-registry \
+	images deb sbom simulator-up simulator-down console demo demo-drain demo-registry \
 	demo-bill demo-correct docs docs-build
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
@@ -411,6 +415,17 @@ deb:
 	GOARCH=$(DEB_GOARCH) VERSION='$(DEB_VERSION)' \
 		go run github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION) \
 		package --packager deb --target dist/
+
+# The SBOM is taken from the binary rather than from the .deb, because the
+# binary is the only thing in the package with dependencies: syft reads its
+# module list out of the Go build info, which the -ldflags='-s -w' above leaves
+# in place. The target depends on `deb`, so the binary it reads and the package
+# a release publishes come out of one build at one version.
+## sbom: write the SBOM of the packaged collector into dist/
+sbom: deb
+	go run github.com/anchore/syft/cmd/syft@$(SYFT_VERSION) scan \
+		file:bin/tally-openstack-collector-linux-$(DEB_GOARCH) \
+		-o spdx-json=dist/tally-openstack-collector_$(DEB_VERSION)_$(DEB_GOARCH).spdx.json
 
 ## down: delete the kind cluster
 down:
