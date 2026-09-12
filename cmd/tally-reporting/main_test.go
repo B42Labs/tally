@@ -209,12 +209,23 @@ func freePort(t *testing.T) int {
 	return addr.Port
 }
 
+// testClient is what every request in this file goes through. It reuses no
+// connection: the transport pools one it never sent a request on when a dial
+// and a freed idle connection race, and net/http holds Server.Shutdown for five
+// seconds over such a connection before it counts it as idle. That is longer
+// than the budget the shutdown assertions allow, so a pooled connection turns
+// them into a coin flip. Nothing here is hot enough to miss the reuse.
+var testClient = &http.Client{
+	Timeout:   startupTimeout,
+	Transport: &http.Transport{DisableKeepAlives: true},
+}
+
 // get reads one URL off the running server and returns the body and the status
 // it answered with.
 func get(t *testing.T, url string) (string, int) {
 	t.Helper()
 
-	resp, err := (&http.Client{Timeout: startupTimeout}).Get(url)
+	resp, err := testClient.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -233,7 +244,6 @@ func get(t *testing.T, url string) (string, int) {
 func waitForHealthz(t *testing.T, port int, done <-chan error) {
 	t.Helper()
 
-	client := &http.Client{Timeout: startupTimeout}
 	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
 
 	for deadline := time.Now().Add(startupTimeout); time.Now().Before(deadline); {
@@ -243,7 +253,7 @@ func waitForHealthz(t *testing.T, port int, done <-chan error) {
 		default:
 		}
 
-		resp, err := client.Get(url)
+		resp, err := testClient.Get(url)
 		if err != nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
