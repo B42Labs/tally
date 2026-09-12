@@ -1,0 +1,98 @@
+name: release
+
+# The tag is the trigger and the version source, so a release cannot disagree
+# with the artifacts attached to it. No pull request exercises this workflow:
+# the first tag pushed after it lands is what proves it, which is why the
+# version step refuses a malformed tag before anything is built, and why
+# packaging/release_test.go reads the file below.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # contents writes the release, id-token mints the OIDC token the Sigstore
+    # certificate is issued against, and attestations stores the attestation on
+    # the repository. artifact-metadata is not among them: that is what a
+    # registry storage record needs, and this pushes to no registry.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false # the publish step authenticates with GH_TOKEN
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The raw tag reaches no shell as interpolated text: it is read from the
+      # runner's own GITHUB_REF_NAME here, and every later step takes the
+      # version this validated through a step output.
+      - name: version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sh packaging/release-version.sh "${GITHUB_REF_NAME}")"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          # The tilde the script wrote for the hyphen is what marks a prerelease.
+          case "${version}" in
+            *'~'*) echo 'prerelease=true' >> "${GITHUB_OUTPUT}" ;;
+            *) echo 'prerelease=false' >> "${GITHUB_OUTPUT}" ;;
+          esac
+
+      # sbom depends on deb, so this builds the binary, the package and the
+      # SBOM at one version.
+      - name: build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: make sbom DEB_VERSION="${VERSION}"
+
+      - name: checksums
+        run: |
+          set -euo pipefail
+          # The names go in bare, so an operator checks the file in the
+          # directory they downloaded into. An empty dist/ leaves the globs
+          # unmatched, which fails here rather than publishing nothing.
+          cd dist
+          sha256sum *.deb *.spdx.json > SHA256SUMS
+
+      # No sbom-path and no predicate input puts the action in provenance mode.
+      # Several subjects produce one attestation referencing all of them.
+      - name: attest
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.spdx.json
+            dist/SHA256SUMS
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # The bundle is the one artifact that cannot be a subject of itself.
+          # It rides along so that a host with no route to the attestations API
+          # can verify with gh attestation verify --bundle.
+          cp "${BUNDLE}" dist/attestation.sigstore.json
+          flags=()
+          if [ "${PRERELEASE}" = 'true' ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${flags[@]}" \
+            dist/*.deb dist/*.spdx.json dist/SHA256SUMS dist/attestation.sigstore.json
