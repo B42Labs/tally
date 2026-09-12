@@ -99,6 +99,43 @@ broker rather than in the cluster.
 directories, `docs/.vitepress/dist/` and `docs/.vitepress/cache/`, out of the
 build context.
 
+## Debian package
+
+`make deb` builds `tally-openstack-collector` as a `.deb` into `dist/`. The
+collector is the one binary that runs on a host rather than in a cluster, next
+to the broker of an OpenStack control plane, so it is the one that is packaged;
+everything else ships as an image.
+
+The target cross-compiles `linux/$(DEB_GOARCH)` with the `Dockerfile`'s build
+flags, so the packaged binary is the image's binary, and then runs
+[nfpm](https://nfpm.goreleaser.com/) at `NFPM_VERSION` (`v2.47.0`) from the
+module cache. Nothing is installed on the host and Docker is not involved, so
+the target runs on macOS as well; reading the result there takes `ar x` and
+`tar tzvf data.tar.gz`, because macOS has no `dpkg-deb`.
+
+`nfpm.yaml` at the repository root is the package definition, and `packaging/`
+holds what it installs:
+
+| Path | Content |
+| --- | --- |
+| `/usr/bin/tally-openstack-collector` | the static binary |
+| `/lib/systemd/system/tally-openstack-collector.service` | the unit, running as the `tally` system user |
+| `/etc/default/tally-openstack-collector` | every variable with its default, a conffile |
+| `/etc/tally/amqp-url`, `/etc/tally/ingest-token` | the two secrets, `0640 root:tally`, conffiles shipped empty |
+| `/var/lib/tally/collector/` | the outbox directory, `0750 tally:tally` |
+
+`postinstall.sh` creates the `tally` user and group and applies the ownership
+dpkg cannot resolve at unpack time; `preremove.sh` stops and disables the unit;
+`postremove.sh` drops `/etc/tally` on purge and keeps the outbox, because
+between the acknowledgement on the bus and the delivery an event lives in that
+file and nowhere else.
+
+`packaging/packaging_test.go` pins all of it to `openstack.EnvNames` and to the
+paths the unit uses, and it reads files rather than building, so it needs
+neither Docker nor dpkg. The `package` step of `.github/workflows/ci.yaml` is
+what builds, installs, verifies and purges the package on a runner. Publishing
+it on a tagged release is not set up yet.
+
 ## Dependencies
 
 `go.mod` and `go.sum` pin every module the build resolves. Renovate proposes
