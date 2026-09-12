@@ -130,11 +130,18 @@ dpkg cannot resolve at unpack time; `preremove.sh` stops and disables the unit;
 between the acknowledgement on the bus and the delivery an event lives in that
 file and nowhere else.
 
+`make sbom` builds the package and then writes the SPDX SBOM of the binary it
+installs into `dist/`, with [syft](https://github.com/anchore/syft) at
+`SYFT_VERSION` (`v1.51.1`) from the module cache. It catalogs the binary rather
+than the `.deb`, because the binary is the only thing in the package with
+dependencies: syft reads its module list out of the Go build info, which
+`-ldflags="-s -w"` leaves in place.
+
 `packaging/packaging_test.go` pins all of it to `openstack.EnvNames` and to the
 paths the unit uses, and it reads files rather than building, so it needs
 neither Docker nor dpkg. The `package` step of `.github/workflows/ci.yaml` is
-what builds, installs, verifies and purges the package on a runner. Publishing
-it on a tagged release is not set up yet.
+what builds, installs, verifies and purges the package on a runner, and
+[Releases](#releases) below is what publishes it.
 
 ## Dependencies
 
@@ -166,3 +173,34 @@ that step is the link check of the site.
 `deploy-docs.yaml` publishes `main` to GitHub Pages. It runs when a push
 touches `docs/`, `package.json`, `package-lock.json`, `.nvmrc` or the workflow
 itself.
+
+## Releases
+
+`.github/workflows/release.yaml` runs on a push of a tag matching `v*` and
+publishes a GitHub release from it. The tag is both the trigger and the version
+source, so a release cannot disagree with what is attached to it.
+`packaging/release-version.sh` is the one place the mapping is written: `v1.2.3`
+becomes `1.2.3`, and the prerelease tag `v1.2.3-rc.1` becomes `1.2.3~rc.1`,
+because dpkg reads everything after a hyphen as the package revision and would
+sort `1.2.3-rc.1` above `1.2.3`, while a tilde sorts below every other
+character. A tag the script refuses fails the run before anything is built, and
+a version carrying a tilde marks the release as a prerelease.
+
+The run builds with `make sbom`, writes `SHA256SUMS` over the package and the
+SBOM, and attests all three with `actions/attest`. That action signs with a
+short-lived Sigstore certificate minted from the workflow's OIDC token and
+stores the attestation on the repository, so the project holds no key. Several
+subjects produce one attestation, whose bundle is attached as
+`attestation.sigstore.json`;
+[Install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
+is the operator's side of it. The job holds `contents: write`,
+`id-token: write` and `attestations: write`, and the workflow holds
+`contents: read`.
+
+The run repeats none of the `ci` job's checks. What judges a commit is the `ci`
+run on it, so a tag belongs on a commit whose run is green.
+
+No pull request exercises this workflow, which is why
+`packaging/release_test.go` reads it: the tag mapping and its refusals, the
+trigger, the three permissions, the version source, and that every file the
+release attaches is a subject of the attestation.
