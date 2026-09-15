@@ -1,0 +1,74 @@
+# VictoriaMetrics scrape configuration of the dedicated cluster.
+#
+# This file replaces the generated victoriametrics-scrape ConfigMap through the
+# behavior: replace generator in the overlay's kustomization.yaml, which is the
+# mechanism docs/how-to/observability/scrape-the-openstack-exporters.md
+# documents under "Replace the scrape targets". It holds the base's two
+# in-cluster jobs, copied unchanged, and nothing else.
+#
+# The two OpenStack jobs of the base scrape placeholder addresses. Left in
+# place on a cluster with no such exporter, they would keep
+# TallyScrapeTargetDown firing for as long as the cluster runs.
+# TallyScrapeJobMissing selects exactly the two jobs below, so that rule holds
+# here as it does against the base. The first cloud's exporters are added
+# through the how-to above.
+#
+# The jobs, their intervals, and how the in-cluster jobs find their targets are
+# documented in docs/explanation/the-openstack-metrics-pipeline.md.
+scrape_configs:
+  # The in-cluster jobs discover endpoints instead of naming a Service address.
+  # A Service address is one ClusterIP that kube-proxy resolves to an arbitrary
+  # backend per connection, so a second replica would leave every scrape landing
+  # on a different pod while every sample carries the same instance label, and
+  # one series would interleave two independent counters. rate() reads each of
+  # those decreases as a counter reset, the targets stay up, nothing is logged,
+  # and the numbers billing reconciles against are quietly wrong. Discovery
+  # gives every pod a target and an instance label of its own.
+  #
+  # own_namespace keeps the discovery inside the namespace the pod runs in,
+  # which is what the Role in victoriametrics.yaml grants.
+  #
+  # instance comes from the pod name rather than the default, which is
+  # __address__ and therefore the pod IP and port. A pod IP is handed back to
+  # the pool on deletion and reused, so the next pod to take it would continue
+  # the series its predecessor wrote — two independent counters in one series,
+  # which is what discovery is here to prevent. A pod name carries a random
+  # suffix and is not reused.
+  #
+  # What discovery cannot express is a job that resolves to nothing. up is a
+  # per-target series, so zero targets produce no up series at all rather than
+  # up == 0: a Deployment scaled to zero, a renamed Service, a renamed port, a
+  # removed RoleBinding, or an unreachable API server all take the job off
+  # /targets instead of turning it red. An alert on these two jobs therefore
+  # pairs up == 0 with absent(up{job="..."})
+  # (roadmap/02-phase-2-reporting-dashboards.md).
+  - job_name: reporting-api
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: reporting-api;http
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  - job_name: otel-collector
+    scrape_interval: 15s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: otel-collector;metrics
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance

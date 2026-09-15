@@ -17,6 +17,9 @@ tilt_modules/
 .env
 !.env.example
 
+# The secrets of the prod overlay; the .example files beside them stay tracked
+deploy/kubernetes/overlays/prod/secrets/*.env
+
 # Editors
 .idea/
 .vscode/

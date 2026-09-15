@@ -1,0 +1,267 @@
+# The dedicated cluster: the collecting half of the stack on a public domain.
+#
+# The Reporting API, the OTLP collector, the store, the alerting pair and
+# Grafana run here, under the hostnames hosts.yaml names and behind a
+# certificate Let's Encrypt signs. The metering scheduler does not run here,
+# and nothing that answers without a credential is published.
+#
+# issuers.yaml is deliberately not listed here; see the comment in that file.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tally
+
+# hosts.yaml is read by the replacements at the end of this file and never
+# emitted. There is no envoyproxy.yaml: Envoy Gateway's default Service type is
+# LoadBalancer, which is what this cluster provides. That LoadBalancer has to
+# pass the client's address on: the base's OTLP rate limit keeps one bucket per
+# address, and behind a LoadBalancer that proxies connections every publisher
+# draws from the bucket of the LoadBalancer's own address.
+resources:
+  - namespace.yaml
+  - ../../base
+  - hosts.yaml
+
+# The Reporting API image the release workflow publishes. The operator moves
+# newTag on every release, and the tag has to exist in the registry before
+# `make prod-up` runs. The engine image has no entry because its CronJob is
+# deleted below.
+images:
+  - name: tally-reporting
+    newName: ghcr.io/b42labs/tally-reporting
+    newTag: v0.2.0
+
+# The credentials of this cluster. Each file is untracked and copied from the
+# .example beside it, which says how to fill every key. `make prod-up` checks
+# that each exists with every value filled in before it applies anything.
+secretGenerator:
+  - name: tally-db
+    envs:
+      - secrets/tally-db.env
+  - name: tally-internal-token
+    envs:
+      - secrets/tally-internal-token.env
+  - name: tally-otlp-auth
+    envs:
+      - secrets/tally-otlp-auth.env
+  - name: tally-grafana
+    envs:
+      - secrets/tally-grafana.env
+  - name: tally-vm-admin
+    envs:
+      - secrets/tally-vm-admin.env
+
+# The scrape config of this cluster, in place of the base's. What the file
+# keeps, and why, is written in its own header.
+configMapGenerator:
+  - name: victoriametrics-scrape
+    behavior: replace
+    files:
+      - victoriametrics/scrape.yaml
+
+patches:
+  # The UIs of the store, vmalert and Alertmanager answer without a credential,
+  # so their routes are not published here, and neither is the filter the
+  # Alertmanager route references. docs/how-to/observability/deploy-alerting.md
+  # tells a deployment beyond localhost to publish neither alerting route. The
+  # operator reaches all three with kubectl port-forward.
+  - patch: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: victoriametrics
+      $patch: delete
+
+  - patch: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: vmalert
+      $patch: delete
+
+  - patch: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: alertmanager
+      $patch: delete
+
+  - patch: |
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: HTTPRouteFilter
+      metadata:
+        name: alertmanager-deny-writes
+      $patch: delete
+
+  # Grafana answers /metrics on the port its route publishes, without a
+  # credential, and nothing on this cluster scrapes it.
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+      spec:
+        template:
+          spec:
+            containers:
+              - name: grafana
+                env:
+                  - name: GF_METRICS_ENABLED
+                    value: "false"
+
+  # Behind a LoadBalancer the postgres listener would put the database on the
+  # internet, so neither it nor its route exists here. Migrations and the admin
+  # CLI reach the database through a port-forward. Index 2 is the listener
+  # named postgres in the base's gateway.yaml, which manifest_test.go checks.
+  - patch: |
+      apiVersion: gateway.networking.k8s.io/v1alpha2
+      kind: TCPRoute
+      metadata:
+        name: timescaledb
+      $patch: delete
+
+  - target:
+      group: gateway.networking.k8s.io
+      kind: Gateway
+      name: tally
+    patch: |
+      - op: remove
+        path: /spec/listeners/2
+
+  # The scheduler does not run on this cluster. TimescaleDB's initdb still
+  # creates the engine's database and reader roles on the first start of an
+  # empty volume, so running it later means removing this patch, adding the two
+  # engine keys to secrets/tally-db.env and applying the engine chain.
+  - patch: |
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: tally-engine
+      $patch: delete
+
+  # Let's Encrypt issues a wildcard only over DNS-01, so the certificate names
+  # the four published hostnames instead. The entries are the keys of
+  # hosts.yaml, which the replacements below overwrite with their values. The
+  # Certificate keeps the base's name and secretName, which the https listener
+  # references.
+  - target:
+      group: cert-manager.io
+      kind: Certificate
+      name: tally-wildcard
+    patch: |
+      - op: replace
+        path: /spec/dnsNames
+        value:
+          - api
+          - otlp
+          - otlp-grpc
+          - grafana
+      - op: replace
+        path: /spec/issuerRef/name
+        value: letsencrypt
+
+# Every hostname and external URL comes from hosts.yaml. The URL targets split
+# the value at "://" and replace the part after it, so the https scheme stays.
+# vmalert and Alertmanager take their URLs although their routes are deleted
+# above, so the links they render are right on the day the routes are published
+# behind an authenticating proxy.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.api
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: reporting-api
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: Certificate
+          name: tally-wildcard
+        fieldPaths:
+          - spec.dnsNames.0
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.otlp
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: otel-collector-http
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: Certificate
+          name: tally-wildcard
+        fieldPaths:
+          - spec.dnsNames.1
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.otlp-grpc
+    targets:
+      - select:
+          kind: GRPCRoute
+          name: otel-collector-grpc
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: Certificate
+          name: tally-wildcard
+        fieldPaths:
+          - spec.dnsNames.2
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.grafana
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: grafana
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: Certificate
+          name: tally-wildcard
+        fieldPaths:
+          - spec.dnsNames.3
+      - select:
+          kind: Deployment
+          name: grafana
+        fieldPaths:
+          - spec.template.spec.containers.[name=grafana].env.[name=GF_SERVER_ROOT_URL].value
+        options:
+          delimiter: "://"
+          index: 1
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.vmalert
+    targets:
+      - select:
+          kind: Deployment
+          name: vmalert
+        fieldPaths:
+          - spec.template.spec.containers.[name=vmalert].env.[name=VMALERT_EXTERNAL_URL].value
+        options:
+          delimiter: "://"
+          index: 1
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.alertmanager
+    targets:
+      - select:
+          kind: StatefulSet
+          name: alertmanager
+        fieldPaths:
+          - spec.template.spec.containers.[name=alertmanager].env.[name=ALERTMANAGER_EXTERNAL_URL].value
+        options:
+          delimiter: "://"
+          index: 1

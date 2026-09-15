@@ -1,0 +1,32 @@
+# The certificate issuer of the dedicated cluster.
+#
+# Applied by `make prod-up` with plain kubectl rather than through the overlay:
+# a ClusterIssuer is cluster-scoped, and the overlay's namespace transformer
+# would stamp tally onto it.
+#
+# Let's Encrypt issues a wildcard certificate only over DNS-01, so this issuer
+# solves HTTP-01 through the Gateway, and the overlay's Certificate names each
+# published hostname. For every challenge cert-manager creates a temporary
+# HTTPRoute in tally for /.well-known/acme-challenge/<token> on the http
+# listener. That listener admits routes from its own namespace, and the exact
+# path match of the challenge wins over the redirect route, which matches
+# everything.
+#
+# The account address is the maintainer address nfpm.yaml carries.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: info@b42labs.com
+    privateKeySecretRef:
+      name: letsencrypt-account
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - kind: Gateway
+                name: tally
+                namespace: tally

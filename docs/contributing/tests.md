@@ -196,6 +196,12 @@ mismatch that would otherwise fail quietly.
   `TallyScrapeJobMissing` and `TallyExporterServiceSilent` selecting jobs the
   cluster no longer scrapes, and neither the scrape nor the rules fail on
   their own.
+- `deploy/kubernetes/overlays/prod/manifest_test.go` pins where the prod
+  overlay's names come from and what it keeps off the internet. A replacement
+  aimed at the wrong field, a delete patch lost in an edit, or a listener
+  index that no longer names `postgres` still renders a valid overlay, and the
+  first sign is a wrong hostname or an unauthenticated service on a public
+  address.
 - `deploy/kubernetes/base/grafana/dashboards_test.go` pins the JSON contract
   of the provisioned dashboards. Grafana loads these files at startup and
   reports a broken one only in its own log, so a truncated file or a renamed
