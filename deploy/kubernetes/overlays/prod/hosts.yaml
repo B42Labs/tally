@@ -1,0 +1,24 @@
+# The hostnames of the dedicated cluster, and the one file that names its
+# domain.
+#
+# The replacements in kustomization.yaml copy each value into the route that
+# publishes it, the Certificate and the external URLs. The local-config
+# annotation makes kustomize read this ConfigMap for those replacements and
+# never emit it.
+#
+# An operator serving another domain edits the six values below and nothing
+# else. Each value is a full hostname. The Makefile reads these lines as text,
+# so each stays one unquoted key at two spaces, with no comment after it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tally-hosts
+  annotations:
+    config.kubernetes.io/local-config: "true"
+data:
+  api: api.tally.demo.b42labs.com
+  otlp: otlp.tally.demo.b42labs.com
+  otlp-grpc: otlp-grpc.tally.demo.b42labs.com
+  grafana: grafana.tally.demo.b42labs.com
+  vmalert: vmalert.tally.demo.b42labs.com
+  alertmanager: alertmanager.tally.demo.b42labs.com
