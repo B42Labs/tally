@@ -202,6 +202,12 @@ mismatch that would otherwise fail quietly.
   index that no longer names `postgres` still renders a valid overlay, and the
   first sign is a wrong hostname or an unauthenticated service on a public
   address.
+- `deploy/kubernetes/overlays/prod/makefile_test.go` runs the prod targets of
+  the Makefile up to the refusal of each guard, in a throwaway Git repository
+  and against a kubeconfig that names no cluster. Without the guards an empty
+  secret value applies, a migration chain that does not match the image leaves
+  the old pod Ready, and a listener already on the forwarded port is migrated
+  through.
 - `deploy/kubernetes/base/grafana/dashboards_test.go` pins the JSON contract
   of the provisioned dashboards. Grafana loads these files at startup and
   reports a broken one only in its own log, so a truncated file or a renamed
