@@ -93,7 +93,8 @@ prod run the same image.
 kind, `tally-reporting` and `tally-engine`;
 [The dev stack](/contributing/dev-stack) is that cluster. `IMAGES` adds
 `tally-openstack-collector` and `tally-openstack-simulator`, which run beside a
-broker rather than in the cluster.
+broker rather than in the cluster. A release pushes the two `SERVICES` images to
+GHCR; [Releases](#releases) says how.
 
 `.dockerignore` keeps `node_modules/` and the site's build and cache
 directories, `docs/.vitepress/dist/` and `docs/.vitepress/cache/`, out of the
@@ -195,12 +196,34 @@ subjects produce one attestation, whose bundle is attached as
 [Install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
 is the operator's side of it. The job holds `contents: write`,
 `id-token: write` and `attestations: write`, and the workflow holds
-`contents: read`.
+`contents: read`. Every action the workflow uses runs at a commit SHA rather
+than at a tag: it reaches the token of its job, and its owner can move a tag.
+
+The `images` job runs once the `release` job has succeeded, so a tag whose
+release failed publishes no image. It holds `contents: read` and
+`packages: write` alone, logs into `ghcr.io` with the workflow's token, and
+builds `ghcr.io/b42labs/tally-reporting:<tag>` and
+`ghcr.io/b42labs/tally-engine:<tag>` from the `Dockerfile`, then pushes both.
+It pushes nothing unless the tag still points at the commit it builds: a
+re-run builds the commit of its first attempt, so once the tag has moved it
+would publish that commit under it.
+An image tag already in the registry fails the job rather than being pushed
+over, and so does a registry that answers the check with anything but not
+found. The exception is an image whose `org.opencontainers.image.revision`
+label is the tagged commit: an earlier attempt of the job pushed it, so a
+re-run keeps it and pushes only the images still missing.
+The tag is the raw Git tag, `v1.2.3-rc.1` rather than `1.2.3~rc.1`,
+because a Docker tag cannot carry a tilde. The images are not attested; the
+Debian package is the one signed artifact. The first push of each image creates
+its package as private, and an organisation admin makes it public in the
+package settings.
 
 The run repeats none of the `ci` job's checks. What judges a commit is the `ci`
 run on it, so a tag belongs on a commit whose run is green.
 
 No pull request exercises this workflow, which is why
 `packaging/release_test.go` reads it: the tag mapping and its refusals, the
-trigger, the three permissions, the version source, and that every file the
-release attaches is a subject of the attestation.
+trigger, the permissions of both jobs, that every action runs at a commit, the
+version source, that every `SERVICES` image is pushed after the release, never
+over a tag already in the registry and never by a run whose tag has moved, and
+that every file the release attaches is a subject of the attestation.

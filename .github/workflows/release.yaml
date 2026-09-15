@@ -19,17 +19,19 @@ jobs:
     # contents writes the release, id-token mints the OIDC token the Sigstore
     # certificate is issued against, and attestations stores the attestation on
     # the repository. artifact-metadata is not among them: that is what a
-    # registry storage record needs, and this pushes to no registry.
+    # registry storage record needs, and this pushes to no registry. Every
+    # action below can reach them, so each runs at a commit rather than at a
+    # tag its owner can move.
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false # the publish step authenticates with GH_TOKEN
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -68,7 +70,7 @@ jobs:
       # Several subjects produce one attestation referencing all of them.
       - name: attest
         id: attest
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/*.deb
@@ -96,3 +98,67 @@ jobs:
             --generate-notes \
             "${flags[@]}" \
             dist/*.deb dist/*.spdx.json dist/SHA256SUMS dist/attestation.sigstore.json
+
+  # The service images, pushed once the release exists: a tag whose release
+  # failed publishes no image, and a moved tag stops at gh release create above
+  # or, on a re-run, at the tag check of the push step. A job of its own keeps
+  # packages: write and the ghcr.io login away from the actions the release job
+  # runs. No third-party action logs in or pushes, and the images are not
+  # attested. checkout can reach the token all the same, so it runs at a commit
+  # rather than at a tag its owner can move.
+  images:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The images take the raw GITHUB_REF_NAME as their tag. The version step
+      # of the release job refused it when malformed, and it is a valid Docker
+      # tag as it stands; the tilde version is not. A tag already in the
+      # registry is refused rather than pushed over: a rebuild is not the same
+      # image, and a node that cached the first one keeps running it. An image
+      # labelled with this commit is the exception: an earlier attempt pushed
+      # it, so a re-run keeps it and pushes only what is still missing.
+      - name: push
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A re-run builds the commit of its first attempt, so once the tag has
+          # moved it would publish that commit under the tag. The API answers
+          # tags/ for an annotated tag with a 422; refs/tags/ resolves both kinds.
+          tagged="$(gh api "repos/${GITHUB_REPOSITORY}/commits/refs/tags/${GITHUB_REF_NAME}" --jq .sha)"
+          if [ "${tagged}" != "${GITHUB_SHA}" ]; then
+            echo "ERROR: ${GITHUB_REF_NAME} points at ${tagged} now, not at ${GITHUB_SHA}; this run is superseded" >&2
+            exit 1
+          fi
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          # GHCR takes lower-case names only, and the owner is B42Labs.
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          for service in tally-reporting tally-engine; do
+            image="ghcr.io/${owner}/${service}:${GITHUB_REF_NAME}"
+            # imagetools answers a 404 with not found and any other status with
+            # that status. docker manifest inspect reports a registry it cannot
+            # reach as a missing manifest, which would push over the tag.
+            if found="$(docker buildx imagetools inspect "${image}" 2>&1)"; then
+              docker pull --quiet "${image}"
+              revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
+              if [ "${revision}" != "${GITHUB_SHA}" ]; then
+                echo "ERROR: ${image} is already in the registry, built from ${revision:-an unlabelled commit}; a release tag is pushed once" >&2
+                exit 1
+              fi
+              echo "${image} is already in the registry, built from this commit; keeping it"
+            elif [[ "${found}" == *': not found' ]]; then
+              docker build --build-arg "CMD=${service}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .
+              docker push "${image}"
+            else
+              echo "ERROR: cannot tell whether ${image} is in the registry: ${found}" >&2
+              exit 1
+            fi
+          done

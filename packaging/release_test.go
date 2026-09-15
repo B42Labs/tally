@@ -9,6 +9,7 @@ package packaging_test
 
 import (
 	"errors"
+	"maps"
 	"os/exec"
 	"path"
 	"regexp"
@@ -30,9 +31,11 @@ const (
 	// The workflow that publishes a release, read from here.
 	releaseWorkflowPath = "../.github/workflows/release.yaml"
 
-	// The tag pattern that triggers it, and the job that does the work.
+	// The tag pattern that triggers it, the job that does the work, and the job
+	// that pushes the service images once that one succeeded.
 	releaseTagPattern = "v*"
 	releaseJob        = "release"
+	imagesJob         = "images"
 
 	// The bundle the attestation is written to. It is the one file a release
 	// carries that is not among the attestation's subjects, because an
@@ -163,6 +166,88 @@ func TestReleaseWorkflowHoldsThePermissionsTheAttestationNeeds(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowPushesTheImagesOnceTheReleaseExists(t *testing.T) {
+	// The images job validates no tag of its own: the one it pushes under is
+	// the tag the version step of the release job refused when malformed, which
+	// holds only while it waits on that job. Its permissions are the checkout
+	// and the push, so no action of the release job holds a token that writes
+	// packages.
+	job := imagesJobOf(t)
+	if job.Needs != releaseJob {
+		t.Errorf("the %s job needs %q, want %q", imagesJob, job.Needs, releaseJob)
+	}
+	if want := map[string]string{"contents": "read", "packages": "write"}; !maps.Equal(job.Permissions, want) {
+		t.Errorf("the %s job holds %v, want exactly %v", imagesJob, job.Permissions, want)
+	}
+}
+
+func TestReleaseWorkflowRunsEveryActionAtACommit(t *testing.T) {
+	// Every action reaches the token of its job: in the release job one that
+	// rewrites the release and signs under this workflow's identity, in the
+	// images job one that pushes packages. Whoever can move a tag of the action
+	// would run code with that token, so each runs at a commit instead.
+	jobs := releaseWorkflow(t).Jobs
+	for _, name := range slices.Sorted(maps.Keys(jobs)) {
+		for _, step := range jobs[name].Steps {
+			if step.Uses != "" && !pinnedActionRe.MatchString(step.Uses) {
+				t.Errorf("the %s job uses %s, which is not pinned to a commit", name, step.Uses)
+			}
+		}
+	}
+}
+
+func TestReleaseWorkflowPublishesOneImagePerService(t *testing.T) {
+	// A service added to SERVICES that the release never pushes is an image the
+	// cluster cannot pull, and no pull request runs this workflow to say so.
+	// Each line below fails the same way when dropped: a build without CMD
+	// puts the Dockerfile's default binary under every name, GHCR refuses the
+	// owner B42Labs unless it is lower-cased, and a push over a tag already in
+	// the registry swaps the image under a node that cached the first one. So
+	// does a registry error taken for a missing tag, and an image of another
+	// commit taken for this one's. An image without the revision label leaves a
+	// partly pushed release that no re-run completes, and a re-run that skips
+	// the tag check publishes its old commit under a tag moved since. The check
+	// reads refs/tags/, because tags/ answers an annotated tag with a 422.
+	match := servicesRe.FindStringSubmatch(read(t, makefilePath))
+	if match == nil {
+		t.Fatalf("%s has no line matching %s, which names the images the release pushes", makefilePath, servicesRe)
+	}
+	services := strings.Fields(match[1])
+	if len(services) == 0 {
+		t.Fatalf("SERVICES in %s names no service, want at least one", makefilePath)
+	}
+
+	var push string
+	for _, step := range imagesJobOf(t).Steps {
+		if step.Name == "push" {
+			push = step.Run
+		}
+	}
+	loop := serviceLoopRe.FindStringSubmatch(push)
+	if loop == nil {
+		t.Fatalf("the push step of the %s job has no line matching %s:\n%s", imagesJob, serviceLoopRe, push)
+	}
+	if got := strings.Fields(loop[1]); !slices.Equal(got, services) {
+		t.Errorf("the push step loops over %v, want SERVICES %v", got, services)
+	}
+	for _, want := range []string{
+		`tagged="$(gh api "repos/${GITHUB_REPOSITORY}/commits/refs/tags/${GITHUB_REF_NAME}" --jq .sha)"`,
+		`if [ "${tagged}" != "${GITHUB_SHA}" ]; then`,
+		`owner="${GITHUB_REPOSITORY_OWNER,,}"`,
+		`image="ghcr.io/${owner}/${service}:${GITHUB_REF_NAME}"`,
+		`if found="$(docker buildx imagetools inspect "${image}" 2>&1)"; then`,
+		`{{index .Config.Labels "org.opencontainers.image.revision"}}`,
+		`if [ "${revision}" != "${GITHUB_SHA}" ]; then`,
+		`elif [[ "${found}" == *': not found' ]]; then`,
+		`docker build --build-arg "CMD=${service}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .`,
+		`docker push "${image}"`,
+	} {
+		if !strings.Contains(push, want) {
+			t.Errorf("the push step does not carry %s:\n%s", want, push)
+		}
+	}
+}
+
 func TestReleaseWorkflowStampsTheTagIntoThePackage(t *testing.T) {
 	// The mapping lives in the script and nowhere else, and the version it
 	// produces reaches the package through the Makefile. A second copy in YAML
@@ -249,6 +334,29 @@ func releaseStep(t *testing.T, name string) releaseStepSpec {
 	return releaseStepSpec{}
 }
 
+// imagesJobOf returns the job that pushes the service images.
+func imagesJobOf(t *testing.T) releaseJobSpec {
+	t.Helper()
+
+	job, ok := releaseWorkflow(t).Jobs[imagesJob]
+	if !ok {
+		t.Fatalf("%s carries no %s job", releaseWorkflowPath, imagesJob)
+	}
+	return job
+}
+
+// servicesRe matches the Makefile line that lists the services, capturing the
+// names. Those are the images the cluster runs, and so the ones a release
+// pushes.
+var servicesRe = regexp.MustCompile(`(?m)^SERVICES := (.+)$`)
+
+// serviceLoopRe matches the loop of the push step, capturing the services it
+// builds and pushes.
+var serviceLoopRe = regexp.MustCompile(`(?m)^\s*for service in ([^;]+); do$`)
+
+// pinnedActionRe matches the uses: of an action pinned to a full commit SHA.
+var pinnedActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+
 // distPathRe matches a path into dist/ as a workflow writes one: a step's
 // subject list or the argument list of gh release create.
 var distPathRe = regexp.MustCompile(`dist/[A-Za-z0-9_.*-]+`)
@@ -273,6 +381,7 @@ type releaseSpec struct {
 }
 
 type releaseJobSpec struct {
+	Needs       string
 	Permissions map[string]string
 	Steps       []releaseStepSpec
 }
