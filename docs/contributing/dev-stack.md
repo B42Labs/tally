@@ -369,6 +369,9 @@ The table below is rendered from the `## target: description` comments of the
 | `fmt` | format every Go file with gofumpt, through golangci-lint's formatter |
 | `check-alerting` | validate the alert rules and the Alertmanager config |
 | `migrate` | apply the reporting and the engine migration chains |
+| `prod-addons` | install Envoy Gateway and cert-manager on the cluster PROD_CONTEXT names |
+| `prod-up` | deploy the prod overlay to the cluster PROD_CONTEXT names and migrate the reporting database |
+| `prod-migrate` | apply the reporting migration chain through a port-forward to the cluster PROD_CONTEXT names |
 | `generate` | run the code generators and refresh the generated blocks of the reference pages and the handbook |
 | `docs` | serve the documentation site locally with live reload |
 | `docs-build` | build the documentation site; a dead internal link fails the build |
@@ -411,13 +414,29 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   [the demo](#the-demo).
 - `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
   127.0.0.1, and the port of the URL it prints.
+- `PROD_CONTEXT` (no default) is the kubectl context `prod-addons`, `prod-up`
+  and `prod-migrate` act on; each of them refuses to run while it is empty.
+- `PROD_DB_PORT` (`15432`) is the port on 127.0.0.1 `prod-migrate` forwards
+  TimescaleDB to.
 
 ## Where the dev stack ends
 
-There is no `prod` overlay. The binding layout in section 2 of
+`overlays/prod/` exists beside `overlays/dev/`, as the binding layout in
+section 2 of
 [`roadmap/00-conventions.md`](https://github.com/B42Labs/tally/blob/main/roadmap/00-conventions.md)
-lists `overlays/prod/` as added when Tally is first deployed to a real cluster,
-so `overlays/dev/` is the only overlay in the tree.
+reserves it for the first deployment to a real cluster.
+
+Against the dev overlay, the prod overlay takes the Reporting API image from
+`ghcr.io` at a release tag instead of `kind load`. Its certificate is signed by
+a Let's Encrypt ClusterIssuer over HTTP-01 and names the four published
+hostnames instead of a wildcard from the dev CA. Every hostname comes from
+`hosts.yaml` through kustomize replacements, and the secrets come from
+untracked `.env` files instead of literals. The Gateway keeps the default
+LoadBalancer Service of Envoy Gateway instead of `envoyproxy.yaml`, and it has
+no `postgres` listener, so `make prod-migrate` reaches the database through a
+port-forward. The routes of VictoriaMetrics, vmalert and Alertmanager are
+deleted, and so is the engine CronJob. VictoriaMetrics scrapes the two
+in-cluster jobs only.
 
 kind is never used in CI either, as
 [Continuous integration](/contributing/toolchain#continuous-integration)

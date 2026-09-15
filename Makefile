@@ -100,6 +100,19 @@ COMPOSE := docker compose -f deploy/compose/compose.yaml
 KUBE_CONTEXT := kind-$(CLUSTER_NAME)
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 
+# The prod targets act on a real cluster, and PROD_CONTEXT is the kubectl
+# context that names it. It has no default, so no prod target runs against
+# whatever context is current: each of them refuses to start while it is empty.
+# PROD_OVERLAY is the overlay they deploy, and PROD_DB_PORT is the port on
+# 127.0.0.1 `prod-migrate` forwards TimescaleDB to.
+PROD_OVERLAY := deploy/kubernetes/overlays/prod
+PROD_CONTEXT ?=
+PROD_DB_PORT ?= 15432
+PROD_KUBECTL := kubectl --context $(PROD_CONTEXT)
+# A comma in a $(call) argument splits the argument, and a comma in the value of
+# a variable the argument references does not, so the selector is a variable.
+PROD_GATEWAY_SELECTOR := gateway.envoyproxy.io/owning-gateway-name=tally,gateway.envoyproxy.io/owning-gateway-namespace=tally
+
 # How long one readiness wait may take, and how many of them a rollout gets. The
 # product is the budget. A first `make up` on a fresh node pulls every image the
 # stack runs, and a pull outlasting one wait is the normal case on a slow line
@@ -123,6 +136,52 @@ WAIT_ATTEMPTS ?= 6
 # sitting at 0/1 and no reason for it.
 define await
 	@attempt=1; 	until $(KUBECTL) $(1) --timeout=$(WAIT_TIMEOUT); do 		if [ "$$attempt" -ge '$(WAIT_ATTEMPTS)' ]; then 			echo '' >&2; 			echo 'ERROR: $(2) did not become ready in $(WAIT_ATTEMPTS) waits of $(WAIT_TIMEOUT).' >&2; 			echo '       make up stops here, so the stack is incomplete. Stopping before' >&2; 			echo '       the migration chain leaves the Reporting API at 0/1 until a later' >&2; 			echo '       make up applies it: it never migrates on its own.' >&2; 			echo '       kubectl --context $(KUBE_CONTEXT) get pods -A, and the events of' >&2; 			echo '       the pod that is not ready, say why it is not.' >&2; 			echo '       make up is safe to run again: it reuses the cluster and carries on.' >&2; 			exit 1; 		fi; 		attempt=$$((attempt + 1)); 		echo '==> $(2) is not ready after $(WAIT_TIMEOUT); the node may still be pulling an image, waiting again ('"$$attempt"'/$(WAIT_ATTEMPTS))'; 	done
+endef
+
+# prod_context_guard is the first recipe line of every prod target. It stops
+# the target while PROD_CONTEXT is empty, and $@ names the target the operator
+# ran in the example it prints.
+define prod_context_guard
+	@[ -n '$(PROD_CONTEXT)' ] || { echo 'ERROR: set PROD_CONTEXT to the kubectl context of the cluster, e.g. make $@ PROD_CONTEXT=tally-demo' >&2; exit 1; }
+endef
+
+# prod_release_guard stops a prod target unless the checkout is the release the
+# overlay deploys. `go run` migrates with the chain of the checkout, and the
+# Reporting API's readiness refuses only a schema behind its build: a chain
+# ahead of the image leaves the old pod Ready on a schema it does not know, and
+# one behind it leaves the new pod unready with nothing naming why. go:embed
+# takes every .sql file there, while git status leaves out an ignored one, and
+# every untracked one once status.showUntrackedFiles is no; git ls-files
+# --others lists them whatever the ignore rules and that setting say.
+define prod_release_guard
+	@tag="$$(sed -n 's/^ *newTag: *//p' '$(PROD_OVERLAY)/kustomization.yaml')"; \
+	if [ -z "$$tag" ] || ! git tag --points-at HEAD | grep -qxF "$$tag"; then \
+		echo "ERROR: the prod overlay deploys $${tag:-no tag}, but the checkout is at $$(git describe --tags --always HEAD); check out $${tag:-the release tag}, so the migration chain matches the image" >&2; \
+		exit 1; \
+	fi; \
+	if [ -n "$$(git status --porcelain -- migrations/reporting; git ls-files --others -- 'migrations/reporting/*.sql')" ]; then \
+		echo 'ERROR: migrations/reporting differs from the tag, so the migration chain does not match the image' >&2; \
+		exit 1; \
+	fi
+endef
+
+# prod_await is await for the cluster PROD_CONTEXT names. $(1) and $(2) are what
+# they are for await.
+define prod_await
+	@attempt=1; \
+	until $(PROD_KUBECTL) $(1) --timeout=$(WAIT_TIMEOUT); do \
+		if [ "$$attempt" -ge '$(WAIT_ATTEMPTS)' ]; then \
+			echo '' >&2; \
+			echo 'ERROR: $(2) did not become ready in $(WAIT_ATTEMPTS) waits of $(WAIT_TIMEOUT).' >&2; \
+			echo '       make $@ stops here.' >&2; \
+			echo '       kubectl --context $(PROD_CONTEXT) get pods -A, and the events of' >&2; \
+			echo '       the pod that is not ready, say why it is not.' >&2; \
+			echo '       make prod-addons and make prod-up are safe to run again.' >&2; \
+			exit 1; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		echo '==> $(2) is not ready after $(WAIT_TIMEOUT); the node may still be pulling an image, waiting again ('"$$attempt"'/$(WAIT_ATTEMPTS))'; \
+	done
 endef
 
 # Reaches TimescaleDB through the Gateway's TCP listener, which is the same path
@@ -214,7 +273,7 @@ ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deplo
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
 	images deb sbom simulator-up simulator-down console demo demo-drain demo-registry \
-	demo-bill demo-correct docs docs-build
+	demo-bill demo-correct docs docs-build prod-addons prod-up prod-migrate
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
 # stack, and an engine given less than this spends the readiness waits of `up`
@@ -837,6 +896,111 @@ check-alerting:
 migrate:
 	TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin migrate
 	TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' go run ./cmd/tally-engine migrate
+
+# prod-addons installs the two add-ons from their Helm charts, at the versions
+# `up` applies the release manifests of. Envoy Gateway goes first: its chart
+# installs the Gateway API CRDs, and cert-manager looks for them at startup.
+# helm is a prerequisite the how-to names. `check-tools` does not probe it,
+# because that target probes the tools of the dev stack.
+## prod-addons: install Envoy Gateway and cert-manager on the cluster PROD_CONTEXT names
+prod-addons:
+	$(call prod_context_guard)
+	@echo '==> installing Envoy Gateway $(ENVOY_GATEWAY_VERSION) on $(PROD_CONTEXT)'
+	helm --kube-context '$(PROD_CONTEXT)' upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm --version $(ENVOY_GATEWAY_VERSION) -n envoy-gateway-system --create-namespace
+	$(call prod_await,-n envoy-gateway-system rollout status deployment/envoy-gateway,Envoy Gateway)
+	@echo '==> installing cert-manager $(CERT_MANAGER_VERSION) on $(PROD_CONTEXT)'
+	helm --kube-context '$(PROD_CONTEXT)' upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --version $(CERT_MANAGER_VERSION) -n cert-manager --create-namespace --set crds.enabled=true --set config.gatewayAPI.enabled=true
+	$(call prod_await,-n cert-manager rollout status deployment/cert-manager,cert-manager)
+	$(call prod_await,-n cert-manager rollout status deployment/cert-manager-webhook,the cert-manager webhook)
+	$(call prod_await,-n cert-manager rollout status deployment/cert-manager-cainjector,the cert-manager cainjector)
+
+# prod-up checks that the secret file of every example exists with each value
+# filled in before it applies anything. An empty value applies quietly: Grafana
+# keeps its default admin password when admin-password is empty, and
+# VictoriaMetrics serves delete_series to every pod when delete-auth-key is. It
+# does not wait on the Gateway's Programmed condition: the certificate cannot be
+# issued before DNS points at the address this target prints. The wait on that
+# address comes after the rollouts, because `kubectl wait -l` fails at once
+# while no Service matches the selector. grep exits 1 on a secret file with
+# every value filled in, and -e with pipefail would end the recipe there
+# without a word, so only a status above 1 stops it.
+## prod-up: deploy the prod overlay to the cluster PROD_CONTEXT names and migrate the reporting database
+prod-up:
+	$(call prod_context_guard)
+	@for example in $(PROD_OVERLAY)/secrets/*.env.example; do \
+		file="$${example%.example}"; \
+		[ -f "$$file" ] || { echo "ERROR: $$file is missing; copy $$example and fill it" >&2; exit 1; }; \
+		keys="$$({ grep -E '^[^#=]+=([[:space:]]*$$|.*<[a-z-]+>)' "$$file" || [ $$? -eq 1 ]; } | cut -d= -f1 | tr '\n' ' ')"; \
+		[ -z "$$keys" ] || { echo "ERROR: $$file leaves $${keys% } empty or on a placeholder; fill every value" >&2; exit 1; }; \
+	done
+	$(call prod_release_guard)
+	@echo '==> installing the certificate issuer'
+	$(PROD_KUBECTL) apply -f $(PROD_OVERLAY)/issuers.yaml
+	@echo '==> applying the prod overlay'
+	$(PROD_KUBECTL) apply -k $(PROD_OVERLAY)
+	$(call prod_await,-n $(NAMESPACE) rollout status statefulset/timescaledb,TimescaleDB)
+	$(call prod_await,-n $(NAMESPACE) rollout status statefulset/victoriametrics,VictoriaMetrics)
+	$(call prod_await,-n $(NAMESPACE) rollout status deployment/otel-collector,the OTel Collector)
+	$(call prod_await,-n $(NAMESPACE) rollout status deployment/grafana,Grafana)
+	$(call prod_await,-n $(NAMESPACE) rollout status statefulset/alertmanager,Alertmanager)
+	$(call prod_await,-n $(NAMESPACE) rollout status deployment/vmalert,vmalert)
+	$(call prod_await,-n envoy-gateway-system wait svc -l $(PROD_GATEWAY_SELECTOR) --for=jsonpath='{.status.loadBalancer.ingress}',the LoadBalancer address of the Gateway)
+	@echo '==> applying the reporting migration chain'
+	$(MAKE) prod-migrate
+	$(call prod_await,-n $(NAMESPACE) rollout status deployment/reporting-api,the Reporting API)
+	@address="$$($(PROD_KUBECTL) -n envoy-gateway-system get svc -l '$(PROD_GATEWAY_SELECTOR)' -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')"; \
+	if [ -z "$$address" ]; then \
+		address="$$($(PROD_KUBECTL) -n envoy-gateway-system get svc -l '$(PROD_GATEWAY_SELECTOR)' -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')"; \
+	fi; \
+	api="$$(sed -n 's/^  api: *//p' '$(PROD_OVERLAY)/hosts.yaml')"; \
+	echo; \
+	echo "==> the Gateway answers on $$address"; \
+	echo '    the hostnames of hosts.yaml:'; \
+	sed -n '/^data:/,$$ s/^  \([a-z-]*\): *\(.*\)$$/      \2  (\1)/p' '$(PROD_OVERLAY)/hosts.yaml'; \
+	echo; \
+	echo "Point *.$${api#*.} at that address, then: kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) wait certificate/tally-wildcard --for=condition=Ready --timeout=10m"; \
+	echo; \
+	echo '==> the unpublished services, through a port-forward:'; \
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) port-forward svc/victoriametrics 8428:8428'; \
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) port-forward svc/vmalert 8880:8880'; \
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) port-forward svc/alertmanager 9093:9093'
+
+# prod-migrate applies the reporting chain alone, because this cluster runs no
+# engine. The prod overlay has no postgres listener, so the database is reached
+# through a port-forward. The URL is an environment value of the one process
+# that migrates and lands in no file. The password is a hex value from
+# `openssl rand -hex 32`, so the URL needs no encoding. A listener already on
+# PROD_DB_PORT is refused, because the probe below would take it for the forward
+# and migrate whatever database answers there.
+## prod-migrate: apply the reporting migration chain through a port-forward to the cluster PROD_CONTEXT names
+prod-migrate:
+	$(call prod_context_guard)
+	$(call prod_release_guard)
+	@password="$$(sed -n 's/^password=//p' '$(PROD_OVERLAY)/secrets/tally-db.env' 2>/dev/null || true)"; \
+	if [ -z "$$password" ]; then \
+		echo 'ERROR: $(PROD_OVERLAY)/secrets/tally-db.env carries no password' >&2; \
+		exit 1; \
+	fi; \
+	if nc -z 127.0.0.1 '$(PROD_DB_PORT)' >/dev/null 2>&1; then \
+		echo 'ERROR: something already listens on 127.0.0.1:$(PROD_DB_PORT), such as a port-forward left running; stop it or set PROD_DB_PORT' >&2; \
+		exit 1; \
+	fi; \
+	log="$$(mktemp)"; \
+	$(PROD_KUBECTL) -n $(NAMESPACE) port-forward svc/timescaledb '$(PROD_DB_PORT):5432' >"$$log" 2>&1 & \
+	forward=$$!; \
+	trap 'kill $$forward 2>/dev/null || true; rm -f "$$log"' EXIT; \
+	ready=; \
+	for attempt in $$(seq 30); do \
+		kill -0 "$$forward" 2>/dev/null || break; \
+		if nc -z 127.0.0.1 '$(PROD_DB_PORT)' >/dev/null 2>&1; then ready=yes; break; fi; \
+		sleep 1; \
+	done; \
+	if [ -z "$$ready" ]; then \
+		echo 'ERROR: the port-forward to TimescaleDB never answered on 127.0.0.1:$(PROD_DB_PORT); kubectl said:' >&2; \
+		cat "$$log" >&2; \
+		exit 1; \
+	fi; \
+	TALLY_REPORTING_DB_URL="postgres://tally:$$password@127.0.0.1:$(PROD_DB_PORT)/tally_reporting?sslmode=disable" go run ./cmd/tally-reporting-admin migrate
 
 ## generate: run the code generators and refresh the generated blocks of the reference pages and the handbook
 generate:
