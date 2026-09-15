@@ -435,8 +435,10 @@ untracked `.env` files instead of literals. The Gateway keeps the default
 LoadBalancer Service of Envoy Gateway instead of `envoyproxy.yaml`, and it has
 no `postgres` listener, so `make prod-migrate` reaches the database through a
 port-forward. The routes of VictoriaMetrics, vmalert and Alertmanager are
-deleted, and so is the engine CronJob. VictoriaMetrics scrapes the two
-in-cluster jobs only.
+deleted, and so is the engine CronJob. Grafana serves no `/metrics`.
+VictoriaMetrics scrapes the two in-cluster jobs only.
+[Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+walks the deployment through.
 
 kind is never used in CI either, as
 [Continuous integration](/contributing/toolchain#continuous-integration)

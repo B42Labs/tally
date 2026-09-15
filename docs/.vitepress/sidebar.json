@@ -45,6 +45,13 @@
       "items": [
         { "text": "Overview", "link": "/how-to/" },
         {
+          "text": "Cluster",
+          "collapsed": true,
+          "items": [
+            { "text": "Deploy the collecting stack to a cluster", "link": "/how-to/cluster/deploy-the-collecting-stack" }
+          ]
+        },
+        {
           "text": "OpenStack provider",
           "collapsed": true,
           "items": [

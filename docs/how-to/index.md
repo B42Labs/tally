@@ -21,6 +21,13 @@ Tally sit together.
 
 ## Guides by area
 
+### Cluster
+
+- [Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+  puts the Reporting API, the OTLP endpoint and Grafana on a dedicated cluster
+  behind Let's Encrypt certificates, with the secrets kept out of the
+  repository.
+
 ### OpenStack provider
 
 - [Install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
