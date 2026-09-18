@@ -32,7 +32,7 @@ services:
     # Pinned to a version and a digest, the way deploy/kind/kind.yaml pins the
     # node image: a floating tag re-resolves on every pull, so the broker the
     # stack runs would be whatever the registry published under it last.
-    image: rabbitmq:4.3.6-management-alpine@sha256:9b256c20789b98b5920374bf9d0f31d86a3efeda3dc381aa4d3ffb3fbba6aa41
+    image: rabbitmq:4.3.6-management-alpine@sha256:5240653724b684642bbbfd0a7bbd14dc0517078743a3114c9ed1ea2e32f4d69f
     ports:
       - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"
