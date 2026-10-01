@@ -46,22 +46,36 @@ The exchanges and the topics are configuration, and their defaults stand in
 
 The collector's own queue is `tally-notifications`, declared durable, so
 notifications pile up in it while the collector is down and are consumed when it
-returns. It is bound to every pair of exchange and topic the configuration
-names. `TALLY_OSC_EXCHANGES` defaults to `nova,neutron,cinder,glance` and
-`TALLY_OSC_TOPICS` to `notifications.info`, which are the stock OpenStack
-settings; a topic is the routing key itself and not a prefix of one, because
-that is how oslo publishes.
+returns. It is bound to every topic the configuration names, on every
+configured exchange the broker carries. `TALLY_OSC_EXCHANGES` defaults to
+`nova,neutron,openstack,glance` and `TALLY_OSC_TOPICS` to `notifications.info`,
+which are the stock OpenStack settings: cinder sets no `control_exchange` and
+publishes on oslo's default, `openstack`. A topic is the routing key itself and
+not a prefix of one, because that is how oslo publishes.
 
-The exchanges are declared passively and none of them is created. Which options
-a service declared its exchange with differs per deployment, so a collector that
-declared them itself would have to guess. An exchange the broker does not carry
-fails the declare, closes the channel, and the collector reconnects with the
-error naming the exchange it waits for.
+Each configured exchange is probed with a passive declare on a channel of its
+own, and none is created. An exchange the broker does not carry is skipped: the
+collector logs
+`exchanges are missing on the broker, binding the others and retrying these`
+with the missing ones, binds the others, and probes each missing one again
+after 1 s, doubling to 60 s. One that has appeared is bound and logged with
+`an exchange appeared on the broker, bound it`. What was published on an
+exchange before it was bound is not consumed.
 
-Octavia's `control_exchange` is `octavia` and the default leaves it out on
-purpose: because the declare is passive, a default naming it would stop every
-deployment that runs none. A deployment with octavia sets
-`TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia`. Until it does,
+A session fails over its exchanges, and the collector reconnects, in two cases:
+
+- None of the configured exchanges exists. The error is
+  `none of the exchanges in TALLY_OSC_EXCHANGES exists on the broker`, followed
+  by the list.
+- `TALLY_OSC_REQUIRE_EXCHANGES` is `true` and one exchange is missing. The
+  error is
+  `the exchange <name> does not exist on the broker, and TALLY_OSC_REQUIRE_EXCHANGES requires it`,
+  and the session ends before the queue is declared.
+
+Octavia's `control_exchange` is `octavia` and the default leaves it out: a
+deployment that runs none would report it missing for as long as the collector
+runs. A deployment with octavia sets
+`TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia`. Until it does,
 octavia's notifications reach no queue of this collector and show up in none of
 its counters.
 
@@ -117,9 +131,11 @@ Three routes are served on `TALLY_OSC_HTTP_PORT`, none of them with a
 credential. Each probe answers in plain text.
 
 `GET /readyz` answers 200 with `ok` while the consumer holds a connection to the
-broker and the outbox answers. It answers 503 with `the collector is not ready`
-otherwise, which takes the pod out of the Service's endpoints while leaving it
-running. What failed goes to the log rather than into the body.
+broker and the outbox answers. A skipped exchange does not fail readiness: a
+consumer bound to the exchanges the broker carries holds its connection. It
+answers 503 with `the collector is not ready` otherwise, which takes the pod out
+of the Service's endpoints while leaving it running. What failed goes to the log
+rather than into the body.
 
 `GET /healthz` weighs the outbox alone, and only against time. It answers 200
 with `ok` while the outbox answers, and it keeps answering 200 while the outbox
