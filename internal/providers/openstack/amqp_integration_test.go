@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -252,8 +253,17 @@ func testConfig(url string, exchanges []string, bufferMax int64) Config {
 func startConsumer(t *testing.T, cfg Config, buffer eventBuffer) (*Consumer, *Metrics, func()) {
 	t.Helper()
 
+	return startConsumerWithLogger(t, cfg, buffer, testLogger(t))
+}
+
+// startConsumerWithLogger is startConsumer with the logger handed in, for a test
+// that reads what the consumer logged.
+func startConsumerWithLogger(t *testing.T, cfg Config, buffer eventBuffer, logger *slog.Logger,
+) (*Consumer, *Metrics, func()) {
+	t.Helper()
+
 	m := freshMetrics(t)
-	consumer := NewConsumer(cfg, buffer, m, testLogger(t))
+	consumer := NewConsumer(cfg, buffer, m, logger)
 	consumer.minBackoff = testMinBackoff
 	consumer.maxBackoff = testMaxBackoff
 	consumer.pausePoll = testPausePoll
@@ -303,8 +313,9 @@ func startDump(t *testing.T, cfg Config) *syncBuffer {
 	return out
 }
 
-// syncBuffer collects the dump's output. The dump writes from a goroutine of its
-// own while the test reads, so both go through one mutex.
+// syncBuffer collects the dump's output, or the log of a test that reads it. The
+// writer runs in a goroutine of its own while the test reads, so both go through
+// one mutex.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -349,6 +360,79 @@ func testLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(testWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
+// recordingLogger is testLogger with a copy of every line kept for the test to
+// read. The copy is the text handler's output, so a test looks for a message
+// with strings.Contains on the text as it was logged.
+func recordingLogger(t *testing.T) (*slog.Logger, *syncBuffer) {
+	t.Helper()
+
+	logs := &syncBuffer{}
+	return slog.New(slog.NewTextHandler(io.MultiWriter(testWriter{t: t}, logs),
+		&slog.HandlerOptions{Level: slog.LevelDebug})), logs
+}
+
+// openConnection dials the broker and keeps the connection until the test ends.
+// It is what a test hands a probe or a watcher, which open their channels
+// themselves.
+func openConnection(t *testing.T, url string) *amqp091.Connection {
+	t.Helper()
+
+	conn, err := amqp091.Dial(url)
+	if err != nil {
+		t.Fatalf("dialing the broker at %s: %v", url, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// closedConnection dials the broker and closes the connection again, which is
+// what a probe meets once the broker is gone.
+func closedConnection(t *testing.T, url string) *amqp091.Connection {
+	t.Helper()
+
+	conn, err := amqp091.Dial(url)
+	if err != nil {
+		t.Fatalf("dialing the broker at %s: %v", url, err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("closing the connection: %v", err)
+	}
+	return conn
+}
+
+// startWatcher runs watchExchanges over conn at the test's waits, until it
+// returns or the test ends. It hands back what the watcher logged, a channel
+// that is closed once the watcher has returned, and the cancel of its context.
+func startWatcher(t *testing.T, conn *amqp091.Connection, queue string, missing ...string,
+) (*syncBuffer, <-chan struct{}, context.CancelFunc) {
+	t.Helper()
+
+	logger, logs := recordingLogger(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchExchanges(ctx, conn, queue, missing, []string{testTopic}, testMinBackoff, testMaxBackoff, logger)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return logs, done, cancel
+}
+
+// awaitReturn fails the test when the watcher behind done has not returned
+// within pollDeadline. when completes "did not return within 30s ...".
+func awaitReturn(t *testing.T, done <-chan struct{}, when string) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(pollDeadline):
+		t.Fatalf("watchExchanges() did not return within %v %s", pollDeadline, when)
+	}
+}
+
 type testWriter struct{ t *testing.T }
 
 func (w testWriter) Write(p []byte) (int, error) {
@@ -368,6 +452,23 @@ func waitFor(t *testing.T, why string, condition func() bool) {
 		time.Sleep(pollInterval)
 	}
 	t.Fatalf("timed out after %v waiting until %s", pollDeadline, why)
+}
+
+// disconnectedPolls is how often staysDisconnected looks, pollInterval apart:
+// several reconnects worth at the test backoffs.
+const disconnectedPolls = 20
+
+// staysDisconnected fails the test when the consumer reports itself connected
+// during disconnectedPolls looks. why completes "want false ...".
+func staysDisconnected(t *testing.T, consumer *Consumer, why string) {
+	t.Helper()
+
+	for range disconnectedPolls {
+		if consumer.Connected() {
+			t.Fatalf("Connected() = true, want false %s", why)
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // eventID reads the event id of a buffered event.
@@ -555,22 +656,17 @@ func TestConsumerAcknowledgesWhatItCannotRecord(t *testing.T) {
 }
 
 // TestConsumerRecoversWhenTheExchangeAppearsLater covers the deployment where
-// the collector starts before the service it collects has published anything: a
-// passive declare against an exchange that is not there fails and closes the
-// channel with it, so the consumer has nothing to do but retry.
+// the collector starts before any service it collects has published anything:
+// none of the configured exchanges exists, so there is nothing to bind, the
+// session fails, and the consumer retries until one of them is there.
 func TestConsumerRecoversWhenTheExchangeAppearsLater(t *testing.T) {
 	url := startBroker(t)
 	box := newOutbox(t)
 	consumer, _, _ := startConsumer(t, testConfig(url, []string{"nova"}, testBufferMax), box)
 
-	// Several reconnects worth of looking: the consumer must not report itself
-	// connected while the exchange it is configured for does not exist.
-	for range 20 {
-		if consumer.Connected() {
-			t.Fatal("Connected() = true, want false while the exchange is missing")
-		}
-		time.Sleep(pollInterval)
-	}
+	// The consumer must not report itself connected while the exchange it is
+	// configured for does not exist.
+	staysDisconnected(t, consumer, "while the exchange is missing")
 	if depth := box.Depth(); depth != 0 {
 		t.Fatalf("Depth() = %d, want 0 while the exchange is missing", depth)
 	}
@@ -587,6 +683,312 @@ func TestConsumerRecoversWhenTheExchangeAppearsLater(t *testing.T) {
 	})
 	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
 		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
+	}
+
+	// An empty list is the same case with nothing to wait for: no exchange will
+	// ever appear, so every session fails and says which variable to fill.
+	t.Run("with no exchange configured", func(t *testing.T) {
+		logger, logs := recordingLogger(t)
+		consumer, _, stop := startConsumerWithLogger(t, testConfig(url, nil, testBufferMax), newOutbox(t), logger)
+
+		const want = "none of the exchanges in TALLY_OSC_EXCHANGES exists on the broker: []"
+		waitFor(t, "the session error names the empty list", func() bool {
+			return strings.Contains(logs.String(), want)
+		})
+		staysDisconnected(t, consumer, "with no exchange configured")
+		stop()
+	})
+}
+
+// TestConsumerSkipsAMissingExchangeAndBindsItLater covers the fresh cloud: nova
+// publishes already and glance has not sent its first notification, so its
+// exchange does not exist yet. The collector collects from nova meanwhile and
+// binds glance once it is there.
+func TestConsumerSkipsAMissingExchangeAndBindsItLater(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	box := newOutbox(t)
+	logger, logs := recordingLogger(t)
+	consumer, _, _ := startConsumerWithLogger(t,
+		testConfig(url, []string{"nova", "glance"}, testBufferMax), box, logger)
+	waitFor(t, "the consumer is connected while glance is missing", consumer.Connected)
+
+	novaBody, novaID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", novaBody)
+	waitFor(t, "the nova notification is buffered while glance is missing", func() bool {
+		return slices.Contains(storedEventIDs(t, box), novaID)
+	})
+
+	const skipped = "exchanges are missing on the broker"
+	var warning string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, skipped) {
+			warning = line
+		}
+	}
+	if !strings.Contains(warning, "glance") {
+		t.Errorf("the log line holding %q = %q, want it to name glance", skipped, warning)
+	}
+
+	// The notification is published until it is buffered, because the bind follows
+	// the watcher's next probe and whatever is published before it reaches no
+	// queue. Each republish after the bind is buffered, which is why the assertion
+	// is that the outbox holds this event and not how often.
+	declareExchanges(t, publisher, "glance")
+	glanceBody, glanceID := fixture(t, "image-upload")
+	publishUntil(t, publisher, "glance", glanceBody, "the glance notification is buffered", func() bool {
+		return slices.Contains(storedEventIDs(t, box), glanceID)
+	})
+	waitFor(t, "the bind is logged", func() bool {
+		return strings.Contains(logs.String(), "an exchange appeared on the broker, bound it")
+	})
+}
+
+// TestConsumerRequiresEveryExchangeWhenToldTo covers the switch that keeps the
+// stop: with RequireExchanges one missing exchange fails the session before it
+// declares anything, and the consumer connects once the exchange exists.
+func TestConsumerRequiresEveryExchangeWhenToldTo(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	cfg := testConfig(url, []string{"nova", "glance"}, testBufferMax)
+	cfg.RequireExchanges = true
+	box := newOutbox(t)
+	logger, logs := recordingLogger(t)
+	consumer, _, _ := startConsumerWithLogger(t, cfg, box, logger)
+
+	const want = "the exchange glance does not exist on the broker, and TALLY_OSC_REQUIRE_EXCHANGES requires it"
+	waitFor(t, "the session error names the exchange and the variable", func() bool {
+		return strings.Contains(logs.String(), want)
+	})
+	staysDisconnected(t, consumer, "while a required exchange is missing")
+
+	// The refused session left the broker as it found it. The declare runs on a
+	// channel opened for it alone, because the 404 closes that channel.
+	_, err := openChannel(t, url).QueueDeclarePassive(queueName, true, false, false, false, nil)
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.NotFound {
+		t.Fatalf("a passive declare of %s returned %v, want a 404: a refused session declares no queue",
+			queueName, err)
+	}
+
+	declareExchanges(t, publisher, "glance")
+	waitFor(t, "the consumer connects once every exchange exists", consumer.Connected)
+
+	body, messageID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", body)
+	waitFor(t, "the nova notification is buffered", func() bool { return box.Depth() == 1 })
+	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
+		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
+	}
+}
+
+// TestConsumerStopsWhileAnExchangeIsStillMissing covers the shutdown of a
+// session whose watcher is still running: the session cancels it, closes the
+// connection under it, and waits for it, and none of the three may hang.
+func TestConsumerStopsWhileAnExchangeIsStillMissing(t *testing.T) {
+	url := startBroker(t)
+	declareExchanges(t, openChannel(t, url), "nova")
+
+	consumer, _, stop := startConsumer(t,
+		testConfig(url, []string{"nova", "glance"}, testBufferMax), newOutbox(t))
+	waitFor(t, "the consumer is connected while glance is missing", consumer.Connected)
+
+	// A stop that hangs keeps this goroutine and the cleanup startConsumer
+	// registered waiting on the same call, so the test then ends at its timeout.
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(pollDeadline):
+		t.Fatalf("stop() did not return within %v while glance was still missing", pollDeadline)
+	}
+}
+
+// TestDumpSkipsAMissingExchangeAndBindsItLater is the same fresh cloud seen
+// through the dump, whose watcher binds the dump's own exclusive queue.
+func TestDumpSkipsAMissingExchangeAndBindsItLater(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	out := startDump(t, testConfig(url, []string{"nova", "glance"}, testBufferMax))
+
+	novaBody, novaID := fixture(t, "compute-instance-create-end")
+	publishUntil(t, publisher, "nova", novaBody, "the dump prints the nova notification while glance is missing",
+		func() bool { return dumpLineWith(t, out.String(), "message_id", novaID) != nil })
+
+	declareExchanges(t, publisher, "glance")
+	glanceBody, glanceID := fixture(t, "image-upload")
+	publishUntil(t, publisher, "glance", glanceBody, "the dump prints the glance notification",
+		func() bool { return dumpLineWith(t, out.String(), "message_id", glanceID) != nil })
+	if got := dumpLineWith(t, out.String(), "message_id", glanceID)["exchange"]; got != "glance" {
+		t.Errorf("the dumped line's exchange = %v, want %q", got, "glance")
+	}
+}
+
+// TestExchangeExistsReportsAClosedConnection covers the probe that cannot ask:
+// a closed connection is an error and not a missing exchange, so a session that
+// lost its broker is not mistaken for one whose exchanges are gone.
+func TestExchangeExistsReportsAClosedConnection(t *testing.T) {
+	conn := closedConnection(t, startBroker(t))
+
+	exists, err := exchangeExists(conn, "nova")
+	if exists {
+		t.Error("exchangeExists() = true, want false on a closed connection")
+	}
+	if err == nil {
+		t.Fatal("exchangeExists() error = nil, want an error on a closed connection")
+	}
+	if prefix := "opening a channel: "; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("exchangeExists() error = %q, want it to start with %q", err, prefix)
+	}
+	if !errors.Is(err, amqp091.ErrClosed) {
+		t.Errorf("exchangeExists() error = %v, want it to wrap amqp091.ErrClosed", err)
+	}
+}
+
+// TestExchangeExistsReportsARefusalThatIsNotA404 covers the probe the broker
+// answers with something other than NOT_FOUND. Only a 404 says the exchange is
+// missing; any other refusal is an error, so that a session does not skip an
+// exchange nobody told it is absent. The empty name is the default exchange,
+// and RabbitMQ refuses a declare of it with a 403.
+func TestExchangeExistsReportsARefusalThatIsNotA404(t *testing.T) {
+	conn := openConnection(t, startBroker(t))
+
+	exists, err := exchangeExists(conn, "")
+	if exists {
+		t.Error("exchangeExists() = true, want false for a declare the broker refused")
+	}
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.AccessRefused {
+		t.Fatalf("exchangeExists() error = %v, want it to wrap the broker's 403", err)
+	}
+	if prefix := "declaring the exchange : "; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("exchangeExists() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+// TestWatchExchangesBindsEachExchangeAsItAppearsAndThenReturns covers the fresh
+// cloud at the default list, where two exchanges are missing at once: glance and
+// openstack each appear with their service's first notification. The watcher
+// binds the one that appeared, keeps the other, and returns once that one is
+// bound too.
+func TestWatchExchangesBindsEachExchangeAsItAppearsAndThenReturns(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	if _, err := publisher.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring the queue %s: %v", queueName, err)
+	}
+
+	logs, done, _ := startWatcher(t, openConnection(t, url), queueName, "glance", "openstack")
+
+	declareExchanges(t, publisher, "glance")
+	waitFor(t, "glance is bound", func() bool {
+		return strings.Contains(logs.String(), "an exchange appeared on the broker, bound it")
+	})
+
+	// A watcher that dropped openstack when it bound glance has returned by now
+	// and never binds it, and one that kept glance after binding it never returns.
+	declareExchanges(t, publisher, "openstack")
+	awaitReturn(t, done, "of the last exchange appearing")
+
+	for exchange, name := range map[string]string{"glance": "image-upload", "openstack": "volume-create-end"} {
+		body, _ := fixture(t, name)
+		publish(t, publisher, exchange, body)
+	}
+	waitFor(t, "the queue holds the notification of each exchange", func() bool {
+		return readyMessages(t, publisher) == 2
+	})
+}
+
+// TestWatchExchangesRetriesAProbeThatFailedOnALiveConnection covers the probe
+// that cannot ask although the connection stands. The watcher logs the failure,
+// keeps the exchange, and binds it once a probe works again.
+func TestWatchExchangesRetriesAProbeThatFailedOnALiveConnection(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	if _, err := publisher.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring the queue %s: %v", queueName, err)
+	}
+	declareExchanges(t, publisher, "glance")
+
+	// The connection allows one channel and the test holds it, so every probe
+	// fails at opening its own while the connection stays up.
+	conn, err := amqp091.DialConfig(url, amqp091.Config{ChannelMax: 1})
+	if err != nil {
+		t.Fatalf("dialing the broker at %s: %v", url, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	held, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("opening the connection's one channel: %v", err)
+	}
+
+	logs, done, _ := startWatcher(t, conn, queueName, "glance")
+
+	// Two failed probes are two rounds: the watcher kept the exchange after the
+	// first and probed it again.
+	waitFor(t, "the probe is retried after it failed", func() bool {
+		return strings.Count(logs.String(), "probing a missing exchange failed, retrying it") >= 2
+	})
+
+	if err := held.Close(); err != nil {
+		t.Fatalf("closing the held channel: %v", err)
+	}
+	awaitReturn(t, done, "of the probe working again")
+
+	body, _ := fixture(t, "image-upload")
+	publish(t, publisher, "glance", body)
+	waitFor(t, "the queue holds the notification published on glance", func() bool {
+		return readyMessages(t, publisher) == 1
+	})
+}
+
+// TestWatchExchangesKeepsAnExchangeItCouldNotBind covers the bind that fails:
+// the exchange exists, the queue to bind does not, and the watcher keeps the
+// exchange and retries it until it is told to stop.
+func TestWatchExchangesKeepsAnExchangeItCouldNotBind(t *testing.T) {
+	url := startBroker(t)
+	declareExchanges(t, openChannel(t, url), "nova")
+
+	logs, done, cancel := startWatcher(t, openConnection(t, url), "a-queue-the-broker-does-not-carry", "nova")
+
+	// Two failed binds are two rounds: the watcher kept the exchange after the
+	// first and probed it again.
+	waitFor(t, "the bind is retried after it failed", func() bool {
+		return strings.Count(logs.String(), "binding an exchange that appeared failed, retrying it") >= 2
+	})
+	select {
+	case <-done:
+		t.Fatal("watchExchanges() returned although the exchange is not bound and its context is live")
+	default:
+	}
+
+	cancel()
+	awaitReturn(t, done, "of its context being cancelled")
+}
+
+// TestWatchExchangesReturnsOnAClosedConnection covers the watcher that outlives
+// its connection. It returns on its own, and it logs nothing about it, because
+// the session that owns the connection reports the loss.
+func TestWatchExchangesReturnsOnAClosedConnection(t *testing.T) {
+	logs, done, _ := startWatcher(t, closedConnection(t, startBroker(t)), queueName, "glance")
+
+	awaitReturn(t, done, "on a closed connection")
+	for _, unwanted := range []string{
+		"probing a missing exchange failed",
+		"binding an exchange that appeared failed",
+	} {
+		if strings.Contains(logs.String(), unwanted) {
+			t.Errorf("the log holds %q, want the watcher to return on a closed connection without logging", unwanted)
+		}
 	}
 }
 

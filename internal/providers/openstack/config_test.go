@@ -549,6 +549,74 @@ func TestLoadTrimsTheReportingURL(t *testing.T) {
 	}
 }
 
+// TestLoadTrimsTheExchangeNames covers the list an operator writes with a space
+// after each comma. The padded name is an exchange the broker does not carry,
+// and a missing exchange is skipped, so without the trim the collector would
+// report ready while it collects from the first exchange alone.
+func TestLoadTrimsTheExchangeNames(t *testing.T) {
+	setEnv(t, withVars(map[string]string{"TALLY_OSC_EXCHANGES": "nova, neutron ,openstack,\tglance"}))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	if want := []string{"nova", "neutron", "openstack", "glance"}; !slices.Equal(cfg.Exchanges, want) {
+		t.Errorf("Exchanges = %q, want %q", cfg.Exchanges, want)
+	}
+}
+
+// TestLoadRejectsAnEmptyExchangeName covers the list with a comma too many. The
+// empty name is AMQP's default exchange, which no queue can be bound to.
+func TestLoadRejectsAnEmptyExchangeName(t *testing.T) {
+	for _, value := range []string{"nova,,glance", "nova,glance,", "nova, ,glance", " "} {
+		t.Run(value, func(t *testing.T) {
+			setEnv(t, withVars(map[string]string{"TALLY_OSC_EXCHANGES": value}))
+
+			_, err := Load()
+
+			const want = "TALLY_OSC_EXCHANGES: an exchange name is empty"
+			if err == nil || err.Error() != want {
+				t.Fatalf("Load() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+// TestLoadTrimsTheTopics covers the same habit in the topic list. The padded
+// topic is a binding key no service publishes under, and the bind succeeds all
+// the same, so without the trim the collector would report ready while that
+// topic's notifications never reach it.
+func TestLoadTrimsTheTopics(t *testing.T) {
+	setEnv(t, withVars(map[string]string{"TALLY_OSC_TOPICS": "notifications.info, notifications.error ,\ttally.info"}))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	if want := []string{"notifications.info", "notifications.error", "tally.info"}; !slices.Equal(cfg.Topics, want) {
+		t.Errorf("Topics = %q, want %q", cfg.Topics, want)
+	}
+}
+
+// TestLoadRejectsAnEmptyTopic covers the list with a comma too many. The empty
+// topic binds the empty key, which matches no notification.
+func TestLoadRejectsAnEmptyTopic(t *testing.T) {
+	for _, value := range []string{"notifications.info,,tally.info", "notifications.info,", "notifications.info, ,tally.info", " "} {
+		t.Run(value, func(t *testing.T) {
+			setEnv(t, withVars(map[string]string{"TALLY_OSC_TOPICS": value}))
+
+			_, err := Load()
+
+			const want = "TALLY_OSC_TOPICS: a topic is empty"
+			if err == nil || err.Error() != want {
+				t.Fatalf("Load() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 func TestValidateDump(t *testing.T) {
 	t.Run("the broker url alone is enough", func(t *testing.T) {
 		setEnv(t, map[string]string{"TALLY_OSC_AMQP_URL": "amqp://tally:s3cret@rabbit:5672/"})
