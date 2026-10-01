@@ -551,12 +551,12 @@ func TestConsumerBuffersNotificationsFromEveryDefaultExchange(t *testing.T) {
 	url := startBroker(t)
 	publisher := openChannel(t, url)
 
-	exchanges := []string{"nova", "neutron", "cinder", "glance"}
+	exchanges := []string{"nova", "neutron", "openstack", "glance"}
 	fixtures := map[string]string{
-		"nova":    "compute-instance-create-end",
-		"neutron": "floatingip-create-end",
-		"cinder":  "volume-create-end",
-		"glance":  "image-upload",
+		"nova":      "compute-instance-create-end",
+		"neutron":   "floatingip-create-end",
+		"openstack": "volume-create-end",
+		"glance":    "image-upload",
 	}
 	declareExchanges(t, publisher, exchanges...)
 

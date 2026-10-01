@@ -795,7 +795,7 @@ outbox (SQLite, WAL) ──▶ sender loop: batch ≤500 ──▶ POST /api/v1/
   AMQP messages — no Python library required. The collector declares its **own durable queue**
   `tally-notifications` and binds it to the notification topic(s) (`TALLY_OSC_TOPICS`, default
   `notifications.info`) on each configured service exchange (`TALLY_OSC_EXCHANGES`, default
-  `nova,neutron,cinder,glance`). An own queue replicates oslo's listener-pool semantics —
+  `nova,neutron,openstack,glance`). An own queue replicates oslo's listener-pool semantics —
   Ceilometer keeps receiving its own copies untouched. The message body is the oslo envelope
   `{"oslo.version": "2.0", "oslo.message": "<json string>"}`; the inner document carries
   `message_id`, `event_type`, `timestamp`, `payload`. Manual acks with bounded prefetch
