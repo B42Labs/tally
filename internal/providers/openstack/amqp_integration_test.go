@@ -30,7 +30,11 @@ import (
 // other's notifications.
 const (
 	brokerImage = "rabbitmq:4-alpine"
-	brokerPort  = "5672/tcp"
+	// The broker the quorum gate refuses: the last release before 4.0, which
+	// reads a delivery limit of -1 as a limit. The line gets no releases any
+	// more, so the image is pinned by its digest.
+	oldBrokerImage = "rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc"
+	brokerPort     = "5672/tcp"
 	// The port is listening well before the broker accepts a connection on it, so
 	// the wait is on RabbitMQ's own boot marker instead.
 	brokerReadyLog = "Server startup complete"
@@ -62,13 +66,23 @@ const (
 // far more than it publishes, so the consumer never pauses.
 const testBufferMax = 1000
 
-// startBroker runs a RabbitMQ container for the test and returns the URL it is
-// reachable under.
+// startBroker runs the broker every test but one runs against and returns the
+// URL it is reachable under.
 func startBroker(t *testing.T) string {
 	t.Helper()
 
+	_, url := startBrokerContainer(t, brokerImage)
+	return url
+}
+
+// startBrokerContainer runs a RabbitMQ container of the given image for the
+// test. It returns the container, for a test that runs a command in it, and the
+// URL the broker is reachable under.
+func startBrokerContainer(t *testing.T, image string) (testcontainers.Container, string) {
+	t.Helper()
+
 	ctx := context.Background()
-	container, err := testcontainers.Run(ctx, brokerImage,
+	container, err := testcontainers.Run(ctx, image,
 		testcontainers.WithExposedPorts(brokerPort),
 		testcontainers.WithWaitStrategy(wait.ForLog(brokerReadyLog)),
 	)
@@ -91,7 +105,7 @@ func startBroker(t *testing.T) string {
 	}
 	// The guest account is the image's own, and the container is reachable only
 	// through its ephemeral host port for the length of one test.
-	return fmt.Sprintf("amqp://guest:guest@%s/", net.JoinHostPort(host, port.Port()))
+	return container, fmt.Sprintf("amqp://guest:guest@%s/", net.JoinHostPort(host, port.Port()))
 }
 
 // openChannel connects to the broker the way an OpenStack service would and
@@ -1123,6 +1137,54 @@ func TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery(t *testing.T
 	buffer.failing.Store(false)
 	startConsumer(t, cfg, buffer)
 	waitFor(t, "the notification is buffered after every return", func() bool {
+		return box.Depth() == 1
+	})
+	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
+		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
+	}
+}
+
+// TestConsumerRefusesAQuorumQueueOnAnOlderBroker covers the broker a quorum
+// declare must not reach. RabbitMQ before 4.0 reads the delivery limit of -1 as
+// a limit, so the queue this collector would declare there loses a notification
+// on its first requeue. The session ends at the gate instead, before it has
+// declared anything. A collector at the default queue type passes the gate on
+// the same broker.
+func TestConsumerRefusesAQuorumQueueOnAnOlderBroker(t *testing.T) {
+	_, url := startBrokerContainer(t, oldBrokerImage)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	cfg := testConfig(url, []string{"nova"}, testBufferMax)
+	cfg.QueueType = queueTypeQuorum
+	logger, logs := recordingLogger(t)
+	consumer, _, stop := startConsumerWithLogger(t, cfg, newOutbox(t), logger)
+
+	const want = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13"
+	waitFor(t, "the session error names the variable and the broker's version", func() bool {
+		return strings.Contains(logs.String(), want)
+	})
+	staysDisconnected(t, consumer, "on a broker older than RabbitMQ 4.0")
+
+	// The refused session left the broker as it found it. The declare runs on a
+	// channel opened for it alone, because the 404 closes that channel.
+	_, err := openChannel(t, url).QueueDeclarePassive(queueName, true, false, false, false, nil)
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.NotFound {
+		t.Fatalf("a passive declare of %s returned %v, want a 404: a refused session declares no queue",
+			queueName, err)
+	}
+
+	// The gate is for a quorum queue alone: the default declares on the same
+	// broker, which is the one a deployment that sets nothing may run.
+	stop()
+	box := newOutbox(t)
+	defaulted, _, _ := startConsumer(t, testConfig(url, []string{"nova"}, testBufferMax), box)
+	waitFor(t, "a consumer at the default queue type connects to the older broker", defaulted.Connected)
+
+	body, messageID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", body)
+	waitFor(t, "the notification is buffered on the older broker", func() bool {
 		return box.Depth() == 1
 	})
 	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {

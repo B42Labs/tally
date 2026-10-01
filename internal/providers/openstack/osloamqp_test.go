@@ -488,3 +488,75 @@ func TestQueueDeclareError(t *testing.T) {
 		t.Errorf("errors.As(queueDeclareError()) found %v, want the broker's 406", refused)
 	}
 }
+
+// TestRequireQuorumBroker covers the gate in front of the quorum declare. The
+// version is a server property, which is whatever the broker chose to send, so
+// the cases it cannot read are refused and not waved through.
+func TestRequireQuorumBroker(t *testing.T) {
+	const (
+		older = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13.7: " +
+			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue"
+		unusable = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: "
+	)
+
+	tests := []struct {
+		name       string
+		properties amqp091.Table
+		// want is the error text, and empty for a broker the gate lets through.
+		want string
+	}{
+		{name: "the oldest release the gate lets through", properties: amqp091.Table{"version": "4.0.0"}},
+		{name: "a patch release of the 4.x line", properties: amqp091.Table{"version": "4.3.6"}},
+		{name: "a later major release", properties: amqp091.Table{"version": "5.0.0"}},
+		{name: "a version without a dot", properties: amqp091.Table{"version": "4"}},
+		{
+			name:       "a broker older than 4.0",
+			properties: amqp091.Table{"version": "3.13.7"},
+			want:       older,
+		},
+		{
+			name:       "no server properties at all",
+			properties: nil,
+			want:       unusable + "<nil>",
+		},
+		{
+			name:       "server properties without a version",
+			properties: amqp091.Table{"product": "RabbitMQ"},
+			want:       unusable + "<nil>",
+		},
+		{
+			name:       "an empty version",
+			properties: amqp091.Table{"version": ""},
+			want:       unusable,
+		},
+		{
+			name:       "a version that is not a string",
+			properties: amqp091.Table{"version": int32(4)},
+			want:       unusable + "4",
+		},
+		{
+			name:       "a version that starts with no number",
+			properties: amqp091.Table{"version": "unknown"},
+			want:       unusable + "unknown",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireQuorumBroker(tc.properties)
+
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("requireQuorumBroker() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("requireQuorumBroker() error = nil, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("requireQuorumBroker() error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
