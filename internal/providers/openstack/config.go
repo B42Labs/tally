@@ -46,6 +46,7 @@ const (
 	envAMQPURL            = "TALLY_OSC_AMQP_URL"
 	envExchanges          = "TALLY_OSC_EXCHANGES"
 	envTopics             = "TALLY_OSC_TOPICS"
+	envRequireExchanges   = "TALLY_OSC_REQUIRE_EXCHANGES"
 	envCloud              = "TALLY_OSC_CLOUD"
 	envReportingURL       = "TALLY_OSC_REPORTING_URL"
 	envReportingInsecure  = "TALLY_OSC_REPORTING_INSECURE"
@@ -69,6 +70,7 @@ var EnvNames = []string{
 	envAMQPURL + fileSuffix,
 	envExchanges,
 	envTopics,
+	envRequireExchanges,
 	envCloud,
 	envReportingURL,
 	envReportingInsecure,
@@ -121,6 +123,12 @@ type Config struct {
 	// Topics are the notification topics bound on each exchange, matching the
 	// notification_topics of the services being collected.
 	Topics []string `env:"TALLY_OSC_TOPICS" envSeparator:"," envDefault:"notifications.info"`
+	// RequireExchanges makes a missing exchange fail the AMQP session instead of
+	// being skipped: the collector then consumes nothing until the broker carries
+	// every exchange it lists. It is for a deployment that would rather stop than
+	// collect from a part of the cloud, and for the simulator stack, whose wait
+	// for the collector reads a consumer on the queue as a queue that is bound.
+	RequireExchanges bool `env:"TALLY_OSC_REQUIRE_EXCHANGES" envDefault:"false"`
 	// Cloud is the cloud name every emitted event is attributed to. It has no
 	// default because a guessed cloud silently books usage to the wrong one.
 	Cloud string `env:"TALLY_OSC_CLOUD"`

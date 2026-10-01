@@ -83,6 +83,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if want := []string{"notifications.info"}; !slices.Equal(cfg.Topics, want) {
 		t.Errorf("Topics = %q, want %q", cfg.Topics, want)
 	}
+	if cfg.RequireExchanges {
+		t.Error("RequireExchanges = true, want false")
+	}
 	if cfg.BatchMax != 500 {
 		t.Errorf("BatchMax = %d, want 500", cfg.BatchMax)
 	}
@@ -110,6 +113,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_OSC_HTTP_PORT":             "9090",
 		"TALLY_OSC_EXCHANGES":             "nova,octavia",
 		"TALLY_OSC_TOPICS":                "notifications.info,notifications.error",
+		"TALLY_OSC_REQUIRE_EXCHANGES":     "true",
 		"TALLY_OSC_BATCH_MAX":             "50",
 		"TALLY_OSC_FLUSH_INTERVAL_S":      "1",
 		"TALLY_OSC_BUFFER_MAX_EVENTS":     "250000",
@@ -137,6 +141,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	if want := []string{"notifications.info", "notifications.error"}; !slices.Equal(cfg.Topics, want) {
 		t.Errorf("Topics = %q, want %q", cfg.Topics, want)
 	}
+	if !cfg.RequireExchanges {
+		t.Error("RequireExchanges = false, want true")
+	}
 	if cfg.BatchMax != 50 {
 		t.Errorf("BatchMax = %d, want 50", cfg.BatchMax)
 	}
@@ -162,6 +169,18 @@ func TestLoadRejectsAnUnparsablePort(t *testing.T) {
 		t.Fatal("Load() error = nil, want an error")
 	}
 	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsAnUnparsableRequireExchanges(t *testing.T) {
+	setEnv(t, withVars(map[string]string{"TALLY_OSC_REQUIRE_EXCHANGES": "maybe"}))
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment: "; !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
 	}
 }
