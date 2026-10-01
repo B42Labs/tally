@@ -124,6 +124,75 @@ func TestRunServesTheScrapeRoute(t *testing.T) {
 	}
 }
 
+// TestRunEndsASyncOnTheConfiguredBudget holds the assembled process to the
+// budget the environment names. The router falls back to a default of its own,
+// so a budget that never reached it, or reached it in the wrong unit, would go
+// unnoticed everywhere but here. The database takes the connection and never
+// answers, which holds the run where it acquires one until the budget ends it.
+func TestRunEndsASyncOnTheConfiguredBudget(t *testing.T) {
+	const cloud = "os-budget"
+	const budget = time.Second
+
+	clouds := filepath.Join(t.TempDir(), "clouds-config.yaml")
+	if err := os.WriteFile(clouds, []byte("clouds:\n"+
+		"  - cloud: "+cloud+"\n"+
+		"    platform: openstack\n"+
+		"    adapter: openstack\n"), 0o600); err != nil {
+		t.Fatalf("writing the clouds config: %v", err)
+	}
+
+	port := freePort(t)
+	env := serverEnv(port)
+	env["TALLY_REPORTING_DB_URL"] = "postgres://tally:tally@" + silentDatabase(t) + "/tally"
+	env["TALLY_REPORTING_CLOUDS_CONFIG"] = clouds
+	env["TALLY_REPORTING_SYNC_BUDGET_S"] = "1"
+	// The gauge refresher would query the silent database on its own schedule.
+	env["TALLY_METRICS_ENABLED"] = "false"
+	setEnv(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	waitForHealthz(t, port, done)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/internal/sync/%s", port, cloud), nil)
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+env["TALLY_REPORTING_INTERNAL_TOKEN"])
+	start := time.Now()
+	// The client gives up after startupTimeout, which is how a run left on the
+	// 45 seconds of the router's default fails here.
+	resp, err := testClient.Do(req)
+	took := time.Since(start)
+	if err != nil {
+		t.Fatalf("the sync request failed after %s: %v, want the 500 of a run that ended on its budget",
+			took, err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	// A budget that lost its unit on the way is nanoseconds long and ends the
+	// run at once.
+	if took < budget {
+		t.Errorf("the call took %s, want at least the configured %s", took, budget)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run() error = %v, want nil after a cancelled context", err)
+		}
+	case <-time.After(shutdownTimeout / 2):
+		t.Fatalf("run() did not return within %v of the cancellation", shutdownTimeout/2)
+	}
+}
+
 func TestRunRefusesToStart(t *testing.T) {
 	t.Run("when the OIDC JWKS URL names an unimplemented provider", func(t *testing.T) {
 		env := serverEnv(freePort(t))
@@ -156,6 +225,14 @@ func TestRunRefusesToStart(t *testing.T) {
 		setEnv(t, env)
 
 		assertRunFails(t, "loading the clouds config")
+	})
+
+	t.Run("when the sync budget is not positive", func(t *testing.T) {
+		env := serverEnv(freePort(t))
+		env["TALLY_REPORTING_SYNC_BUDGET_S"] = "0"
+		setEnv(t, env)
+
+		assertRunFails(t, "TALLY_REPORTING_SYNC_BUDGET_S")
 	})
 }
 
@@ -207,6 +284,21 @@ func freePort(t *testing.T) int {
 		t.Fatalf("releasing the reserved port: %v", err)
 	}
 	return addr.Port
+}
+
+// silentDatabase is the address of a listener nothing accepts on. The kernel
+// completes the handshake from the listen backlog, so a client that dials it is
+// connected and then blocks on its first read, which is what a database that
+// stopped answering looks like to the pool.
+func silentDatabase(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening as the silent database: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().String()
 }
 
 // testClient is what every request in this file goes through. It reuses no
