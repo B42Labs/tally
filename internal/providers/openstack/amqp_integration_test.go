@@ -171,6 +171,34 @@ func readyMessages(t *testing.T, channel *amqp091.Channel) int {
 	return queue.Messages
 }
 
+// abandonDelivery takes the message at the head of the collector's queue and
+// closes the connection without acknowledging it, which is what a collector
+// that crashed or lost its broker with a delivery in hand is to the broker. It
+// waits for the message, because the broker hands a returned one out again a
+// moment after the connection that held it is gone.
+func abandonDelivery(t *testing.T, url string) {
+	t.Helper()
+
+	conn, err := amqp091.Dial(url)
+	if err != nil {
+		t.Fatalf("dialing the broker at %s: %v", url, err)
+	}
+	channel, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("opening a channel: %v", err)
+	}
+	waitFor(t, "the queue hands out the notification it was returned", func() bool {
+		_, ok, err := channel.Get(queueName, false)
+		if err != nil {
+			t.Fatalf("taking a delivery from %s: %v", queueName, err)
+		}
+		return ok
+	})
+	if err := conn.Close(); err != nil {
+		t.Fatalf("closing the connection: %v", err)
+	}
+}
+
 // fixture reads a captured oslo envelope and the message id it carries, which is
 // the event id the collector books it under.
 func fixture(t *testing.T, name string) ([]byte, string) {
@@ -236,6 +264,7 @@ func testConfig(url string, exchanges []string, bufferMax int64) Config {
 		AMQPURL:         url,
 		Exchanges:       exchanges,
 		Topics:          []string{testTopic},
+		QueueType:       queueTypeClassic,
 		Cloud:           "os-test",
 		Prefetch:        10,
 		BufferMaxEvents: bufferMax,
@@ -1033,6 +1062,116 @@ func TestConsumerRequeuesADeliveryTheOutboxRefused(t *testing.T) {
 	})
 	// Once, not once per attempt: the refused inserts stored nothing, and the
 	// requeued delivery came back rather than being dropped.
+	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
+		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
+	}
+}
+
+// TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery is the
+// requeue test above against a quorum queue, and past the point where one
+// would drop the notification: from RabbitMQ 4.0 a quorum queue gives a message
+// up once it came back more than 20 times, unless its delivery limit is
+// disabled.
+//
+// The notification comes back in two ways here. The refused inserts are nacks
+// with requeue, which is what an outbox on a full disk costs for as long as the
+// disk stays full. RabbitMQ 4.3.6 counts none of them towards the limit. What
+// it counts is a delivery whose consumer went away without acknowledging it,
+// so the test abandons the notification that way as well, and that half is the
+// one that fails on a queue declared without the limit disabled.
+func TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	box := newOutbox(t)
+	buffer := &failingBuffer{inner: box}
+	buffer.failing.Store(true)
+
+	cfg := testConfig(url, []string{"nova"}, testBufferMax)
+	cfg.QueueType = queueTypeQuorum
+	consumer, _, stop := startConsumer(t, cfg, buffer)
+	waitFor(t, "the consumer is connected", consumer.Connected)
+
+	// What proves the type is the declare the broker refuses: one without
+	// arguments is not equivalent to the queue the consumer declared. It runs on
+	// a channel opened for it alone, because the 406 closes that channel.
+	_, err := openChannel(t, url).QueueDeclare(queueName, true, false, false, false, nil)
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.PreconditionFailed ||
+		!strings.Contains(refused.Reason, amqp091.QueueTypeArg) {
+		t.Fatalf("declaring %s without arguments returned %v, want a 406 naming %s",
+			queueName, err, amqp091.QueueTypeArg)
+	}
+
+	body, messageID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", body)
+
+	// 25 is past the 20 returns a quorum queue allows by default.
+	const returns = 25
+	waitFor(t, "the insert was refused past the broker's default delivery limit", func() bool {
+		return buffer.failures.Load() >= returns
+	})
+
+	// The consumer stops while the buffer still refuses, so the notification is
+	// on the queue and nowhere else.
+	stop()
+	for range returns {
+		abandonDelivery(t, url)
+	}
+
+	buffer.failing.Store(false)
+	startConsumer(t, cfg, buffer)
+	waitFor(t, "the notification is buffered after every return", func() bool {
+		return box.Depth() == 1
+	})
+	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
+		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
+	}
+}
+
+// TestConsumerReportsAQueueOfAnotherType covers the deployment that changes the
+// queue type while the queue of the old one exists. The broker refuses the
+// declare, the collector says which variable the queue disagrees with and
+// deletes nothing, and the operator's delete is what lets the next session
+// declare the queue anew.
+func TestConsumerReportsAQueueOfAnotherType(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+	// The queue a collector at the default setting left behind.
+	if _, err := publisher.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring the queue %s: %v", queueName, err)
+	}
+
+	cfg := testConfig(url, []string{"nova"}, testBufferMax)
+	cfg.QueueType = queueTypeQuorum
+	box := newOutbox(t)
+	logger, logs := recordingLogger(t)
+	consumer, _, _ := startConsumerWithLogger(t, cfg, box, logger)
+
+	const want = "the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=quorum declares"
+	waitFor(t, "the session error names the variable and its value", func() bool {
+		return strings.Contains(logs.String(), want)
+	})
+	staysDisconnected(t, consumer, "while the queue exists with another type")
+
+	// The queue and whatever it holds are still there: the collector reports the
+	// mismatch and leaves the delete to the operator.
+	if _, err := publisher.QueueDeclarePassive(queueName, true, false, false, false, nil); err != nil {
+		t.Fatalf("a passive declare of %s returned %v, want the queue the collector found", queueName, err)
+	}
+
+	if _, err := publisher.QueueDelete(queueName, false, false, false); err != nil {
+		t.Fatalf("deleting the queue %s: %v", queueName, err)
+	}
+	waitFor(t, "the consumer connects once the queue is deleted", consumer.Connected)
+
+	body, messageID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", body)
+	waitFor(t, "the notification published after the delete is buffered", func() bool {
+		return box.Depth() == 1
+	})
 	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
 		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
 	}

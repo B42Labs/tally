@@ -144,10 +144,13 @@ func parseTimestamp(value string) (time.Time, error) {
 
 // The names the collector claims on the broker. The queue is the collector's
 // own; the tag names its consumer on the channel, which is what backpressure
-// cancels and what resuming registers again.
+// cancels and what resuming registers again. The delivery limit is an argument
+// a quorum queue is declared with: amqp091 exports the name of the queue type
+// argument and none for this one.
 const (
-	queueName   = "tally-notifications"
-	consumerTag = "tally-openstack-collector"
+	queueName             = "tally-notifications"
+	consumerTag           = "tally-openstack-collector"
+	queueDeliveryLimitArg = "x-delivery-limit"
 )
 
 // exchangeKind is what every service exchange is: oslo publishes notifications
@@ -324,8 +327,9 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	// else's, which is oslo's listener-pool semantics: a topic exchange copies
 	// each notification to every bound queue, so Ceilometer and every other
 	// listener keep receiving their copies untouched.
-	if _, err := channel.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
-		return false, fmt.Errorf("declaring the queue %s: %w", queueName, err)
+	_, err = channel.QueueDeclare(queueName, true, false, false, false, queueDeclareArgs(c.cfg.QueueType))
+	if err != nil {
+		return false, queueDeclareError(err, c.cfg.QueueType)
 	}
 	if err := bindQueue(channel, queueName, present, c.cfg.Topics); err != nil {
 		return false, err
@@ -352,6 +356,52 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	}
 
 	return true, c.deliver(ctx, channel, deliveries, closed)
+}
+
+// queueDeclareArgs is the argument table the collector's queue is declared
+// with.
+//
+// A quorum queue carries a delivery limit of -1, which disables the limit. From
+// RabbitMQ 4.0 a quorum queue without the argument drops a message that came
+// back to it more than 20 times from a consumer that went away holding it
+// unacknowledged. A session holds up to Prefetch deliveries that way and every
+// session that ends returns them, so while the outbox refuses inserts the same
+// notifications come back with every reconnect and every restart. RabbitMQ
+// 4.3.6 counts those returns and not a nack with requeue, which is what a
+// refused insert and a pause send. The limit is part of the declare, so an
+// operator has no policy to set for it. A policy that sets delivery-limit on
+// this queue takes the guarantee away all the same: the broker lets a positive
+// limit win over the -1, and the collector cannot see policies. The value is an
+// int32 and stays one, so that a later version declares the argument this one
+// declared.
+//
+// Every other value declares no arguments. That is the declare every deployed
+// queue was created with, so the default meets no 406 on a queue that exists.
+func queueDeclareArgs(queueType string) amqp091.Table {
+	if queueType != queueTypeQuorum {
+		return nil
+	}
+	return amqp091.Table{
+		amqp091.QueueTypeArg:  amqp091.QueueTypeQuorum,
+		queueDeliveryLimitArg: int32(-1),
+	}
+}
+
+// queueDeclareError names why the declare of the collector's queue failed.
+//
+// A 406 is the broker's answer to a queue that exists with other arguments,
+// which is what a queue of the other type is. A queue keeps the type it was
+// declared with, and deleting it discards its backlog, so the collector deletes
+// nothing: the error names the variable, and moving the queue is the operator's
+// step. Every other error keeps the plain text, because changing the variable
+// does not fix it.
+func queueDeclareError(err error, queueType string) error {
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.PreconditionFailed {
+		return fmt.Errorf("declaring the queue %s: %w", queueName, err)
+	}
+	return fmt.Errorf("declaring the queue %s: the queue exists with other arguments than %s=%s declares, "+
+		"and a queue keeps the type it was declared with: %w", queueName, envQueueType, queueType, err)
 }
 
 // consume registers this collector's consumer on the queue. The acks are manual,

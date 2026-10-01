@@ -2,10 +2,13 @@ package openstack
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
 // wrap builds a message body the way oslo.messaging does: the notification
@@ -369,4 +372,119 @@ func TestParseEnvelopeAcceptsAbsentMembers(t *testing.T) {
 			t.Errorf("EventType = %q, want it kept", got.EventType)
 		}
 	})
+}
+
+// TestQueueDeclareArgs pins the two declares the collector issues. Everything
+// but quorum declares with no arguments at all, which is the declare every
+// deployed queue was created with, so the nil is asserted and an empty table
+// does not pass for it.
+func TestQueueDeclareArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		queueType string
+		want      amqp091.Table
+	}{
+		{
+			name:      "a Config that never went through Load declares no arguments",
+			queueType: "",
+			want:      nil,
+		},
+		{
+			name:      "classic declares no arguments",
+			queueType: queueTypeClassic,
+			want:      nil,
+		},
+		{
+			name:      "a type the collector does not declare falls back to no arguments",
+			queueType: "stream",
+			want:      nil,
+		},
+		{
+			// The int32 is part of what is pinned: reflect.DeepEqual tells it from
+			// an int of the same value.
+			name:      "quorum declares the type and disables the delivery limit",
+			queueType: queueTypeQuorum,
+			want:      amqp091.Table{"x-queue-type": "quorum", "x-delivery-limit": int32(-1)},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queueDeclareArgs(tc.queueType); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("queueDeclareArgs(%q) = %#v, want %#v", tc.queueType, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestQueueDeclareError pins the two texts a failed declare is reported with.
+// Only a 406 is a queue that exists with other arguments, so only a 406 names
+// the variable: a 403 and a closed channel are not fixed by changing it.
+func TestQueueDeclareError(t *testing.T) {
+	const plain = "declaring the queue tally-notifications: "
+	mismatch := func(queueType string) string {
+		return plain + "the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=" + queueType +
+			" declares, and a queue keeps the type it was declared with: "
+	}
+	inequivalent := &amqp091.Error{
+		Code: amqp091.PreconditionFailed,
+		Reason: "PRECONDITION_FAILED - inequivalent arg 'x-queue-type' for queue 'tally-notifications' " +
+			"in vhost '/': received 'quorum' but current is 'classic'",
+	}
+	forbidden := &amqp091.Error{
+		Code:   amqp091.AccessRefused,
+		Reason: "ACCESS_REFUSED - configure access to queue 'tally-notifications' in vhost '/' refused for user 'tally'",
+	}
+	closed := errors.New("closed")
+
+	tests := []struct {
+		name      string
+		cause     error
+		queueType string
+		want      string
+	}{
+		{
+			name:      "a 406 under classic names classic",
+			cause:     inequivalent,
+			queueType: queueTypeClassic,
+			want:      mismatch("classic") + inequivalent.Error(),
+		},
+		{
+			name:      "a 406 under quorum names quorum",
+			cause:     inequivalent,
+			queueType: queueTypeQuorum,
+			want:      mismatch("quorum") + inequivalent.Error(),
+		},
+		{
+			name:      "a 403 keeps the plain text",
+			cause:     forbidden,
+			queueType: queueTypeQuorum,
+			want:      plain + forbidden.Error(),
+		},
+		{
+			name:      "an error that is no broker error keeps the plain text",
+			cause:     closed,
+			queueType: queueTypeQuorum,
+			want:      plain + closed.Error(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := queueDeclareError(tc.cause, tc.queueType)
+
+			if got.Error() != tc.want {
+				t.Errorf("queueDeclareError() = %q, want %q", got, tc.want)
+			}
+			if !errors.Is(got, tc.cause) {
+				t.Errorf("queueDeclareError() = %v, want it to wrap its cause", got)
+			}
+		})
+	}
+
+	// The broker's own error stays reachable behind the added text, code and all.
+	var refused *amqp091.Error
+	if got := queueDeclareError(inequivalent, queueTypeClassic); !errors.As(got, &refused) || refused != inequivalent {
+		t.Errorf("errors.As(queueDeclareError()) found %v, want the broker's 406", refused)
+	}
 }
