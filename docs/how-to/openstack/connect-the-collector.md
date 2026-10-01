@@ -106,31 +106,38 @@ Reporting API. What the collector guarantees between those two ends is in
 1. Name the service exchanges in `TALLY_OSC_EXCHANGES` and the notification
    topics in `TALLY_OSC_TOPICS`. An exchange is a service's `control_exchange`,
    a topic one of its `notification_topics`. The defaults
-   `nova,neutron,cinder,glance` and `notifications.info` are the stock
-   settings; a deployment that runs octavia lists it as well, and one that
+   `nova,neutron,openstack,glance` and `notifications.info` are the stock
+   settings: cinder sets no `control_exchange` and publishes on oslo's default,
+   `openstack`. A deployment that runs octavia lists it as well, and one that
    renamed an exchange or publishes on a topic of its own lists its values
    instead:
 
    ```sh
-   export TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia
+   export TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia
    export TALLY_OSC_TOPICS=notifications.info
    ```
 
-2. Check that the broker carries every exchange you listed. The collector
-   declares them passively and creates none, so one the broker does not carry
-   fails the connection with its name in the error:
+2. Check which of the exchanges you listed the broker carries. The collector
+   creates none of them:
 
    ```sh
-   rabbitmqctl list_exchanges name type | grep -E '^(nova|neutron|cinder|glance|octavia)[[:space:]]'
+   rabbitmqctl list_exchanges name type | grep -E '^(nova|neutron|openstack|glance|octavia)[[:space:]]'
    ```
 
    ```text
    nova	topic
    neutron	topic
-   cinder	topic
+   openstack	topic
    glance	topic
    octavia	topic
    ```
+
+   An exchange missing from that output is skipped with a warning and bound
+   within a minute of appearing. On a fresh cloud glance's exchange appears
+   with the first image notification. That notification, and any published
+   before the collector binds, reaches no queue, so create and delete one image
+   before the cloud goes into billing. `TALLY_OSC_REQUIRE_EXCHANGES=true` makes
+   the collector wait for every exchange instead.
 
 ## Configure the collector
 

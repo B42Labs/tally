@@ -72,17 +72,41 @@ limit the deployment cannot change.
 
 ## The queue and the exchanges
 
-The collector declares the exchanges passively and creates none of them, so an
-exchange that does not exist on the broker fails the connection with an error
-naming it. Its own queue is `tally-notifications`, durable and bound to every
-exchange and topic pair. Notifications therefore pile up in that queue while the
-collector is down and are consumed when it returns.
+The collector's own queue is `tally-notifications`, durable and bound to every
+topic on every listed exchange the broker carries. Notifications therefore pile
+up in that queue while the collector is down and are consumed when it returns.
+
+The collector probes each exchange in `TALLY_OSC_EXCHANGES` with a passive
+declare and creates none of them. The options a service declares its exchange
+with differ per deployment, so a collector that created one would have to guess
+them, and creating one needs a permission on the service exchanges that the
+collector should not hold. The default list is `nova,neutron,openstack,glance`,
+where `openstack` is oslo's default exchange: cinder sets no `control_exchange`
+and publishes there.
+
+An exchange the broker does not carry is skipped. The collector logs which ones
+are missing, binds the others, and probes each missing one again after 1 s,
+doubling to 60 s, until it exists and is bound. A fresh cloud is in that state
+as a matter of course: glance declares its exchange with its first notification,
+so the exchange is missing until the first image is uploaded. RabbitMQ logs each
+probe of a missing exchange as a channel error.
+
+What was published on an exchange before the collector bound it is not
+collected, because a topic exchange drops a message no queue is bound to. A
+missing exchange therefore costs the notifications of that one service until it
+appears, and those of no other.
+
+When none of the listed exchanges exists, the session fails and the collector
+reconnects: a queue bound to nothing has nothing to consume, and a wrong vhost
+must not read as a ready collector. `TALLY_OSC_REQUIRE_EXCHANGES=true` extends
+that stop to a single missing exchange, for a deployment that would rather
+collect nothing than a part of the cloud. The collector then consumes nothing
+until the broker carries every exchange it lists.
 
 Octavia's `control_exchange` is `octavia`, and the default leaves it out on
-purpose. Because that declare is passive, a collector listing an exchange the
-broker does not carry never connects at all, so a default naming `octavia` would
-stop every deployment that runs none. A deployment with octavia sets
-`TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia`. Until it does,
+purpose: a cloud without octavia would report the exchange missing for as long
+as the collector runs. A deployment with octavia sets
+`TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia`. Until it does,
 octavia's notifications reach no queue of this collector and show up in none of
 its counters, `tally_collector_skipped_total` included: a topic exchange copies
 a message only to the queues bound to it.

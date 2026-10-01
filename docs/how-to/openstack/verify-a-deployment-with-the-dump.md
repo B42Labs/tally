@@ -29,7 +29,7 @@ it, and compares that against the entries the mapping table carries.
 
    ```sh
    export TALLY_OSC_AMQP_URL='amqp://user:password@rabbitmq.example:5672/'
-   export TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia
+   export TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia
    export TALLY_OSC_TOPICS=notifications.info
    tally-openstack-collector --dump | tee dump.jsonl
    ```
@@ -136,7 +136,7 @@ it, and compares that against the entries the mapping table carries.
 
    ```json
    {"exchange":"nova","routing_key":"notifications.info","message_id":"e3d6f0f4-5b2f-4b1a-9a2b-1c3d5e7f9a0b","event_type":"compute.instance.create.end","timestamp":"2026-03-01T10:00:00Z"}
-   {"exchange":"cinder","routing_key":"notifications.info","message_id":"b7c8d9e0-1f2a-4b3c-8d4e-5f6a7b8c9d0e","event_type":"volume.create.end","timestamp":"2026-03-01T10:04:11Z"}
+   {"exchange":"openstack","routing_key":"notifications.info","message_id":"b7c8d9e0-1f2a-4b3c-8d4e-5f6a7b8c9d0e","event_type":"volume.create.end","timestamp":"2026-03-01T10:04:11Z"}
    ```
 
 2. A body the parser refuses prints under `unparseable`, with the credentials

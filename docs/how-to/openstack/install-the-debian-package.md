@@ -149,11 +149,10 @@ notifications it then consumes, and what the cloud has to publish for it, is
    ```
 
 2. Where the cloud runs octavia, or renamed an exchange, uncomment the
-   exchanges line and list its own. The collector declares the exchanges
-   passively, so one the broker does not carry fails the connection:
+   exchanges line and list its own:
 
    ```sh
-   TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance,octavia
+   TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia
    ```
 
 3. Leave `TALLY_OSC_BUFFER_PATH` as it is. It points into
@@ -190,7 +189,30 @@ notifications it then consumes, and what the cloud has to publish for it, is
 
 ## Upgrade, remove and purge
 
-1. Upgrade by installing the newer file. Your edits to
+1. Coming from v0.2.0 with the exchanges line still commented out, check
+   whether cinder sets `control_exchange = cinder` before you upgrade. The
+   default of `TALLY_OSC_EXCHANGES` listed `cinder` then and lists `openstack`
+   in its place now, and where cinder publishes on `cinder` the upgrade does
+   not show what it drops: the queue keeps the binding the older version made,
+   so volume notifications keep arriving, and they stop once the queue is
+   recreated. The broker lists that binding:
+
+   ```sh
+   rabbitmqctl list_bindings source_name destination_name | grep -E '^cinder[[:space:]]+tally-notifications'
+   ```
+
+   ```text
+   cinder	tally-notifications
+   ```
+
+   Where cinder sets the option, uncomment the exchanges line and list `cinder`
+   instead of `openstack`:
+
+   ```sh
+   TALLY_OSC_EXCHANGES=nova,neutron,glance,cinder
+   ```
+
+2. Upgrade by installing the newer file. Your edits to
    `/etc/default/tally-openstack-collector` and to the two credential files are
    kept, because all three are conffiles; a changed default arrives beside them
    as `.dpkg-dist` for you to compare. The outbox is untouched, so events that
@@ -200,14 +222,14 @@ notifications it then consumes, and what the cloud has to publish for it, is
    sudo apt install ./tally-openstack-collector_<newer-version>_amd64.deb
    ```
 
-2. Remove the package to stop and disable the service while keeping its
+3. Remove the package to stop and disable the service while keeping its
    configuration and its outbox:
 
    ```sh
    sudo apt remove tally-openstack-collector
    ```
 
-3. Purge it to drop the configuration and the credentials as well. The outbox
+4. Purge it to drop the configuration and the credentials as well. The outbox
    is deliberately kept: between the acknowledgement on the bus and the
    delivery, an event lives in that file and nowhere else, so no purge destroys
    usage that exists in no other copy. Delete it by hand once you know it is
