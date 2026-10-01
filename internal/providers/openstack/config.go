@@ -111,15 +111,17 @@ type Config struct {
 	// broker password, so it supports the *_FILE convention.
 	AMQPURL string `env:"TALLY_OSC_AMQP_URL"`
 	// Exchanges are the service exchanges the collector binds its queue to. The
-	// default covers nova, neutron, cinder and glance; a deployment that renamed
-	// them through control_exchange lists its own.
+	// default covers nova, neutron, cinder and glance: cinder sets no
+	// control_exchange of its own and publishes on oslo's default, openstack. A
+	// deployment that renamed an exchange through control_exchange lists its own.
 	//
-	// Octavia publishes on the exchange octavia, and the default leaves it out.
-	// The exchanges are declared passively, so a collector refuses to run while
-	// one it lists is missing from the broker, and a default naming octavia would
-	// stop every deployment that runs none. A deployment with octavia lists
-	// nova,neutron,cinder,glance,octavia.
-	Exchanges []string `env:"TALLY_OSC_EXCHANGES" envSeparator:"," envDefault:"nova,neutron,cinder,glance"`
+	// An exchange the broker does not carry is skipped with a warning and bound
+	// once it appears, which is what a fresh cloud needs: glance declares its
+	// exchange with its first notification. Octavia publishes on the exchange
+	// octavia, and the default leaves it out, because a deployment that runs none
+	// would report it missing for as long as the collector runs. A deployment with
+	// octavia lists nova,neutron,openstack,glance,octavia.
+	Exchanges []string `env:"TALLY_OSC_EXCHANGES" envSeparator:"," envDefault:"nova,neutron,openstack,glance"`
 	// Topics are the notification topics bound on each exchange, matching the
 	// notification_topics of the services being collected.
 	Topics []string `env:"TALLY_OSC_TOPICS" envSeparator:"," envDefault:"notifications.info"`

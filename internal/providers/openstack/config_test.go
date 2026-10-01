@@ -77,7 +77,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.HTTPPort != 8080 {
 		t.Errorf("HTTPPort = %d, want 8080", cfg.HTTPPort)
 	}
-	if want := []string{"nova", "neutron", "cinder", "glance"}; !slices.Equal(cfg.Exchanges, want) {
+	if want := []string{"nova", "neutron", "openstack", "glance"}; !slices.Equal(cfg.Exchanges, want) {
 		t.Errorf("Exchanges = %q, want %q", cfg.Exchanges, want)
 	}
 	if want := []string{"notifications.info"}; !slices.Equal(cfg.Topics, want) {

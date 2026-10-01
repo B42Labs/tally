@@ -48,11 +48,12 @@ TALLY_OSC_BUFFER_PATH=/var/lib/tally/collector/outbox.db
 #TALLY_OSC_HTTP_PORT=8080
 
 # Service exchanges the collector binds its queue to, comma-separated. The
-# default covers nova, neutron, cinder and glance; a deployment that renamed
-# them through control_exchange lists its own, and one that runs octavia adds
-# it. The exchanges are declared passively, so the collector refuses to run
-# while one it lists is missing from the broker.
-#TALLY_OSC_EXCHANGES=nova,neutron,cinder,glance
+# default covers nova, neutron, cinder and glance: cinder sets no
+# control_exchange of its own and publishes on oslo's default, openstack. A
+# deployment that renamed an exchange through control_exchange lists its own,
+# and one that runs octavia adds it. An exchange the broker does not carry is
+# skipped with a warning and bound once it appears.
+#TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance
 
 # Require every exchange above. With true, an exchange the broker does not
 # carry fails the AMQP session, so the collector consumes nothing until the
