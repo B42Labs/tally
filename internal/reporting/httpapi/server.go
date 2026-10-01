@@ -37,6 +37,9 @@ type server struct {
 	// syncAllowAt is whether the sync route takes an instant to run at from the
 	// request body. It is off outside a development deployment.
 	syncAllowAt bool
+	// syncBudget is how long a run behind the sync route may take. NewRouter
+	// never leaves it at zero.
+	syncBudget time.Duration
 	// metrics holds the instruments the scrape route serves. A nil value is a
 	// build without instrumentation, which that route answers 404.
 	metrics *metrics.Metrics

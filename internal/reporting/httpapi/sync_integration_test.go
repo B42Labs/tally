@@ -354,6 +354,130 @@ func TestSyncCloudOverHTTP(t *testing.T) {
 			t.Errorf("stored errors = %v, want them to carry %q", stored.Errors, errPlatformDown)
 		}
 	})
+
+	t.Run("ends a run on the budget the deployment set", func(t *testing.T) {
+		const cloud = "os-http-sync-budget"
+		// The listing is never released, so the budget is all that ends the run.
+		a := newSyncAPIWithBudget(t, db.Store, syncerOver(db.Store, cloud, blockingSyncFake()),
+			time.Second)
+
+		start := time.Now()
+		rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken, nil)
+		took := time.Since(start)
+
+		assertProblem(t, rec, http.StatusInternalServerError, problem.TypeInternal)
+		assertDetail(t, rec, "the sync run failed")
+		// A router that ignored the option would hold the run for the 45 seconds
+		// of the default, so the time the call took is what says whose budget
+		// ended it.
+		if limit := 10 * time.Second; took >= limit {
+			t.Errorf("the call took %s, want it under %s: the configured budget ends the run", took, limit)
+		}
+		row := runRow(t, a, latestRunID(t, a, cloud))
+		if row.Status != "failed" {
+			t.Errorf("run status = %q, want %q", row.Status, "failed")
+		}
+		var stored reconciliation.Stats
+		if err := json.Unmarshal(row.Stats, &stored); err != nil {
+			t.Fatalf("decoding the stored stats %q: %v", row.Stats, err)
+		}
+		if want := context.DeadlineExceeded.Error(); !strings.Contains(strings.Join(stored.Errors, "; "), want) {
+			t.Errorf("stored errors = %v, want them to carry %q", stored.Errors, want)
+		}
+	})
+
+	t.Run("answers a run that outlasts the server's write timeout", func(t *testing.T) {
+		const cloud = "os-http-sync-long"
+		fake := blockingSyncFake()
+		a := newSyncAPIWithBudget(t, db.Store, syncerOver(db.Store, cloud, fake), 30*time.Second)
+
+		// A recorder has no connection and so no deadline. A listening server is
+		// what arms the write timeout the sync route has to move.
+		srv := httptest.NewUnstartedServer(a.handler)
+		srv.Config.WriteTimeout = 200 * time.Millisecond
+		srv.Start()
+		t.Cleanup(srv.Close)
+
+		type answer struct {
+			status int
+			body   []byte
+			err    error
+		}
+		answered := make(chan answer, 1)
+		go func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+				srv.URL+syncRoute(cloud), nil)
+			if err != nil {
+				answered <- answer{err: err}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+internalToken)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				answered <- answer{err: err}
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			answered <- answer{status: resp.StatusCode, body: body, err: err}
+		}()
+
+		select {
+		case <-fake.entered:
+		case got := <-answered:
+			t.Fatalf("the request was answered %d (error %v, body %q) before the run reached its listing",
+				got.status, got.err, got.body)
+		}
+		// The run is held past the server's write timeout, so the deadline armed
+		// for the request has passed by the time the handler writes.
+		time.Sleep(500 * time.Millisecond)
+		close(fake.released)
+
+		got := <-answered
+		if got.err != nil {
+			t.Fatalf("the request failed: %v, want an answer past the server's write timeout", got.err)
+		}
+		if got.status != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", got.status, http.StatusOK, got.body)
+		}
+		var result SyncResult
+		if err := json.Unmarshal(got.body, &result); err != nil {
+			t.Fatalf("decoding the body %q: %v", got.body, err)
+		}
+		if result.SyncRunId == "" {
+			t.Error("sync_run_id is empty, want the id of the run's row")
+		}
+	})
+
+	t.Run("answers a run that ended on its budget over a connection", func(t *testing.T) {
+		const cloud = "os-http-sync-budget-conn"
+		const budget = 100 * time.Millisecond
+		// The listing is never released, so the budget is all that ends the run.
+		a := newSyncAPIWithBudget(t, db.Store, syncerOver(db.Store, cloud, blockingSyncFake()), budget)
+
+		// The write timeout is the budget itself, so the deadline armed for the
+		// request has passed by the time the run ends. Only the margin the route
+		// adds leaves the 500 a connection to be written to.
+		srv := httptest.NewUnstartedServer(a.handler)
+		srv.Config.WriteTimeout = budget
+		srv.Start()
+		t.Cleanup(srv.Close)
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+			srv.URL+syncRoute(cloud), nil)
+		if err != nil {
+			t.Fatalf("building the request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+internalToken)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("the request failed: %v, want the 500 of a run that ended on its budget", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+		}
+	})
 }
 
 // syncRoute is the route of one cloud, which the other Tally components call
@@ -444,6 +568,24 @@ func newSyncAPI(t *testing.T, s *store.Store, syncer *reconciliation.Syncer) api
 func newSyncAPIWithAt(t *testing.T, s *store.Store, syncer *reconciliation.Syncer, allowAt bool) api {
 	t.Helper()
 
+	return newSyncAPIWithOptions(t, s, syncer, allowAt, 0)
+}
+
+// newSyncAPIWithBudget is newSyncAPI with TALLY_REPORTING_SYNC_BUDGET_S set to
+// budget, which is how long a run behind the sync route may take.
+func newSyncAPIWithBudget(t *testing.T, s *store.Store, syncer *reconciliation.Syncer, budget time.Duration) api {
+	t.Helper()
+
+	return newSyncAPIWithOptions(t, s, syncer, false, budget)
+}
+
+// newSyncAPIWithOptions builds the router the helpers above share. A zero
+// budget names none, which leaves the router on its default.
+func newSyncAPIWithOptions(t *testing.T, s *store.Store, syncer *reconciliation.Syncer,
+	allowAt bool, budget time.Duration,
+) api {
+	t.Helper()
+
 	q := sqlcgen.New(s.Pool())
 	handler, err := NewRouter(Options{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -457,6 +599,7 @@ func newSyncAPIWithAt(t *testing.T, s *store.Store, syncer *reconciliation.Synce
 		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer:             syncer,
 		SyncAllowAt:        allowAt,
+		SyncBudget:         budget,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)

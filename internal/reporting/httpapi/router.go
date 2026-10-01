@@ -84,6 +84,10 @@ type Options struct {
 	// run is at. It is off everywhere but a development deployment, where the
 	// cloud a sync reconciles is a simulated one.
 	SyncAllowAt bool
+	// SyncBudget comes from TALLY_REPORTING_SYNC_BUDGET_S and is how long one
+	// run of POST /internal/sync/{cloud} may take. A zero or negative value
+	// selects defaultSyncBudget.
+	SyncBudget time.Duration
 	// Metrics holds the instruments GET /metrics serves. A nil value leaves the
 	// route answering 404, the way a disabled scrape route does.
 	Metrics *metrics.Metrics
@@ -112,6 +116,12 @@ func NewRouter(opts Options) (http.Handler, error) {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
+	}
+	// A zero budget must never reach context.WithTimeout, where it would end
+	// every run at once.
+	syncBudget := opts.SyncBudget
+	if syncBudget <= 0 {
+		syncBudget = defaultSyncBudget
 	}
 
 	r := chi.NewRouter()
@@ -147,6 +157,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 		attributingTypes: opts.AttributingRelationTypes,
 		syncer:           opts.Syncer,
 		syncAllowAt:      opts.SyncAllowAt,
+		syncBudget:       syncBudget,
 		metrics:          opts.Metrics,
 		metricsEnabled:   opts.MetricsEnabled,
 		now:              now,
