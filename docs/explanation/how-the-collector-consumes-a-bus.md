@@ -135,6 +135,44 @@ queue and the lifetime of a message keeps them small, and
 [connect the collector](/how-to/openstack/connect-the-collector#cap-the-default-notification-queues)
 has the commands.
 
+## Classic and quorum
+
+`TALLY_OSC_QUEUE_TYPE` decides the type `tally-notifications` is declared with.
+A classic queue lives on one node of a broker cluster, and its backlog is
+unavailable while that node is down. The collector relies on that backlog: at
+the buffer bound, and while the collector itself is down, the notifications
+wait on the bus. A
+[quorum queue](https://www.rabbitmq.com/docs/quorum-queues) is replicated
+across the nodes and stays available while a majority of them is up.
+
+From RabbitMQ 4.0 a quorum queue has a delivery limit of 20, and drops a
+message that came back to the queue more often than that. On RabbitMQ 4.3.6
+what counts is a delivery whose connection closed before it was acknowledged. A
+`basic.nack` with requeue does not count, and that is what the collector sends
+once per second while the outbox refuses an insert and once per pause at the
+buffer bound. The limit reaches the collector through its sessions. A session
+holds up to `TALLY_OSC_PREFETCH` deliveries unacknowledged, and one that ends
+returns them. While the outbox refuses inserts nothing is acknowledged, so
+every reconnect and every restart returns the same notifications, and the
+twenty-first would lose them. The collector therefore declares the queue with
+`x-delivery-limit` set to `-1`, which disables the limit, so an operator has no
+policy to set for it. A policy that sets `delivery-limit` on this queue takes
+the guarantee away all the same: RabbitMQ 4.3.6 lets a positive limit from a
+policy or an operator policy win over the argument, and the collector cannot
+see policies.
+
+A broker older than 4.0 reads `-1` as a limit: RabbitMQ 3.13.7 drops a message
+on its first requeue. The collector refuses to declare a quorum queue there.
+The session ends before it declares anything, and the collector reconnects.
+
+The type is fixed when a queue is declared. Where the queue exists with the
+other type the broker refuses the declare, and the collector reports the
+mismatch and deletes nothing, because deleting a queue discards its backlog.
+Moving the queue to the other type is an operator's step, in
+[connect the collector](/how-to/openstack/connect-the-collector#declare-the-queue-as-a-quorum-queue).
+`classic` is the default and sends no queue type at all, so a deployment that
+sets nothing keeps declaring the queue it has.
+
 ## What the broker account may do
 
 The collector declares its queue, binds it and consumes from it. It publishes

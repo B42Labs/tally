@@ -359,6 +359,69 @@ covers.
    Every exchange in the read pattern has a row. One without a row is
    unrestricted, and is the one step 2 has to be repeated for.
 
+## Declare the queue as a quorum queue
+
+This section is optional and for a broker cluster: it replicates
+`tally-notifications` across the cluster's nodes.
+[Classic and quorum](/explanation/how-the-collector-consumes-a-bus#classic-and-quorum)
+compares the two types.
+
+1. Read the broker version. The setting needs RabbitMQ 4.0 or newer:
+
+   ```sh
+   rabbitmqctl version
+   ```
+
+   ```text
+   4.3.6
+   ```
+
+2. Set the type:
+
+   ```sh
+   export TALLY_OSC_QUEUE_TYPE=quorum
+   ```
+
+3. Where a collector has run against this broker before, look at the queue it
+   left:
+
+   ```sh
+   rabbitmqctl list_queues name type arguments messages consumers | grep -E '^tally-notifications[[:space:]]'
+   ```
+
+   ```text
+   tally-notifications	classic	[{"x-queue-type","classic"}]	0	1
+   ```
+
+   The queue has to be moved unless it is a quorum queue whose arguments carry
+   `x-delivery-limit` -1. A quorum queue without that argument, which is what a
+   virtual host with `default_queue_type` `quorum` created, is refused the same
+   way as a classic one.
+
+   A collector started with the new setting against such a queue logs
+   `the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=quorum declares`
+   and consumes nothing, while the queue stays bound and keeps filling. The
+   queue is drained by a collector that runs with the old setting, so where the
+   collector was already restarted with `quorum`, set the value back and
+   restart it first. Wait until the message count is 0, stop the collector,
+   delete the queue, and start the collector with the new setting:
+
+   ```sh
+   rabbitmqctl delete_queue tally-notifications
+   ```
+
+   Notifications published between the stop and the delete are discarded with
+   the queue, and those published between the delete and the new binding reach
+   no queue. [Reconcile a cloud](/how-to/openstack/reconcile-a-cloud) finds
+   what those notifications reported.
+
+The way back is the same sequence. A collector set back to `classic`, and a
+collector release older than this setting, declares the queue without
+arguments, and the broker refuses that declare over the quorum queue. Before a
+downgrade or a return to `classic`, wait until the message count is 0 with the
+quorum collector still running, stop it, delete the queue, and start the other
+collector.
+
 ## Configure the collector
 
 1. Set `TALLY_OSC_CLOUD` to the cloud the ingest credential was issued for, and
@@ -440,3 +503,20 @@ covers.
    ```text
    0
    ```
+
+4. Read the collector's queue back. The line below is a quorum queue, and a
+   classic queue prints `classic` in the type column:
+
+   ```sh
+   rabbitmqctl list_queues name type arguments effective_policy_definition consumers | grep -E '^tally-notifications[[:space:]]'
+   ```
+
+   ```text
+   tally-notifications	quorum	[{"x-queue-type","quorum"},{"x-delivery-limit",-1}]	#{}	1
+   ```
+
+   A policy or operator policy that matches `tally-notifications` and sets
+   `delivery-limit` to a positive number overrides the argument. The effective
+   policy definition, which is `#{}` where no policy matches, must carry no
+   `delivery-limit`; exclude `tally-notifications` from such a policy's
+   pattern.

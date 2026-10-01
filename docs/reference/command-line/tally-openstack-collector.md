@@ -53,6 +53,17 @@ which are the stock OpenStack settings: cinder sets no `control_exchange` and
 publishes on oslo's default, `openstack`. A topic is the routing key itself and
 not a prefix of one, because that is how oslo publishes.
 
+`TALLY_OSC_QUEUE_TYPE` decides the arguments of that declare. `quorum` sends
+`x-queue-type=quorum` and `x-delivery-limit=-1`, after the session has checked
+that the broker reports RabbitMQ 4.0 or newer. `classic` sends no arguments and
+so no queue type, which leaves the type to the broker: a virtual host whose
+`default_queue_type` is `quorum` creates a quorum queue with the broker's own
+delivery limit. Such a deployment sets `TALLY_OSC_QUEUE_TYPE=quorum`, and
+deletes a queue it declared before, because that queue carries no
+`x-delivery-limit` and the broker refuses the new declare over it.
+[Declare the queue as a quorum queue](/how-to/openstack/connect-the-collector#declare-the-queue-as-a-quorum-queue)
+has the order that drains the queue before the delete.
+
 Each configured exchange is probed with a passive declare on a channel of its
 own, and none is created. An exchange the broker does not carry is skipped: the
 collector logs
@@ -71,6 +82,18 @@ A session fails over its exchanges, and the collector reconnects, in two cases:
   error is
   `the exchange <name> does not exist on the broker, and TALLY_OSC_REQUIRE_EXCHANGES requires it`,
   and the session ends before the queue is declared.
+
+A session fails over its queue, and the collector reconnects, in two cases:
+
+- `TALLY_OSC_QUEUE_TYPE` is `quorum` and the broker is older than RabbitMQ 4.0.
+  The error is
+  `TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports <version>: an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue`,
+  and the session ends before the queue is declared. A broker whose version
+  cannot be read is refused with
+  `TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: <value>`.
+- The queue exists with another type than the setting declares. The error is
+  `declaring the queue tally-notifications: the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=<type> declares, and a queue keeps the type it was declared with`,
+  followed by the broker's error. The collector does not delete the queue.
 
 Octavia's `control_exchange` is `octavia` and the default leaves it out: a
 deployment that runs none would report it missing for as long as the collector
