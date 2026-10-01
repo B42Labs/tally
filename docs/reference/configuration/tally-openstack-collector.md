@@ -39,6 +39,7 @@ so a lower-case `info` is refused.
 | `TALLY_OSC_EXCHANGES` | list, comma-separated | `nova,neutron,openstack,glance` | no | Exchanges are the service exchanges the collector binds its queue to. The default covers nova, neutron, cinder and glance: cinder sets no control_exchange of its own and publishes on oslo's default, openstack. A deployment that renamed an exchange through control_exchange lists its own. An exchange the broker does not carry is skipped with a warning and bound once it appears, which is what a fresh cloud needs: glance declares its exchange with its first notification. Octavia publishes on the exchange octavia, and the default leaves it out, because a deployment that runs none would report it missing for as long as the collector runs. A deployment with octavia lists nova,neutron,openstack,glance,octavia. |
 | `TALLY_OSC_TOPICS` | list, comma-separated | `notifications.info` | no | Topics are the notification topics bound on each exchange, matching the notification_topics of the services being collected. |
 | `TALLY_OSC_REQUIRE_EXCHANGES` | boolean | `false` | no | RequireExchanges makes a missing exchange fail the AMQP session instead of being skipped: the collector then consumes nothing until the broker carries every exchange it lists. It is for a deployment that would rather stop than collect from a part of the cloud, and for the simulator stack, whose wait for the collector reads a consumer on the queue as a queue that is bound. |
+| `TALLY_OSC_QUEUE_TYPE` | string | `classic` | no | QueueType is the type the queue tally-notifications is declared with, classic or quorum. classic sends no queue type and leaves the choice to the broker: a classic queue on one node, unless the virtual host's default_queue_type is quorum, which creates a quorum queue with the broker's own delivery limit. quorum declares a replicated queue with the delivery limit disabled, and needs RabbitMQ 4.0 or newer. An existing queue keeps its type, so changing the value means deleting the queue first. |
 | `TALLY_OSC_CLOUD` | string | none | no | Cloud is the cloud name every emitted event is attributed to. It has no default because a guessed cloud silently books usage to the wrong one. |
 | `TALLY_OSC_REPORTING_URL` | string | none | no | ReportingURL is the base URL of the Reporting API the sender posts to. It must be an absolute https URL, because the ingest token travels on it; ReportingInsecure is what allows a plaintext one. |
 | `TALLY_OSC_REPORTING_INSECURE` | boolean | `false` | no | ReportingInsecure allows an http Reporting API. It exists for a collector and an API on the same trusted network, and for development; anywhere else it puts the ingest token on the wire in cleartext. |
@@ -57,6 +58,7 @@ so a lower-case `info` is refused.
 trailing slash off `TALLY_OSC_REPORTING_URL`, and then checks:
 
 - `TALLY_LOG_LEVEL` is one of the four levels above.
+- `TALLY_OSC_QUEUE_TYPE` is `classic` or `quorum`.
 - `TALLY_OSC_BATCH_MAX` is between 1 and 1000. The upper bound is
   `maxBatchItems` in
   [`internal/providers/openstack/config.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/config.go),

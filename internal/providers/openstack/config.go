@@ -47,6 +47,7 @@ const (
 	envExchanges          = "TALLY_OSC_EXCHANGES"
 	envTopics             = "TALLY_OSC_TOPICS"
 	envRequireExchanges   = "TALLY_OSC_REQUIRE_EXCHANGES"
+	envQueueType          = "TALLY_OSC_QUEUE_TYPE"
 	envCloud              = "TALLY_OSC_CLOUD"
 	envReportingURL       = "TALLY_OSC_REPORTING_URL"
 	envReportingInsecure  = "TALLY_OSC_REPORTING_INSECURE"
@@ -71,6 +72,7 @@ var EnvNames = []string{
 	envExchanges,
 	envTopics,
 	envRequireExchanges,
+	envQueueType,
 	envCloud,
 	envReportingURL,
 	envReportingInsecure,
@@ -94,9 +96,18 @@ var logLevels = map[string]slog.Level{
 	"ERROR": slog.LevelError,
 }
 
+// The accepted values of TALLY_OSC_QUEUE_TYPE. The match is exact, as it is for
+// the log level: a "Quorum" read as quorum would hide the typo, and one read as
+// classic would declare the queue the operator did not ask for.
+const (
+	queueTypeClassic = "classic"
+	queueTypeQuorum  = "quorum"
+)
+
 // Config is the collector's resolved configuration. Every field is final by the
-// time Load returns: file-backed secrets hold their content, the log level is
-// one this package accepts, and every bounded number is within its bounds.
+// time Load returns: file-backed secrets hold their content, the log level and
+// the queue type are ones this package accepts, and every bounded number is
+// within its bounds.
 type Config struct {
 	// LogLevel is the slog threshold, one of DEBUG, INFO, WARN, or ERROR.
 	LogLevel string `env:"TALLY_LOG_LEVEL" envDefault:"INFO"`
@@ -131,6 +142,14 @@ type Config struct {
 	// collect from a part of the cloud, and for the simulator stack, whose wait
 	// for the collector reads a consumer on the queue as a queue that is bound.
 	RequireExchanges bool `env:"TALLY_OSC_REQUIRE_EXCHANGES" envDefault:"false"`
+	// QueueType is the type the queue tally-notifications is declared with,
+	// classic or quorum. classic sends no queue type and leaves the choice to the
+	// broker: a classic queue on one node, unless the virtual host's
+	// default_queue_type is quorum, which creates a quorum queue with the broker's
+	// own delivery limit. quorum declares a replicated queue with the delivery
+	// limit disabled, and needs RabbitMQ 4.0 or newer. An existing queue keeps its
+	// type, so changing the value means deleting the queue first.
+	QueueType string `env:"TALLY_OSC_QUEUE_TYPE" envDefault:"classic"`
 	// Cloud is the cloud name every emitted event is attributed to. It has no
 	// default because a guessed cloud silently books usage to the wrong one.
 	Cloud string `env:"TALLY_OSC_CLOUD"`
@@ -169,9 +188,9 @@ type Config struct {
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
-// log level and the numeric bounds. It does not check whether the required
-// values are present: which ones are required depends on the mode, which is
-// what ValidateServe and ValidateDump decide.
+// log level, the queue type and the numeric bounds. It does not check whether
+// the required values are present: which ones are required depends on the mode,
+// which is what ValidateServe and ValidateDump decide.
 func Load() (Config, error) {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
@@ -212,6 +231,9 @@ func Load() (Config, error) {
 
 	if _, ok := logLevels[cfg.LogLevel]; !ok {
 		return Config{}, fmt.Errorf("%s: %q must be DEBUG, INFO, WARN, or ERROR", envLogLevel, cfg.LogLevel)
+	}
+	if cfg.QueueType != queueTypeClassic && cfg.QueueType != queueTypeQuorum {
+		return Config{}, fmt.Errorf("%s: %q must be classic or quorum", envQueueType, cfg.QueueType)
 	}
 	// Every numeric has a default, so both modes reach these checks with a value
 	// to check, and both are refused the same way.

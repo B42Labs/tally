@@ -86,6 +86,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.RequireExchanges {
 		t.Error("RequireExchanges = true, want false")
 	}
+	if cfg.QueueType != "classic" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "classic")
+	}
 	if cfg.BatchMax != 500 {
 		t.Errorf("BatchMax = %d, want 500", cfg.BatchMax)
 	}
@@ -114,6 +117,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_OSC_EXCHANGES":             "nova,octavia",
 		"TALLY_OSC_TOPICS":                "notifications.info,notifications.error",
 		"TALLY_OSC_REQUIRE_EXCHANGES":     "true",
+		"TALLY_OSC_QUEUE_TYPE":            "quorum",
 		"TALLY_OSC_BATCH_MAX":             "50",
 		"TALLY_OSC_FLUSH_INTERVAL_S":      "1",
 		"TALLY_OSC_BUFFER_MAX_EVENTS":     "250000",
@@ -143,6 +147,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if !cfg.RequireExchanges {
 		t.Error("RequireExchanges = false, want true")
+	}
+	if cfg.QueueType != "quorum" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "quorum")
 	}
 	if cfg.BatchMax != 50 {
 		t.Errorf("BatchMax = %d, want 50", cfg.BatchMax)
@@ -302,6 +309,44 @@ func TestLoadRejectsAnUnknownLogLevel(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), level) {
 				t.Errorf("Load() error = %q, want it to name %q", err, level)
+			}
+		})
+	}
+}
+
+// TestLoadDefaultsTheQueueTypeWhenTheVariableIsUnset covers the variable that
+// is absent from the environment. setEnv blanks every variable, which is the
+// empty string, so the unset form is taken away here after it.
+func TestLoadDefaultsTheQueueTypeWhenTheVariableIsUnset(t *testing.T) {
+	setEnv(t, serveVars())
+	// setEnv registered the restore of this variable with t.Setenv.
+	if err := os.Unsetenv("TALLY_OSC_QUEUE_TYPE"); err != nil {
+		t.Fatalf("Unsetenv: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.QueueType != "classic" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "classic")
+	}
+}
+
+// TestLoadRejectsAnUnknownQueueType covers the two values an operator reaches
+// for by mistake: the right word in the wrong case, and a queue type RabbitMQ
+// has and the collector does not declare.
+func TestLoadRejectsAnUnknownQueueType(t *testing.T) {
+	for _, queueType := range []string{"Quorum", "stream"} {
+		t.Run(queueType, func(t *testing.T) {
+			setEnv(t, withVars(map[string]string{"TALLY_OSC_QUEUE_TYPE": queueType}))
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() error = nil, want an error")
+			}
+			if want := `TALLY_OSC_QUEUE_TYPE: "` + queueType + `"`; !strings.Contains(err.Error(), want) {
+				t.Errorf("Load() error = %q, want it to contain %q", err, want)
 			}
 		})
 	}
