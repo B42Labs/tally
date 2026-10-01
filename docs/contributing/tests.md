@@ -49,7 +49,9 @@ and `internal/providers/openstack/simulator/publish_integration_test.go`,
 start a RabbitMQ container the same way, `rabbitmq:4-alpine` through
 testcontainers. Each of them starts a broker of its own, because the
 collector's queue name is fixed and two tests on one broker would consume each
-other's notifications.
+other's notifications. One test of the collector's file,
+`TestConsumerRefusesAQuorumQueueOnAnOlderBroker`, runs `rabbitmq:3.13.7-alpine`
+instead, pinned by digest, which is the broker the quorum gate refuses.
 
 None of these carries a build tag, and there is no `-short` mode: a plain
 `go test ./...` runs them all. Without a reachable Docker daemon every one of

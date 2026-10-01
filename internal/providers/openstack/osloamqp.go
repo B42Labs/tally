@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -311,8 +312,13 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 		watcher.Wait()
 	}()
 
-	// The probe comes before the queue, so a session that is refused leaves the
-	// broker as it found it.
+	// The version gate and the probe come before the queue, so a session that is
+	// refused leaves the broker as it found it.
+	if c.cfg.QueueType == queueTypeQuorum {
+		if err := requireQuorumBroker(conn.Properties); err != nil {
+			return false, err
+		}
+	}
 	present, missing, err := probeExchanges(conn, c.cfg)
 	if err != nil {
 		return false, err
@@ -356,6 +362,31 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	}
 
 	return true, c.deliver(ctx, channel, deliveries, closed)
+}
+
+// requireQuorumBroker refuses a broker older than RabbitMQ 4.0 for a quorum
+// queue. properties are the server properties the broker sent when the
+// connection opened, where RabbitMQ reports its version as a string.
+//
+// The major version is the number before the first dot. An older broker reads
+// the delivery limit of -1 as a limit and drops a notification on its first
+// requeue, which RabbitMQ 3.13.7 does, so the session ends before it declares
+// anything. A version the gate cannot read is refused the same way: the declare
+// that follows is only safe on a broker known to be new enough.
+func requireQuorumBroker(properties amqp091.Table) error {
+	version, _ := properties["version"].(string)
+	leading, _, _ := strings.Cut(version, ".")
+	major, err := strconv.Atoi(leading)
+	if err != nil {
+		return fmt.Errorf("%s=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: %v",
+			envQueueType, properties["version"])
+	}
+	if major < 4 {
+		return fmt.Errorf("%s=quorum needs RabbitMQ 4.0 or newer and the broker reports %s: "+
+			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue",
+			envQueueType, version)
+	}
+	return nil
 }
 
 // queueDeclareArgs is the argument table the collector's queue is declared
