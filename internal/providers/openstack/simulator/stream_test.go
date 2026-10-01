@@ -225,6 +225,27 @@ func TestReadStreamNamesTheBadLine(t *testing.T) {
 			t.Fatalf("ReadStream() error = %v, want %q", err, want)
 		}
 	})
+
+	t.Run("an exchange the simulator does not declare", func(t *testing.T) {
+		// The line is built by hand because WriteStream writes the exchanges of
+		// this build alone. Heat's exchange stands for any other one, which is
+		// also what a month recorded before cinder's notifications moved to
+		// openstack names.
+		path := writeLines(t, valid[0], encodeLine(t, Line{
+			Exchange:   "heat",
+			RoutingKey: collectorTopic,
+			Body:       render(t, schedule[1]),
+		}))
+
+		_, err := ReadStream(path)
+
+		want := path + `: line 2: the exchange "heat" is not one the simulator declares ` +
+			"(nova, openstack, neutron, glance, octavia, keystone, designate, barbican); " +
+			"a month recorded on it has to be generated again"
+		if err == nil || err.Error() != want {
+			t.Fatalf("ReadStream() error = %v, want %q", err, want)
+		}
+	})
 }
 
 func TestReadStreamReportsAMissingFile(t *testing.T) {

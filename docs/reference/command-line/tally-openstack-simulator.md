@@ -409,7 +409,7 @@ Line is one line of notifications.jsonl: the message body a service put on the b
 
 | Member | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `exchange` | string | always | Exchange is the service exchange the notification belongs on, one of nova, cinder, neutron, glance, octavia, keystone, designate, and barbican. |
+| `exchange` | string | always | Exchange is the exchange the notification belongs on, one of nova, openstack, neutron, glance, octavia, keystone, designate, and barbican. Cinder publishes on openstack. |
 | `routing_key` | string | always | RoutingKey is the topic the notification was published under. |
 | `body` | object | always | Body is the oslo envelope as Render produced it, kept as raw JSON so a replay republishes the very bytes the run generated rather than a re-encoding of them. |
 <!-- refdoc:end stream-line -->
@@ -502,9 +502,11 @@ once, which is what lets a file that is not perfectly sorted replay whole.
 The file is read whole by `ReadStream` in
 [`internal/providers/openstack/simulator/stream.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/simulator/stream.go)
 before the first message goes out. An empty file, a line that is not JSON, a
-line longer than 1 MiB and a body without a usable timestamp are each refused
-there, so a replay that would fail halfway through a month fails with nothing
-published.
+line longer than 1 MiB, a body without a usable timestamp and an exchange the
+simulator does not declare are each refused there, so a replay that would fail
+halfway through a month fails with nothing published. A month recorded while
+`volume.*` notifications went to an exchange named `cinder` is refused for its
+exchange and has to be generated again.
 
 ## Project registration
 

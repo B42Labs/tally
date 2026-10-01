@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/b42labs/tally/internal/providers/openstack"
@@ -16,8 +18,9 @@ import (
 // what decides which queue a notification reaches, and a replay that guessed it
 // would publish a month no collector receives.
 type Line struct {
-	// Exchange is the service exchange the notification belongs on, one of nova,
-	// cinder, neutron, glance, octavia, keystone, designate, and barbican.
+	// Exchange is the exchange the notification belongs on, one of nova,
+	// openstack, neutron, glance, octavia, keystone, designate, and barbican.
+	// Cinder publishes on openstack.
 	Exchange string `json:"exchange"`
 	// RoutingKey is the topic the notification was published under.
 	RoutingKey string `json:"routing_key"`
@@ -140,6 +143,12 @@ func WriteEvents(path, cloud string, schedule Schedule) (err error) {
 // recorded against one deployment may have been published under a topic this
 // build no longer defaults to, and a replay has to reach the queue the
 // recording did.
+//
+// The exchange of a line is held to ServiceExchanges, which are the ones
+// Connect declares. A publish on any other one either fails on a broker that
+// does not carry it, after the lines ahead of it are out, or is confirmed and
+// dropped on a broker that carries it with no queue bound. A month recorded
+// while cinder's notifications went to an exchange named cinder is such a file.
 func ReadStream(path string) ([]Line, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -161,6 +170,11 @@ func ReadStream(path string) ([]Line, error) {
 		}
 		if _, err := openstack.ParseEnvelope(line.Body); err != nil {
 			return nil, fmt.Errorf("%s: line %d: %w", path, number, err)
+		}
+		if !slices.Contains(ServiceExchanges, line.Exchange) {
+			return nil, fmt.Errorf("%s: line %d: the exchange %q is not one the simulator declares (%s); "+
+				"a month recorded on it has to be generated again",
+				path, number, line.Exchange, strings.Join(ServiceExchanges, ", "))
 		}
 		lines = append(lines, line)
 	}
