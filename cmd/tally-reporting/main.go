@@ -44,7 +44,9 @@ const (
 	// readTimeout bounds the whole request, headers and body together.
 	readTimeout = 30 * time.Second
 	// writeTimeout bounds the response. Without it a client that stops reading
-	// holds its handler goroutine for as long as it likes.
+	// holds its handler goroutine for as long as it likes. The sync route moves
+	// this deadline for its own response, to the configured sync budget plus a
+	// margin.
 	writeTimeout = 60 * time.Second
 	// idleTimeout bounds a kept-alive connection between requests. Go derives it
 	// from readTimeout when it is zero, and a zero readTimeout clears the read
@@ -136,6 +138,7 @@ func run(ctx context.Context) error {
 		AttributingRelationTypes: cfg.AttributingRelationTypes,
 		Syncer:                   syncer,
 		SyncAllowAt:              cfg.SyncAllowAt,
+		SyncBudget:               time.Duration(cfg.SyncBudgetSeconds) * time.Second,
 		Metrics:                  m,
 		MetricsEnabled:           cfg.MetricsEnabled,
 	})
