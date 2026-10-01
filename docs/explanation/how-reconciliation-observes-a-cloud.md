@@ -166,12 +166,16 @@ projection rows against two overlapping observations; the lock behind that
 answer lives in the database, so it holds across replicas. A run that recorded
 any error at all is answered 500, and its `sync_runs` row holds the reasons.
 
-A run is bounded at 45 seconds, under the server's write timeout of 60, so that
-it ends while the connection that asked for it is still there to be answered. A
-cloud whose enumeration does not fit that budget never completes a run. The work
-that budget has to cover does not grow with the outage: the deleted-servers
-listing is the one part of a run bounded by how long the cloud has gone without
-a completed one, and it is clamped at 24 hours.
+A run is bounded by `TALLY_REPORTING_SYNC_BUDGET_S`, 45 seconds unless the
+deployment sets it. The route holds its response open for the budget and 15
+seconds more, where every other route is held to the server's write timeout of
+60 seconds, so that a run ends while the connection that asked for it is still
+there to be answered. A cloud whose enumeration does not fit the budget
+completes no run until the budget is raised
+([give a large cloud a longer budget](/how-to/openstack/reconcile-a-cloud#give-a-large-cloud-a-longer-budget)).
+The work that budget has to cover does not grow with the outage: the
+deleted-servers listing is the one part of a run bounded by how long the cloud
+has gone without a completed one, and it is clamped at 24 hours.
 
 ## A told instant
 
@@ -269,7 +273,7 @@ poll time, the instant the sync ran.
 
 That window is clamped at 24 hours. A failed run does not move the bound, so a
 cloud that has not completed one in a week would otherwise ask nova for a week
-of its churn, inside the same 45 seconds the five live listings share, and time
+of its churn, inside the same budget the five live listings share, and time
 out before it can complete and move the bound, every following run asking for
 more and getting through less. What the clamp leaves out is not lost: those
 deletes are booked by the absence pass at poll time, which is the approximation

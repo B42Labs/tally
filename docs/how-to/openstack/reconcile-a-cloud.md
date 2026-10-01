@@ -25,7 +25,7 @@ observes and how it corrects the projection is in
   account check.
 - The [Reporting API settings](/reference/configuration/tally-reporting) page,
   which names `TALLY_REPORTING_CLOUDS_CONFIG` (the clouds file the API reads at
-  startup) and `TALLY_REPORTING_SYNC_ALLOW_AT`.
+  startup), `TALLY_REPORTING_SYNC_ALLOW_AT` and `TALLY_REPORTING_SYNC_BUDGET_S`.
 
 ## Mount the clouds file
 
@@ -247,3 +247,66 @@ instant its caller picked.
 
    The Reporting API's log carries the same reasons on the request that
    triggered the run, together with the `sync_run_id` the row is found by.
+
+## Give a large cloud a longer budget
+
+A run is bounded by `TALLY_REPORTING_SYNC_BUDGET_S`, 45 seconds by default. A
+cloud whose enumeration does not fit that budget completes no run until you
+raise it.
+
+1. Read how long the runs take:
+
+   ```sql
+   SELECT started_at, completed_at, completed_at - started_at AS took, status, stats->'errors'
+   FROM sync_runs
+   WHERE cloud = 'os-prod-eu1'
+   ORDER BY started_at DESC
+   LIMIT 5;
+   ```
+
+   ```text
+            started_at         |        completed_at        |     took     | status |                                                ?column?
+   ----------------------------+----------------------------+--------------+--------+---------------------------------------------------------------------------------------------------------
+    2026-07-09 14:22:00.512+00 | 2026-07-09 14:22:45.530+00 | 00:00:45.018 | failed | ["listing the resources of os-prod-eu1: the run ended while enumerating server: context deadline exceeded"]
+   ```
+
+   A run that ended on the budget is `failed`, took about the budget, and
+   carries `context deadline exceeded` in its errors.
+
+2. Set the budget and restart:
+
+   ```sh
+   kubectl set env deployment/reporting-api TALLY_REPORTING_SYNC_BUDGET_S=300
+   kubectl rollout status deployment/reporting-api
+   ```
+
+   ```text
+   deployment.apps/reporting-api env updated
+   deployment "reporting-api" successfully rolled out
+   ```
+
+   The value is in seconds, applies to every cloud of the deployment, and is
+   refused at startup outside 1 to 86400.
+
+3. Give whatever calls the route a client timeout of the budget plus 20
+   seconds, `--max-time 320` for a budget of 300:
+
+   ```sh
+   curl -sS --max-time 320 -X POST \
+     -H "Authorization: Bearer $TALLY_REPORTING_INTERNAL_TOKEN" \
+     https://tally-reporting.internal/internal/sync/os-prod-eu1
+   ```
+
+   A client that gives up earlier closes the connection, which cancels the run
+   and records it `failed`.
+
+4. Keep the budget under the interval of the sync schedule. A call that arrives
+   while a run holds the cloud is answered 409, and `TallySyncStale` fires when
+   no run completes within 30 minutes.
+
+5. Size the connection pool for the clouds you sync at the same time. A running
+   sync keeps one connection of `TALLY_REPORTING_DB_MAX_CONNS` checked out for
+   as long as it runs and takes a second one for each write, so a longer budget
+   holds that connection longer. Raise `TALLY_REPORTING_DB_MAX_CONNS` by the
+   number of clouds synced at the same time, or stagger the schedule so that
+   their runs do not overlap.

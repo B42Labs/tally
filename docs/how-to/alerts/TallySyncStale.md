@@ -33,9 +33,12 @@ as long as this holds, because a completed run is what books it.
 3. The cloud's `adapter_config` entry, the clouds.yaml the pod reads, and
    whether Keystone and the service APIs answer. A failure that names no single
    resource type ends the whole run before a type is observed.
-4. The 45 second budget a run is bounded at. A cloud whose enumeration outgrows
-   it never completes a run, so every call is answered while the counter stays
-   flat.
+4. The budget a run is bounded at, `TALLY_REPORTING_SYNC_BUDGET_S`, 45 seconds
+   by default. A cloud whose enumeration outgrows it never completes a run:
+   every call is answered 500 and leaves `context deadline exceeded` in the
+   `stats.errors` of its `sync_runs` row, while the counter stays flat.
+   [Give a large cloud a longer budget](/how-to/openstack/reconcile-a-cloud#give-a-large-cloud-a-longer-budget)
+   raises it.
 
 The adapter, its runs, and what a partial outage does to one are described in
 [how reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud),
