@@ -29,6 +29,8 @@ notifications it then consumes, and what the cloud has to publish for it, is
   nothing else and runs on macOS as well as on Linux, but it produces no
   checksum file and no attestation, so the next section does not apply to it.
 - The broker's AMQP URL, the cloud name and the base URL of the Reporting API.
+  The account the AMQP URL names needs the permissions of
+  [create the broker account](/how-to/openstack/connect-the-collector#create-the-broker-account).
 - The ingest credential this cloud reports under.
   [Issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials)
   has those steps.

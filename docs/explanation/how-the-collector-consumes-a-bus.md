@@ -135,6 +135,32 @@ queue and the lifetime of a message keeps them small, and
 [connect the collector](/how-to/openstack/connect-the-collector#cap-the-default-notification-queues)
 has the commands.
 
+## What the broker account may do
+
+The collector declares its queue, binds it and consumes from it. It publishes
+nothing, declares no exchange and deletes nothing, so its account gets by on
+RabbitMQ's three
+[permission patterns](https://www.rabbitmq.com/docs/access-control) at their
+narrowest: configure and write on its own queue, and read on that queue and on
+the service exchanges. The dump's server-named queue is the one other name the
+patterns carry.
+
+Those patterns still allow more than the collector does. The service exchanges
+carry RPC as well as notifications: the calls the services make to each other,
+with their arguments and a request context that holds a Keystone token. Read
+permission on a topic exchange allows a binding with any routing key, so an
+account with the three patterns alone can bind `#` on `nova` and is handed a
+copy of every message published there. A topic permission is what keeps the
+account to the notification topics. With one in place, RabbitMQ 4.3.6 refuses a
+binding of `#`, of `conductor` and of `notifications.error` on `nova` with
+`ACCESS_REFUSED - read access to topic`, and accepts `notifications.info`.
+
+A topic permission is checked when a binding is made and not when a message is
+routed, so a binding that predates it stays. The permission therefore belongs
+in place before the account is used for the first time, which is the order
+[connect the collector](/how-to/openstack/connect-the-collector#create-the-broker-account)
+creates the account in.
+
 ## What the dump can and cannot show
 
 Oslo type names and payload members differ per OpenStack release, so
