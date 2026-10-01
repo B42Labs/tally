@@ -16,6 +16,9 @@ it, and compares that against the entries the mapping table carries.
 - The broker's AMQP URL. The dump reads the AMQP variables alone: no cloud, no
   Reporting API, no token and no outbox
   ([the collector's modes](/reference/command-line/tally-openstack-collector#modes)).
+  The account in the URL needs the permissions of
+  [create the broker account](/how-to/openstack/connect-the-collector#create-the-broker-account),
+  the `amq\.gen-.*` alternative included, which is the dump's queue.
 - A project on the cloud where you may boot an instance, create a volume,
   allocate a floating IP, upload an image and create a load balancer, and the
   `openstack` client configured for it.

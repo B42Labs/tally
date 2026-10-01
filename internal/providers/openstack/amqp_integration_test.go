@@ -1399,6 +1399,22 @@ func TestDumpPrintsNotificationsWithoutTakingThemFromTheConsumer(t *testing.T) {
 // three patterns and the topic permission, and what the topic permission exists
 // to refuse has to be refused.
 func TestConsumerAndDumpRunUnderTheDocumentedPermissions(t *testing.T) {
+	// The constants are a copy of the page, so the page is held to them: an edit
+	// to its commands that this test does not follow fails here.
+	page, err := os.ReadFile("../../../docs/how-to/openstack/connect-the-collector.md")
+	if err != nil {
+		t.Fatalf("reading the how-to: %v", err)
+	}
+	for _, want := range []string{
+		"rabbitmqctl add_user " + accountUser + " ",
+		"'" + accountConfigure + "' \\\n     '" + accountWrite + "' \\\n",
+		"'" + accountTopicWrite + "' '" + accountTopicRead + "'",
+	} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("the how-to does not carry %q, so this test runs under another account than the page creates", want)
+		}
+	}
+
 	container, url := startBrokerContainer(t, brokerImage)
 	publisher := openChannel(t, url)
 	declareExchanges(t, publisher, "nova", "openstack")
@@ -1446,7 +1462,7 @@ func TestConsumerAndDumpRunUnderTheDocumentedPermissions(t *testing.T) {
 	// Read permission on a topic exchange allows a binding under any routing key,
 	// and the service exchanges carry RPC as well. The topic permission is what
 	// keeps the account to the notification topic.
-	err := openChannel(t, accountURL).QueueBind(queueName, "#", "nova", false, nil)
+	err = openChannel(t, accountURL).QueueBind(queueName, "#", "nova", false, nil)
 	var refused *amqp091.Error
 	if !errors.As(err, &refused) || refused.Code != amqp091.AccessRefused {
 		t.Fatalf("binding %s to # on nova as %s returned %v, want a 403", queueName, accountUser, err)

@@ -85,6 +85,32 @@ has committed the event it maps to, so a failed acknowledgement costs a
 redelivery and never an event. A delivery the outbox refuses is requeued
 instead, and stays on the broker until a buffer that works takes it.
 
+## Broker permissions
+
+The collector issues four operations on the broker, in the virtual host the
+AMQP URL names:
+
+| Operation | Resource | Permission |
+| --- | --- | --- |
+| passive `exchange.declare` | each exchange in `TALLY_OSC_EXCHANGES` | any one of configure, write or read on RabbitMQ 4.2.9, 4.3.1 and 4.3.6; configure on 4.3.0; none on 3.13.7, 4.0.9 and 4.1.8 |
+| `queue.declare` | `tally-notifications`, and in `--dump` mode a server-named `amq.gen-` queue | configure on the queue |
+| `queue.bind` | the queue and each exchange | write on the queue, read on the exchange, and a topic read pattern that matches the topic where topic permissions are set |
+| `basic.consume` | the queue | read on the queue |
+
+The collector publishes nothing, declares no exchange and deletes nothing.
+
+The releases named for the passive declare are the ones it was run against.
+Where a release checks it, an exchange outside the account's patterns is
+answered with a 403 whether it exists or not, such as
+`ACCESS_REFUSED - configure access to exchange 'designate' in vhost '/' refused for user 'tally'`.
+The collector reports that as an error and not as a missing exchange, so the
+session fails with `declaring the exchange <name>: ` followed by the broker's
+error until the pattern lists the exchange. With the permission in place, a
+missing exchange is answered with the 404 that makes the collector skip it.
+
+On RabbitMQ 4.3.0 read permission is not enough, so an account that holds read
+alone on the service exchanges fails every session there.
+
 ## Bounds
 
 Two sizes bound a notification on its way into the buffer, both stated as

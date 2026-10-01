@@ -15,8 +15,9 @@ Reporting API. What the collector guarantees between those two ends is in
 
 ## Before you start
 
-- A broker the collector reaches over AMQP, with a user that may declare a
-  durable queue and bind it to the service exchanges.
+- A broker the collector reaches over AMQP, and an administrator shell on it
+  for `rabbitmqctl`. The account the collector connects with is created in
+  [create the broker account](/how-to/openstack/connect-the-collector#create-the-broker-account).
 - Access to the configuration files of nova, neutron, cinder, glance and
   octavia, and permission to restart them.
 - A shell that may run
@@ -268,6 +269,95 @@ and every `rabbitmqctl` call on this page runs as
    before the collector binds, reaches no queue, so create and delete one image
    before the cloud goes into billing. `TALLY_OSC_REQUIRE_EXCHANGES=true` makes
    the collector wait for every exchange instead.
+
+## Create the broker account
+
+The account holds three permission patterns and one topic permission per
+exchange.
+[What the broker account may do](/explanation/how-the-collector-consumes-a-bus#what-the-broker-account-may-do)
+has the reasons. The patterns are not enough on RabbitMQ 4.3.0, which
+[broker permissions](/reference/command-line/tally-openstack-collector#broker-permissions)
+covers.
+
+1. Create the account and grant it the three patterns, configure, write and
+   read in that order, on the virtual host the services' `transport_url` names,
+   which is `/` on Kolla. `add_user` reads the password from standard input,
+   which keeps it out of the shell history and the process list:
+
+   ```sh
+   rabbitmqctl add_user tally < tally-broker-password
+   rabbitmqctl set_permissions -p / tally \
+     '^(tally-notifications|amq\.gen-.*)$' \
+     '^(tally-notifications|amq\.gen-.*)$' \
+     '^(tally-notifications|amq\.gen-.*|nova|neutron|openstack|glance|octavia)$'
+   ```
+
+   The file holds the password on one line; remove it afterwards. In a
+   container the first call is
+   `docker exec -i rabbitmq rabbitmqctl add_user tally < tally-broker-password`.
+
+   The read pattern lists the exchanges in `TALLY_OSC_EXCHANGES` and no others,
+   the ones the broker does not carry yet included. A cloud without octavia
+   leaves it out here and in step 2. The `amq\.gen-.*` alternative is the
+   server-named queue of `--dump`, and an account that never runs the dump can
+   leave it out.
+
+2. Restrict what the account may bind, once per exchange in the read pattern.
+   The topic read pattern has to match every topic in `TALLY_OSC_TOPICS`:
+
+   ```sh
+   for exchange in nova neutron openstack glance octavia; do
+     rabbitmqctl set_topic_permissions -p / tally "$exchange" '^$' '^notifications\.info$'
+   done
+   ```
+
+   An exchange in the read pattern without a topic permission is readable
+   under every routing key, RPC included. RabbitMQ 4.3.6 answers
+   `Exchange glance does not exist` for an exchange the broker does not carry,
+   where 3.13.7 accepts the call. The account is unrestricted on that exchange
+   from the moment it appears, so repeat the call as soon as it does, which for
+   glance on a fresh cloud is after the first image notification. Then list
+   what the account bound there, because a binding that predates the topic
+   permission stays:
+
+   ```sh
+   rabbitmqctl list_bindings source_name destination_name routing_key | grep -E '^glance[[:space:]]+(tally-notifications|amq\.gen-)'
+   ```
+
+   ```text
+   glance	tally-notifications	notifications.info
+   ```
+
+   A line with another routing key than a topic in `TALLY_OSC_TOPICS` is a
+   binding made while the exchange was unrestricted. It keeps copying messages
+   until it is unbound or its queue is deleted.
+
+3. Read both back:
+
+   ```sh
+   rabbitmqctl list_user_permissions tally
+   ```
+
+   ```text
+   vhost	configure	write	read
+   /	^(tally-notifications|amq\.gen-.*)$	^(tally-notifications|amq\.gen-.*)$	^(tally-notifications|amq\.gen-.*|nova|neutron|openstack|glance|octavia)$
+   ```
+
+   ```sh
+   rabbitmqctl list_topic_permissions -p /
+   ```
+
+   ```text
+   user	exchange	write	read
+   tally	glance	^$	^notifications\.info$
+   tally	neutron	^$	^notifications\.info$
+   tally	nova	^$	^notifications\.info$
+   tally	octavia	^$	^notifications\.info$
+   tally	openstack	^$	^notifications\.info$
+   ```
+
+   Every exchange in the read pattern has a row. One without a row is
+   unrestricted, and is the one step 2 has to be repeated for.
 
 ## Configure the collector
 
