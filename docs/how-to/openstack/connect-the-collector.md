@@ -181,6 +181,56 @@ section above.
    export TALLY_OSC_PREFETCH=3
    ```
 
+## Cap the default notification queues
+
+oslo.messaging declares a queue of its own per notification topic and
+priority, and the collector reads none of them.
+[The default queues oslo declares](/explanation/how-the-collector-consumes-a-bus#the-default-queues-oslo-declares)
+has the reasons. On a Kolla or OSISM deployment the broker runs in a container,
+and every `rabbitmqctl` call on this page runs as
+`docker exec rabbitmq rabbitmqctl` there.
+
+1. List the default queues with their consumers:
+
+   ```sh
+   rabbitmqctl list_queues name consumers messages | grep -E '^notifications\.'
+   ```
+
+   ```text
+   notifications.info	0	18342
+   notifications.error	0	27
+   ```
+
+   A consumer count of 0 means nothing reads the queue at this moment. Before
+   capping it, confirm that the cloud runs no service that consumes it, which
+   Ceilometer's notification agent does: an agent that is stopped or restarting
+   shows 0 as well, and the length cap drops the oldest messages of the backlog
+   it would have read as soon as the policy is set. A queue a service consumes
+   is that service's backlog and gets no cap.
+
+2. Cap them with a policy that keeps 10000 messages per queue and drops a
+   message after 600000 ms:
+
+   ```sh
+   rabbitmqctl set_policy -p / --apply-to queues notifications-cap '^notifications\.' '{"max-length":10000,"message-ttl":600000}'
+   ```
+
+   The pattern does not match `tally-notifications`. Where a service consumes
+   one of these queues, narrow the pattern to the others. RabbitMQ applies one
+   policy per queue, so on a broker whose existing policy already matches these
+   queues, add the two keys to that policy instead.
+
+3. Read the policy back:
+
+   ```sh
+   rabbitmqctl list_policies -p /
+   ```
+
+   ```text
+   vhost	name	pattern	apply-to	definition	priority
+   /	notifications-cap	^notifications\.	queues	{"max-length":10000,"message-ttl":600000}	0
+   ```
+
 ## Bind the exchanges and topics
 
 1. Name the service exchanges in `TALLY_OSC_EXCHANGES` and the notification

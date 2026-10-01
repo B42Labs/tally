@@ -111,6 +111,30 @@ octavia's notifications reach no queue of this collector and show up in none of
 its counters, `tally_collector_skipped_total` included: a topic exchange copies
 a message only to the queues bound to it.
 
+## The default queues oslo declares
+
+Before it publishes a notification, oslo.messaging declares a queue named after
+the routing key and binds it to the exchange, so that a consumer that arrives
+later finds what it missed. The function is
+[`_publish_and_creates_default_queue`](https://opendev.org/openstack/oslo.messaging/src/branch/stable/2025.1/oslo_messaging/_drivers/impl_rabbit.py).
+The routing key is the topic with the priority appended, so one default queue
+exists per priority: `notifications.info`, `notifications.error` and so on.
+
+The collector reads none of them and binds `tally-notifications`. A topic
+exchange copies each message to every bound queue, so a queue of its own hands
+the collector every notification and leaves Ceilometer's copies in the queue
+Ceilometer consumes. A collector that consumed `notifications.info` would share
+that queue's messages with Ceilometer, would have to declare the queue with the
+arguments oslo chose, and would not empty the queues of the other priorities.
+
+On a cloud without Ceilometer nothing consumes the default queues. Without a
+consumer and without a policy they grow until the broker's memory or disk alarm
+stops every publisher, and the publishers are the OpenStack services. A
+[policy](https://www.rabbitmq.com/docs/policies) that bounds the length of a
+queue and the lifetime of a message keeps them small, and
+[connect the collector](/how-to/openstack/connect-the-collector#cap-the-default-notification-queues)
+has the commands.
+
 ## What the dump can and cannot show
 
 Oslo type names and payload members differ per OpenStack release, so
