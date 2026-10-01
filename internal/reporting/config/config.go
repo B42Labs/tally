@@ -37,6 +37,7 @@ const (
 	envAttributingTypes   = "TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES"
 	envCloudsConfig       = "TALLY_REPORTING_CLOUDS_CONFIG"
 	envSyncAllowAt        = "TALLY_REPORTING_SYNC_ALLOW_AT"
+	envSyncBudget         = "TALLY_REPORTING_SYNC_BUDGET_S"
 	envMetricsEnabled     = "TALLY_METRICS_ENABLED"
 	envMetricsRefresh     = "TALLY_REPORTING_METRICS_REFRESH_S"
 )
@@ -59,6 +60,7 @@ var EnvNames = []string{
 	envAttributingTypes,
 	envCloudsConfig,
 	envSyncAllowAt,
+	envSyncBudget,
 	envMetricsEnabled,
 	envMetricsRefresh,
 }
@@ -68,6 +70,11 @@ const (
 	authModeEnforced = "enforced"
 	authModeDisabled = "disabled"
 )
+
+// maxSyncBudgetSeconds caps TALLY_REPORTING_SYNC_BUDGET_S at one day. No run
+// needs more, and the cap keeps the conversion to time.Duration far from
+// overflow.
+const maxSyncBudgetSeconds = 86400
 
 // logLevels maps the accepted values of TALLY_LOG_LEVEL to their slog level.
 // The match is exact: a lower-case "info" is a typo, and silently accepting it
@@ -136,6 +143,17 @@ type Config struct {
 	// clock; a production deployment keeps the default, where such a request is
 	// refused before a run starts.
 	SyncAllowAt bool `env:"TALLY_REPORTING_SYNC_ALLOW_AT" envDefault:"false"`
+	// SyncBudgetSeconds is how long one run of POST /internal/sync/{cloud} may
+	// take. A run that has not finished by then ends failed and is answered 500.
+	// The route holds its response open for the budget and 15 seconds more,
+	// whatever the server's write timeout is for the other routes, so a caller
+	// needs a timeout of the budget plus 20 seconds. A cloud whose enumeration
+	// does not fit the default needs a larger value. A running sync keeps one
+	// connection of TALLY_REPORTING_DB_MAX_CONNS checked out for as long as it
+	// runs and takes a second one for each write, so the pool has to hold one
+	// connection per cloud synced at the same time on top of what the API's other
+	// routes need.
+	SyncBudgetSeconds int `env:"TALLY_REPORTING_SYNC_BUDGET_S" envDefault:"45"`
 	// MetricsEnabled exposes the instrumentation: false makes GET /metrics answer
 	// 404 and stops the gauge refresher. The instruments still exist and keep
 	// counting either way, so turning the flag back on costs nothing and loses
@@ -182,6 +200,14 @@ func Load() (Config, error) {
 	}
 	if cfg.MetricsRefreshSeconds <= 0 {
 		return Config{}, fmt.Errorf("%s: %d must be positive", envMetricsRefresh, cfg.MetricsRefreshSeconds)
+	}
+	// A zero budget is a deadline that has already passed, so every run would
+	// end before it lists anything.
+	if cfg.SyncBudgetSeconds <= 0 {
+		return Config{}, fmt.Errorf("%s: %d must be positive", envSyncBudget, cfg.SyncBudgetSeconds)
+	}
+	if cfg.SyncBudgetSeconds > maxSyncBudgetSeconds {
+		return Config{}, fmt.Errorf("%s: %d must be at most %d", envSyncBudget, cfg.SyncBudgetSeconds, maxSyncBudgetSeconds)
 	}
 	// env applies the default to a variable set to the empty string, the same as
 	// to an unset one, so the raw value is what tells the two apart. Only the

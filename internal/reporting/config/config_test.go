@@ -90,6 +90,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.SyncAllowAt {
 		t.Error("SyncAllowAt = true, want false")
 	}
+	if cfg.SyncBudgetSeconds != 45 {
+		t.Errorf("SyncBudgetSeconds = %d, want 45", cfg.SyncBudgetSeconds)
+	}
 	if !cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = false, want true")
 	}
@@ -113,6 +116,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_REPORTING_ATTRIBUTING_RELATION_TYPES": "infrastructure_tenant,same_owner",
 		"TALLY_REPORTING_CLOUDS_CONFIG":              "/etc/tally/clouds.yaml",
 		"TALLY_REPORTING_SYNC_ALLOW_AT":              "true",
+		"TALLY_REPORTING_SYNC_BUDGET_S":              "600",
 		"TALLY_METRICS_ENABLED":                      "false",
 		"TALLY_REPORTING_METRICS_REFRESH_S":          "15",
 	})
@@ -149,6 +153,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if !cfg.SyncAllowAt {
 		t.Error("SyncAllowAt = false, want true")
+	}
+	if cfg.SyncBudgetSeconds != 600 {
+		t.Errorf("SyncBudgetSeconds = %d, want 600", cfg.SyncBudgetSeconds)
 	}
 	if cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = true, want false")
@@ -206,6 +213,21 @@ func TestLoadRejectsUnparsableMetricsEnabled(t *testing.T) {
 func TestLoadRejectsUnparsableSyncAllowAt(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_REPORTING_SYNC_ALLOW_AT": "sometimes",
+		"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+	})
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsUnparsableSyncBudget(t *testing.T) {
+	setEnv(t, map[string]string{
+		"TALLY_REPORTING_SYNC_BUDGET_S": "45s",
 		"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
 	})
 
@@ -291,6 +313,16 @@ func TestLoadRejectsNonPositiveBounds(t *testing.T) {
 			vars:     map[string]string{"TALLY_REPORTING_METRICS_REFRESH_S": "-5"},
 			wantText: "TALLY_REPORTING_METRICS_REFRESH_S",
 		},
+		{
+			name:     "a zero sync budget ends every run before it lists anything",
+			vars:     map[string]string{"TALLY_REPORTING_SYNC_BUDGET_S": "0"},
+			wantText: "TALLY_REPORTING_SYNC_BUDGET_S: 0 must be positive",
+		},
+		{
+			name:     "a negative sync budget behaves the same way",
+			vars:     map[string]string{"TALLY_REPORTING_SYNC_BUDGET_S": "-1"},
+			wantText: "TALLY_REPORTING_SYNC_BUDGET_S: -1 must be positive",
+		},
 	}
 
 	for _, tc := range tests {
@@ -310,6 +342,53 @@ func TestLoadRejectsNonPositiveBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadBoundsTheSyncBudget(t *testing.T) {
+	t.Run("the largest budget loads", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+			"TALLY_REPORTING_SYNC_BUDGET_S": "86400",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if cfg.SyncBudgetSeconds != 86400 {
+			t.Errorf("SyncBudgetSeconds = %d, want 86400", cfg.SyncBudgetSeconds)
+		}
+	})
+
+	t.Run("a budget of more than a day is refused", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+			"TALLY_REPORTING_SYNC_BUDGET_S": "86401",
+		})
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an error")
+		}
+		if want := "TALLY_REPORTING_SYNC_BUDGET_S: 86401 must be at most 86400"; !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to carry %q", err, want)
+		}
+	})
+
+	t.Run("an empty value is the default", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+			"TALLY_REPORTING_SYNC_BUDGET_S": "",
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if cfg.SyncBudgetSeconds != 45 {
+			t.Errorf("SyncBudgetSeconds = %d, want the default 45", cfg.SyncBudgetSeconds)
+		}
+	})
 }
 
 func TestLoadReadsAttributingRelationTypes(t *testing.T) {
