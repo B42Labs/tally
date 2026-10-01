@@ -206,11 +206,12 @@ the loop, and an hour of it is the rest of the month unsynced while the loop
 still looks like it is working; a curl that reached nothing at all is the same
 loss without the wait. The clock read carries `--max-time 30`. The sync post
 carries `--max-time 65`, which is past every answer the Reporting API can still
-deliver: the 45 seconds `syncBudget` gives the run itself
-(`internal/reporting/httpapi/sync.go`), the two writes that end it, each on a
-context detached from that budget and bounded by a `completionBudget` of 10
-seconds (`internal/reporting/reconciliation/sync.go`), and the 60-second
-`writeTimeout` the server holds the response to (`cmd/tally-reporting/main.go`),
+deliver: the 45 seconds the default `TALLY_REPORTING_SYNC_BUDGET_S` gives the
+run itself, the two writes that end it, each on a context detached from that
+budget and bounded by a `completionBudget` of 10 seconds
+(`internal/reporting/reconciliation/sync.go`), and the write deadline the sync
+route sets for its own response, the budget plus a `syncAnswerMargin` of 15
+seconds (`internal/reporting/httpapi/sync.go`), 60 seconds on the default,
 which a run past that hits before the client does. A client timeout under that
 would close the connection on a run the server had not given up on, which the
 faulted month's syncs and a first sync with no bound to start from are long
