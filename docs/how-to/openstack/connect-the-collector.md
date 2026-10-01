@@ -72,6 +72,86 @@ Reporting API. What the collector guarantees between those two ends is in
    active
    ```
 
+## Enable notifications on a Kolla deployment
+
+Kolla-Ansible, and OSISM, which deploys through it, renders `driver = noop`
+into `[oslo_messaging_notifications]` of a service unless one of the service's
+notification topics is enabled, and it enables the `notifications` topic for
+Ceilometer alone. On such a deployment these steps take the place of the
+section above.
+
+1. Enable the `notifications` topic of the five services in the Kolla
+   configuration, which is `/etc/kolla/globals.yml`, or
+   `environments/kolla/configuration.yml` on OSISM:
+
+   ```yaml
+   nova_notification_topics:
+     - name: notifications
+       enabled: true
+   neutron_notification_topics:
+     - name: notifications
+       enabled: true
+   cinder_notification_topics:
+     - name: notifications
+       enabled: true
+   glance_notification_topics:
+     - name: notifications
+       enabled: true
+   octavia_notification_topics:
+     - name: notifications
+       enabled: true
+   ```
+
+   Each variable replaces the role's whole list. A deployment that runs the
+   Designate sink keeps the sink's topic as a second entry under nova and
+   neutron:
+
+   ```yaml
+     - name: "{{ designate_notifications_topic_name }}"
+       enabled: "{{ designate_enable_notifications_sink | bool }}"
+   ```
+
+2. Leave nova's notification settings alone where Ceilometer, Designate or the
+   Infoblox IPAM agent is enabled. `notification_format` defaults to
+   `unversioned`, and Kolla sets `notify_on_state_change = vm_and_task_state`
+   for those three. That value is a superset of `vm_state`: it adds
+   `compute.instance.update` notifications, which the collector counts as
+   skipped. Where none of the three is enabled, set the option in a nova
+   override, `/etc/kolla/config/nova.conf`, or
+   `environments/kolla/files/overlays/nova.conf` on OSISM:
+
+   ```ini
+   [notifications]
+   notify_on_state_change = vm_state
+   ```
+
+3. Reconfigure the five services:
+
+   ```sh
+   kolla-ansible reconfigure -i <inventory> --tags nova,cinder,neutron,glance,octavia
+   ```
+
+   On OSISM, once per service:
+
+   ```sh
+   osism apply -a reconfigure nova
+   ```
+
+4. Read the rendered section back from one of the containers:
+
+   ```sh
+   docker exec nova_api grep -A3 '^\[oslo_messaging_notifications\]' /etc/nova/nova.conf | grep -v '^transport_url'
+   ```
+
+   ```text
+   [oslo_messaging_notifications]
+   driver = messagingv2
+   topics = notifications
+   ```
+
+   The section also holds `transport_url`, which carries the broker password
+   and is filtered out for that reason.
+
 ## Cap the broker's message size
 
 1. Set RabbitMQ's `max_message_size` in `rabbitmq.conf` so that
