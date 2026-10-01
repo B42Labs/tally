@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -66,6 +67,21 @@ const (
 // far more than it publishes, so the consumer never pauses.
 const testBufferMax = 1000
 
+// The broker account of the section "Create the broker account" in
+// docs/how-to/openstack/connect-the-collector.md, repeated here so that a change
+// to what the collector does on the broker fails a test and not an operator.
+// The read pattern lists the exchanges this test configures, where the page
+// lists those of a whole cloud.
+const (
+	accountUser       = "tally"
+	accountPassword   = "documented-account"
+	accountConfigure  = `^(tally-notifications|amq\.gen-.*)$`
+	accountWrite      = `^(tally-notifications|amq\.gen-.*)$`
+	accountRead       = `^(tally-notifications|amq\.gen-.*|nova|openstack|glance)$`
+	accountTopicWrite = `^$`
+	accountTopicRead  = `^notifications\.info$`
+)
+
 // startBroker runs the broker every test but one runs against and returns the
 // URL it is reachable under.
 func startBroker(t *testing.T) string {
@@ -106,6 +122,26 @@ func startBrokerContainer(t *testing.T, image string) (testcontainers.Container,
 	// The guest account is the image's own, and the container is reachable only
 	// through its ephemeral host port for the length of one test.
 	return container, fmt.Sprintf("amqp://guest:guest@%s/", net.JoinHostPort(host, port.Port()))
+}
+
+// rabbitmqctl runs one rabbitmqctl command in the broker's container, which is
+// where the how-to has an operator run it, and fails the test when the command
+// does.
+func rabbitmqctl(t *testing.T, container testcontainers.Container, args ...string) {
+	t.Helper()
+
+	code, output, err := container.Exec(t.Context(), append([]string{"rabbitmqctl"}, args...),
+		tcexec.Multiplexed())
+	if err != nil {
+		t.Fatalf("running rabbitmqctl %q: %v", args, err)
+	}
+	if code != 0 {
+		printed, err := io.ReadAll(output)
+		if err != nil {
+			t.Fatalf("rabbitmqctl %q exited %d, and reading what it printed failed: %v", args, code, err)
+		}
+		t.Fatalf("rabbitmqctl %q exited %d: %s", args, code, printed)
+	}
 }
 
 // openChannel connects to the broker the way an OpenStack service would and
@@ -1354,4 +1390,76 @@ func TestDumpPrintsNotificationsWithoutTakingThemFromTheConsumer(t *testing.T) {
 	if strings.Contains(out.String(), token) {
 		t.Error("the dump printed the Keystone token the request context carried")
 	}
+}
+
+// TestConsumerAndDumpRunUnderTheDocumentedPermissions runs both modes under the
+// account the how-to has an operator create. It is the fresh cloud again: nova
+// and cinder publish, and glance is in the account's read pattern and not on
+// the broker yet. Everything the collector does on the broker has to fit the
+// three patterns and the topic permission, and what the topic permission exists
+// to refuse has to be refused.
+func TestConsumerAndDumpRunUnderTheDocumentedPermissions(t *testing.T) {
+	container, url := startBrokerContainer(t, brokerImage)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova", "openstack")
+
+	rabbitmqctl(t, container, "add_user", accountUser, accountPassword)
+	rabbitmqctl(t, container, "set_permissions", "-p", "/", accountUser,
+		accountConfigure, accountWrite, accountRead)
+	for _, exchange := range []string{"nova", "openstack"} {
+		rabbitmqctl(t, container, "set_topic_permissions", "-p", "/", accountUser, exchange,
+			accountTopicWrite, accountTopicRead)
+	}
+	accountURL := strings.Replace(url, "guest:guest@", accountUser+":"+accountPassword+"@", 1)
+
+	cfg := testConfig(accountURL, []string{"nova", "openstack", "glance"}, testBufferMax)
+	box := newOutbox(t)
+	logger, logs := recordingLogger(t)
+	consumer, _, stop := startConsumerWithLogger(t, cfg, box, logger)
+	waitFor(t, "the consumer connects as the documented account", consumer.Connected)
+
+	// The probe of glance has to come back as a 404 and not as a 403, or the
+	// session would have failed instead of skipping the exchange.
+	const skipped = "exchanges are missing on the broker"
+	if !slices.ContainsFunc(strings.Split(logs.String(), "\n"), func(line string) bool {
+		return strings.Contains(line, skipped) && strings.Contains(line, "glance")
+	}) {
+		t.Errorf("the log holds no line with %q that names glance", skipped)
+	}
+
+	novaBody, novaID := fixture(t, "compute-instance-create-end")
+	publish(t, publisher, "nova", novaBody)
+	waitFor(t, "the nova notification is buffered", func() bool {
+		return slices.Contains(storedEventIDs(t, box), novaID)
+	})
+
+	// The dump declares a server-named queue, which is the amq.gen- alternative
+	// of the patterns.
+	out := startDump(t, cfg)
+	volumeBody, volumeID := fixture(t, "volume-create-end")
+	publishUntil(t, publisher, "openstack", volumeBody, "the dump prints the volume notification",
+		func() bool { return dumpLineWith(t, out.String(), "message_id", volumeID) != nil })
+	if got := dumpLineWith(t, out.String(), "message_id", volumeID)["exchange"]; got != "openstack" {
+		t.Errorf("the dumped line's exchange = %v, want %q", got, "openstack")
+	}
+
+	// Read permission on a topic exchange allows a binding under any routing key,
+	// and the service exchanges carry RPC as well. The topic permission is what
+	// keeps the account to the notification topic.
+	err := openChannel(t, accountURL).QueueBind(queueName, "#", "nova", false, nil)
+	var refused *amqp091.Error
+	if !errors.As(err, &refused) || refused.Code != amqp091.AccessRefused {
+		t.Fatalf("binding %s to # on nova as %s returned %v, want a 403", queueName, accountUser, err)
+	}
+
+	// The quorum declare has to fit the same account. A queue keeps its type, so
+	// the classic one goes first, as the how-to has an operator do it.
+	stop()
+	if _, err := publisher.QueueDelete(queueName, false, false, false); err != nil {
+		t.Fatalf("deleting the queue %s: %v", queueName, err)
+	}
+	quorum := cfg
+	quorum.QueueType = queueTypeQuorum
+	replicated, _, _ := startConsumer(t, quorum, box)
+	waitFor(t, "the consumer declares a quorum queue as the documented account", replicated.Connected)
 }
