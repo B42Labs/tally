@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -263,21 +264,29 @@ func NewConsumer(cfg Config, buffer eventBuffer, m *Metrics, logger *slog.Logger
 
 // Run consumes until ctx is done, and then returns nil, which is the only way it
 // returns. A connection that fails to come up, or one the broker closes, is
-// retried with a growing wait: a broker that is restarting, or a service that
-// has not declared its exchange yet, costs the collector a pause rather than the
-// process, and the notifications wait on the bus meanwhile.
+// retried with a growing wait: a broker that is restarting costs the collector a
+// pause rather than the process, and the notifications wait on the bus
+// meanwhile.
+//
+// An exchange the broker does not carry is skipped and bound once it appears, so
+// a service that has not declared its exchange yet costs the notifications of
+// that service and not the session. A session fails over its exchanges in two
+// cases only: none of the listed ones exists, or Config.RequireExchanges is set
+// and one of them is missing.
 func (c *Consumer) Run(ctx context.Context) error {
 	return connectLoop(ctx, c.logger, c.minBackoff, c.maxBackoff, c.session)
 }
 
 // Connected reports whether a connection and a consumer are established. It is
 // what the readiness probe reads. A consumer paused by backpressure counts as
-// connected: the connection is up and not consuming is the deliberate part.
+// connected: the connection is up and not consuming is the deliberate part. A
+// session that skipped a missing exchange counts as connected too: it consumes
+// from every exchange the broker carries.
 func (c *Consumer) Connected() bool {
 	return c.connected.Load()
 }
 
-// session is one connection's life: declare, bind, consume, and process
+// session is one connection's life: probe, declare, bind, consume, and process
 // deliveries until the broker closes the connection or ctx is done. The bool
 // reports whether it got as far as consuming, which is what resets the caller's
 // wait.
@@ -286,7 +295,29 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = conn.Close() }()
+	// The way out has an order, because the watcher for missing exchanges works
+	// on this connection: cancel it, close the connection, which is what unblocks
+	// a probe waiting on a dead one, and wait for it last, so that it logs nothing
+	// once the session has returned. A session that started no watcher closes the
+	// connection and nothing else.
+	watchCtx, stopWatching := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	defer func() {
+		stopWatching()
+		_ = conn.Close()
+		watcher.Wait()
+	}()
+
+	// The probe comes before the queue, so a session that is refused leaves the
+	// broker as it found it.
+	present, missing, err := probeExchanges(conn, c.cfg)
+	if err != nil {
+		return false, err
+	}
+	if len(missing) > 0 {
+		c.logger.Warn("exchanges are missing on the broker, binding the others and retrying these",
+			"missing", missing)
+	}
 
 	// The collector's own queue, durable so that a restart finds what arrived
 	// while it was down. It is a queue of its own rather than a share of somebody
@@ -296,7 +327,7 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	if _, err := channel.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
 		return false, fmt.Errorf("declaring the queue %s: %w", queueName, err)
 	}
-	if err := bindQueue(channel, queueName, c.cfg); err != nil {
+	if err := bindQueue(channel, queueName, present, c.cfg.Topics); err != nil {
 		return false, err
 	}
 	// The prefetch bounds what the broker hands out unacknowledged. Since the acks
@@ -312,6 +343,13 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	closed := conn.NotifyClose(make(chan *amqp091.Error, 1))
 	c.connected.Store(true)
 	defer c.connected.Store(false)
+
+	if len(missing) > 0 {
+		watcher.Go(func() {
+			watchExchanges(watchCtx, conn, queueName, missing, c.cfg.Topics,
+				c.minBackoff, c.maxBackoff, c.logger)
+		})
+	}
 
 	return true, c.deliver(ctx, channel, deliveries, closed)
 }
@@ -498,17 +536,34 @@ func Dump(ctx context.Context, cfg Config, out io.Writer, logger *slog.Logger) e
 		logger = slog.Default()
 	}
 	return connectLoop(ctx, logger, minReconnectBackoff, maxReconnectBackoff,
-		func(ctx context.Context) (bool, error) { return dumpSession(ctx, cfg, out) })
+		func(ctx context.Context) (bool, error) { return dumpSession(ctx, cfg, out, logger) })
 }
 
 // dumpSession is one connection's worth of printing. It reports whether it got
 // as far as consuming, the way the consumer's session does.
-func dumpSession(ctx context.Context, cfg Config, out io.Writer) (bool, error) {
+func dumpSession(ctx context.Context, cfg Config, out io.Writer, logger *slog.Logger) (bool, error) {
 	conn, channel, err := connect(cfg)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = conn.Close() }()
+	// The same way out as the consumer's session, for the same reason: cancel the
+	// watcher, close the connection, wait for the watcher.
+	watchCtx, stopWatching := context.WithCancel(ctx)
+	var watcher sync.WaitGroup
+	defer func() {
+		stopWatching()
+		_ = conn.Close()
+		watcher.Wait()
+	}()
+
+	present, missing, err := probeExchanges(conn, cfg)
+	if err != nil {
+		return false, err
+	}
+	if len(missing) > 0 {
+		logger.Warn("exchanges are missing on the broker, binding the others and retrying these",
+			"missing", missing)
+	}
 
 	// Server-named, exclusive, and auto-deleting: the queue belongs to this
 	// connection and is gone with it, so a dump that is interrupted leaves no
@@ -517,7 +572,7 @@ func dumpSession(ctx context.Context, cfg Config, out io.Writer) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("declaring the dump queue: %w", err)
 	}
-	if err := bindQueue(channel, queue.Name, cfg); err != nil {
+	if err := bindQueue(channel, queue.Name, present, cfg.Topics); err != nil {
 		return false, err
 	}
 	// Automatic acks: the dump reads a copy of every message and owes the broker
@@ -525,6 +580,15 @@ func dumpSession(ctx context.Context, cfg Config, out io.Writer) (bool, error) {
 	deliveries, err := channel.Consume(queue.Name, "", true, true, false, false, nil)
 	if err != nil {
 		return false, fmt.Errorf("consuming from the dump queue: %w", err)
+	}
+
+	// The dump queue is exclusive to this connection, and the watcher binds on
+	// that same connection.
+	if len(missing) > 0 {
+		watcher.Go(func() {
+			watchExchanges(watchCtx, conn, queue.Name, missing, cfg.Topics,
+				minReconnectBackoff, maxReconnectBackoff, logger)
+		})
 	}
 
 	closed := conn.NotifyClose(make(chan *amqp091.Error, 1))
@@ -657,16 +721,10 @@ func connectLoop(ctx context.Context, logger *slog.Logger, minBackoff, maxBackof
 	return nil
 }
 
-// connect dials the broker, opens a channel, and declares the configured
-// exchanges passively.
-//
-// Passively is the point: the exchanges belong to the OpenStack services, and
-// which options they were declared with differs per deployment, so a collector
-// that declared them itself would have to guess those options and would fail
-// against every deployment that chose others. A missing exchange fails the
-// declare and closes the channel with it, which is why the caller reconnects
-// instead of binding what is left: a service that has not published yet costs a
-// retry, and the error names the exchange it is waiting for.
+// connect dials the broker and opens the session channel. It declares nothing:
+// whether a configured exchange exists is probed on a channel of its own
+// (exchangeExists), because a passive declare that fails closes the channel it
+// ran on, and the session channel has to survive a missing exchange.
 func connect(cfg Config) (*amqp091.Connection, *amqp091.Channel, error) {
 	// The URL is parsed here and the parse error is thrown away, because that one
 	// error is the only one on this path that quotes the URL back: net/url formats
@@ -685,28 +743,144 @@ func connect(cfg Config) (*amqp091.Connection, *amqp091.Channel, error) {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("opening a channel: %w", err)
 	}
-	for _, exchange := range cfg.Exchanges {
-		if err := channel.ExchangeDeclarePassive(exchange, exchangeKind,
-			true, false, false, false, nil); err != nil {
-			_ = conn.Close()
-			return nil, nil, fmt.Errorf("declaring the exchange %s: %w", exchange, err)
-		}
-	}
 	return conn, channel, nil
 }
 
-// bindQueue binds queue to every configured topic on every configured exchange.
-// The topic is the routing key, because that is how oslo publishes: the
-// notification topic is the key itself and not a prefix of one.
-func bindQueue(channel *amqp091.Channel, queue string, cfg Config) error {
+// exchangeExists reports whether the broker carries exchange.
+//
+// The declare is passive and creates nothing: the exchanges belong to the
+// OpenStack services, and which options they were declared with differs per
+// deployment, so a collector that declared them itself would have to guess
+// those options, and would need the configure permission on them. A passive
+// declare of an exchange that is not there closes the channel it ran on, which
+// is why every probe takes a channel of its own.
+func exchangeExists(conn *amqp091.Connection, exchange string) (bool, error) {
+	channel, err := conn.Channel()
+	if err != nil {
+		return false, fmt.Errorf("opening a channel: %w", err)
+	}
+	err = channel.ExchangeDeclarePassive(exchange, exchangeKind, true, false, false, false, nil)
+	if err == nil {
+		// The answer is in hand, and a channel that fails to close goes with the
+		// connection.
+		_ = channel.Close()
+		return true, nil
+	}
+	// The broker has closed the channel already.
+	var refused *amqp091.Error
+	if errors.As(err, &refused) && refused.Code == amqp091.NotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("declaring the exchange %s: %w", exchange, err)
+}
+
+// probeExchanges sorts the configured exchanges into the ones the broker
+// carries and the ones it does not, in the order they are listed.
+//
+// A missing exchange is an error only with RequireExchanges. A list of which
+// none exists is one either way, the empty list included: a session bound to
+// nothing has nothing to consume, and a wrong vhost must not read as a ready
+// collector.
+func probeExchanges(conn *amqp091.Connection, cfg Config) (present, missing []string, err error) {
 	for _, exchange := range cfg.Exchanges {
-		for _, topic := range cfg.Topics {
+		exists, err := exchangeExists(conn, exchange)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case exists:
+			present = append(present, exchange)
+		case cfg.RequireExchanges:
+			return nil, nil, fmt.Errorf("the exchange %s does not exist on the broker, and %s requires it",
+				exchange, envRequireExchanges)
+		default:
+			missing = append(missing, exchange)
+		}
+	}
+	if len(present) == 0 {
+		return nil, nil, fmt.Errorf("none of the exchanges in %s exists on the broker: %q",
+			envExchanges, cfg.Exchanges)
+	}
+	return present, missing, nil
+}
+
+// bindQueue binds queue to every one of topics on every one of exchanges. It
+// binds only the exchanges it is handed, which are the ones the caller found on
+// the broker. The topic is the routing key, because that is how oslo publishes:
+// the notification topic is the key itself and not a prefix of one.
+func bindQueue(channel *amqp091.Channel, queue string, exchanges, topics []string) error {
+	for _, exchange := range exchanges {
+		for _, topic := range topics {
 			if err := channel.QueueBind(queue, topic, exchange, false, nil); err != nil {
 				return fmt.Errorf("binding %s to %s on %s: %w", queue, topic, exchange, err)
 			}
 		}
 	}
 	return nil
+}
+
+// watchExchanges probes the exchanges a session found missing, and binds queue
+// to each one that has appeared. It returns when ctx is done, when the
+// connection is closed, or when nothing is missing any more.
+//
+// The wait between two rounds starts at minBackoff and doubles up to
+// maxBackoff, with no jitter.
+//
+// The watcher works on channels of its own and never on the session channel. A
+// bind that fails closes the channel it ran on, and on the session channel that
+// would end the consumer with it.
+func watchExchanges(ctx context.Context, conn *amqp091.Connection, queue string,
+	missing, topics []string, minBackoff, maxBackoff time.Duration, logger *slog.Logger,
+) {
+	backoff := minBackoff
+	for len(missing) > 0 {
+		if err := sleep(ctx, backoff); err != nil {
+			return
+		}
+		backoff = min(2*backoff, maxBackoff)
+
+		remaining := make([]string, 0, len(missing))
+		for _, exchange := range missing {
+			exists, err := exchangeExists(conn, exchange)
+			if err != nil {
+				// A probe that fails on a closed connection is not logged: the
+				// session's own NotifyClose reports the loss.
+				if conn.IsClosed() {
+					return
+				}
+				logger.Warn("probing a missing exchange failed, retrying it",
+					"exchange", exchange, "error", err)
+				remaining = append(remaining, exchange)
+				continue
+			}
+			if !exists {
+				remaining = append(remaining, exchange)
+				continue
+			}
+			if err := bindOnOwnChannel(conn, queue, exchange, topics); err != nil {
+				logger.Warn("binding an exchange that appeared failed, retrying it",
+					"exchange", exchange, "error", err)
+				remaining = append(remaining, exchange)
+				continue
+			}
+			logger.Info("an exchange appeared on the broker, bound it", "exchange", exchange)
+		}
+		missing = remaining
+	}
+}
+
+// bindOnOwnChannel binds queue to one exchange on a channel it opens for that
+// bind and closes after it.
+func bindOnOwnChannel(conn *amqp091.Connection, queue, exchange string, topics []string) error {
+	channel, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("opening a channel: %w", err)
+	}
+	err = bindQueue(channel, queue, []string{exchange}, topics)
+	// A failed bind has closed the channel already, and after a bind that worked
+	// a channel that fails to close goes with the connection.
+	_ = channel.Close()
+	return err
 }
 
 // ack acknowledges a delivery. A failed acknowledgement means the channel is

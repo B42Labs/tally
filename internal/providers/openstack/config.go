@@ -189,6 +189,25 @@ func Load() (Config, error) {
 	// retries forever.
 	cfg.ReportingURL = strings.TrimRight(cfg.ReportingURL, "/")
 
+	// A name with a space around it is an exchange the broker does not carry, and
+	// a missing exchange is skipped rather than refused, so the padding would cost
+	// that service's notifications without an error.
+	for i, exchange := range cfg.Exchanges {
+		cfg.Exchanges[i] = strings.TrimSpace(exchange)
+		if cfg.Exchanges[i] == "" {
+			return Config{}, fmt.Errorf("%s: an exchange name is empty", envExchanges)
+		}
+	}
+	// A padded topic is a binding key no service publishes under. The bind
+	// succeeds all the same, so the padding would cost that topic's notifications
+	// without even the warning a missing exchange gets.
+	for i, topic := range cfg.Topics {
+		cfg.Topics[i] = strings.TrimSpace(topic)
+		if cfg.Topics[i] == "" {
+			return Config{}, fmt.Errorf("%s: a topic is empty", envTopics)
+		}
+	}
+
 	if _, ok := logLevels[cfg.LogLevel]; !ok {
 		return Config{}, fmt.Errorf("%s: %q must be DEBUG, INFO, WARN, or ERROR", envLogLevel, cfg.LogLevel)
 	}
