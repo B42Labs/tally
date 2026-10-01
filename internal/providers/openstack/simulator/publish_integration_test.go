@@ -110,13 +110,14 @@ func connect(t *testing.T, url string) *Publisher {
 // defaultCollectorExchanges are the exchanges a collector binds when nothing
 // sets TALLY_OSC_EXCHANGES: the default of the variable in
 // internal/providers/openstack/config.go.
-var defaultCollectorExchanges = []string{"nova", "neutron", "cinder", "glance"}
+var defaultCollectorExchanges = []string{"nova", "neutron", "openstack", "glance"}
 
 // startCollector runs the collector's own consumer against the broker, bound to
 // the exchanges it is given, into an outbox and a registry of its own, until
 // the test ends. It is the collector as the pipeline runs it: the same
 // consumer, the same buffer, and the same counters, so what a test asserts is
-// what a deployment would see.
+// what a deployment would see. It requires every exchange it is given, because
+// that is how the compose stack runs the collector.
 //
 // The returned stop waits for the consumer's loop to return before it closes the
 // outbox, so nothing the collector logs outlives the test and nothing touches a
@@ -134,12 +135,13 @@ func startCollector(t *testing.T, url string, exchanges []string) (*openstack.Ou
 		func() float64 { return float64(outbox.Depth()) },
 		outbox.OldestBufferedSeconds)
 	consumer := openstack.NewConsumer(openstack.Config{
-		AMQPURL:         url,
-		Exchanges:       exchanges,
-		Topics:          []string{collectorTopic},
-		Cloud:           testCloud,
-		Prefetch:        10,
-		BufferMaxEvents: testOutboxMax,
+		AMQPURL:          url,
+		Exchanges:        exchanges,
+		Topics:           []string{collectorTopic},
+		RequireExchanges: true,
+		Cloud:            testCloud,
+		Prefetch:         10,
+		BufferMaxEvents:  testOutboxMax,
 	}, outbox, m, testLogger(t))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -439,8 +441,8 @@ func decodeEventID(t *testing.T, eventJSON []byte) string {
 func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 	url, _ := startBroker(t)
 	// The publisher connects first, because its declares are what the collector's
-	// passive ones find: a consumer started against a fresh broker reconnects
-	// until the exchanges exist.
+	// probes find: this collector requires every exchange, so one started against
+	// a fresh broker reconnects until the exchanges exist.
 	publisher := connect(t, url)
 	outbox, reg, _ := startCollector(t, url, ServiceExchanges)
 

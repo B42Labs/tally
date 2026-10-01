@@ -176,10 +176,10 @@ type queued struct {
 //
 // The publisher is dialled by the caller rather than here. That is what lets a
 // caller have the service exchanges declared before a collector starts: the
-// collector declares them passively and reconnects until somebody has declared
-// them, and a collector started first spends the run reconnecting. A nil
-// publisher is file mode, where the month is written out and nothing reaches a
-// bus.
+// collector creates none of them, and one that requires every exchange
+// (TALLY_OSC_REQUIRE_EXCHANGES=true) reconnects until somebody has declared
+// them, so started first it spends the run reconnecting. A nil publisher is
+// file mode, where the month is written out and nothing reaches a bus.
 //
 // With RegisterProjects the month's tenants, its Gardener projects and the
 // relations between them are registered with the Reporting API first, before

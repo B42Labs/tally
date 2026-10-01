@@ -360,14 +360,14 @@ endpoint the audit records name is `https://barbican.<cloud>.example:9311`.
 | `keypair.import.end` | `nova` | shoot infrastructure |
 | `keypair.delete.start` | `nova` | shoot tear-down |
 | `keypair.delete.end` | `nova` | shoot tear-down |
-| `volume.create.start` | `cinder` | volume |
-| `volume.delete.start` | `cinder` | volume |
-| `volume.resize.start` | `cinder` | paired step |
-| `volume.transfer.accept.start` | `cinder` | paired step |
-| `volume.attach.start` | `cinder` | volume |
-| `volume.attach.end` | `cinder` | volume |
-| `volume.detach.start` | `cinder` | volume, delete |
-| `volume.detach.end` | `cinder` | volume, delete |
+| `volume.create.start` | `openstack` | volume |
+| `volume.delete.start` | `openstack` | volume |
+| `volume.resize.start` | `openstack` | paired step |
+| `volume.transfer.accept.start` | `openstack` | paired step |
+| `volume.attach.start` | `openstack` | volume |
+| `volume.attach.end` | `openstack` | volume |
+| `volume.detach.start` | `openstack` | volume, delete |
+| `volume.detach.end` | `openstack` | volume, delete |
 | `network.create.start` | `neutron` | shoot infrastructure, tenant |
 | `network.create.end` | `neutron` | shoot infrastructure, tenant |
 | `network.delete.start` | `neutron` | shoot tear-down |
@@ -437,11 +437,11 @@ skips.
 | `compute.instance.power_on.end` | `nova` | yes |
 | `compute.instance.shelve_offload.end` | `nova` | yes |
 | `compute.instance.unshelve.end` | `nova` | yes |
-| `volume.create.end` | `cinder` | yes |
-| `volume.delete.end` | `cinder` | yes |
-| `volume.resize.end` | `cinder` | yes |
-| `volume.retype` | `cinder` | yes |
-| `volume.transfer.accept.end` | `cinder` | yes |
+| `volume.create.end` | `openstack` | yes |
+| `volume.delete.end` | `openstack` | yes |
+| `volume.resize.end` | `openstack` | yes |
+| `volume.retype` | `openstack` | yes |
+| `volume.transfer.accept.end` | `openstack` | yes |
 | `floatingip.create.end` | `neutron` | yes |
 | `floatingip.delete.end` | `neutron` | yes |
 | `image.create` | `glance` | no |

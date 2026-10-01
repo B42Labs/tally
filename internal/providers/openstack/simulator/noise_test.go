@@ -330,6 +330,7 @@ func TestExchangeForNamesEveryService(t *testing.T) {
 		{"scheduler.select_destinations.start", "nova"},
 		{"keypair.import.end", "nova"},
 		{"compute.instance.exists", "nova"},
+		{"volume.attach.start", "openstack"},
 		{"network.create.end", "neutron"},
 		{"subnet.delete.start", "neutron"},
 		{"router.interface.create", "neutron"},

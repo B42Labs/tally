@@ -28,11 +28,12 @@ type Transition struct {
 	// EventType is the type the emitting service would use, such as
 	// "compute.instance.create.end".
 	EventType string
-	// Exchange is the notification exchange the type belongs on. A deployment
-	// gives each service its own, and a month uses eight: nova, cinder,
-	// neutron, glance, octavia, keystone, designate, and barbican. The
-	// collector's default binds nova, neutron, cinder, and glance, and a
-	// deployment lists the other four itself.
+	// Exchange is the notification exchange the type belongs on. A month uses
+	// eight: nova, openstack, neutron, glance, octavia, keystone, designate, and
+	// barbican. The second is oslo's default, which cinder publishes on because
+	// it sets no control_exchange of its own. The collector's default binds
+	// nova, neutron, openstack, and glance, and a deployment lists the other
+	// four itself.
 	Exchange string
 	// Billable reports whether the collector's mapping records an event for this
 	// notification. It is false on the image.create that precedes an upload,
@@ -111,11 +112,13 @@ const (
 	workloadCI       = "ci"
 )
 
-// exchangeFor names the exchange a type is published on. The eight are the
-// service exchanges of nova, cinder, neutron, glance, octavia, keystone,
-// designate, and barbican. A type outside them is one this package does not
-// generate, and it is reported as the empty exchange rather than guessed at,
-// because a wrong exchange is a notification no bound queue receives.
+// exchangeFor names the exchange a type is published on. The eight are nova,
+// openstack, neutron, glance, octavia, keystone, designate, and barbican: each
+// service's own, except that cinder sets no control_exchange and publishes its
+// volume types on oslo's default, openstack. A type outside them is one this
+// package does not generate, and it is reported as the empty exchange rather
+// than guessed at, because a wrong exchange is a notification no bound queue
+// receives.
 func exchangeFor(eventType string) string {
 	switch {
 	case strings.HasPrefix(eventType, "compute."),
@@ -123,7 +126,7 @@ func exchangeFor(eventType string) string {
 		strings.HasPrefix(eventType, "keypair."):
 		return "nova"
 	case strings.HasPrefix(eventType, "volume."):
-		return "cinder"
+		return "openstack"
 	case strings.HasPrefix(eventType, "floatingip."),
 		strings.HasPrefix(eventType, "network."),
 		strings.HasPrefix(eventType, "subnet."),

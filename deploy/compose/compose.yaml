@@ -61,7 +61,14 @@ services:
       # message only to the queues bound to it, so a collector left at its
       # default of four sees none of them in any counter, neither as an event
       # nor as a skip.
-      TALLY_OSC_EXCHANGES: nova,neutron,cinder,glance,octavia,keystone,designate,barbican
+      TALLY_OSC_EXCHANGES: nova,neutron,openstack,glance,octavia,keystone,designate,barbican
+      # The simulator starts in parallel and reads one consumer on
+      # tally-notifications as a queue that is bound. A collector that skipped
+      # the exchanges the simulator had not declared yet would consume from an
+      # unbound queue, and the head of the month would be published into
+      # nothing. With the switch the collector consumes only once every
+      # exchange exists.
+      TALLY_OSC_REQUIRE_EXCHANGES: "true"
       TALLY_OSC_CLOUD: ${TALLY_SIM_CLOUD}
       TALLY_OSC_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:8443
       TALLY_OSC_TOKEN: ${TALLY_OSC_TOKEN}

@@ -71,8 +71,10 @@ back through the Reporting API. What such a month holds is in
 
 3. Watch the first publish. The simulator waits for a consumer on the collector's
    `tally-notifications` queue before it, and `--wait-for-collector` bounds that
-   wait, two minutes by default, with `0` disabling it. A wait that runs out ends
-   the run with an error naming the fix: start the collector first, or pass
+   wait, two minutes by default, with `0` disabling it. The stack's collector
+   runs with `TALLY_OSC_REQUIRE_EXCHANGES=true`, which is what makes a consumer
+   on the queue mean a bound queue. A wait that runs out ends the run with an
+   error naming the fix: start the collector first, or pass
    `--wait-for-collector 0` to publish anyway.
 
 ## Pace the month

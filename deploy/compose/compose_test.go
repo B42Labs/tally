@@ -167,8 +167,8 @@ func TestCollectorBindsEveryExchangeTheSimulatorPublishesOn(t *testing.T) {
 	// A topic exchange copies a message only to the queues bound to it, so a
 	// notification published on an exchange the collector never binds is dropped
 	// by the broker: no queue, no counter, and no event. The collector's default
-	// binds four of the five the simulator publishes on, which makes the fifth
-	// this stack's to list.
+	// binds four of the eight the simulator publishes on, which makes the other
+	// four this stack's to list.
 	svc := serviceNamed(t, loadCompose(t), collectorService)
 
 	bound := strings.Split(svc.Environment["TALLY_OSC_EXCHANGES"], ",")
@@ -176,6 +176,20 @@ func TestCollectorBindsEveryExchangeTheSimulatorPublishesOn(t *testing.T) {
 	if want := slices.Sorted(slices.Values(simulator.ServiceExchanges)); !slices.Equal(bound, want) {
 		t.Errorf("TALLY_OSC_EXCHANGES binds %v, want %v, the exchanges the simulator publishes on (simulator.ServiceExchanges); a notification on an unbound exchange reaches no queue and no counter",
 			bound, want)
+	}
+}
+
+func TestCollectorRequiresEveryExchangeBeforeItConsumes(t *testing.T) {
+	// The collector and the simulator start in parallel, and the simulator reads
+	// one consumer on the collector's queue as a queue that is bound. That holds
+	// only for a collector that refuses to consume while an exchange is missing:
+	// one that skips missing exchanges and connects first consumes unbound, and
+	// the simulator publishes the head of the month into nothing.
+	svc := serviceNamed(t, loadCompose(t), collectorService)
+
+	if got := svc.Environment["TALLY_OSC_REQUIRE_EXCHANGES"]; got != "true" {
+		t.Errorf("TALLY_OSC_REQUIRE_EXCHANGES = %q, want %q; a collector that connects before the simulator has declared the exchanges would otherwise consume from an unbound queue, and the simulator would take that consumer for a bound one",
+			got, "true")
 	}
 }
 

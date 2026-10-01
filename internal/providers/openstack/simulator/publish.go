@@ -17,14 +17,16 @@ import (
 const collectorQueue = "tally-notifications"
 
 // ServiceExchanges are the exchanges the simulator publishes notifications on,
-// one per service, and the ones Connect declares. The collector's default
-// TALLY_OSC_EXCHANGES lists the first four, and a deployment lists the other
-// four itself (docs/how-to/openstack/connect-the-collector.md, "Bind the
-// exchanges and topics"), so a collector left at its default receives the month
-// without its load balancers and without the keystone, designate, and barbican
+// and the ones Connect declares. Seven are a service's own, and openstack is
+// oslo's default, which carries cinder's notifications because cinder sets no
+// control_exchange. The collector's default TALLY_OSC_EXCHANGES lists the first
+// four, and a deployment lists the other four itself
+// (docs/how-to/openstack/connect-the-collector.md, "Bind the exchanges and
+// topics"), so a collector left at its default receives the month without its
+// load balancers and without the keystone, designate, and barbican
 // notifications.
 var ServiceExchanges = []string{
-	"nova", "cinder", "neutron", "glance", "octavia", "keystone", "designate", "barbican",
+	"nova", "openstack", "neutron", "glance", "octavia", "keystone", "designate", "barbican",
 }
 
 // probeInterval is how long AwaitConsumer waits between two looks at the
@@ -81,12 +83,14 @@ type Publisher struct {
 // Connect dials the broker, opens the confirming channel, and declares the
 // service exchanges.
 //
-// The declares are what make the collector's connection work at all: the
-// collector declares the same exchanges passively (connect in
-// internal/providers/openstack/osloamqp.go), so on a fresh broker, where no
-// OpenStack service has ever published, its declare fails and it reconnects
-// until somebody declares them. The arguments are the ones the services use,
-// and the ones declareExchanges in
+// The declares are what give the collector something to bind: it creates no
+// exchange and probes the ones it lists (probeExchanges in
+// internal/providers/openstack/osloamqp.go), binding those that exist. On a
+// fresh broker, where no OpenStack service has ever published, a collector
+// running with TALLY_OSC_REQUIRE_EXCHANGES=true reconnects until somebody
+// declares them, and one without it skips them and binds each once it appears.
+//
+// The arguments are the ones the services use, and the ones declareExchanges in
 // internal/providers/openstack/amqp_integration_test.go uses: a durable topic
 // exchange that is neither auto-deleted nor internal. A declare that differed
 // in any of them would be refused by a broker that already carries the
@@ -130,8 +134,13 @@ func Connect(url string) (*Publisher, error) {
 // drops every message no queue is bound to, and on a fresh broker the
 // collector's queue does not exist until the collector has connected once and
 // bound it. The consumer count rather than the queue's existence is the signal,
-// because the collector declares, binds, and only then registers its consumer:
-// a queue that has one is a collector that has finished connecting.
+// because the collector declares, binds, and only then registers its consumer.
+//
+// A queue that has a consumer is a queue bound to every exchange only for a
+// collector running with TALLY_OSC_REQUIRE_EXCHANGES=true, or one whose
+// exchanges all existed when it connected. A collector without the switch that
+// connected before the exchanges were declared consumes from a queue it has not
+// bound to them yet.
 func (p *Publisher) AwaitConsumer(ctx context.Context, queue string, timeout time.Duration) error {
 	if timeout == 0 {
 		return nil
