@@ -59,6 +59,10 @@ func TestNilMetricsRecordsNothingInsteadOfPanicking(t *testing.T) {
 	m.Unparseable()
 	m.Delivered(5)
 	m.DeliveryError()
+
+	if got := m.Totals(); got != (Totals{}) {
+		t.Errorf("Totals() = %+v on a nil *Metrics, want the zero value", got)
+	}
 }
 
 func TestNewMetricsExportsEveryInstrument(t *testing.T) {
@@ -134,6 +138,41 @@ func TestDeliveredAddsUpWhatTheBatchesCarried(t *testing.T) {
 
 	if got := testutil.ToFloat64(m.delivered); got != 8 {
 		t.Errorf("tally_collector_delivered_total = %v, want 8", got)
+	}
+}
+
+// TestTotalsMirrorTheCounters holds the plain totals to the counters they are
+// recorded beside. The two labelled counters come back as one number each,
+// whatever the event type, which is what the summary line reads and what a
+// vector does not offer without a gather.
+func TestTotalsMirrorTheCounters(t *testing.T) {
+	m := freshMetrics(t)
+
+	if got := m.Totals(); got != (Totals{}) {
+		t.Fatalf("Totals() = %+v before the first recording, want the zero value", got)
+	}
+
+	m.Consumed("compute.instance.create.end")
+	m.Consumed("volume.create.end")
+	m.Skipped("compute.instance.reboot.start")
+	m.Unparseable()
+	m.Delivered(5)
+	m.DeliveryError()
+
+	want := Totals{Consumed: 2, Skipped: 1, Unparseable: 1, Delivered: 5, DeliveryErrors: 1}
+	if got := m.Totals(); got != want {
+		t.Errorf("Totals() = %+v, want %+v", got, want)
+	}
+
+	// The totals are kept beside the counters and take nothing from them.
+	if got := testutil.ToFloat64(m.unparseable); got != 1 {
+		t.Errorf("tally_collector_unparseable_total = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.delivered); got != 5 {
+		t.Errorf("tally_collector_delivered_total = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(m.deliveryErrors); got != 1 {
+		t.Errorf("tally_collector_delivery_errors_total = %v, want 1", got)
 	}
 }
 
