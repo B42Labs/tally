@@ -19,7 +19,7 @@ stack so that generated code is consistent:
 | Data validation | Generated request types + explicit `Validate()` methods for cross-field rules | Wire schemas live in the OpenAPI document |
 | DB access | **pgx v5** (no ORM); **sqlc** for typed static queries | Textual SQL is the norm (TimescaleDB DDL, advisory locks, hot-path queries) — exactly what sqlc consumes |
 | Migrations | **goose**, plain SQL files embedded via `embed.FS` | One migration chain per service database (`migrations/reporting/`, `migrations/engine/`) |
-| Databases | **PostgreSQL 16 + TimescaleDB 2.x** (Reporting API), **PostgreSQL 16** plain (Engine) | Use the `timescale/timescaledb:latest-pg16` image for dev |
+| Databases | **PostgreSQL 16 + TimescaleDB 2.x** (Reporting API), **PostgreSQL 16** plain (Engine) | Use the `timescale/timescaledb:2.30.2-pg16` image, the release the base manifest pins |
 | Metrics store | **VictoriaMetrics single-node** | `-retentionPeriod=13` (months) |
 | Metrics pipeline | **OpenTelemetry Collector (contrib)** | OTLP in, Prometheus Remote Write out |
 | Service metrics | **prometheus/client_golang** | Every service exposes `/metrics` |
@@ -111,12 +111,14 @@ tally/
 │   └── kubernetes/
 │       ├── base/                  # kustomize base — one directory per component
 │       │   ├── kustomization.yaml
-│       │   ├── gateway/           # GatewayClass + Gateway (http/https/postgres) + wildcard Certificate
+│       │   ├── gateway/           # Gateway (http/https/postgres) + wildcard Certificate
 │       │   ├── timescaledb/       # StatefulSet + PVC + Service + TCPRoute
 │       │   ├── victoriametrics/   # StatefulSet + scrape.yaml ConfigMap + HTTPRoute
 │       │   ├── otel-collector/    # Deployment + config.yaml ConfigMap + HTTPRoute/GRPCRoute
 │       │   ├── reporting-api/     # Deployment + Service + HTTPRoute
 │       │   └── grafana/           # Phase 2: provisioning + dashboards JSON (ConfigMaps) + HTTPRoute
+│       ├── components/            # kustomize components an overlay lists
+│       │   └── envoy-gateway/     # GatewayClass + OTLP rate limit + the two route filters and their deny rules
 │       └── overlays/
 │           ├── dev/               # kind: namespace tally, nip.io hostnames, self-signed CA, replicas: 1
 │           └── prod/              # real hostnames + issuer; added when first deployed to a real cluster

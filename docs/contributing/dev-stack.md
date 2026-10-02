@@ -147,6 +147,13 @@ one directory each: `gateway`, `timescaledb`, `victoriametrics`,
 and `vmalert`. An overlay changes hostnames, the certificate issuer and
 environment-specific infrastructure, never the shape of what is deployed.
 
+The base is plain Gateway API and names no implementation. What needs Envoy
+Gateway is in the kustomize component
+[`deploy/kubernetes/components/envoy-gateway`](https://github.com/B42Labs/tally/tree/main/deploy/kubernetes/components/envoy-gateway),
+which the overlay lists under `components`: the GatewayClass `tally`, the rate
+limit on the two OTLP routes, and the rules that answer Grafana's
+`/api/datasources/proxy` and Alertmanager's write paths with a 403.
+
 The overlay patches a nip.io hostname onto each HTTPRoute of the base, so every
 service answers under its own name below `*.tally.127-0-0-1.nip.io`, and points
 the wildcard Certificate at the dev CA. `envoyproxy.yaml` pins the Envoy

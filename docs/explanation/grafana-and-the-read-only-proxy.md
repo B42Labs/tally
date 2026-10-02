@@ -67,10 +67,12 @@ before anyone sees it.
 
 ## What the route publishes
 
-The route publishes the whole host bar one prefix: `/api/datasources/proxy`
-answers 403 from the Gateway. The dashboards do not use it, they query through
-`/api/ds/query`, so it is refused rather than published. That rule is the outer
-of two rings and the weaker one: the sibling endpoint
+The route of the base publishes the whole host. Where an overlay lists the
+`envoy-gateway` component, as the dev and the prod overlay do, one prefix is
+taken out: `/api/datasources/proxy` answers 403 from the Gateway, through a
+filter of Envoy Gateway. The dashboards do not use that prefix, they query
+through `/api/ds/query`, so it is refused rather than published. That rule is
+the outer of two rings and the weaker one: the sibling endpoint
 `/api/datasources/uid/<uid>/resources` forwards a caller-supplied path the same
 way and cannot be denied without emptying every variable dropdown, and a
 percent-encoded spelling of the prefix reaches Grafana as the decoded path
