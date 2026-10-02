@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -721,6 +722,51 @@ type dumpLine struct {
 // is asked for is the shape of a message, and the beginning of it shows that.
 const previewMax = 512
 
+// redactionMarker is what the dump prints in place of a value it withholds.
+const redactionMarker = "[redacted]"
+
+// secretNameParts are the fragments by which a member name gives a credential
+// away. They are fragments and not whole names because services name the same
+// credential differently (auth_token, _context_auth_token, auth_password), and
+// the dump is run against deployments whose payloads nobody has seen yet.
+// connection_info is what a volume attachment describes its backend with: the
+// addresses, the user, and the secret that opens it.
+var secretNameParts = []string{"password", "token", "secret", "connection_info"}
+
+// secretMember reports whether the dump withholds the value of a JSON member of
+// that name: the name contains one of secretNameParts, in any letter case. The
+// name is all the rule reads, so it holds for whatever value stands under it.
+// The mapping table reads no member the rule matches, so the comparison the
+// dump exists for loses nothing.
+func secretMember(name string) bool {
+	name = strings.ToLower(name)
+	return slices.ContainsFunc(secretNameParts, func(part string) bool {
+		return strings.Contains(name, part)
+	})
+}
+
+// redactValue replaces the value of every member secretMember names with
+// redactionMarker, at any depth of a decoded payload. A matching member is
+// replaced whole and not descended into, whether it holds a string, a number,
+// null, an object or an array. The tree is changed in place: the dump prints a
+// notification and reads it no further.
+func redactValue(value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		for name, member := range value {
+			if secretMember(name) {
+				value[name] = redactionMarker
+				continue
+			}
+			redactValue(member)
+		}
+	case []any:
+		for _, element := range value {
+			redactValue(element)
+		}
+	}
+}
+
 // contextSecrets matches the members of an oslo request context that hold a
 // credential. An unversioned notification serializes that context next to the
 // payload, and _context_auth_token is the Keystone token of the request that
@@ -728,18 +774,23 @@ const previewMax = 512
 // operator attaches to a ticket.
 var contextSecrets = regexp.MustCompile(`("_context_(?:auth_token|password)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
 
-// printNotification writes one delivery as a JSON line. A body that does not
-// parse is printed raw rather than left out: showing an operator what the
-// deployment sends is what the dump is for, and a body this collector cannot
-// read is the most interesting thing it can find. Raw is not verbatim, though:
-// the credentials the request context carries are replaced and the rest is cut
-// off after previewMax bytes, because neither the event type nor the payload
-// shape needs any of that.
+// printNotification writes one delivery as a JSON line, and neither kind of
+// line is verbatim. A payload carries more than the mapping reads, a Keystone
+// token and the connection_info of a volume attachment among it, and the dump's
+// output is a file an operator keeps. The payload of a delivery that parses is
+// therefore printed with every member secretMember names redacted.
+//
+// A body that does not parse is printed rather than left out: showing an
+// operator what the deployment sends is what the dump is for, and a body this
+// collector cannot read is the most interesting thing it can find. It goes
+// through preview, which redacts it and cuts it off after previewMax bytes,
+// because neither the event type nor the payload shape needs more.
 func printNotification(encoder *json.Encoder, delivery amqp091.Delivery) error {
 	line := dumpLine{Exchange: delivery.Exchange, RoutingKey: delivery.RoutingKey}
 	if notification, err := ParseEnvelope(delivery.Body); err != nil {
 		line.Unparseable = preview(delivery.Body)
 	} else {
+		redactValue(notification.Payload)
 		line.MessageID = notification.MessageID
 		line.EventType = notification.EventType
 		line.Timestamp = notification.Timestamp
