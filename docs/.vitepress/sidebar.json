@@ -48,7 +48,8 @@
           "text": "Cluster",
           "collapsed": true,
           "items": [
-            { "text": "Deploy the collecting stack to a cluster", "link": "/how-to/cluster/deploy-the-collecting-stack" }
+            { "text": "Deploy the collecting stack to a cluster", "link": "/how-to/cluster/deploy-the-collecting-stack" },
+            { "text": "Use another Gateway API implementation", "link": "/how-to/cluster/use-another-gateway-api-implementation" }
           ]
         },
         {
