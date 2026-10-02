@@ -1,6 +1,6 @@
 ---
 title: OpenStack collector (tally-openstack-collector)
-description: The two modes of the OpenStack collector, its flag, its AMQP consumption, its HTTP routes and the bounds it applies to a notification.
+description: The two modes of the OpenStack collector, its flag, its AMQP consumption, its HTTP routes, its log lines and the bounds it applies to a notification.
 quadrant: reference
 audience: operator
 ---
@@ -12,9 +12,10 @@ oslo.messaging notifications from AMQP, maps them to Tally events, buffers them
 in a SQLite outbox, and posts them to the Reporting API from a loop of its own.
 Both loops retry what failed, so the process comes up while the broker or the
 Reporting API is unavailable and reports that state through the probes rather
-than through a failed start. Beside them it serves the probes and the Prometheus
-exposition on the configured port; it serves no API of its own. The process is
-assembled in
+than through a failed start. A third loop logs a `summary` line every
+`TALLY_OSC_SUMMARY_INTERVAL_S` seconds. Beside them it serves the probes and the
+Prometheus exposition on the configured port; it serves no API of its own. The
+process is assembled in
 [`cmd/tally-openstack-collector/main.go`](https://github.com/B42Labs/tally/blob/main/cmd/tally-openstack-collector/main.go).
 
 ## Flags
@@ -27,9 +28,9 @@ assembled in
 
 ## Modes
 
-Collecting is the mode without a flag: the consumer, the sender, the outbox and
-the HTTP server all run, and the configuration gate asks for everything the
-pipeline reads.
+Collecting is the mode without a flag: the consumer, the sender, the summary
+loop, the outbox and the HTTP server all run, and the configuration gate asks
+for everything the pipeline reads.
 
 `--dump` prints the notifications the broker delivers, one JSON line per
 delivery, and does nothing else: no HTTP, no outbox, no delivery. Its gate asks
@@ -201,13 +202,63 @@ request that asked it.
 `TALLY_METRICS_ENABLED` to `false` is answered 404 there. The consumer and the
 sender keep counting either way.
 
+## Log lines
+
+The collector logs JSON to stdout, one object per line, with `time`, `level`,
+`msg` and `service`, at the level `TALLY_LOG_LEVEL` names.
+
+A healthy start logs `listening` with `port`, then
+`the AMQP session is established, consuming` with `queue`, `exchanges` and
+`topics`. `exchanges` lists the exchanges the queue was bound to in this
+session; a skipped exchange is absent and is reported by
+`an exchange appeared on the broker, bound it` once it is bound. The line is
+logged again after every reconnect.
+
+`summary` is logged every `TALLY_OSC_SUMMARY_INTERVAL_S` seconds, the first one
+interval after the start, and whether or not anything happened. It carries
+these attributes:
+
+| Attribute | Meaning |
+| --- | --- |
+| `interval_seconds` | The configured interval. |
+| `connected` | Whether the consumer holds an AMQP session at the time of the line. |
+| `consumed` | Notifications mapped to an event and buffered. |
+| `skipped` | Notifications the mapping table produced no event for. |
+| `unparseable` | Deliveries whose body could not be parsed. |
+| `delivered` | Events the Reporting API accepted. |
+| `delivery_errors` | Delivery attempts the Reporting API did not accept. |
+| `buffered` | Events waiting in the outbox at the time of the line. |
+| `oldest_buffered_seconds` | Age of the oldest of them, 0 while the outbox is empty, and absent while the buffer cannot be read. |
+
+The five counts, `consumed` to `delivery_errors`, cover the time since the
+previous `summary` line.
+
+The line reads as follows:
+
+- `connected` is `false`: the consumer holds no session, and the last
+  `the AMQP session ended, reconnecting` warning carries the reason.
+- `connected` is `true` and `consumed`, `skipped` and `unparseable` are 0: the
+  consumer acknowledged no notification in the interval. Either none reached
+  the queue, or they wait on the broker: behind a paused consumer, which has
+  logged `the outbox is at its bound, pausing the consumer` and shows
+  `buffered` at 90 % of `TALLY_OSC_BUFFER_MAX_EVENTS` or above, or behind an
+  outbox that refuses them, which logs
+  `buffering an event failed, requeueing the notification`.
+- `skipped` is above 0 and `consumed` is 0: notifications arrive and none is of
+  a mapped type.
+- `buffered` and `oldest_buffered_seconds` rise from line to line while
+  `delivered` stays 0: the Reporting API takes nothing, and `delivery_errors`
+  counts the attempts.
+
+`TALLY_LOG_LEVEL=WARN` hides both lines, and `--dump` logs neither.
+
 ## Signals and exit status
 
 SIGINT and SIGTERM begin a graceful shutdown. The HTTP server stops accepting
 connections, in-flight requests get 10 seconds, the consumer stops reading from
-the broker, the sender finishes the attempt it is in, and the outbox is closed
-once both have returned. What is buffered stays in the file, where the next
-start picks it up, and the process exits 0.
+the broker, the sender finishes the attempt it is in, the summary loop ends, and
+the outbox is closed once all three have returned. What is buffered stays in the
+file, where the next start picks it up, and the process exits 0.
 
 Every other failure exits 1: a configuration that was refused, an outbox that
 could not be opened, and a listener that ended with anything but a closed

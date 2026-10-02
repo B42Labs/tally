@@ -175,13 +175,17 @@ notifications it then consumes, and what the cloud has to publish for it, is
 
    ```sh
    systemctl is-active tally-openstack-collector
-   journalctl -u tally-openstack-collector -n 1 -o cat
+   journalctl -u tally-openstack-collector -n 2 -o cat
    ```
 
    ```text
    active
    {"time":"2026-07-09T14:22:00.512Z","level":"INFO","msg":"listening","service":"tally-openstack-collector","port":8080}
+   {"time":"2026-07-09T14:22:00.731Z","level":"INFO","msg":"the AMQP session is established, consuming","service":"tally-openstack-collector","queue":"tally-notifications","exchanges":["nova","neutron","openstack","glance"],"topics":["notifications.info"]}
    ```
+
+   A second line that reads `the AMQP session ended, reconnecting` carries the
+   broker's refusal in `error`.
 
    A start that ends in `failed` names the value to fix. An empty credential
    file reports `TALLY_OSC_AMQP_URL_FILE: file /etc/tally/amqp-url is empty`,
@@ -344,4 +348,18 @@ notifications it then consumes, and what the cloud has to publish for it, is
 
    ```text
    active
+   ```
+
+4. Read the last summary line. The collector logs one every
+   `TALLY_OSC_SUMMARY_INTERVAL_S` seconds, 60 by default, with what it consumed
+   and delivered since the previous one; the
+   [log lines](/reference/command-line/tally-openstack-collector#log-lines)
+   section states every attribute:
+
+   ```sh
+   journalctl -u tally-openstack-collector -o cat | grep '"msg":"summary"' | tail -1
+   ```
+
+   ```json
+   {"time":"2026-07-09T14:23:00.514Z","level":"INFO","msg":"summary","service":"tally-openstack-collector","interval_seconds":60,"connected":true,"consumed":14,"skipped":37,"unparseable":0,"delivered":12,"delivery_errors":0,"buffered":2,"oldest_buffered_seconds":3}
    ```

@@ -493,7 +493,8 @@ the other collector.
    ```
 
    ```json
-   {"time":"2026-07-09T14:22:00.512Z","level":"INFO","msg":"listening","port":8080}
+   {"time":"2026-07-09T14:22:00.512Z","level":"INFO","msg":"listening","service":"tally-openstack-collector","port":8080}
+   {"time":"2026-07-09T14:22:00.731Z","level":"INFO","msg":"the AMQP session is established, consuming","service":"tally-openstack-collector","queue":"tally-notifications","exchanges":["nova","neutron","openstack","glance"],"topics":["notifications.info"]}
    ```
 
 ## Check the result
@@ -551,3 +552,17 @@ the other collector.
    policy definition, which is `#{}` where no policy matches, must carry no
    `delivery-limit`; exclude `tally-notifications` from such a policy's
    pattern.
+
+5. Read the last summary line. The collector logs one every
+   `TALLY_OSC_SUMMARY_INTERVAL_S` seconds, 60 by default, with what it consumed
+   and delivered since the previous one; the
+   [log lines](/reference/command-line/tally-openstack-collector#log-lines)
+   section states every attribute:
+
+   ```sh
+   grep '"msg":"summary"' collector.log | tail -1
+   ```
+
+   ```json
+   {"time":"2026-07-09T14:23:00.514Z","level":"INFO","msg":"summary","service":"tally-openstack-collector","interval_seconds":60,"connected":true,"consumed":14,"skipped":37,"unparseable":0,"delivered":12,"delivery_errors":0,"buffered":2,"oldest_buffered_seconds":3}
+   ```

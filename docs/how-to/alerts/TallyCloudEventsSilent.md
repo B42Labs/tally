@@ -35,6 +35,10 @@ under [Known limitations](/explanation/dual-ingestion-and-reconciliation#known-l
    its reason in the log
    ([the HTTP routes](/reference/command-line/tally-openstack-collector#http-routes)
    and [the gauges and the counter](/reference/observability/metrics#openstack-collector)).
+   The last
+   [`summary` line](/reference/command-line/tally-openstack-collector#log-lines)
+   of the collector's log carries the same numbers for the last interval, and
+   `connected` there says whether the consumer holds a session.
 2. The broker connection.
    [`--dump`](/how-to/openstack/verify-a-deployment-with-the-dump) prints one
    line per delivery and reads nothing but the AMQP variables, so it says
