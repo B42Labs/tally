@@ -45,6 +45,9 @@ const (
 // the collector's default.
 const testTopic = "notifications.info"
 
+// sessionEstablished is the message a session logs once it is consuming.
+const sessionEstablished = "the AMQP session is established, consuming"
+
 // The consumer's waits, shortened so that a test spends milliseconds where the
 // collector spends seconds.
 const (
@@ -802,13 +805,34 @@ func TestConsumerSkipsAMissingExchangeAndBindsItLater(t *testing.T) {
 
 	const skipped = "exchanges are missing on the broker"
 	var warning string
+	var sessions []string
 	for _, line := range strings.Split(logs.String(), "\n") {
 		if strings.Contains(line, skipped) {
 			warning = line
 		}
+		if strings.Contains(line, sessionEstablished) {
+			sessions = append(sessions, line)
+		}
 	}
 	if !strings.Contains(warning, "glance") {
 		t.Errorf("the log line holding %q = %q, want it to name glance", skipped, warning)
+	}
+
+	// The session line names what the queue was bound to when the session began,
+	// which is nova alone: the warning above is where the skipped exchange is
+	// named. The buffered notification is what says the line is written, because
+	// the consumer reports itself connected one statement before it logs.
+	if len(sessions) != 1 {
+		t.Fatalf("%d log lines hold %q, want 1:\n%s", len(sessions), sessionEstablished, logs.String())
+	}
+	for _, want := range []string{"level=INFO", "queue=" + queueName, "exchanges=[nova]", "topics=[" + testTopic + "]"} {
+		if !strings.Contains(sessions[0], want) {
+			t.Errorf("the log line holding %q = %q, want it to carry %s", sessionEstablished, sessions[0], want)
+		}
+	}
+	if strings.Contains(sessions[0], "glance") {
+		t.Errorf("the log line holding %q = %q, want it to leave the skipped glance out",
+			sessionEstablished, sessions[0])
 	}
 
 	// The notification is published until it is buffered, because the bind follows
@@ -823,6 +847,11 @@ func TestConsumerSkipsAMissingExchangeAndBindsItLater(t *testing.T) {
 	waitFor(t, "the bind is logged", func() bool {
 		return strings.Contains(logs.String(), "an exchange appeared on the broker, bound it")
 	})
+	// The bind is the watcher's and belongs to the session that skipped glance,
+	// so it logs no second session line.
+	if got := strings.Count(logs.String(), sessionEstablished); got != 1 {
+		t.Errorf("%q is logged %d times after the later bind, want 1", sessionEstablished, got)
+	}
 }
 
 // TestConsumerRequiresEveryExchangeWhenToldTo covers the switch that keeps the
@@ -844,6 +873,10 @@ func TestConsumerRequiresEveryExchangeWhenToldTo(t *testing.T) {
 		return strings.Contains(logs.String(), want)
 	})
 	staysDisconnected(t, consumer, "while a required exchange is missing")
+	// A session that fails before it consumes logs no session line.
+	if strings.Contains(logs.String(), sessionEstablished) {
+		t.Errorf("the log holds %q while a required exchange is missing:\n%s", sessionEstablished, logs.String())
+	}
 
 	// The refused session left the broker as it found it. The declare runs on a
 	// channel opened for it alone, because the 404 closes that channel.
@@ -856,6 +889,9 @@ func TestConsumerRequiresEveryExchangeWhenToldTo(t *testing.T) {
 
 	declareExchanges(t, publisher, "glance")
 	waitFor(t, "the consumer connects once every exchange exists", consumer.Connected)
+	waitFor(t, "the session that consumes logs its line", func() bool {
+		return strings.Contains(logs.String(), sessionEstablished)
+	})
 
 	body, messageID := fixture(t, "compute-instance-create-end")
 	publish(t, publisher, "nova", body)
@@ -863,6 +899,29 @@ func TestConsumerRequiresEveryExchangeWhenToldTo(t *testing.T) {
 	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
 		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
 	}
+}
+
+// TestConsumerLogsEverySessionItEstablishes covers the reconnect as the log
+// shows it: a deleted queue ends the session, and the session that follows
+// declares the queue again and logs a line of its own.
+func TestConsumerLogsEverySessionItEstablishes(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+
+	logger, logs := recordingLogger(t)
+	consumer, _, _ := startConsumerWithLogger(t,
+		testConfig(url, []string{"nova"}, testBufferMax), newOutbox(t), logger)
+	waitFor(t, "the consumer is connected", consumer.Connected)
+
+	if _, err := publisher.QueueDelete(queueName, false, false, false); err != nil {
+		t.Fatalf("deleting the queue %s: %v", queueName, err)
+	}
+	waitFor(t, "the ended session and the one after it are logged", func() bool {
+		logged := logs.String()
+		return strings.Contains(logged, "the broker stopped delivering") &&
+			strings.Count(logged, sessionEstablished) == 2
+	})
 }
 
 // TestConsumerStopsWhileAnExchangeIsStillMissing covers the shutdown of a
