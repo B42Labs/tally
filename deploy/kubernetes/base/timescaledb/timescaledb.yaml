@@ -34,7 +34,15 @@ spec:
     spec:
       containers:
         - name: timescaledb
-          image: timescale/timescaledb:latest-pg16
+          # A named release, the one the tag latest-pg16 pointed to on
+          # 2026-10-02. internal/reporting/store/storetest/storetest.go carries
+          # the same value, and so do roadmap/00-conventions.md and
+          # roadmap/01-phase-1-core-platform-openstack.md, so a version bump
+          # edits all four files. A database keeps the extension version it was
+          # created with until ALTER EXTENSION timescaledb UPDATE. An image
+          # older than that version still starts on it and passes both probes,
+          # and every statement fails on the library that image lacks.
+          image: timescale/timescaledb:2.30.2-pg16
           ports:
             - name: postgres
               containerPort: 5432

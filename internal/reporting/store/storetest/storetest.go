@@ -20,10 +20,14 @@ import (
 	"github.com/b42labs/tally/internal/reporting/store"
 )
 
-// The container the tests run against. It is the image the dev stack uses, so
-// tests meet the same TimescaleDB version as a developer's cluster.
+// The container the tests run against. The image is the release
+// deploy/kubernetes/base/timescaledb/timescaledb.yaml deploys, so tests meet
+// the TimescaleDB release a cluster created from that manifest runs. A cluster
+// with an older volume runs the same image on the extension version the volume
+// was created with. TestImageIsTheOneTheBaseDeploys holds the two values
+// together.
 const (
-	image = "timescale/timescaledb:latest-pg16"
+	image = "timescale/timescaledb:2.30.2-pg16"
 	// ContainerPort is where Postgres listens inside the container. It is
 	// exported because a test that follows the container across a restart has to
 	// ask for the host port it is published on.
