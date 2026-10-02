@@ -696,7 +696,7 @@ func deletedObjects(t *testing.T, k kustomization) []string {
 }
 
 // baseListeners returns the listener names of the base's Gateway, in order.
-// The file carries the GatewayClass first, so every document is read.
+// Every document of the file is read, so the Gateway need not be the first.
 func baseListeners(t *testing.T) []string {
 	t.Helper()
 

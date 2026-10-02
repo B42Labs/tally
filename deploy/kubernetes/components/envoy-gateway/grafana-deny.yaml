@@ -1,0 +1,14 @@
+# The response the deny rule in kustomization.yaml sends. Envoy Gateway's
+# extension filter, the Gateway API having no core way to answer a request
+# without a backend.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: grafana-deny-datasource-proxy
+spec:
+  directResponse:
+    statusCode: 403
+    contentType: text/plain
+    body:
+      type: Inline
+      inline: "The Grafana datasource proxy is not published.\n"

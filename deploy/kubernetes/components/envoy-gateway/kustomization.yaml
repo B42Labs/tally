@@ -1,0 +1,105 @@
+# What the stack needs Envoy Gateway for. The base is plain Gateway API and
+# names no implementation. This component adds the GatewayClass bound to Envoy
+# Gateway's controller, the rate limit on the two OTLP routes, and the 403
+# answers on the Grafana and the Alertmanager route.
+#
+# Both overlays list it. A cluster behind another Gateway API implementation
+# builds on the base without it, which
+# docs/how-to/cluster/use-another-gateway-api-implementation.md walks through.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - gatewayclass.yaml
+  - otlp-rate-limit.yaml
+  - grafana-deny.yaml
+  - alertmanager-deny.yaml
+
+# Each patch adds one rule to a route of the base, at index 0 and so ahead of
+# the rule the base carries. The Gateway API ranks rules by what they match and
+# not by their position, so the index fixes the order of the rendered list and
+# nothing else.
+patches:
+  # Nothing in the base needs the datasource proxy: a provisioned dashboard
+  # queries through /api/ds/query, so the prefix is refused rather than
+  # published.
+  #
+  # This is the outer of two rings and the weaker one. It closes one spelling
+  # of one endpoint: /api/datasources/uid/<uid>/resources forwards a
+  # caller-supplied path the same way and cannot be denied without emptying
+  # every variable dropdown, and a percent-encoded spelling of the prefix
+  # below reaches Grafana as this path all the same, because Grafana routes on
+  # the decoded one. What actually bounds the tunnel is the far end: the
+  # datasource URL names the vmauth container in the Grafana pod, which serves
+  # reads and refuses everything else.
+  #
+  # Gateway API resolves path prefixes longest-match-first, so this rule wins
+  # over the base's / rule wherever it matches, whatever the order in the list.
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: grafana
+    patch: |
+      - op: add
+        path: /spec/rules/0
+        value:
+          matches:
+            - path:
+                type: PathPrefix
+                value: /api/datasources/proxy
+          filters:
+            - type: ExtensionRef
+              extensionRef:
+                group: gateway.envoyproxy.io
+                kind: HTTPRouteFilter
+                name: grafana-deny-datasource-proxy
+
+  # Port 9093 answers reads and writes on one API. Under /api/v2 a POST
+  # creates a silence or injects an alert, a PUT edits one and a DELETE
+  # expires one; /-/reload re-reads the config on demand, and /debug carries
+  # the pprof endpoints. The base's forwarding rule publishes none of them, so
+  # this one is not what keeps them off the host: it is what answers them, so
+  # the UI's silence form is told why it was turned away rather than left with
+  # a 404.
+  #
+  # The base's forwarding rule names longer prefixes than /api/v2, and the
+  # Gateway API ranks a longer prefix above a method match. Its matches
+  # therefore name GET, so a POST /api/v2/silences never reaches it and lands
+  # here.
+  #
+  # Silences are created from inside the cluster instead, with the amtool the
+  # image ships; docs/how-to/observability/deploy-alerting.md carries the
+  # command.
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: alertmanager
+    patch: |
+      - op: add
+        path: /spec/rules/0
+        value:
+          matches:
+            - path:
+                type: PathPrefix
+                value: /api/v2
+              method: POST
+            - path:
+                type: PathPrefix
+                value: /api/v2
+              method: PUT
+            - path:
+                type: PathPrefix
+                value: /api/v2
+              method: DELETE
+            - path:
+                type: PathPrefix
+                value: /-/reload
+            - path:
+                type: PathPrefix
+                value: /debug
+          filters:
+            - type: ExtensionRef
+              extensionRef:
+                group: gateway.envoyproxy.io
+                kind: HTTPRouteFilter
+                name: alertmanager-deny-writes
