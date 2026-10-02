@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -275,6 +279,98 @@ func TestRunServesTheScrapeRoute(t *testing.T) {
 			assertShutdown(t, done)
 		})
 	}
+}
+
+// TestRunLogsTheSummary holds the assembled process to the third loop: with the
+// interval at one second the collector logs a summary line on its own, and the
+// line reports the consumer as disconnected, because the broker is unreachable.
+//
+// The line is read off the process's stdout, which is where run writes its log.
+// The test therefore swaps os.Stdout for a pipe, and since run makes its logger
+// the default one, the default logger is put back as well. It does not run in
+// parallel for the same reason.
+func TestRunLogsTheSummary(t *testing.T) {
+	env := serveEnv(t, freePort(t))
+	env["TALLY_LOG_LEVEL"] = "INFO"
+	env["TALLY_OSC_SUMMARY_INTERVAL_S"] = "1"
+	setEnv(t, env)
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("opening a pipe: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	returned := make(chan struct{})
+	drained := make(chan struct{})
+
+	stdout, defaultLogger := os.Stdout, slog.Default()
+	// slog.SetDefault also points the log package at the new default's handler,
+	// and setting the previous default back does not undo that.
+	logWriter, logFlags := log.Writer(), log.Flags()
+	os.Stdout = writer
+	t.Cleanup(func() {
+		// The write end is closed only once run has returned, so the collector
+		// never logs into a closed pipe, and the reader is waited for last: the
+		// closed write end is what ends it.
+		cancel()
+		select {
+		case <-returned:
+		case <-time.After(shutdownTimeout):
+		}
+		os.Stdout = stdout
+		slog.SetDefault(defaultLogger)
+		log.SetOutput(logWriter)
+		log.SetFlags(logFlags)
+		_ = writer.Close()
+		<-drained
+		_ = reader.Close()
+	})
+
+	// The reader keeps reading until the pipe is closed and never blocks on the
+	// test: a pipe nobody drains fills up and holds the collector in a log write.
+	summary := make(chan map[string]any, 1)
+	go func() {
+		defer close(drained)
+		for lines := bufio.NewScanner(reader); lines.Scan(); {
+			var line map[string]any
+			if err := json.Unmarshal(lines.Bytes(), &line); err != nil || line["msg"] != "summary" {
+				continue
+			}
+			select {
+			case summary <- line:
+			default:
+			}
+		}
+	}()
+	go func() {
+		defer close(returned)
+		done <- run(ctx, false)
+	}()
+
+	var line map[string]any
+	select {
+	case line = <-summary:
+	case err := <-done:
+		t.Fatalf("run() returned %v before it logged a summary", err)
+	case <-time.After(startupTimeout):
+		t.Fatalf("the collector logged no summary within %v", startupTimeout)
+	}
+	// A JSON number decodes to a float64.
+	for name, want := range map[string]any{
+		"service":          "tally-openstack-collector",
+		"interval_seconds": float64(1),
+		"connected":        false,
+		"consumed":         float64(0),
+		"buffered":         float64(0),
+	} {
+		if got := line[name]; got != want {
+			t.Errorf("the summary line's %s = %v, want %v (line %v)", name, got, want, line)
+		}
+	}
+
+	cancel()
+	assertShutdown(t, done)
 }
 
 func TestRunRefusesToStart(t *testing.T) {
