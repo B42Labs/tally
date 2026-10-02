@@ -148,8 +148,10 @@ what builds, installs, verifies and purges the package on a runner, and
 
 `go.mod` and `go.sum` pin every module the build resolves. Renovate proposes
 updates as pull requests: Go modules, npm packages, `.nvmrc` and the GitHub
-Actions the workflows use. Its configuration, `renovate.json`, is
-`config:recommended` and nothing else.
+Actions the workflows use. Its configuration, `renovate.json`, extends
+`config:recommended` and adds one rule: the `ghcr.io/b42labs` images move in
+one pull request. The prod overlay names two of them at one tag, and a pull
+request that moved one alone would fail the test that holds the two tags equal.
 
 The site carries a Node toolchain beside that. `package.json` pins `vitepress`
 exactly, at `1.6.4`, and its `engines` field asks for Node 24 or newer.
