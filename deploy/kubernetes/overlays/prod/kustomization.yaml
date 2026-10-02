@@ -2,8 +2,11 @@
 #
 # The Reporting API, the OTLP collector, the store, the alerting pair and
 # Grafana run here, under the hostnames hosts.yaml names and behind a
-# certificate Let's Encrypt signs. The metering scheduler does not run here,
-# and nothing that answers without a credential is published.
+# certificate Let's Encrypt signs. The OpenStack collector runs here too: it
+# consumes the notifications of the cloud collector.env names from a broker
+# outside the cluster and posts them to the Reporting API. The metering
+# scheduler does not run here, and nothing that answers without a credential is
+# published.
 #
 # issuers.yaml is deliberately not listed here; see the comment in that file.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -27,21 +30,40 @@ resources:
 # GatewayClass, the OTLP rate limit and the two 403 answers. kustomize applies
 # the component before the patches below, which is why one of them can delete
 # a filter the component declares.
+#
+# The second component is the collector: a Deployment with its outbox on a
+# claim. Its kustomization.yaml states what an overlay has to supply, which the
+# images, secretGenerator and configMapGenerator entries below do, all but the
+# Secret of the ingest token.
 components:
   - ../../components/envoy-gateway
+  - ../../components/openstack-collector
 
-# The Reporting API image the release workflow publishes. The operator moves
-# newTag on every release, and the tag has to exist in the registry before
-# `make prod-up` runs. The engine image has no entry because its CronJob is
-# deleted below.
+# The Reporting API and the collector image the release workflow publishes. The
+# overlay deploys one release, so both entries carry one tag: the operator
+# moves both on every release, `make prod-up` refuses two different ones, and
+# the tag has to exist in the registry before it runs. The release workflow
+# publishes the collector image from the first release after v0.3.0 on: at
+# v0.3.0 itself no registry holds it, and a deployment moves both tags to a
+# later release. The engine image has no entry because its CronJob is deleted
+# below.
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
+    newTag: v0.3.0
+  - name: tally-openstack-collector
+    newName: ghcr.io/b42labs/tally-openstack-collector
     newTag: v0.3.0
 
 # The credentials of this cluster. Each file is untracked and copied from the
 # .example beside it, which says how to fill every key. `make prod-up` checks
 # that each exists with every value filled in before it applies anything.
+#
+# tally-collector-token, the Secret of the collector's ingest token, is in no
+# generator. A credential can be issued only against the migrated database, so
+# the operator creates the Secret with kubectl from the output of
+# `tally-reporting-admin create-ingest-credential` after the first
+# `make prod-up`. The collector pod waits in ContainerCreating until then.
 secretGenerator:
   - name: tally-db
     envs:
@@ -58,14 +80,24 @@ secretGenerator:
   - name: tally-vm-admin
     envs:
       - secrets/tally-vm-admin.env
+  - name: tally-collector-amqp
+    envs:
+      - secrets/tally-collector-amqp.env
 
 # The scrape config of this cluster, in place of the base's. What the file
 # keeps, and why, is written in its own header.
+#
+# The second entry is the non-secret settings of the collector, one variable
+# per line of collector.env. The file is tracked and ships with an empty
+# TALLY_OSC_CLOUD, which `make prod-up` refuses.
 configMapGenerator:
   - name: victoriametrics-scrape
     behavior: replace
     files:
       - victoriametrics/scrape.yaml
+  - name: tally-openstack-collector
+    envs:
+      - collector.env
 
 patches:
   # The UIs of the store, vmalert and Alertmanager answer without a credential,
