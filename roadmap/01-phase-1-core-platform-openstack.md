@@ -76,7 +76,8 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
   port and does not have it on every Mac, and rootless Docker and Podman cannot publish one
   at all. Only the host binding moves — node ports, Envoy Service ports, and Gateway
   listeners keep the standard numbers, so prod is unaffected.
-- `deploy/kubernetes/base/gateway/` — `GatewayClass` `tally` (Envoy Gateway controller) and
+- `deploy/kubernetes/components/envoy-gateway/` — `GatewayClass` `tally` (Envoy Gateway
+  controller), listed by both overlays. `deploy/kubernetes/base/gateway/` —
   one `Gateway` `tally` with listeners `http` (:80, `RequestRedirect` → https), `https`
   (:443, wildcard certificate from a cert-manager `Certificate`), `postgres` (:5432, TCP;
   Gateway API experimental channel for `TCPRoute`). Dev hostname scheme
@@ -85,7 +86,7 @@ WP1.1 scaffolding ─▶ WP1.2 core library ─▶ WP1.3 API skeleton+DB ─▶ 
   redirect filter takes no port in the base (prod redirects to 443); the dev overlay patches
   `port: 8443` into it so the `Location` header points at a port that is actually open.
 - `deploy/kubernetes/base/` (kustomize base) with components:
-  - `timescaledb/` — StatefulSet, image `timescale/timescaledb:latest-pg16`, DB
+  - `timescaledb/` — StatefulSet, image `timescale/timescaledb:2.30.2-pg16`, DB
     `tally_reporting`, PVC, readiness probe `pg_isready`, Service, `TCPRoute` on the
     `postgres` listener → dev: `db.tally.127-0-0-1.nip.io:5432` (hostname is cosmetic —
     TCP routing is by listener port)

@@ -170,12 +170,16 @@ put into it, and `/metrics` names the delivery integrations it is configured
 with. The UI's Status page reads the first of those and reports an error; that
 is the endpoint the route withholds.
 
-A second rule answers `POST`, `PUT` and `DELETE` under `/api/v2`, plus
-`/-/reload` and `/debug`, with a 403. None of those is published either, so what
-this rule adds is an answer that says why: the "New Silence" form the UI offers
-is told it was refused rather than left with a 404. The read matches name `GET`
-for that to work, because the Gateway API ranks a longer path prefix above a
-method match and `/api/v2/silences` is longer than `/api/v2`.
+Where an overlay lists the `envoy-gateway` component, a second rule answers
+`POST`, `PUT` and `DELETE` under `/api/v2`, plus `/-/reload` and `/debug`, with
+a 403. None of those is published either, so what this rule adds is an answer
+that says why: the "New Silence" form the UI offers is told it was refused
+rather than left with a 404. The read matches name `GET` for that to work,
+because the Gateway API ranks a longer path prefix above a method match and
+`/api/v2/silences` is longer than `/api/v2`. The rule answers through a filter
+of Envoy Gateway, which is why it is in the component and not in the base.
+Without the component those paths get the Gateway's 404 like everything else
+the route does not name.
 
 ## When an expected alert does not appear
 

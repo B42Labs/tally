@@ -128,14 +128,19 @@ They carry different amounts of authority:
 - The two OTLP hostnames accept metrics from whoever holds the Basic credentials
   above, and refuse everything else. What they accept is written to the billing
   store under the producer's own labels, which is why they are not open. Both
-  are rate limited at the Gateway to 60 requests a second by the
-  `BackendTrafficPolicy` in
-  [`otel-collector.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/otel-collector/otel-collector.yaml),
+  are rate limited at the Gateway to 10 requests a second per client address
+  by the `BackendTrafficPolicy` in
+  [`otlp-rate-limit.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/components/envoy-gateway/otlp-rate-limit.yaml),
   because refusing a request is the expensive half of Basic auth: the username
   is published here and in the Ceilometer publisher's URL, so every wrong password
   costs the collector a bcrypt comparison, tens of milliseconds of CPU against
   one replica's 100m request, while costing the sender nothing. The proxy
-  answers a request over the limit with 429 before the collector sees it.
+  answers a request over the limit with 429 before the collector sees it. The
+  policy is an Envoy Gateway object, so the limit exists where an overlay lists
+  the `envoy-gateway` component, as the dev and the prod overlay do. Behind
+  another implementation the limit is the operator's to set up, as
+  [Use another Gateway API implementation](/how-to/cluster/use-another-gateway-api-implementation)
+  says.
 - `vm.tally.example.com` publishes VictoriaMetrics' read paths alone:
   `/api/v1/query`, `/api/v1/query_range`, `/targets`, and `/vmui`. The route
   matches those prefixes and nothing else, so `/api/v1/write` and

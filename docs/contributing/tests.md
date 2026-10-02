@@ -35,9 +35,12 @@ in milliseconds.
 Every file named `*_integration_test.go`, and every test that imports one of
 the two `storetest` packages, starts a database container of its own.
 
-`internal/reporting/store/storetest` runs TimescaleDB on
-`timescale/timescaledb:latest-pg16`, the image the dev cluster runs, so a test
-meets the version a developer's cluster does.
+`internal/reporting/store/storetest` runs TimescaleDB on the image the base's
+`timescaledb.yaml` deploys, so a test meets the release a cluster created from
+that manifest runs. A cluster with an older volume runs the same image on the
+extension version the volume was created with.
+`TestImageIsTheOneTheBaseDeploys` in that package reads the manifest and fails
+when the two tags differ.
 `internal/engine/store/storetest` runs plain PostgreSQL 16 on `postgres:16`,
 without the TimescaleDB extension the reporting side needs. Both wait until
 the server answers a query rather than until it logs a line, apply the real
@@ -168,16 +171,19 @@ mismatch that would otherwise fail quietly.
   outbox volume puts the undelivered events in the writable layer that
   `docker compose down` drops, and a missing `extra_hosts` entry sends every
   flush to a name the container's resolver does not know.
+- `deploy/kubernetes/base/manifest_test.go` pins the base to plain Gateway
+  API. An object in the API group of one implementation, a reference to such a
+  group, a GatewayClass or an `ExtensionRef` filter renders in both overlays,
+  and the apply fails only on a cluster that runs another implementation.
 - `deploy/kubernetes/base/alertmanager/manifest_test.go` pins who may change
-  Alertmanager's state and where a firing alert ends up. A route that forwards
-  `POST /api/v2/silences` renders exactly like one that refuses it, and a
-  critical alert that repeats no sooner than the rest is noticeable only once
-  an incident is four hours old.
+  Alertmanager's state and where a firing alert ends up. A route whose match
+  names no method forwards `POST /api/v2/silences` and renders exactly like one
+  that names `GET`, and a critical alert that repeats no sooner than the rest
+  is noticeable only once an incident is four hours old.
 - `deploy/kubernetes/base/grafana/manifest_test.go` pins how far an anonymous
   request reaches. A pod that mounts the wrong Secret key still passes its
-  readiness probe, a route that publishes the datasource proxy still renders
-  every panel, and a session cookie without `Secure` looks the same in the
-  browser.
+  readiness probe, a datasource that names the store still renders every
+  panel, and a session cookie without `Secure` looks the same in the browser.
 - `deploy/kubernetes/base/tally-engine/manifest_test.go` pins the scheduler
   CronJob's contract with the engine binary and with the secret it reads its
   two databases from. A manifest that lost the tick argument runs the engine's
@@ -187,23 +193,33 @@ mismatch that would otherwise fail quietly.
   creates the engine's database on a fresh cluster. A StatefulSet that lost an
   initdb mount starts a Postgres which passes both probes and answers every
   reporting query, and what is missing surfaces one step later in
-  `make migrate`.
+  `make migrate`. It holds the image to a release tag as well, because a tag
+  without a release is whatever the registry points it at when a node pulls
+  it.
 - `deploy/kubernetes/base/vmalert/manifest_test.go` pins whether an evaluated
   rule reaches anyone. A vmalert that has lost `-notifier.url` still starts,
   still evaluates every rule and still answers its probes while nothing is
   ever posted to Alertmanager.
+- `deploy/kubernetes/components/envoy-gateway/manifest_test.go` pins what the
+  stack takes from Envoy Gateway: the GatewayClass, the rate limit on the OTLP
+  routes, and the two rules that answer a request with a 403. A policy whose
+  target names no route leaves both OTLP hostnames unlimited, and a deny rule
+  that references a filter no file declares still renders.
 - `deploy/kubernetes/overlays/dev/manifest_test.go` pins the two files this
   overlay adds to the metrics pipeline. A scrape config that dropped or
   renamed a job of the base leaves `TallyScrapeTargetDown`,
   `TallyScrapeJobMissing` and `TallyExporterServiceSilent` selecting jobs the
   cluster no longer scrapes, and neither the scrape nor the rules fail on
-  their own.
+  their own. It asserts that the overlay lists the `envoy-gateway` component
+  too: without the entry the overlay renders, and the cluster has no
+  GatewayClass.
 - `deploy/kubernetes/overlays/prod/manifest_test.go` pins where the prod
   overlay's names come from and what it keeps off the internet. A replacement
   aimed at the wrong field, a delete patch lost in an edit, or a listener
   index that no longer names `postgres` still renders a valid overlay, and the
   first sign is a wrong hostname or an unauthenticated service on a public
-  address.
+  address. The same goes for a `components` entry lost in an edit, which
+  leaves the cluster without a GatewayClass and without the OTLP rate limit.
 - `deploy/kubernetes/overlays/prod/makefile_test.go` runs the prod targets of
   the Makefile up to the refusal of each guard, in a throwaway Git repository
   and against a kubeconfig that names no cluster. Without the guards an empty
