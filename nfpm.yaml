@@ -1,8 +1,8 @@
 # The Debian package of the OpenStack collector, built by `make deb`.
 #
-# The collector is the one binary that runs beside a cloud rather than in the
-# cluster, on a control node that has no container runtime. Everything else
-# here ships as an image (Dockerfile).
+# The package is for a control node that has no container runtime. In a cluster
+# the collector runs the same binary from its image (Dockerfile), which is how
+# everything else here ships.
 name: tally-openstack-collector
 arch: ${GOARCH}
 platform: linux

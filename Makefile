@@ -464,13 +464,13 @@ images:
 		docker build --build-arg "CMD=$$service" -t "$$service:dev" .; \
 	done
 
-# The collector is the one binary that runs on a host rather than in a cluster,
-# so it is the one that is packaged. The build flags are the Dockerfile's, so
-# the packaged binary is the image's binary. nfpm reads VERSION and GOARCH out
-# of its environment, which is why they are exported here rather than written
-# into nfpm.yaml. Docker is not involved, and neither is a tool on the host:
-# this runs on macOS as well, where the .deb it writes can be read with
-# `ar x` and `tar tzvf data.tar.gz`.
+# The collector runs on a control node from this package or in a cluster from
+# its image, so it is the one binary that is packaged. The build flags are the
+# Dockerfile's, so the packaged binary is the image's binary. nfpm reads VERSION
+# and GOARCH out of its environment, which is why they are exported here rather
+# than written into nfpm.yaml. Docker is not involved, and neither is a tool on
+# the host: this runs on macOS as well, where the .deb it writes can be read
+# with `ar x` and `tar tzvf data.tar.gz`.
 ## deb: build the Debian package of the OpenStack collector into dist/
 deb:
 	GOOS=linux GOARCH=$(DEB_GOARCH) CGO_ENABLED=0 go build -trimpath \
