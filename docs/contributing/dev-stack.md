@@ -434,7 +434,10 @@ section 2 of
 reserves it for the first deployment to a real cluster.
 
 Against the dev overlay, the prod overlay takes the Reporting API image from
-`ghcr.io` at a release tag instead of `kind load`. Its certificate is signed by
+`ghcr.io` at a release tag instead of `kind load`. It lists the
+`openstack-collector` component as well and pulls the collector image at the
+same tag, so the collector runs in the cluster; the dev stack keeps its
+collector in compose, beside its broker. Its certificate is signed by
 a Let's Encrypt ClusterIssuer over HTTP-01 and names the four published
 hostnames instead of a wildcard from the dev CA. Every hostname comes from
 `hosts.yaml` through kustomize replacements, and the secrets come from

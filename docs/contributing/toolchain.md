@@ -89,12 +89,18 @@ has two stages: the first compiles a static binary with `CGO_ENABLED=0`,
 `gcr.io/distroless/static-debian12:nonroot` and runs it as `nonroot`. Dev and
 prod run the same image.
 
-`IMAGES` is wider than `SERVICES`. `SERVICES` is what `make up` loads into
-kind, `tally-reporting` and `tally-engine`;
-[The dev stack](/contributing/dev-stack) is that cluster. `IMAGES` adds
-`tally-openstack-collector` and `tally-openstack-simulator`, which run beside a
-broker rather than in the cluster. A release pushes the two `SERVICES` images to
-GHCR; [Releases](#releases) says how.
+The Makefile keeps four lists of images. `SERVICES` is what `make up` loads
+into kind, `tally-reporting` and `tally-engine`;
+[The dev stack](/contributing/dev-stack) is that cluster. `IMAGES` is what
+`make images` builds. It adds `tally-openstack-collector` and
+`tally-openstack-simulator`, which the dev stack runs in compose beside a
+broker. `RELEASE_IMAGES` is what a release pushes to GHCR: the two `SERVICES`
+images, `tally-openstack-collector`, which the `openstack-collector` kustomize
+component runs in a cluster, and `tally-reporting-admin`. The admin CLI is in
+no other list, because the dev stack runs it with `go run`.
+[Releases](#releases) says how the push works. `SIM_IMAGES` is what
+`make simulator-up` builds, the collector and the simulator alone;
+[The simulator stack](/contributing/dev-stack#the-simulator-stack) says why.
 
 `.dockerignore` keeps `node_modules/` and the site's build and cache
 directories, `docs/.vitepress/dist/` and `docs/.vitepress/cache/`, out of the
@@ -103,9 +109,10 @@ build context.
 ## Debian package
 
 `make deb` builds `tally-openstack-collector` as a `.deb` into `dist/`. The
-collector is the one binary that runs on a host rather than in a cluster, next
-to the broker of an OpenStack control plane, so it is the one that is packaged;
-everything else ships as an image.
+package is for a control node without a container runtime, next to the broker
+of an OpenStack control plane. The image is for a cluster, where the
+`openstack-collector` kustomize component runs the same binary. The collector
+is the one binary that is packaged; everything else ships as an image alone.
 
 The target cross-compiles `linux/$(DEB_GOARCH)` with the `Dockerfile`'s build
 flags, so the packaged binary is the image's binary, and then runs
@@ -204,8 +211,11 @@ than at a tag: it reaches the token of its job, and its owner can move a tag.
 The `images` job runs once the `release` job has succeeded, so a tag whose
 release failed publishes no image. It holds `contents: read` and
 `packages: write` alone, logs into `ghcr.io` with the workflow's token, and
-builds `ghcr.io/b42labs/tally-reporting:<tag>` and
-`ghcr.io/b42labs/tally-engine:<tag>` from the `Dockerfile`, then pushes both.
+builds the four `RELEASE_IMAGES` from the `Dockerfile`, then pushes each:
+`ghcr.io/b42labs/tally-reporting:<tag>`, `ghcr.io/b42labs/tally-engine:<tag>`,
+`ghcr.io/b42labs/tally-openstack-collector:<tag>` and
+`ghcr.io/b42labs/tally-reporting-admin:<tag>`. The entrypoint of each image is
+its binary, so the admin image takes the subcommand as its arguments.
 It pushes nothing unless the tag still points at the commit it builds: a
 re-run builds the commit of its first attempt, so once the tag has moved it
 would publish that commit under it.
@@ -226,6 +236,7 @@ run on it, so a tag belongs on a commit whose run is green.
 No pull request exercises this workflow, which is why
 `packaging/release_test.go` reads it: the tag mapping and its refusals, the
 trigger, the permissions of both jobs, that every action runs at a commit, the
-version source, that every `SERVICES` image is pushed after the release, never
-over a tag already in the registry and never by a run whose tag has moved, and
-that every file the release attaches is a subject of the attestation.
+version source, that every `RELEASE_IMAGES` image is pushed after the release,
+never over a tag already in the registry and never by a run whose tag has
+moved, and that every file the release attaches is a subject of the
+attestation.

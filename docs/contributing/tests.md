@@ -205,6 +205,14 @@ mismatch that would otherwise fail quietly.
   routes, and the two rules that answer a request with a 403. A policy whose
   target names no route leaves both OTLP hostnames unlimited, and a deny rule
   that references a filter no file declares still renders.
+- `deploy/kubernetes/components/openstack-collector/manifest_test.go` pins the
+  collector Deployment's contract with the binary, with its two Secrets, with
+  the claim its outbox lies on and with the Service of the Reporting API it
+  posts to. A second replica or a rolling update puts two writers on one
+  outbox file, a volume without `fsGroup` ends the pod on its first start, a
+  `*_FILE` path that matches no mount leaves the collector restarting on a
+  file it cannot read, and a URL naming a Service the base no longer declares
+  leaves every event in the outbox. kustomize renders all four.
 - `deploy/kubernetes/overlays/dev/manifest_test.go` pins the two files this
   overlay adds to the metrics pipeline. A scrape config that dropped or
   renamed a job of the base leaves `TallyScrapeTargetDown`,
@@ -219,13 +227,18 @@ mismatch that would otherwise fail quietly.
   index that no longer names `postgres` still renders a valid overlay, and the
   first sign is a wrong hostname or an unauthenticated service on a public
   address. The same goes for a `components` entry lost in an edit, which
-  leaves the cluster without a GatewayClass and without the OTLP rate limit.
+  leaves the cluster without a GatewayClass and without the OTLP rate limit,
+  or without a collector. It holds both images to one release tag and to the
+  names the containers carry, the token Secret of the collector out of every
+  generator, and `collector.env` to one `TALLY_OSC_CLOUD` line and to no
+  variable the component fixes.
 - `deploy/kubernetes/overlays/prod/makefile_test.go` runs the prod targets of
   the Makefile up to the refusal of each guard, in a throwaway Git repository
   and against a kubeconfig that names no cluster. Without the guards an empty
-  secret value applies, a migration chain that does not match the image leaves
-  the old pod Ready, and a listener already on the forwarded port is migrated
-  through.
+  secret value applies, an empty `TALLY_OSC_CLOUD` ends the collector in a pod
+  nothing waits on, a migration chain that does not match the image leaves the
+  old pod Ready, two images at two tags deploy two releases, and a listener
+  already on the forwarded port is migrated through.
 - `deploy/kubernetes/base/grafana/dashboards_test.go` pins the JSON contract
   of the provisioned dashboards. Grafana loads these files at startup and
   reports a broken one only in its own log, so a truncated file or a renamed
