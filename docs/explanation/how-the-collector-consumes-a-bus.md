@@ -137,11 +137,11 @@ has the commands.
 
 ## Classic and quorum
 
-`TALLY_OSC_QUEUE_TYPE` decides the type `tally-notifications` is declared with.
-A classic queue lives on one node of a broker cluster, and its backlog is
-unavailable while that node is down. The collector relies on that backlog: at
-the buffer bound, and while the collector itself is down, the notifications
-wait on the bus. A
+The collector declares `tally-notifications` as a quorum queue unless
+`TALLY_OSC_QUEUE_TYPE` is `classic`. A classic queue lives on one node of a
+broker cluster, and its backlog is unavailable while that node is down. The
+collector relies on that backlog: at the buffer bound, and while the collector
+itself is down, the notifications wait on the bus. A
 [quorum queue](https://www.rabbitmq.com/docs/quorum-queues) is replicated
 across the nodes and stays available while a majority of them is up.
 
@@ -164,14 +164,19 @@ see policies.
 A broker older than 4.0 reads `-1` as a limit: RabbitMQ 3.13.7 drops a message
 on its first requeue. The collector refuses to declare a quorum queue there.
 The session ends before it declares anything, and the collector reconnects.
+The default asks for a quorum queue, so on such a broker the collector consumes
+nothing until `TALLY_OSC_QUEUE_TYPE=classic` is set.
 
 The type is fixed when a queue is declared. Where the queue exists with the
 other type the broker refuses the declare, and the collector reports the
 mismatch and deletes nothing, because deleting a queue discards its backlog.
 Moving the queue to the other type is an operator's step, in
-[connect the collector](/how-to/openstack/connect-the-collector#declare-the-queue-as-a-quorum-queue).
-`classic` is the default and sends no queue type at all, so a deployment that
-sets nothing keeps declaring the queue it has.
+[connect the collector](/how-to/openstack/connect-the-collector#move-the-queue-to-another-type).
+The default is `quorum`. `classic` sends no queue type at all, which is the
+declare of every collector up to v0.2.0, so a deployment upgraded from one
+finds a queue the default declare is refused over and either sets `classic` or
+moves the queue. `classic` is the setting for a broker older than RabbitMQ 4.0
+and for an operator who wants the queue on one node.
 
 ## What the broker account may do
 
