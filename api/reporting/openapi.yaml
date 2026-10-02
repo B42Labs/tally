@@ -506,10 +506,12 @@ paths:
           required: true
           description: >-
             Which dimensions the counts are grouped by, as a comma-separated
-            list. `cloud` and `resource_type` have to be among them, because
-            they are what an item is read by; a grouping that leaves either out
-            is answered 400. The rule spans the members of one list, which this
-            schema cannot express, so the handler is what enforces it.
+            list. The parameter is given once: a request that repeats it, such
+            as `group_by=cloud&group_by=resource_type`, is answered 400. `cloud`
+            and `resource_type` have to be among them, because they are what an
+            item is read by; a grouping that leaves either out is answered 400.
+            The rule spans the members of one list, which this schema cannot
+            express, so the handler is what enforces it.
           style: form
           explode: false
           schema:
@@ -609,10 +611,12 @@ paths:
           required: true
           description: >-
             Which dimensions the counts are grouped by, as a comma-separated
-            list. `cloud` and `event_type` have to be among them, because they
-            are what an item is read by; a grouping that leaves either out is
-            answered 400. The rule spans the members of one list, which this
-            schema cannot express, so the handler is what enforces it.
+            list. The parameter is given once: a request that repeats it, such
+            as `group_by=cloud&group_by=event_type`, is answered 400. `cloud`
+            and `event_type` have to be among them, because they are what an
+            item is read by; a grouping that leaves either out is answered 400.
+            The rule spans the members of one list, which this schema cannot
+            express, so the handler is what enforces it.
           style: form
           explode: false
           schema:
