@@ -31,19 +31,21 @@ certificate issuance through the listener, OTLP traffic or a LoadBalancer.
 - Everything else
   [Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#before-you-start)
   asks for, apart from `helm` for `make prod-addons`.
-- The sections "Cut the release that publishes the images", "Set the domain"
-  and "Write the secrets" of that guide, done. `kubectl apply -k` reads the
-  `.env` files, and `make prod-migrate` refuses to run from a checkout that is
-  not at the tag `newTag` names.
+- The sections "Cut the release that publishes the images", "Set the domain",
+  "Name the cloud" and "Write the secrets" of that guide, done.
+  `kubectl apply -k` reads the `.env` files and `collector.env`, and
+  `make prod-migrate` refuses to run from a checkout that is not at the tag
+  both `newTag` values name.
 
 ## Take the component out of the overlay
 
 1. In `deploy/kubernetes/overlays/prod/kustomization.yaml`, remove the
-   `components` entry:
+   `envoy-gateway` line of the `components` entry and keep the
+   `openstack-collector` line, which is the collector:
 
    ```yaml
    components:
-     - ../../components/envoy-gateway
+     - ../../components/openstack-collector
    ```
 
 2. In the same file, remove the patch that deletes
@@ -142,7 +144,7 @@ Nothing else on this page fails without the two steps. Checks 4 to 6 under
 Envoy Gateway, and the second waits on the LoadBalancer Service Envoy Gateway
 creates.
 
-1. Check that no value in the five `.env` files is empty or still a
+1. Check that no value in the six `.env` files is empty or still a
    placeholder. `make prod-up` refuses such a file, and `kubectl apply -k`
    applies it: with an empty `admin-password` Grafana keeps its default admin
    password. The command prints the file and the key of every such value:
@@ -159,14 +161,27 @@ creates.
    deploy/kubernetes/overlays/prod/secrets/tally-grafana.env:admin-password
    ```
 
-2. Apply the certificate issuer and the overlay:
+2. Check that `collector.env` names the cloud. `make prod-up` refuses an empty
+   `TALLY_OSC_CLOUD`, and `kubectl apply -k` applies it: the collector then
+   exits with `checking the configuration: TALLY_OSC_CLOUD: must be set`. The
+   command counts the lines that set a value:
+
+   ```sh
+   grep -Ec '^TALLY_OSC_CLOUD=[[:space:]]*[^[:space:]]' deploy/kubernetes/overlays/prod/collector.env
+   ```
+
+   ```text
+   1
+   ```
+
+3. Apply the certificate issuer and the overlay:
 
    ```sh
    kubectl --context <ctx> apply -f deploy/kubernetes/overlays/prod/issuers.yaml
    kubectl --context <ctx> apply -k deploy/kubernetes/overlays/prod
    ```
 
-3. Wait for the database, apply the reporting migration chain and wait for the
+4. Wait for the database, apply the reporting migration chain and wait for the
    Reporting API:
 
    ```sh
@@ -178,7 +193,13 @@ creates.
    `make prod-migrate` reaches the database through a port-forward and reads
    nothing of the Gateway.
 
-4. Point the domain at the address your implementation publishes the Gateway
+5. Issue the ingest credential into the Secret the collector waits for, as
+   [issue an ingest credential](/how-to/cluster/deploy-the-collecting-stack#issue-an-ingest-credential)
+   shows. The collector pod stays in `ContainerCreating` until then. The
+   credential needs the migrated database of the step before, and nothing of
+   the Gateway.
+
+6. Point the domain at the address your implementation publishes the Gateway
    on, and wait for the certificate, as
    [point the domain at the cluster](/how-to/cluster/deploy-the-collecting-stack#point-the-domain-at-the-cluster)
    shows.

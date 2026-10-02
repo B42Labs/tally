@@ -1,6 +1,6 @@
 ---
 title: Deploy the collecting stack to a cluster
-description: "Put the Reporting API, the OTLP endpoint and Grafana on a dedicated cluster from a laptop, behind Let's Encrypt certificates, with the secrets kept out of the repository."
+description: "Put the Reporting API, the OTLP endpoint, Grafana and the OpenStack collector on a dedicated cluster from a laptop, behind Let's Encrypt certificates, with the secrets kept out of the repository."
 quadrant: how-to
 audience: operator
 ---
@@ -9,7 +9,9 @@ audience: operator
 
 This guide deploys the collecting half of Tally to a dedicated Kubernetes
 cluster: the Reporting API with TimescaleDB, VictoriaMetrics, the OTel
-Collector, Grafana, vmalert and Alertmanager. The Gateway publishes `api.`,
+Collector, Grafana, vmalert and Alertmanager, and the OpenStack collector. The
+collector consumes the notifications of one cloud from a broker outside the
+cluster and posts them to the Reporting API. The Gateway publishes `api.`,
 `otlp.`, `otlp-grpc.` and `grafana.` over HTTPS, behind a certificate Let's
 Encrypt signs. The metering scheduler does not run there, and the store,
 vmalert and Alertmanager are reached through port-forwards. Every step runs
@@ -37,6 +39,12 @@ replaces the add-on and the deploy steps.
   check. The LibreSSL that macOS ships has no `x509 -ext`.
 - Docker and `curl`, for the checks.
 - A DNS zone for the domain, in which you can create a wildcard record.
+- The broker of the cloud, reachable over AMQP from the pods of the cluster,
+  with the account of
+  [create the broker account](/how-to/openstack/connect-the-collector#create-the-broker-account).
+- The OpenStack services of that cloud, configured as
+  [configure the OpenStack services](/how-to/openstack/connect-the-collector#configure-the-openstack-services)
+  says.
 - A release tag whose images are in the registry, or a commit whose `ci` run is
   green to cut one from.
 - A checkout of the repository at that tag. `go run` migrates with the chain of
@@ -46,8 +54,9 @@ replaces the add-on and the deploy steps.
 ## Cut the release that publishes the images
 
 1. Tag the commit and push the tag. The `release` workflow runs on every tag
-   matching `v*` and pushes `ghcr.io/b42labs/tally-reporting:<tag>` and
-   `ghcr.io/b42labs/tally-engine:<tag>`:
+   matching `v*` and pushes four images to `ghcr.io/b42labs`, each at
+   `<tag>`: `tally-reporting`, `tally-engine`, `tally-openstack-collector` and
+   `tally-reporting-admin`:
 
    ```sh
    git tag <tag>
@@ -57,23 +66,25 @@ replaces the add-on and the deploy steps.
    Wait until the run of the tag has finished on the repository's Actions tab.
    [Releases](/contributing/toolchain#releases) describes what the run builds.
 
-2. Check that the image pulls without a login, which is how the cluster's nodes
-   pull it:
+2. Check that the two images the overlay deploys pull without a login, which
+   is how the cluster's nodes pull them:
 
    ```sh
    docker logout ghcr.io
    docker pull ghcr.io/b42labs/tally-reporting:<tag>
+   docker pull ghcr.io/b42labs/tally-openstack-collector:<tag>
    ```
 
-3. When the pull is denied, the package is still private: the first push of an
+3. When a pull is denied, the package is still private: the first push of an
    image creates its package that way. An organisation admin opens the B42Labs
    organisation on GitHub, then Packages, the `tally-reporting` package and
    Package settings, and makes the package public under "Change visibility".
-   The same goes for `tally-engine`. A public package cannot be made private
-   again. Run the pull of step 2 again afterwards.
+   The same goes for `tally-openstack-collector`, `tally-engine` and
+   `tally-reporting-admin`. A public package cannot be made private again. Run
+   the pulls of step 2 again afterwards.
 
-4. Check out the tag, and set `newTag` in
-   `deploy/kubernetes/overlays/prod/kustomization.yaml` to it when it names
+4. Check out the tag, and set both `newTag` values in
+   `deploy/kubernetes/overlays/prod/kustomization.yaml` to it when they name
    another one:
 
    ```sh
@@ -84,8 +95,14 @@ replaces the add-on and the deploy steps.
    images:
      - name: tally-reporting
        newName: ghcr.io/b42labs/tally-reporting
-       newTag: v0.2.0
+       newTag: <tag>
+     - name: tally-openstack-collector
+       newName: ghcr.io/b42labs/tally-openstack-collector
+       newTag: <tag>
    ```
+
+   The overlay deploys one release, so `make prod-up` refuses two different
+   tags.
 
 ## Set the domain
 
@@ -108,6 +125,33 @@ replaces the add-on and the deploy steps.
 
 2. The rest of this guide uses the demo domain `tally.demo.b42labs.com`. Put
    yours in its place.
+
+## Name the cloud
+
+1. Set `TALLY_OSC_CLOUD` in `deploy/kubernetes/overlays/prod/collector.env` to
+   the cloud the collector reports under:
+
+   ```text
+   TALLY_OSC_CLOUD=<cloud>
+   ```
+
+   Every event the collector emits is attributed to that cloud, and the ingest
+   credential of a later section is issued for it. The file ships with an
+   empty value, which `make prod-up` refuses.
+
+2. Add the other settings the deployment needs to the same file, one
+   `KEY=VALUE` per line. `TALLY_OSC_EXCHANGES` lists the exchanges of a cloud
+   that runs octavia or renamed one, and `TALLY_OSC_QUEUE_TYPE=classic` is the
+   setting for a broker older than RabbitMQ 4.0:
+
+   ```text
+   TALLY_OSC_EXCHANGES=nova,neutron,openstack,glance,octavia
+   ```
+
+   The [collector settings](/reference/configuration/tally-openstack-collector)
+   page lists every variable. The broker URL and the ingest token are not
+   among the lines of this file: both are Secrets, and the header of the file
+   names the six variables the deployment fixes.
 
 ## Install the add-ons
 
@@ -142,7 +186,7 @@ replaces the add-on and the deploy steps.
 
 ## Write the secrets
 
-1. Copy the five examples and make the copies readable by you alone:
+1. Copy the six examples and make the copies readable by you alone:
 
    ```sh
    for f in deploy/kubernetes/overlays/prod/secrets/*.env.example; do cp "$f" "${f%.example}"; done
@@ -165,6 +209,7 @@ replaces the add-on and the deploy steps.
    | `tally-grafana.env` | `admin-password` | `openssl rand -hex 32` |
    | `tally-vm-admin.env` | `delete-auth-key` | `openssl rand -hex 32` |
    | `tally-otlp-auth.env` | `htpasswd` | the line of step 3 |
+   | `tally-collector-amqp.env` | `amqp-url` | the example URL with the broker account, its password and the broker's host in place of the placeholders |
 
    A hex value needs no encoding in `db-url`. `engine-password` is required
    although the cluster runs no engine, because the initdb script that creates
@@ -197,9 +242,10 @@ replaces the add-on and the deploy steps.
    make prod-up PROD_CONTEXT=<ctx>
    ```
 
-   It checks that every `.env` file exists with each value filled in and that
-   the checkout is at the tag `newTag` names, applies the `letsencrypt`
-   ClusterIssuer and the overlay, and waits for every rollout and for the
+   It checks that every `.env` file exists with each value filled in, that
+   `collector.env` names a cloud and that the checkout is at the tag both
+   `newTag` values name. Then it applies the `letsencrypt` ClusterIssuer and
+   the overlay, and waits for every rollout but the collector's and for the
    LoadBalancer address of the Gateway. Then it applies the reporting
    migration chain through a port-forward to TimescaleDB, waits for the
    Reporting API and prints where the Gateway answers:
@@ -220,9 +266,15 @@ replaces the add-on and the deploy steps.
        kubectl --context <ctx> -n tally port-forward svc/victoriametrics 8428:8428
        kubectl --context <ctx> -n tally port-forward svc/vmalert 8880:8880
        kubectl --context <ctx> -n tally port-forward svc/alertmanager 9093:9093
+
+   ==> the collector starts once the Secret tally-collector-token exists, and is Ready once it holds its broker session:
+       kubectl --context <ctx> -n tally rollout status deployment/openstack-collector
    ```
 
-   The address is a hostname when the LoadBalancer hands out one.
+   The address is a hostname when the LoadBalancer hands out one. The
+   collector pod stays in `ContainerCreating` until
+   [issue an ingest credential](#issue-an-ingest-credential) has created its
+   token Secret, and starts by itself afterwards.
 
 2. When a wait runs out, `make prod-up` stops there and names the command that
    shows why. It is safe to run again.
@@ -291,33 +343,73 @@ replaces the add-on and the deploy steps.
    Forwarding from [::1]:15432 -> 5432
    ```
 
-2. Issue the credential from the checkout, for the cloud the collector reports
-   under. The connection string reads the password out of `tally-db.env`, so
-   the password stays out of the shell's history:
+2. Issue the credential from the checkout and pipe the token into the Secret
+   the collector mounts. The connection string reads the password out of
+   `tally-db.env` and the cloud out of `collector.env`, so the password stays
+   out of the shell's history, and the credential is issued for the cloud the
+   collector reports under:
 
    ```sh
-   TALLY_REPORTING_DB_URL="postgres://tally:$(sed -n 's/^password=//p' deploy/kubernetes/overlays/prod/secrets/tally-db.env)@127.0.0.1:15432/tally_reporting?sslmode=disable" \
+   kubectl --context <ctx> -n tally create secret generic tally-collector-token \
+     --from-literal=ingest-token=probe --dry-run=server >/dev/null \
+     && token="$(TALLY_REPORTING_DB_URL="postgres://tally:$(sed -n 's/^password=//p' deploy/kubernetes/overlays/prod/secrets/tally-db.env)@127.0.0.1:15432/tally_reporting?sslmode=disable" \
      go run ./cmd/tally-reporting-admin create-ingest-credential \
      --platform openstack \
-     --cloud <cloud> \
-     --description 'event collector for <cloud>'
+     --cloud "$(sed -n 's/^TALLY_OSC_CLOUD=//p' deploy/kubernetes/overlays/prod/collector.env)" \
+     --description 'in-cluster event collector')" \
+     && printf '%s' "$token" | kubectl --context <ctx> -n tally create secret generic tally-collector-token \
+       --from-file=ingest-token=/dev/stdin
+   unset token
    ```
 
    ```text
-   tly_i_6eb7f2ea8ffbb37f44d41bdc3382d193c3de752f89d5bafe7b85afc93a65c32b
-   created ingest_credentials 8f0c2f34-1a4d-4c2e-9a53-6b1c0f5e77a1
+   created ingest_credentials 16d90e80-4c90-4356-a9f1-842faab52592
    the token above is printed this one time: store it now, it will not be shown again
+   secret/tally-collector-token created
    ```
 
-3. Store the token where the collector reads it, as
-   [issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials#issue-an-ingest-credential)
-   shows. The token goes to stdout alone, so the redirection that page uses
-   works with the command above. The same page revokes a credential.
+   The token reaches neither a file nor the argument list of a process. The
+   first `kubectl create` is a server-side dry run: when the Secret exists, the
+   context is wrong or the cluster refuses the call, it stops the command
+   before a credential is issued, so a second run issues nothing and replaces
+   nothing. The `&&` after the issue keeps a failed issue from creating a
+   Secret with an empty key. If the second `kubectl create` fails all the same,
+   the credential of the id printed above is issued and its token is gone:
+   revoke that id, as
+   [issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials#revoke-a-credential)
+   shows. The API refuses an event outside the scope of its credential with
+   the reason `scope` and never takes it again, which is why the cloud is read
+   from the file the collector reads it from.
 
-4. Set the collector's `TALLY_OSC_REPORTING_URL` to `https://api.<domain>`,
-   which is `https://api.tally.demo.b42labs.com` for the demo domain, as
-   [connect the collector](/how-to/openstack/connect-the-collector#configure-the-collector)
-   shows. Stop the port-forward with Ctrl-C once the credential is issued.
+3. Wait for the collector. The pod has been waiting for the Secret, and the
+   kubelet starts it without a further step:
+
+   ```sh
+   kubectl --context <ctx> -n tally rollout status deployment/openstack-collector
+   ```
+
+   ```text
+   Waiting for deployment "openstack-collector" rollout to finish: 0 of 1 updated replicas are available...
+   deployment "openstack-collector" successfully rolled out
+   ```
+
+   The pod is Ready once the collector holds its session on the broker. When
+   the wait does not end,
+   `kubectl --context <ctx> -n tally logs deployment/openstack-collector` names
+   the reason: a line `the AMQP session ended, reconnecting` carries the error
+   of the broker.
+
+4. Stop the port-forward with Ctrl-C.
+
+To replace the token, forward the database as in step 1, delete the Secret
+with `kubectl --context <ctx> -n tally delete secret tally-collector-token` and
+run the command of step 2 again, which issues a new credential and creates the
+Secret from it. Then restart the collector with
+`kubectl --context <ctx> -n tally rollout restart deployment/openstack-collector`.
+The collector reads the file at its start only, so the running pod keeps the
+old token until the restart. Revoke the old credential afterwards, as
+[issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials#revoke-a-credential)
+shows.
 
 ## Reach the unpublished services
 
@@ -419,7 +511,22 @@ replaces the add-on and the deploy steps.
    `000` is what curl prints when no HTTP answer arrived, and `1` is the exit
    status of `nc` when the port does not accept a connection.
 
-7. A second deploy changes nothing. The filter keeps the lines of
+7. The collector holds its session on the broker. Its log carries a `summary`
+   line every minute:
+
+   ```sh
+   kubectl --context <ctx> -n tally logs deployment/openstack-collector \
+     | grep '"msg":"summary"' | tail -1
+   ```
+
+   ```text
+   {"time":"2026-10-02T19:13:21.226380379Z","level":"INFO","msg":"summary","service":"tally-openstack-collector","interval_seconds":60,"connected":true,"consumed":28,"skipped":119,"unparseable":0,"delivered":28,"delivery_errors":0,"buffered":0,"oldest_buffered_seconds":0}
+   ```
+
+   `"connected":true` is what counts. `delivered` rises once the cloud sends
+   notifications, and `buffered` stays at 0 while the Reporting API takes them.
+
+8. A second deploy changes nothing. The filter keeps the lines of
    `kubectl apply` that report a change and the migration's answer:
 
    ```sh

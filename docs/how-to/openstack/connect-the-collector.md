@@ -36,7 +36,11 @@ Reporting API. What the collector guarantees between those two ends is in
   shell;
   [install the collector from the Debian package](/how-to/openstack/install-the-debian-package)
   puts the same settings into `/etc/default/tally-openstack-collector` and runs
-  it as a systemd service instead.
+  it as a systemd service instead. The third way is the `openstack-collector`
+  kustomize component the prod overlay lists, which runs the collector in the
+  cluster of the Reporting API;
+  [deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+  sets it up.
 
 ## Configure the OpenStack services
 
