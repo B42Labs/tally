@@ -14,6 +14,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -195,6 +196,26 @@ func TestDefaultFileListsEveryVariableAndNoOther(t *testing.T) {
 		_, isCommented := commented[name]
 		if !isSet && !isCommented {
 			t.Errorf("%s appears in neither form, so the file does not document it", name)
+		}
+	}
+}
+
+func TestDefaultFileOffersTheDefaultsTheCollectorApplies(t *testing.T) {
+	// A commented line is what an operator reads as the value in force, so it has
+	// to be the default the collector applies when the variable is unset.
+	_, commented := settings(t)
+
+	fields := reflect.TypeFor[openstack.Config]()
+	for i := range fields.NumField() {
+		tag := fields.Field(i).Tag
+		name := tag.Get("env")
+		want, hasDefault := tag.Lookup("envDefault")
+		got, offered := commented[name]
+		if !hasDefault || !offered {
+			continue
+		}
+		if got != want {
+			t.Errorf("%s is offered as #%s=%s, and the collector defaults it to %q", name, name, got, want)
 		}
 	}
 }
