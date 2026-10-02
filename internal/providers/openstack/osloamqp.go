@@ -353,6 +353,11 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 	closed := conn.NotifyClose(make(chan *amqp091.Error, 1))
 	c.connected.Store(true)
 	defer c.connected.Store(false)
+	// Logged before the watcher starts, so the line precedes every bind the
+	// watcher reports for this session. The exchanges are the ones the queue was
+	// bound to here: a skipped one is named by the warning above.
+	c.logger.Info("the AMQP session is established, consuming",
+		"queue", queueName, "exchanges", present, "topics", c.cfg.Topics)
 
 	if len(missing) > 0 {
 		watcher.Go(func() {
