@@ -1,12 +1,15 @@
 // This file runs the prod targets of the Makefile up to the refusal of each
 // guard, and every guard stands in front of a failure that is quiet otherwise.
 // An empty secret value applies like any other, and Grafana comes up on its
-// default admin password. A migration chain that does not match the image
-// leaves the old pod Ready on a schema it does not know. A listener already on
-// the forwarded port answers the probe, and the migration reaches whatever
-// database is behind it. The targets run in a throwaway Git repository with an
-// empty kubeconfig and a context nothing names, so a guard that lets one
-// through fails at kubectl rather than at a cluster.
+// default admin password. An empty cloud applies too, and the collector exits
+// in a pod no step of the target waits on. A migration chain that does not
+// match the image leaves the old pod Ready on a schema it does not know, and
+// two images at two tags leave one of them on another release than the chain.
+// A listener already on the forwarded port answers the probe, and the
+// migration reaches whatever database is behind it. The targets run in a
+// throwaway Git repository with an empty kubeconfig and a context nothing
+// names, so a guard that lets one through fails at kubectl rather than at a
+// cluster.
 package prod_test
 
 import (
@@ -115,6 +118,45 @@ func TestProdUpRefusesASecretThatIsNotFilledIn(t *testing.T) {
 	})
 }
 
+func TestProdUpRefusesACollectorWithoutACloud(t *testing.T) {
+	// The ConfigMap carries the key either way, so an empty cloud applies like
+	// any other. The collector then exits with "TALLY_OSC_CLOUD: must be set"
+	// in a pod make prod-up does not wait on, and nothing in the run says so.
+	// The content "" removes the file.
+	cases := []struct {
+		name, content, want string
+	}{
+		{"a missing file", "", "collector.env is missing"},
+		{"an empty value", "TALLY_OSC_CLOUD=\n", "collector.env leaves TALLY_OSC_CLOUD empty"},
+		{"a value of blanks", "TALLY_OSC_CLOUD=  \n", "collector.env leaves TALLY_OSC_CLOUD empty"},
+		{"a commented-out line", "# TALLY_OSC_CLOUD=os-test\n", "collector.env leaves TALLY_OSC_CLOUD empty"},
+		{"no line for the cloud", "TALLY_OSC_EXCHANGES=nova\n", "collector.env leaves TALLY_OSC_CLOUD empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := prodOverlay(t, release)
+			file := filepath.Join(overlay, collectorSettingsFile)
+			var err error
+			if tc.content == "" {
+				err = os.Remove(file)
+			} else {
+				err = os.WriteFile(file, []byte(tc.content), 0o600)
+			}
+			if err != nil {
+				t.Fatalf("preparing %s: %v", file, err)
+			}
+
+			out, code := runMake(t, checkout(t, release), "prod-up", overlay)
+			if code == 0 || !strings.Contains(out, tc.want) {
+				t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, tc.want, out)
+			}
+			if strings.Contains(out, prodUpPassed) {
+				t.Errorf("make prod-up went on to the cluster after the refusal:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestProdTargetsRefuseACheckoutThatIsNotTheDeployedRelease(t *testing.T) {
 	// go run migrates with the chain of the checkout, and the Reporting API's
 	// readiness refuses only a schema behind its build. A chain ahead of the
@@ -141,6 +183,26 @@ func TestProdTargetsRefuseACheckoutThatIsNotTheDeployedRelease(t *testing.T) {
 			want := "ERROR: the prod overlay deploys " + release + ", but the checkout is at v0.0.2"
 			if code == 0 || !strings.Contains(out, want) {
 				t.Errorf("make %s exited %d, want a refusal carrying %q:\n%s", target, code, want, out)
+			}
+		})
+
+		// The overlay deploys one release. With two tags the checkout can be at
+		// one of them only, and the image at the other runs against a chain
+		// that is not its own.
+		t.Run(target+" with two images at two tags", func(t *testing.T) {
+			overlay := prodOverlay(t, release)
+			file := filepath.Join(overlay, kustomizationFile)
+			if err := os.WriteFile(file, []byte(imagesAt(release, "v0.0.2")), 0o600); err != nil {
+				t.Fatalf("preparing %s: %v", file, err)
+			}
+
+			out, code := runMake(t, checkout(t, release), target, overlay, freePort(t))
+			want := "ERROR: the prod overlay names more than one tag (" + release + " v0.0.2)"
+			if code == 0 || !strings.Contains(out, want) {
+				t.Errorf("make %s exited %d, want a refusal carrying %q:\n%s", target, code, want, out)
+			}
+			if strings.Contains(out, next) {
+				t.Errorf("make %s went on after the refusal:\n%s", target, out)
 			}
 		})
 
@@ -270,9 +332,18 @@ func checkout(t *testing.T, tag string) string {
 	return dir
 }
 
+// imagesAt returns a kustomization.yaml that deploys the Reporting API at one
+// tag and the collector at another.
+func imagesAt(reportingTag, collectorTag string) string {
+	return "images:\n" +
+		"  - name: " + reportingImage + "\n    newTag: " + reportingTag + "\n" +
+		"  - name: " + collectorImage + "\n    newTag: " + collectorTag + "\n"
+}
+
 // prodOverlay returns a directory standing in for the prod overlay: a
-// kustomization.yaml deploying tag, and every example secret file of the real
-// overlay beside a copy with each empty value and placeholder filled in.
+// kustomization.yaml deploying both images at tag, a collector.env that names
+// a cloud, and every example secret file of the real overlay beside a copy
+// with each empty value and placeholder filled in.
 func prodOverlay(t *testing.T, tag string) string {
 	t.Helper()
 
@@ -285,7 +356,8 @@ func prodOverlay(t *testing.T, tag string) string {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		kustomizationFile: "images:\n  - name: " + reportingImage + "\n    newTag: " + tag + "\n",
+		kustomizationFile:     imagesAt(tag, tag),
+		collectorSettingsFile: "TALLY_OSC_CLOUD=os-test\n",
 	}
 	for _, example := range examples {
 		raw, err := os.ReadFile(example)
