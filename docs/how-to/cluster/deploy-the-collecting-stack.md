@@ -16,6 +16,10 @@ vmalert and Alertmanager are reached through port-forwards. Every step runs
 from a checkout on your machine with three make targets, and no CI job touches
 the cluster. What the prod overlay changes against the dev overlay is in
 [where the dev stack ends](/contributing/dev-stack#where-the-dev-stack-ends).
+The guide installs Envoy Gateway. On a cluster that runs another Gateway API
+implementation,
+[Use another Gateway API implementation](/how-to/cluster/use-another-gateway-api-implementation)
+replaces the add-on and the deploy steps.
 
 ## Before you start
 
