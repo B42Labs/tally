@@ -1462,27 +1462,45 @@ func TestDumpPrintsNotificationsWithoutTakingThemFromTheConsumer(t *testing.T) {
 		return slices.Contains(storedEventIDs(t, box), messageID)
 	})
 
-	// A body the parser refuses is printed raw. It is what an operator verifying
-	// an unknown deployment most needs to see, and the collector acknowledges it
-	// rather than requeueing it, so it costs the queue nothing.
+	// A payload carries more than the mapping reads. Nova's scheduler
+	// notifications hold the request context inside it, Keystone token included,
+	// and the dump prints the payload with that member redacted. The collector
+	// beside it counts its copy as skipped, because the mapping table carries no
+	// entry for the type.
+	publishUntil(t, publisher, "nova", wrap(t, schedulerDocument), "the dump prints the scheduler notification", func() bool {
+		return dumpLineWith(t, out.String(), "message_id", schedulerMessageID) != nil
+	})
+	scheduler := dumpLineWith(t, out.String(), "message_id", schedulerMessageID)
+	if got := memberAt(scheduler, append(schedulerRequestContext, "auth_token")...); got != "[redacted]" {
+		t.Errorf("the dumped line's auth_token = %v, want [redacted]", got)
+	}
+	if got := memberAt(scheduler, append(schedulerRequestContext, "user")...); got != "u1" {
+		t.Errorf("the dumped line's user = %v, want it kept as u1", got)
+	}
+	if strings.Contains(out.String(), keystoneToken) {
+		t.Error("the dump printed the Keystone token the payload carried")
+	}
+
+	// A body the parser refuses is printed as a preview. It is what an operator
+	// verifying an unknown deployment most needs to see, and the collector
+	// acknowledges it rather than requeueing it, so it costs the queue nothing.
 	//
-	// Raw stops at the credentials the oslo request context carries. The dump's
-	// output is a file an operator redirects and attaches to a ticket, and
-	// _context_auth_token is the Keystone token of the request that produced the
-	// message, valid for hours. Neither the event type nor the payload shape,
-	// which is what the dump exists to show, needs it.
-	const token = "gAAAAABlive-keystone-token"
-	garbage := `{"event_type": "compute.instance.create.end", "_context_auth_token": "` + token +
+	// The preview carries no value of a member secretMember names. The dump's
+	// output is a file an operator keeps, and _context_auth_token is the Keystone
+	// token of the request that produced the message, valid for hours. Neither
+	// the event type nor the payload shape, which is what the dump exists to
+	// show, needs it.
+	garbage := `{"event_type": "compute.instance.create.end", "_context_auth_token": "` + keystoneToken +
 		`", "_context_password": "hunter2", "filler": "` + strings.Repeat("z", previewMax) + `"}`
 	redacted := strings.NewReplacer(
-		`"`+token+`"`, `"[redacted]"`, `"hunter2"`, `"[redacted]"`).Replace(garbage)
+		`"`+keystoneToken+`"`, `"[redacted]"`, `"hunter2"`, `"[redacted]"`).Replace(garbage)
 	// And what is left of it is cut off after previewMax, because the shape of a
 	// message shows in its beginning.
 	printed := redacted[:previewMax]
 	publishUntil(t, publisher, "nova", []byte(garbage), "the dump prints the unusable body", func() bool {
 		return dumpLineWith(t, out.String(), "unparseable", printed) != nil
 	})
-	if strings.Contains(out.String(), token) {
+	if strings.Contains(out.String(), keystoneToken) {
 		t.Error("the dump printed the Keystone token the request context carried")
 	}
 }
