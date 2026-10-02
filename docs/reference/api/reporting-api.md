@@ -171,7 +171,7 @@ Security: `apiToken`
 
 | Name | In | Required | Type | Description |
 | --- | --- | --- | --- | --- |
-| `group_by` | `query` | yes | array of `cloud`, `resource_type`, `state`, `platform`, `project_id` | Which dimensions the counts are grouped by, as a comma-separated list. `cloud` and `resource_type` have to be among them, because they are what an item is read by; a grouping that leaves either out is answered 400. The rule spans the members of one list, which this schema cannot express, so the handler is what enforces it. |
+| `group_by` | `query` | yes | array of `cloud`, `resource_type`, `state`, `platform`, `project_id` | Which dimensions the counts are grouped by, as a comma-separated list. The parameter is given once: a request that repeats it, such as `group_by=cloud&group_by=resource_type`, is answered 400. `cloud` and `resource_type` have to be among them, because they are what an item is read by; a grouping that leaves either out is answered 400. The rule spans the members of one list, which this schema cannot express, so the handler is what enforces it. |
 | `status` | `query` | no | `active`, `deleted`, `all`, default `active` | Which part of the fleet to count. `active` counts the rows whose state is not deleted, `deleted` counts those alone, and `all` counts both. |
 | `at` | `query` | no | string, `date-time` | The instant the counts describe. Leaving it out asks for the current counts, which is what the projection holds. Any value at all is answered 501 (`urn:tally:error:not_implemented`): counting a past instant means replaying the histories, and the Phase 3 usage records are what answer that. A value meaning "now" cannot be told from a historic one, because the two differ by however long the request took, so omitting the parameter rather than sending a timestamp is how the current counts are asked for. |
 
@@ -201,7 +201,7 @@ Security: `apiToken`
 
 | Name | In | Required | Type | Description |
 | --- | --- | --- | --- | --- |
-| `group_by` | `query` | yes | array of `cloud`, `event_type`, `source` | Which dimensions the counts are grouped by, as a comma-separated list. `cloud` and `event_type` have to be among them, because they are what an item is read by; a grouping that leaves either out is answered 400. The rule spans the members of one list, which this schema cannot express, so the handler is what enforces it. |
+| `group_by` | `query` | yes | array of `cloud`, `event_type`, `source` | Which dimensions the counts are grouped by, as a comma-separated list. The parameter is given once: a request that repeats it, such as `group_by=cloud&group_by=event_type`, is answered 400. `cloud` and `event_type` have to be among them, because they are what an item is read by; a grouping that leaves either out is answered 400. The rule spans the members of one list, which this schema cannot express, so the handler is what enforces it. |
 | `from` | `query` | yes | string, `date-time` | Count only the events at or after this instant, the inclusive bound of the window. |
 | `to` | `query` | yes | string, `date-time` | Count only the events before this instant, the exclusive bound of the window. |
 | `interval` | `query` | yes | `1h`, `1d` | How wide one bucket is. |
