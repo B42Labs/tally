@@ -143,13 +143,15 @@ type Config struct {
 	// for the collector reads a consumer on the queue as a queue that is bound.
 	RequireExchanges bool `env:"TALLY_OSC_REQUIRE_EXCHANGES" envDefault:"false"`
 	// QueueType is the type the queue tally-notifications is declared with,
-	// classic or quorum. classic sends no queue type and leaves the choice to the
-	// broker: a classic queue on one node, unless the virtual host's
-	// default_queue_type is quorum, which creates a quorum queue with the broker's
-	// own delivery limit. quorum declares a replicated queue with the delivery
-	// limit disabled, and needs RabbitMQ 4.0 or newer. An existing queue keeps its
-	// type, so changing the value means deleting the queue first.
-	QueueType string `env:"TALLY_OSC_QUEUE_TYPE" envDefault:"classic"`
+	// quorum or classic. quorum is the default: it declares a replicated queue
+	// with the delivery limit disabled, and needs RabbitMQ 4.0 or newer. classic
+	// sends no queue type and leaves the choice to the broker: a classic queue on
+	// one node, unless the virtual host's default_queue_type is quorum, which
+	// creates a quorum queue with the broker's own delivery limit. classic is the
+	// setting for a broker older than RabbitMQ 4.0 and for a queue that stays on
+	// one node. An existing queue keeps its type, so declaring it with the other
+	// one means deleting the queue first.
+	QueueType string `env:"TALLY_OSC_QUEUE_TYPE" envDefault:"quorum"`
 	// Cloud is the cloud name every emitted event is attributed to. It has no
 	// default because a guessed cloud silently books usage to the wrong one.
 	Cloud string `env:"TALLY_OSC_CLOUD"`

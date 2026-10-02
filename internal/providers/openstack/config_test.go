@@ -86,8 +86,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.RequireExchanges {
 		t.Error("RequireExchanges = true, want false")
 	}
-	if cfg.QueueType != "classic" {
-		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "classic")
+	if cfg.QueueType != "quorum" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "quorum")
 	}
 	if cfg.BatchMax != 500 {
 		t.Errorf("BatchMax = %d, want 500", cfg.BatchMax)
@@ -117,7 +117,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_OSC_EXCHANGES":             "nova,octavia",
 		"TALLY_OSC_TOPICS":                "notifications.info,notifications.error",
 		"TALLY_OSC_REQUIRE_EXCHANGES":     "true",
-		"TALLY_OSC_QUEUE_TYPE":            "quorum",
+		"TALLY_OSC_QUEUE_TYPE":            "classic",
 		"TALLY_OSC_BATCH_MAX":             "50",
 		"TALLY_OSC_FLUSH_INTERVAL_S":      "1",
 		"TALLY_OSC_BUFFER_MAX_EVENTS":     "250000",
@@ -148,8 +148,8 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	if !cfg.RequireExchanges {
 		t.Error("RequireExchanges = false, want true")
 	}
-	if cfg.QueueType != "quorum" {
-		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "quorum")
+	if cfg.QueueType != "classic" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "classic")
 	}
 	if cfg.BatchMax != 50 {
 		t.Errorf("BatchMax = %d, want 50", cfg.BatchMax)
@@ -328,8 +328,8 @@ func TestLoadDefaultsTheQueueTypeWhenTheVariableIsUnset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
-	if cfg.QueueType != "classic" {
-		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "classic")
+	if cfg.QueueType != "quorum" {
+		t.Errorf("QueueType = %q, want %q", cfg.QueueType, "quorum")
 	}
 }
 

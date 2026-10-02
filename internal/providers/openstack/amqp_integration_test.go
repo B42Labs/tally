@@ -314,7 +314,7 @@ func testConfig(url string, exchanges []string, bufferMax int64) Config {
 		AMQPURL:         url,
 		Exchanges:       exchanges,
 		Topics:          []string{testTopic},
-		QueueType:       queueTypeClassic,
+		QueueType:       queueTypeQuorum,
 		Cloud:           "os-test",
 		Prefetch:        10,
 		BufferMaxEvents: bufferMax,
@@ -1117,11 +1117,10 @@ func TestConsumerRequeuesADeliveryTheOutboxRefused(t *testing.T) {
 	}
 }
 
-// TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery is the
-// requeue test above against a quorum queue, and past the point where one
-// would drop the notification: from RabbitMQ 4.0 a quorum queue gives a message
-// up once it came back more than 20 times, unless its delivery limit is
-// disabled.
+// TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery covers the
+// queue the default declares, a quorum queue, past the point where one would
+// drop the notification: from RabbitMQ 4.0 a quorum queue gives a message up
+// once it came back more than 20 times, unless its delivery limit is disabled.
 //
 // The notification comes back in two ways here. The refused inserts are nacks
 // with requeue, which is what an outbox on a full disk costs for as long as the
@@ -1139,7 +1138,6 @@ func TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery(t *testing.T
 	buffer.failing.Store(true)
 
 	cfg := testConfig(url, []string{"nova"}, testBufferMax)
-	cfg.QueueType = queueTypeQuorum
 	consumer, _, stop := startConsumer(t, cfg, buffer)
 	waitFor(t, "the consumer is connected", consumer.Connected)
 
@@ -1184,15 +1182,14 @@ func TestConsumerDeclaresAQuorumQueueThatKeepsEveryRequeuedDelivery(t *testing.T
 // declare must not reach. RabbitMQ before 4.0 reads the delivery limit of -1 as
 // a limit, so the queue this collector would declare there loses a notification
 // on its first requeue. The session ends at the gate instead, before it has
-// declared anything. A collector at the default queue type passes the gate on
-// the same broker.
+// declared anything. A collector set to classic passes the gate on the same
+// broker, and a delivery its outbox refused comes back from the classic queue.
 func TestConsumerRefusesAQuorumQueueOnAnOlderBroker(t *testing.T) {
 	_, url := startBrokerContainer(t, oldBrokerImage)
 	publisher := openChannel(t, url)
 	declareExchanges(t, publisher, "nova")
 
 	cfg := testConfig(url, []string{"nova"}, testBufferMax)
-	cfg.QueueType = queueTypeQuorum
 	logger, logs := recordingLogger(t)
 	consumer, _, stop := startConsumerWithLogger(t, cfg, newOutbox(t), logger)
 
@@ -1211,15 +1208,25 @@ func TestConsumerRefusesAQuorumQueueOnAnOlderBroker(t *testing.T) {
 			queueName, err)
 	}
 
-	// The gate is for a quorum queue alone: the default declares on the same
-	// broker, which is the one a deployment that sets nothing may run.
+	// The gate is for a quorum queue alone: classic declares on the same broker,
+	// and is the setting a deployment on such a broker runs.
 	stop()
 	box := newOutbox(t)
-	defaulted, _, _ := startConsumer(t, testConfig(url, []string{"nova"}, testBufferMax), box)
-	waitFor(t, "a consumer at the default queue type connects to the older broker", defaulted.Connected)
+	buffer := &failingBuffer{inner: box}
+	buffer.failing.Store(true)
+	classic := cfg
+	classic.QueueType = queueTypeClassic
+	unreplicated, _, _ := startConsumer(t, classic, buffer)
+	waitFor(t, "a consumer set to classic connects to the older broker", unreplicated.Connected)
 
 	body, messageID := fixture(t, "compute-instance-create-end")
 	publish(t, publisher, "nova", body)
+	// The refused insert requeues on the classic queue, and the redelivery is
+	// what stores the notification once the buffer works.
+	waitFor(t, "the refused insert was attempted on the classic queue", func() bool {
+		return buffer.failures.Load() > 0
+	})
+	buffer.failing.Store(false)
 	waitFor(t, "the notification is buffered on the older broker", func() bool {
 		return box.Depth() == 1
 	})
@@ -1237,13 +1244,12 @@ func TestConsumerReportsAQueueOfAnotherType(t *testing.T) {
 	url := startBroker(t)
 	publisher := openChannel(t, url)
 	declareExchanges(t, publisher, "nova")
-	// The queue a collector at the default setting left behind.
+	// The queue a collector up to v0.2.0, or one set to classic, left behind.
 	if _, err := publisher.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
 		t.Fatalf("declaring the queue %s: %v", queueName, err)
 	}
 
 	cfg := testConfig(url, []string{"nova"}, testBufferMax)
-	cfg.QueueType = queueTypeQuorum
 	box := newOutbox(t)
 	logger, logs := recordingLogger(t)
 	consumer, _, _ := startConsumerWithLogger(t, cfg, box, logger)
@@ -1273,6 +1279,33 @@ func TestConsumerReportsAQueueOfAnotherType(t *testing.T) {
 	if got := storedEventIDs(t, box); !slices.Equal(got, []string{messageID}) {
 		t.Errorf("buffered event ids = %v, want [%s]", got, messageID)
 	}
+}
+
+// TestConsumerReportsAQuorumQueueWithoutTheDeliveryLimit covers the queue a
+// virtual host with default_queue_type quorum gave a collector up to v0.2.0: a
+// quorum queue with the broker's own delivery limit. The default declare has to
+// be refused over it, or the collector would consume from a queue that drops a
+// notification after 20 returns.
+func TestConsumerReportsAQuorumQueueWithoutTheDeliveryLimit(t *testing.T) {
+	url := startBroker(t)
+	publisher := openChannel(t, url)
+	declareExchanges(t, publisher, "nova")
+	// The type is declared here, where that virtual host filled it in: the queue
+	// carries the same arguments either way.
+	if _, err := publisher.QueueDeclare(queueName, true, false, false, false,
+		amqp091.Table{amqp091.QueueTypeArg: amqp091.QueueTypeQuorum}); err != nil {
+		t.Fatalf("declaring the queue %s: %v", queueName, err)
+	}
+
+	logger, logs := recordingLogger(t)
+	consumer, _, _ := startConsumerWithLogger(t,
+		testConfig(url, []string{"nova"}, testBufferMax), newOutbox(t), logger)
+
+	const want = "the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=quorum declares"
+	waitFor(t, "the session error names the variable and its value", func() bool {
+		return strings.Contains(logs.String(), want)
+	})
+	staysDisconnected(t, consumer, "while the queue carries the broker's own delivery limit")
 }
 
 // TestConsumerPausesAtTheBufferBoundAndLosesNothing publishes more than the
@@ -1468,14 +1501,14 @@ func TestConsumerAndDumpRunUnderTheDocumentedPermissions(t *testing.T) {
 		t.Fatalf("binding %s to # on nova as %s returned %v, want a 403", queueName, accountUser, err)
 	}
 
-	// The quorum declare has to fit the same account. A queue keeps its type, so
-	// the classic one goes first, as the how-to has an operator do it.
+	// The classic declare has to fit the same account. A queue keeps its type, so
+	// the quorum one goes first, as the how-to has an operator do it.
 	stop()
 	if _, err := publisher.QueueDelete(queueName, false, false, false); err != nil {
 		t.Fatalf("deleting the queue %s: %v", queueName, err)
 	}
-	quorum := cfg
-	quorum.QueueType = queueTypeQuorum
-	replicated, _, _ := startConsumer(t, quorum, box)
-	waitFor(t, "the consumer declares a quorum queue as the documented account", replicated.Connected)
+	classic := cfg
+	classic.QueueType = queueTypeClassic
+	unreplicated, _, _ := startConsumer(t, classic, box)
+	waitFor(t, "the consumer declares the queue without a type as the documented account", unreplicated.Connected)
 }
