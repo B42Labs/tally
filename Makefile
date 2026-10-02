@@ -41,14 +41,20 @@ NAMESPACE ?= tally
 DEV_OVERLAY := deploy/kubernetes/overlays/dev
 SERVICES := tally-reporting tally-engine
 
-# The two lists are not the same. SERVICES is what `up` deploys into kind, so it
-# is also what gets loaded into the cluster: the engine ships as the scheduler
+# The lists below are not the same. SERVICES is what `up` deploys into kind, so
+# it is also what gets loaded into the cluster: the engine ships as the scheduler
 # CronJob, so it belongs there beside the Reporting API. IMAGES is everything
-# `images` builds: the collector image is built and publishable, but it runs
-# beside the broker of an OpenStack control plane rather than in the dev cluster.
-# The simulator is on the producing side of the same kind of broker, and
-# `simulator-up` starts one for it on the developer's machine.
+# `images` builds: the dev stack runs the collector in compose beside its broker
+# and not in the dev cluster. The simulator is on the producing side of that
+# broker, and `simulator-up` starts one for it on the developer's machine.
 IMAGES := $(SERVICES) tally-openstack-collector tally-openstack-simulator
+
+# What a release pushes to the registry, which the push loop of
+# .github/workflows/release.yaml names one by one and packaging/release_test.go
+# compares with this line. The collector image is what the openstack-collector
+# kustomize component runs. tally-reporting-admin is in no other list, because
+# the dev stack runs it with `go run`.
+RELEASE_IMAGES := $(SERVICES) tally-openstack-collector tally-reporting-admin
 
 # The images the stack runs, which is what `simulator-up` builds. It is not
 # IMAGES: the Reporting API is deployed into the cluster by `up`, which loads it
