@@ -1,8 +1,12 @@
 package openstack
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,6 +45,51 @@ const innerDocument = `{
 		"vcpus": 2
 	}
 }`
+
+// keystoneToken is the credential the fixtures carry and no dump line may print.
+const keystoneToken = "gAAAAABlive-keystone-token"
+
+// schedulerMessageID is the message id of schedulerDocument.
+const schedulerMessageID = "5b1c7d2e-8f3a-4c6b-9d0e-1a2b3c4d5e6f"
+
+// schedulerDocument is a nova scheduler notification as a deployment publishes
+// it: the request context sits inside the payload, Keystone token included. No
+// fixture and no simulator payload has that shape.
+const schedulerDocument = `{"message_id": "` + schedulerMessageID + `", "event_type": "scheduler.select_destinations.start", "timestamp": "2026-03-01 12:34:56.789012", "payload": {"request_spec": {"instance_properties": {"pci_requests": {"_context": {"auth_token": "` + keystoneToken + `", "user": "u1"}}}}}}`
+
+// schedulerRequestContext is the path to the request context inside a dumped
+// schedulerDocument line.
+var schedulerRequestContext = []any{"payload", "request_spec", "instance_properties", "pci_requests", "_context"}
+
+// volumeAttachDocument is a cinder attachment notification with the
+// connection_info of a Ceph backend: the monitors, the user and the secret UUID.
+const volumeAttachDocument = `{"message_id": "6c2d8e3f-9a4b-4d7c-8e1f-2b3c4d5e6f7a", "event_type": "volume.attach.end", "timestamp": "2026-03-01 12:34:56.789012", "payload": {"volume_id": "v1", "volume_attachment": [{"connection_info": {"hosts": ["10.0.0.1"], "auth_username": "cinder", "secret_uuid": "457eb676-33da-42ec-9a8c-9293d545c337"}, "instance_uuid": "i1"}]}}`
+
+// closedWriter refuses every write, the way the dump's standard output does
+// once the reader of the pipe is gone.
+type closedWriter struct{}
+
+func (closedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// memberAt follows path into a decoded JSON tree: a string step names a member
+// of an object and an int step an element of an array. It returns nil where
+// the path leaves the tree.
+func memberAt(value any, path ...any) any {
+	for _, step := range path {
+		switch step := step.(type) {
+		case string:
+			object, _ := value.(map[string]any)
+			value = object[step]
+		case int:
+			array, _ := value.([]any)
+			if step < 0 || step >= len(array) {
+				return nil
+			}
+			value = array[step]
+		}
+	}
+	return value
+}
 
 func TestParseEnvelopeReadsEveryField(t *testing.T) {
 	got, err := ParseEnvelope(wrap(t, innerDocument))
@@ -335,6 +384,238 @@ func TestPreviewCutsTheBodyAtTheBound(t *testing.T) {
 
 	if got := preview(body); len(got) != previewMax {
 		t.Errorf("preview() returned %d bytes, want it cut at %d", len(got), previewMax)
+	}
+}
+
+// TestSecretMember pins the rule both dump lines go by. The names are the ones
+// services use for a credential and the ones the mapping reads, which the rule
+// has to leave alone.
+func TestSecretMember(t *testing.T) {
+	for _, name := range []string{
+		"auth_token", "_context_auth_token", "password", "_context_password", "auth_password",
+		"admin_password", "PASSWORD", "X-Auth-Token", "service_token", "secret_uuid",
+		"connection_info", "old_connection_info",
+	} {
+		if !secretMember(name) {
+			t.Errorf("secretMember(%q) = false, want the member withheld", name)
+		}
+	}
+
+	for _, name := range []string{
+		"", "instance_id", "tenant_id", "volume_id", "display_name", "key_name", "routing_key",
+		"size", "connection",
+	} {
+		if secretMember(name) {
+			t.Errorf("secretMember(%q) = true, want the member printed", name)
+		}
+	}
+}
+
+// TestRedactionLeavesWhatTheMappingReads holds the rule against the mapping
+// table: a payload the dump has redacted maps to the event the delivered one
+// maps to, for every golden notification.
+func TestRedactionLeavesWhatTheMappingReads(t *testing.T) {
+	fixtures, err := filepath.Glob(filepath.Join("testdata", "golden", "notifications", "*.json"))
+	if err != nil || len(fixtures) == 0 {
+		t.Fatalf("Glob() = %v, %v, want the notification fixtures", fixtures, err)
+	}
+
+	for _, fixture := range fixtures {
+		t.Run(filepath.Base(fixture), func(t *testing.T) {
+			body, err := os.ReadFile(fixture)
+			if err != nil {
+				t.Fatalf("reading the notification: %v", err)
+			}
+			parsed, err := ParseEnvelope(body)
+			if err != nil {
+				t.Fatalf("ParseEnvelope() error = %v, want nil", err)
+			}
+			want, wantOK := MapNotification(parsed, goldenCloud)
+
+			redactValue(parsed.Payload)
+
+			got, gotOK := MapNotification(parsed, goldenCloud)
+			if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+				t.Errorf("MapNotification() of the redacted payload = %+v, %v, want %+v, %v", got, gotOK, want, wantOK)
+			}
+		})
+	}
+}
+
+// TestRedactValue covers the walk over a decoded payload. The rule reads the
+// name alone, so a matching member is replaced whatever it holds, and a tree
+// without one comes back as it went in.
+func TestRedactValue(t *testing.T) {
+	tests := []struct {
+		name string
+		tree any
+		want any
+	}{
+		{
+			name: "a string under a matching name is replaced",
+			tree: map[string]any{"auth_token": keystoneToken, "user": "u1"},
+			want: map[string]any{"auth_token": "[redacted]", "user": "u1"},
+		},
+		{
+			name: "a number under a matching name is replaced",
+			tree: map[string]any{"token": json.Number("42")},
+			want: map[string]any{"token": "[redacted]"},
+		},
+		{
+			name: "a boolean under a matching name is replaced",
+			tree: map[string]any{"has_secret": true},
+			want: map[string]any{"has_secret": "[redacted]"},
+		},
+		{
+			name: "null under a matching name is replaced",
+			tree: map[string]any{"password": nil},
+			want: map[string]any{"password": "[redacted]"},
+		},
+		{
+			name: "an object under a matching name is replaced whole",
+			tree: map[string]any{"connection_info": map[string]any{"hosts": []any{"10.0.0.1"}}},
+			want: map[string]any{"connection_info": "[redacted]"},
+		},
+		{
+			name: "an array under a matching name is replaced whole",
+			tree: map[string]any{"tokens": []any{"a", "b"}},
+			want: map[string]any{"tokens": "[redacted]"},
+		},
+		{
+			name: "a matching member inside an array inside an array is replaced",
+			tree: []any{[]any{map[string]any{"Admin_Password": nil}}},
+			want: []any{[]any{map[string]any{"Admin_Password": "[redacted]"}}},
+		},
+		{
+			name: "an empty map comes back empty",
+			tree: map[string]any{},
+			want: map[string]any{},
+		},
+		{
+			name: "an empty slice comes back empty",
+			tree: []any{},
+			want: []any{},
+		},
+		{
+			name: "a tree with no matching member comes back as it went in",
+			tree: map[string]any{"instance_id": "i1", "vcpus": json.Number("2"), "nics": []any{map[string]any{"connection": "c1"}}},
+			want: map[string]any{"instance_id": "i1", "vcpus": json.Number("2"), "nics": []any{map[string]any{"connection": "c1"}}},
+		},
+		{
+			name: "nil is left alone",
+			tree: nil,
+			want: nil,
+		},
+		{
+			name: "a nil map is left alone",
+			tree: map[string]any(nil),
+			want: map[string]any(nil),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			redactValue(tc.tree)
+
+			if !reflect.DeepEqual(tc.tree, tc.want) {
+				t.Errorf("redactValue() left %#v, want %#v", tc.tree, tc.want)
+			}
+		})
+	}
+}
+
+// printedLine runs one notification through printNotification the way the dump
+// delivers it, and returns what was written and that line decoded.
+func printedLine(t *testing.T, inner string) (string, map[string]any) {
+	t.Helper()
+
+	var out bytes.Buffer
+	delivery := amqp091.Delivery{Exchange: "nova", RoutingKey: "notifications.info", Body: wrap(t, inner)}
+	if err := printNotification(json.NewEncoder(&out), delivery); err != nil {
+		t.Fatalf("printNotification() error = %v, want nil", err)
+	}
+	if strings.Count(out.String(), "\n") != 1 || !strings.HasSuffix(out.String(), "\n") {
+		t.Fatalf("printNotification() wrote %q, want one line", out.String())
+	}
+	var line map[string]any
+	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
+		t.Fatalf("printNotification() wrote %q, want a JSON object: %v", out.String(), err)
+	}
+	return out.String(), line
+}
+
+// TestPrintNotificationRedactsThePayload covers the line the dump prints for
+// nearly every delivery, the one whose body parses. Both shapes are ones a
+// deployment publishes with a credential in the payload, and neither is among
+// the fixtures.
+func TestPrintNotificationRedactsThePayload(t *testing.T) {
+	t.Run("the Keystone token of a scheduler notification", func(t *testing.T) {
+		out, line := printedLine(t, schedulerDocument)
+
+		if got := memberAt(line, append(schedulerRequestContext, "auth_token")...); got != "[redacted]" {
+			t.Errorf("the printed auth_token = %v, want [redacted]", got)
+		}
+		if got := memberAt(line, append(schedulerRequestContext, "user")...); got != "u1" {
+			t.Errorf("the printed user = %v, want it kept as u1", got)
+		}
+		if strings.Contains(out, keystoneToken) {
+			t.Errorf("printNotification() printed the Keystone token: %s", out)
+		}
+		// What is not payload is printed as before.
+		for _, member := range []struct{ name, want string }{
+			{name: "exchange", want: "nova"},
+			{name: "routing_key", want: "notifications.info"},
+			{name: "message_id", want: schedulerMessageID},
+			{name: "event_type", want: "scheduler.select_destinations.start"},
+			{name: "timestamp", want: "2026-03-01T12:34:56.789012Z"},
+		} {
+			if got := line[member.name]; got != member.want {
+				t.Errorf("the printed %s = %v, want %q", member.name, got, member.want)
+			}
+		}
+	})
+
+	t.Run("the connection_info of a volume attachment", func(t *testing.T) {
+		out, line := printedLine(t, volumeAttachDocument)
+
+		if got := memberAt(line, "payload", "volume_attachment", 0, "connection_info"); got != "[redacted]" {
+			t.Errorf("the printed connection_info = %v, want the string [redacted]", got)
+		}
+		if got := memberAt(line, "payload", "volume_id"); got != "v1" {
+			t.Errorf("the printed volume_id = %v, want it kept as v1", got)
+		}
+		if got := memberAt(line, "payload", "volume_attachment", 0, "instance_uuid"); got != "i1" {
+			t.Errorf("the printed instance_uuid = %v, want it kept as i1", got)
+		}
+		for _, secret := range []string{"10.0.0.1", "457eb676-33da-42ec-9a8c-9293d545c337"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("printNotification() printed %s from the connection_info: %s", secret, out)
+			}
+		}
+	})
+
+	t.Run("a notification without a payload prints none", func(t *testing.T) {
+		_, line := printedLine(t, `{"message_id": "0a3b5f1e-6d2c-4f8a-9b1d-2c4e6a8b0d2f", `+
+			`"event_type": "compute.instance.create.end", "timestamp": "2026-03-01 12:00:00"}`)
+
+		if payload, ok := line["payload"]; ok {
+			t.Errorf("the printed line carries the payload %v, want the member left out", payload)
+		}
+	})
+}
+
+// TestPrintNotificationReportsAWriteThatFailed keeps a dump whose output is
+// gone from running on: the error ends the session.
+func TestPrintNotificationReportsAWriteThatFailed(t *testing.T) {
+	delivery := amqp091.Delivery{Exchange: "nova", RoutingKey: "notifications.info", Body: wrap(t, schedulerDocument)}
+
+	err := printNotification(json.NewEncoder(closedWriter{}), delivery)
+
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("printNotification() error = %v, want it to wrap io.ErrClosedPipe", err)
+	}
+	if !strings.HasPrefix(err.Error(), "printing a notification: ") {
+		t.Errorf("printNotification() error = %q, want it to start with %q", err, "printing a notification: ")
 	}
 }
 
