@@ -1,0 +1,179 @@
+# The outbox of the collector. Between the acknowledgement on the bus and the
+# delivery to the Reporting API an event lives in this file and nowhere else, so
+# it has to outlive the pod.
+#
+# 1Gi holds the default TALLY_OSC_BUFFER_MAX_EVENTS of a million events, which
+# is roughly half a gigabyte, with room for the WAL file SQLite writes beside
+# the database. The claim names no storageClassName, so the default class of
+# the cluster provisions it. A deployment that raises the bound patches the
+# claim.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openstack-collector-outbox
+  labels:
+    app.kubernetes.io/name: openstack-collector
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# The collector of one cloud. It binds a queue on the broker the amqp-url names,
+# buffers what it consumed in the outbox, and posts the buffer to the Reporting
+# API. No Service is declared: nothing in the cluster calls the collector.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openstack-collector
+  labels:
+    app.kubernetes.io/name: openstack-collector
+spec:
+  # One collector writes the outbox. A second replica would open the file of
+  # the first, and a rolling update starts the new pod while the old one still
+  # holds it. Recreate ends the old pod before the new one starts. It is also
+  # what lets an apply replace a pod that never became Ready: a collector with
+  # a wrong broker URL answers readiness with 503, and a StatefulSet would wait
+  # for that pod to be Ready before it updated it.
+  #
+  # Recreate orders a rollout and nothing else. A pod that is deleted or
+  # evicted is replaced while it still terminates, and on the same node the
+  # ReadWriteOnce claim admits both. For up to the grace period the two share
+  # the file under SQLite's locking, which loses no event, but the new pod can
+  # report tally_collector_buffer_depth and the buffered field of its summary
+  # line too high by up to one batch until its next start.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openstack-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openstack-collector
+    spec:
+      # The collector calls no Kubernetes API, so the token of the default
+      # ServiceAccount would be an exposure and nothing else.
+      automountServiceAccountToken: false
+      # The image ends in distroless nonroot with USER nonroot:nonroot, which
+      # names an identity and nothing more; this is what asks the kubelet to
+      # hold the pod to it. 65532 is that user. fsGroup is what makes the
+      # outbox writable: a fresh volume is root-owned, and the collector then
+      # exits with "unable to open database file (14)".
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: openstack-collector
+          image: tally-openstack-collector:dev
+          # What the block above does not reach. These four are per-container
+          # and every one of them defaults the permissive way. The collector
+          # needs none of it: it dials the broker and the Reporting API, serves
+          # its probes on an unprivileged port, and writes to the outbox volume
+          # alone. The broker URL and the ingest token are mounted into this
+          # container, which is what the confinement is worth.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          # The numbers are an assumption and not a measurement: what the
+          # process holds is the 100 unacknowledged deliveries of the default
+          # TALLY_OSC_PREFETCH, a few kilobytes each, and the page cache of
+          # SQLite. Without a request the pod is BestEffort and first in line
+          # for eviction, and the outbox it was draining waits for the next pod.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          # The port carries the probes and /metrics. It is named so that a
+          # Service and a scrape job can refer to it.
+          ports:
+            - name: http
+              containerPort: 8080
+          # Every non-secret setting comes from the ConfigMap the overlay
+          # generates, TALLY_OSC_CLOUD first among them, so a deployment sets
+          # TALLY_OSC_EXCHANGES or TALLY_OSC_QUEUE_TYPE without a patch.
+          envFrom:
+            - configMapRef:
+                name: tally-openstack-collector
+          # env wins over envFrom, so the ConfigMap cannot override the six
+          # variables below. Each of them names something this manifest
+          # declares: the port, two mounts, the Service of the Reporting API
+          # and the path on the claim. TALLY_OSC_AMQP_URL or TALLY_OSC_TOKEN in
+          # the ConfigMap stops the collector with "set TALLY_OSC_AMQP_URL or
+          # TALLY_OSC_AMQP_URL_FILE, not both".
+          env:
+            - name: TALLY_OSC_HTTP_PORT
+              value: "8080"
+            # Secrets follow the *_FILE convention so they arrive as a mounted
+            # file rather than an environment value.
+            - name: TALLY_OSC_AMQP_URL_FILE
+              value: /run/secrets/tally-amqp/amqp-url
+            - name: TALLY_OSC_TOKEN_FILE
+              value: /run/secrets/tally-token/ingest-token
+            # The Service of the Reporting API in this namespace, over plain
+            # HTTP. The link does not depend on the DNS name or the certificate
+            # of the Gateway, and it stays inside the namespace.
+            - name: TALLY_OSC_REPORTING_URL
+              value: http://reporting-api
+            - name: TALLY_OSC_REPORTING_INSECURE
+              value: "true"
+            - name: TALLY_OSC_BUFFER_PATH
+              value: /var/lib/tally/collector/outbox.db
+          volumeMounts:
+            - name: amqp-url
+              mountPath: /run/secrets/tally-amqp
+              readOnly: true
+            - name: ingest-token
+              mountPath: /run/secrets/tally-token
+              readOnly: true
+            - name: outbox
+              mountPath: /var/lib/tally/collector
+          # Liveness weighs the outbox alone, and readiness the broker session
+          # too. A broker outage therefore shows as 0/1 with no restart, which
+          # a restart would not mend. The handler gives its outbox check two
+          # seconds (probeTimeout, cmd/tally-openstack-collector/main.go), so
+          # the timeout here stands above it; the kubelet's default of one
+          # would fail a probe the handler is still working within.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: amqp-url
+          secret:
+            secretName: tally-collector-amqp
+            items:
+              - key: amqp-url
+                path: amqp-url
+        # No overlay generates this Secret: its operator creates it from the
+        # output of create-ingest-credential. Until it exists the pod waits in
+        # ContainerCreating, and it starts on its own afterwards.
+        - name: ingest-token
+          secret:
+            secretName: tally-collector-token
+            items:
+              - key: ingest-token
+                path: ingest-token
+        - name: outbox
+          persistentVolumeClaim:
+            claimName: openstack-collector-outbox

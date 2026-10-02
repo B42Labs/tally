@@ -1,0 +1,25 @@
+# The OpenStack collector in a cluster: one Deployment with its outbox on a
+# PersistentVolumeClaim. The collector consumes the notifications of one cloud
+# from a broker outside the cluster and posts them to the Reporting API of its
+# own namespace.
+#
+# An overlay that lists this component has four things to supply:
+#
+#   - a generated ConfigMap tally-openstack-collector that carries
+#     TALLY_OSC_CLOUD, and any other non-secret TALLY_OSC_* variable beside it
+#   - a generated Secret tally-collector-amqp with the key amqp-url, the URL of
+#     the broker account with its password
+#   - a Secret tally-collector-token with the key ingest-token, the token
+#     `tally-reporting-admin create-ingest-credential` prints
+#   - an images entry that maps tally-openstack-collector to a registry
+#
+# The prod overlay does. It generates the first two, and its operator creates
+# the token Secret with kubectl once the database is migrated
+# (docs/how-to/cluster/deploy-the-collecting-stack.md). The dev overlay does not
+# list the component: the dev stack runs its collector in
+# deploy/compose/compose.yaml, beside its broker.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - openstack-collector.yaml
