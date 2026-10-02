@@ -1,0 +1,16 @@
+# The response the deny rule in kustomization.yaml sends. Envoy Gateway's
+# extension filter, the Gateway API having no core way to answer a request
+# without a backend.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: alertmanager-deny-writes
+  labels:
+    app.kubernetes.io/name: alertmanager
+spec:
+  directResponse:
+    statusCode: 403
+    contentType: text/plain
+    body:
+      type: Inline
+      inline: "The Alertmanager write API is not published.\n"

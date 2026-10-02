@@ -4,13 +4,10 @@
 #
 # Dev and prod share this file. Overlays change the hostnames the routes match,
 # the issuer that signs the certificate, and (in dev) the proxy Service type.
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: tally
-spec:
-  controllerName: gateway.envoyproxy.io/gatewayclass-controller
----
+#
+# The Gateway names the class tally and this directory declares none. The
+# component deploy/kubernetes/components/envoy-gateway declares it for Envoy
+# Gateway, and under another implementation the cluster does.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:

@@ -15,6 +15,11 @@ resources:
   - ../../base
   - envoyproxy.yaml
 
+# The dev stack runs Envoy Gateway, so it lists what the base leaves to it: the
+# GatewayClass, the OTLP rate limit and the two 403 answers.
+components:
+  - ../../components/envoy-gateway
+
 # Dev credentials, in the clear on purpose: this database is reachable only
 # through a Gateway bound to 127.0.0.1 on the developer's own machine.
 secretGenerator:

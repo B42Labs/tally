@@ -173,20 +173,6 @@ spec:
               - key: admin-password
                 path: admin-password
 ---
-# The response the deny rule below sends. Envoy Gateway's extension filter, the
-# Gateway API having no core way to answer a request without a backend.
-apiVersion: gateway.envoyproxy.io/v1alpha1
-kind: HTTPRouteFilter
-metadata:
-  name: grafana-deny-datasource-proxy
-spec:
-  directResponse:
-    statusCode: 403
-    contentType: text/plain
-    body:
-      type: Inline
-      inline: "The Grafana datasource proxy is not published.\n"
----
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -198,32 +184,9 @@ spec:
   hostnames:
     - grafana.tally.example.com
   rules:
-    # Nothing here needs the datasource proxy: a provisioned dashboard queries
-    # through /api/ds/query, so the prefix is refused rather than published.
-    #
-    # This is the outer of two rings and the weaker one. It closes one spelling
-    # of one endpoint: /api/datasources/uid/<uid>/resources forwards a
-    # caller-supplied path the same way and cannot be denied without emptying
-    # every variable dropdown, and a percent-encoded spelling of the prefix
-    # below reaches Grafana as this path all the same, because Grafana routes on
-    # the decoded one. What actually bounds the tunnel is the far end: the
-    # datasource URL names the vmauth container in the Grafana pod, which serves
-    # reads and refuses everything else.
-    #
-    # Gateway API resolves path prefixes longest-match-first, so this rule wins
-    # over the / below wherever it matches, whatever the order in this list.
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /api/datasources/proxy
-      filters:
-        - type: ExtensionRef
-          extensionRef:
-            group: gateway.envoyproxy.io
-            kind: HTTPRouteFilter
-            name: grafana-deny-datasource-proxy
-    # Everything else. Naming paths here would break the asset and API calls
-    # the UI makes to render a page, so the whole host is published.
+    # The whole host. Naming paths here would break the asset and API calls the
+    # UI makes to render a page. The envoy-gateway component puts a rule ahead
+    # of this one that refuses /api/datasources/proxy.
     - matches:
         - path:
             type: PathPrefix

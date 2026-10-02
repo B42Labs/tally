@@ -1,0 +1,7 @@
+# The class the base's Gateway names, bound to Envoy Gateway's controller.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: tally
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller

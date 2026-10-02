@@ -1,9 +1,11 @@
 // This file pins the manifest properties that keep an anonymous request from
 // reaching further than a dashboard. Every one of them fails silently: a pod
-// that mounts the wrong Secret key still passes its readiness probe, a route
-// that publishes the datasource proxy still renders every panel, and a session
-// cookie without Secure looks the same in the browser. The test reads the YAML
-// from disk and needs no cluster.
+// that mounts the wrong Secret key still passes its readiness probe, a
+// datasource that names the store still renders every panel, and a session
+// cookie without Secure looks the same in the browser. The refusal of the
+// datasource proxy at the Gateway is Envoy Gateway's, and the test in
+// deploy/kubernetes/components/envoy-gateway asserts it. The test reads the
+// YAML from disk and needs no cluster.
 package grafana_test
 
 import (
@@ -20,13 +22,14 @@ import (
 )
 
 // The four files that between them bound what the datasource proxy reaches.
-// Denying the proxy prefix at the Gateway is the weakest of them: the variable
-// queries read /api/datasources/uid/<uid>/resources, which forwards a
-// caller-supplied path the same way and cannot be denied without emptying every
-// dropdown, and a percent-encoded spelling of the prefix reaches Grafana as the
-// decoded path regardless. What bounds the tunnel is its far end, so the
-// datasource file, the route map of the container it names, and the delete key
-// on the store are asserted here alongside the route rather than apart.
+// The envoy-gateway component denies the proxy prefix at the Gateway, and that
+// is the weakest bound: the variable queries read
+// /api/datasources/uid/<uid>/resources, which forwards a caller-supplied path
+// the same way and cannot be denied without emptying every dropdown, and a
+// percent-encoded spelling of the prefix reaches Grafana as the decoded path
+// regardless. What bounds the tunnel is its far end, so the datasource file,
+// the route map of the container it names, and the delete key on the store are
+// asserted here, with the component or without it.
 const (
 	grafanaManifest = "grafana.yaml"
 	vmManifest      = "../victoriametrics/victoriametrics.yaml"
@@ -35,17 +38,13 @@ const (
 )
 
 // object is the part of a manifest document this test asserts over. yaml.v3
-// ignores every field not named here, so one shape covers all four kinds.
+// ignores every field not named here, so one shape covers all three kinds.
 type object struct {
 	Kind     string `yaml:"kind"`
 	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Spec struct {
-		// HTTPRouteFilter
-		DirectResponse struct {
-			StatusCode int `yaml:"statusCode"`
-		} `yaml:"directResponse"`
 		// Deployment and StatefulSet
 		Template struct {
 			Spec struct {
@@ -92,16 +91,10 @@ type volume struct {
 type routeRule struct {
 	Matches []struct {
 		Path struct {
+			Type  string `yaml:"type"`
 			Value string `yaml:"value"`
 		} `yaml:"path"`
 	} `yaml:"matches"`
-	Filters []struct {
-		Type         string `yaml:"type"`
-		ExtensionRef struct {
-			Kind string `yaml:"kind"`
-			Name string `yaml:"name"`
-		} `yaml:"extensionRef"`
-	} `yaml:"filters"`
 	BackendRefs []struct {
 		Name string `yaml:"name"`
 	} `yaml:"backendRefs"`
@@ -163,39 +156,39 @@ func TestGrafanaDeployment(t *testing.T) {
 }
 
 func TestGrafanaRoute(t *testing.T) {
-	docs := objects(t, grafanaManifest)
+	// The base carries the whole host to Grafana and nothing else. Core
+	// Gateway API cannot answer a request without a backend, so a rule that
+	// names none answers 500 unless a filter of one implementation answers for
+	// it, and such a rule belongs in a component. The refusal of
+	// /api/datasources/proxy is the envoy-gateway component's rule;
+	// TestDatasourceReachesReadsOnly covers the bound that holds without it.
+	var rules []routeRule
+	var found bool
+	for _, doc := range objects(t, grafanaManifest) {
+		if doc.Kind == "HTTPRoute" && doc.Metadata.Name == "grafana" {
+			rules, found = doc.Spec.Rules, true
+		}
+	}
+	if !found {
+		t.Fatalf("%s declares no HTTPRoute named \"grafana\", so the host answers nothing", grafanaManifest)
+	}
 
-	t.Run("denies the datasource proxy", func(t *testing.T) {
-		// /api/datasources/proxy/uid/<uid>/<path> forwards <path> to the
-		// datasource URL and checks only datasources:query, which the viewer
-		// role holds. Nothing here needs it, so it is refused. This is the
-		// outer ring; TestDatasourceReachesReadsOnly covers the one that holds.
-		const prefix = "/api/datasources/proxy"
+	for i, rule := range rules {
+		if len(rule.BackendRefs) == 0 {
+			t.Errorf("rule %d of the grafana HTTPRoute names no backend; a rule that answers by itself needs one implementation's filter and belongs in a component under deploy/kubernetes/components/", i)
+		}
+	}
+	if len(rules) != 1 {
+		t.Fatalf("the grafana HTTPRoute has %d rules, want the one that carries the host", len(rules))
+	}
 
-		rule, ok := ruleMatching(docs, "grafana", prefix)
-		if !ok {
-			t.Fatalf("the grafana HTTPRoute has no rule for %s, so the / rule carries it to Grafana", prefix)
-		}
-		if len(rule.BackendRefs) != 0 {
-			t.Errorf("the %s rule names %d backends, so the request is forwarded rather than refused",
-				prefix, len(rule.BackendRefs))
-		}
-		if len(rule.Filters) != 1 || rule.Filters[0].Type != "ExtensionRef" {
-			t.Fatalf("the %s rule carries no ExtensionRef filter, so it answers 500 rather than a refusal", prefix)
-		}
-
-		ref := rule.Filters[0].ExtensionRef
-		for _, doc := range docs {
-			if doc.Kind != ref.Kind || doc.Metadata.Name != ref.Name {
-				continue
-			}
-			if doc.Spec.DirectResponse.StatusCode != 403 {
-				t.Errorf("%s %s responds %d, want 403", ref.Kind, ref.Name, doc.Spec.DirectResponse.StatusCode)
-			}
-			return
-		}
-		t.Errorf("the rule references %s/%s, which this file does not define", ref.Kind, ref.Name)
-	})
+	rule := rules[0]
+	if len(rule.Matches) != 1 || rule.Matches[0].Path.Type != "PathPrefix" || rule.Matches[0].Path.Value != "/" {
+		t.Errorf("the rule matches %+v, want PathPrefix / alone; naming paths breaks the asset and API calls the UI makes to render a page", rule.Matches)
+	}
+	if len(rule.BackendRefs) != 1 || rule.BackendRefs[0].Name != "grafana" {
+		t.Errorf("the rule forwards to %+v, want the grafana Service alone", rule.BackendRefs)
+	}
 }
 
 func TestDatasourceReachesReadsOnly(t *testing.T) {
@@ -378,24 +371,6 @@ func volumeNamed(t *testing.T, docs []object, kind, workload, name string) volum
 	}
 	t.Fatalf("no %s named %q", kind, workload)
 	return volume{}
-}
-
-// ruleMatching returns the rule of one HTTPRoute whose path prefix is exactly
-// the one given.
-func ruleMatching(docs []object, route, prefix string) (routeRule, bool) {
-	for _, doc := range docs {
-		if doc.Kind != "HTTPRoute" || doc.Metadata.Name != route {
-			continue
-		}
-		for _, rule := range doc.Spec.Rules {
-			for _, m := range rule.Matches {
-				if m.Path.Value == prefix {
-					return rule, true
-				}
-			}
-		}
-	}
-	return routeRule{}, false
 }
 
 // envValue returns the literal value of one environment variable, or "".

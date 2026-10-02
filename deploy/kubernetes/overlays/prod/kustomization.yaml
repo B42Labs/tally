@@ -14,13 +14,21 @@ namespace: tally
 # hosts.yaml is read by the replacements at the end of this file and never
 # emitted. There is no envoyproxy.yaml: Envoy Gateway's default Service type is
 # LoadBalancer, which is what this cluster provides. That LoadBalancer has to
-# pass the client's address on: the base's OTLP rate limit keeps one bucket per
-# address, and behind a LoadBalancer that proxies connections every publisher
-# draws from the bucket of the LoadBalancer's own address.
+# pass the client's address on: the OTLP rate limit of the envoy-gateway
+# component keeps one bucket per address, and behind a LoadBalancer that
+# proxies connections every publisher draws from the bucket of the
+# LoadBalancer's own address.
 resources:
   - namespace.yaml
   - ../../base
   - hosts.yaml
+
+# This cluster runs Envoy Gateway, so it lists what the base leaves to it: the
+# GatewayClass, the OTLP rate limit and the two 403 answers. kustomize applies
+# the component before the patches below, which is why one of them can delete
+# a filter the component declares.
+components:
+  - ../../components/envoy-gateway
 
 # The Reporting API image the release workflow publishes. The operator moves
 # newTag on every release, and the tag has to exist in the registry before
@@ -62,9 +70,10 @@ configMapGenerator:
 patches:
   # The UIs of the store, vmalert and Alertmanager answer without a credential,
   # so their routes are not published here, and neither is the filter the
-  # Alertmanager route references. docs/how-to/observability/deploy-alerting.md
-  # tells a deployment beyond localhost to publish neither alerting route. The
-  # operator reaches all three with kubectl port-forward.
+  # envoy-gateway component declares for the Alertmanager route.
+  # docs/how-to/observability/deploy-alerting.md tells a deployment beyond
+  # localhost to publish neither alerting route. The operator reaches all three
+  # with kubectl port-forward.
   - patch: |
       apiVersion: gateway.networking.k8s.io/v1
       kind: HTTPRoute

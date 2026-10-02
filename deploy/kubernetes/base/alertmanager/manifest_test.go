@@ -27,17 +27,13 @@ const (
 )
 
 // object is the part of a manifest document this test asserts over. yaml.v3
-// ignores every field not named here, so one shape covers all three kinds.
+// ignores every field not named here, so one shape covers both kinds.
 type object struct {
 	Kind     string `yaml:"kind"`
 	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Spec struct {
-		// HTTPRouteFilter
-		DirectResponse struct {
-			StatusCode int `yaml:"statusCode"`
-		} `yaml:"directResponse"`
 		// StatefulSet
 		Template struct {
 			Spec struct {
@@ -76,14 +72,7 @@ type container struct {
 }
 
 type routeRule struct {
-	Matches []routeMatch `yaml:"matches"`
-	Filters []struct {
-		Type         string `yaml:"type"`
-		ExtensionRef struct {
-			Kind string `yaml:"kind"`
-			Name string `yaml:"name"`
-		} `yaml:"extensionRef"`
-	} `yaml:"filters"`
+	Matches     []routeMatch `yaml:"matches"`
 	BackendRefs []struct {
 		Name string `yaml:"name"`
 	} `yaml:"backendRefs"`
@@ -142,76 +131,20 @@ func TestAlertmanagerRoute(t *testing.T) {
 	docs := objects(t, manifestFile)
 	route := objectNamed(t, docs, "HTTPRoute", "alertmanager")
 
-	var deny, forward []routeRule
-	for _, rule := range route.Spec.Rules {
+	// Core Gateway API cannot answer a request without a backend. The rule
+	// that answers the write paths with a 403 therefore takes Envoy Gateway's
+	// filter and is the envoy-gateway component's, whose test asserts it. In
+	// the base those paths match no rule and get the Gateway's 404.
+	var forward []routeRule
+	for i, rule := range route.Spec.Rules {
 		if len(rule.BackendRefs) == 0 {
-			deny = append(deny, rule)
-			continue
+			t.Fatalf("rule %d of the alertmanager HTTPRoute names no backend; a rule that answers by itself needs one implementation's filter and belongs in a component under deploy/kubernetes/components/", i)
 		}
 		forward = append(forward, rule)
-	}
-	if len(deny) != 1 {
-		t.Fatalf("the alertmanager HTTPRoute has %d rules without a backend, want the one that refuses the write API; without it every write path is answered by a 404 that says nothing",
-			len(deny))
 	}
 	if len(forward) != 1 {
 		t.Fatalf("the alertmanager HTTPRoute has %d rules with a backend, want the one that carries the UI", len(forward))
 	}
-	rule := deny[0]
-
-	t.Run("answers the refused paths itself", func(t *testing.T) {
-		// The Gateway API has no core way to answer without a backend, so the
-		// refusal is Envoy Gateway's extension filter. A rule that names
-		// neither a backend nor a filter answers 500, which reads as an outage
-		// rather than as a decision.
-		if len(rule.Filters) != 1 || rule.Filters[0].Type != "ExtensionRef" {
-			t.Fatalf("the deny rule carries %d filters, want exactly one ExtensionRef; a rule with neither backend nor filter answers 500 rather than a refusal",
-				len(rule.Filters))
-		}
-
-		ref := rule.Filters[0].ExtensionRef
-		if ref.Kind != "HTTPRouteFilter" {
-			t.Fatalf("the deny rule references kind %q, want HTTPRouteFilter", ref.Kind)
-		}
-		for _, doc := range docs {
-			if doc.Kind != ref.Kind || doc.Metadata.Name != ref.Name {
-				continue
-			}
-			if doc.Spec.DirectResponse.StatusCode != 403 {
-				t.Errorf("%s %s responds %d, want 403", ref.Kind, ref.Name, doc.Spec.DirectResponse.StatusCode)
-			}
-			return
-		}
-		t.Errorf("the rule references %s/%s, which this file does not define, so the Gateway rejects the route and the host answers nothing",
-			ref.Kind, ref.Name)
-	})
-
-	t.Run("names every write path", func(t *testing.T) {
-		// Port 9093 answers reads and writes on one API, and the UI needs the
-		// reads. What separates them is the method, so a missing entry here
-		// publishes a write to whoever opens the host.
-		for _, want := range []struct {
-			prefix string
-			method string
-			opens  string
-		}{
-			{"/api/v2", "POST", "creating a silence and injecting an alert"},
-			{"/api/v2", "PUT", "editing a silence"},
-			{"/api/v2", "DELETE", "expiring a silence"},
-			{"/-/reload", "", "re-reading the config on demand"},
-			{"/debug", "", "the pprof endpoints"},
-		} {
-			if covers(rule, "PathPrefix", want.prefix, want.method) {
-				continue
-			}
-			target := want.prefix
-			if want.method != "" {
-				target = want.method + " " + want.prefix
-			}
-			t.Errorf("the deny rule has no PathPrefix match for %s, so %s is answered by the Gateway's 404 rather than by a refusal that says why",
-				target, want.opens)
-		}
-	})
 
 	t.Run("publishes the reads the UI needs", func(t *testing.T) {
 		// One side of the allowlist: a path dropped from publishedReads takes a
@@ -229,11 +162,11 @@ func TestAlertmanagerRoute(t *testing.T) {
 
 	t.Run("withholds what answers with the config", func(t *testing.T) {
 		// The other side, and the reason the read side names paths rather than
-		// the host. GET /api/v2/status and GET /metrics are reads, so the deny
-		// rule above never sees them: what keeps them off the published host is
-		// that no match here carries them. Asserting the absence of those two
-		// values would not say that, because any match wider than the ones
-		// above carries both without naming either.
+		// the host. GET /api/v2/status and GET /metrics are reads, so the
+		// component's deny rule never sees them: what keeps them off the
+		// published host is that no match here carries them. Asserting the
+		// absence of those two values would not say that, because any match
+		// wider than the ones above carries both without naming either.
 		for _, m := range forward[0].Matches {
 			if !slices.ContainsFunc(publishedReads, func(r publishedRead) bool {
 				return r.matchType == m.Path.Type && r.path == m.Path.Value
@@ -241,12 +174,14 @@ func TestAlertmanagerRoute(t *testing.T) {
 				t.Errorf("the forwarding rule publishes %s %s, which is not one of the reads the UI needs; a match wider than those carries GET /api/v2/status and the loaded config with it, and GET /metrics the delivery integrations it names",
 					m.Path.Type, m.Path.Value)
 			}
-			// A match that names no method applies to every one of them, and
-			// the Gateway API ranks its longer prefix above the deny rule's
-			// PathPrefix /api/v2 plus method: the write API becomes reachable
-			// from the published host without any match here naming it.
+			// A match that names no method applies to every one of them, so
+			// it forwards POST to Alertmanager: the write API becomes
+			// reachable from the published host without any match here
+			// naming it. The envoy-gateway component does not close that,
+			// because the Gateway API ranks the longer prefix above its deny
+			// rule's PathPrefix /api/v2 plus method.
 			if m.Method != "GET" {
-				t.Errorf("the match for %s %s names method %q rather than GET, so it outranks the deny rule's /api/v2 method match and forwards POST %s to Alertmanager",
+				t.Errorf("the match for %s %s names method %q rather than GET, so it forwards POST %s to Alertmanager, and with the envoy-gateway component it outranks the deny rule's /api/v2 method match",
 					m.Path.Type, m.Path.Value, m.Method, m.Path.Value)
 			}
 		}

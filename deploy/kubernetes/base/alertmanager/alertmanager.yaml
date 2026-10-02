@@ -137,22 +137,6 @@ spec:
           requests:
             storage: 1Gi
 ---
-# The response the deny rule below sends. Envoy Gateway's extension filter, the
-# Gateway API having no core way to answer a request without a backend.
-apiVersion: gateway.envoyproxy.io/v1alpha1
-kind: HTTPRouteFilter
-metadata:
-  name: alertmanager-deny-writes
-  labels:
-    app.kubernetes.io/name: alertmanager
-spec:
-  directResponse:
-    statusCode: 403
-    contentType: text/plain
-    body:
-      type: Inline
-      inline: "The Alertmanager write API is not published.\n"
----
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -166,45 +150,6 @@ spec:
   hostnames:
     - alertmanager.tally.example.com
   rules:
-    # Port 9093 answers reads and writes on one API. Under /api/v2 a POST
-    # creates a silence or injects an alert, a PUT edits one and a DELETE
-    # expires one; /-/reload re-reads the config on demand, and /debug carries
-    # the pprof endpoints. The rule below publishes none of them, so this one is
-    # not what keeps them off the host: it is what answers them, so the UI's
-    # silence form is told why it was turned away rather than left with a 404.
-    #
-    # The rule below names longer prefixes than /api/v2, and the Gateway API
-    # ranks a longer prefix above a method match. Its matches therefore name
-    # GET, so a POST /api/v2/silences never reaches it and lands here.
-    #
-    # Silences are created from inside the cluster instead, with the amtool the
-    # image ships; docs/how-to/observability/deploy-alerting.md carries the
-    # command.
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /api/v2
-          method: POST
-        - path:
-            type: PathPrefix
-            value: /api/v2
-          method: PUT
-        - path:
-            type: PathPrefix
-            value: /api/v2
-          method: DELETE
-        - path:
-            type: PathPrefix
-            value: /-/reload
-        - path:
-            type: PathPrefix
-            value: /debug
-      filters:
-        - type: ExtensionRef
-          extensionRef:
-            group: gateway.envoyproxy.io
-            kind: HTTPRouteFilter
-            name: alertmanager-deny-writes
     # The published reads, named one at a time the way the vmalert and
     # VictoriaMetrics routes name theirs. Carrying the rest of the host instead
     # would publish two more: GET /api/v2/status answers with the loaded config,
