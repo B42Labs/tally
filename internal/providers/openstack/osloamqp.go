@@ -406,8 +406,10 @@ func requireQuorumBroker(properties amqp091.Table) error {
 // int32 and stays one, so that a later version declares the argument this one
 // declared.
 //
-// Every other value declares no arguments. That is the declare every deployed
-// queue was created with, so the default meets no 406 on a queue that exists.
+// Every other value declares no arguments, which is the declare of classic and
+// of every collector up to v0.2.0. A Config that never went through Load
+// carries the empty string and declares that way too, because the default is
+// Load's.
 func queueDeclareArgs(queueType string) amqp091.Table {
 	if queueType != queueTypeQuorum {
 		return nil

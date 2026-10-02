@@ -139,9 +139,12 @@ func startCollector(t *testing.T, url string, exchanges []string) (*openstack.Ou
 		Exchanges:        exchanges,
 		Topics:           []string{collectorTopic},
 		RequireExchanges: true,
-		Cloud:            testCloud,
-		Prefetch:         10,
-		BufferMaxEvents:  testOutboxMax,
+		// The collector's default, which the compose stack leaves alone. It is a
+		// literal because the package does not export the constant.
+		QueueType:       "quorum",
+		Cloud:           testCloud,
+		Prefetch:        10,
+		BufferMaxEvents: testOutboxMax,
 	}, outbox, m, testLogger(t))
 
 	ctx, cancel := context.WithCancel(context.Background())

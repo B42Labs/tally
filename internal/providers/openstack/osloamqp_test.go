@@ -375,9 +375,9 @@ func TestParseEnvelopeAcceptsAbsentMembers(t *testing.T) {
 }
 
 // TestQueueDeclareArgs pins the two declares the collector issues. Everything
-// but quorum declares with no arguments at all, which is the declare every
-// deployed queue was created with, so the nil is asserted and an empty table
-// does not pass for it.
+// but quorum declares with no arguments at all, which is the declare of classic
+// and of every collector up to v0.2.0, so the nil is asserted and an empty
+// table does not pass for it.
 func TestQueueDeclareArgs(t *testing.T) {
 	tests := []struct {
 		name      string
