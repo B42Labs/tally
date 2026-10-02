@@ -49,6 +49,10 @@ const (
 
 	// What points the engine at the mounted sources file.
 	sourcesVariable = "TALLY_ENGINE_COUNTER_SOURCES"
+
+	// The kustomize component that declares what the stack needs Envoy Gateway
+	// for, as the overlay lists it.
+	envoyGatewayComponent = "../../components/envoy-gateway"
 )
 
 // scrapeConfig is the part of a scrape file these tests assert over. yaml.v3
@@ -70,9 +74,10 @@ type staticConfig struct {
 	Labels  map[string]string `yaml:"labels"`
 }
 
-// kustomization is the part of the overlay these tests assert over: what it
-// generates and what it patches.
+// kustomization is the part of the overlay these tests assert over: the
+// components it lists, what it generates and what it patches.
 type kustomization struct {
+	Components         []string    `yaml:"components"`
 	ConfigMapGenerator []generator `yaml:"configMapGenerator"`
 	Patches            []struct {
 		Patch string `yaml:"patch"`
@@ -267,14 +272,7 @@ func TestKustomizationWiresTheTwoConfigMaps(t *testing.T) {
 	// generator VictoriaMetrics keeps serving the base's placeholders, and
 	// without the patch the engine keeps the empty path the base sets, which is
 	// a tick that measures no counter and reports nothing about it.
-	var k kustomization
-	raw, err := os.ReadFile(kustomizationFile)
-	if err != nil {
-		t.Fatalf("reading %s: %v", kustomizationFile, err)
-	}
-	if err := yaml.Unmarshal(raw, &k); err != nil {
-		t.Fatalf("parsing %s, which kustomize refuses to build: %v", kustomizationFile, err)
-	}
+	k := kustomizationOf(t)
 
 	scrape := generatorNamed(t, k, scrapeConfigMap)
 	if scrape.Behavior != "replace" {
@@ -325,6 +323,36 @@ func TestKustomizationWiresTheTwoConfigMaps(t *testing.T) {
 	if want := mount.MountPath + "/" + sourcesFile; value != want {
 		t.Errorf("%s = %q, want %q, which is where volume %q mounts the generated ConfigMap", sourcesVariable, value, want, name)
 	}
+}
+
+func TestTheEnvoyGatewayComponentIsListed(t *testing.T) {
+	// The base is plain Gateway API and names no implementation. The
+	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
+	// OTLP routes and the two 403 answers are the component's, and the dev
+	// stack runs Envoy Gateway. An entry lost in an edit is not an error to
+	// kustomize: the overlay renders, and the Gateway names a class nobody
+	// declares.
+	k := kustomizationOf(t)
+
+	if want := []string{envoyGatewayComponent}; !slices.Equal(k.Components, want) {
+		t.Errorf("%s lists the components %v, want %v; without the entry the cluster has no GatewayClass and no rate limit, and the overlay still renders",
+			kustomizationFile, k.Components, want)
+	}
+}
+
+// kustomizationOf decodes the overlay's kustomization.yaml.
+func kustomizationOf(t *testing.T) kustomization {
+	t.Helper()
+
+	raw, err := os.ReadFile(kustomizationFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", kustomizationFile, err)
+	}
+	var k kustomization
+	if err := yaml.Unmarshal(raw, &k); err != nil {
+		t.Fatalf("parsing %s, which kustomize refuses to build: %v", kustomizationFile, err)
+	}
+	return k
 }
 
 // scrapeConfigOf decodes one scrape file.

@@ -37,6 +37,7 @@ const (
 	baseScrapeFile    = "../../base/victoriametrics/scrape.yaml"
 	baseGatewayFile   = "../../base/gateway/gateway.yaml"
 	baseDir           = "../../base"
+	componentDir      = "../../components/envoy-gateway"
 	gitignoreFile     = "../../../../.gitignore"
 
 	// The ConfigMap every hostname is read from, and the objects the overlay
@@ -70,7 +71,8 @@ var hostLineRe = regexp.MustCompile(`^  [a-z-]+: [a-z0-9.-]+$`)
 
 // kustomization is the part of the overlay these tests assert over.
 type kustomization struct {
-	Images []struct {
+	Components []string `yaml:"components"`
+	Images     []struct {
 		Name    string `yaml:"name"`
 		NewName string `yaml:"newName"`
 		NewTag  string `yaml:"newTag"`
@@ -127,8 +129,9 @@ type jsonPatchOp struct {
 
 // deletePatch is a strategic merge patch that removes the object it names.
 type deletePatch struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Patch string `yaml:"$patch"`
@@ -430,6 +433,40 @@ func TestNothingUnauthenticatedIsPublished(t *testing.T) {
 	}
 }
 
+func TestTheEnvoyGatewayComponentIsListed(t *testing.T) {
+	// The base is plain Gateway API and names no implementation. The
+	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
+	// OTLP routes and the 403 on Grafana's datasource proxy are the
+	// component's, and this cluster runs Envoy Gateway. An entry lost in an
+	// edit of this file alone is not an error to kustomize.
+	k := kustomizationOf(t)
+
+	if want := []string{componentDir}; !slices.Equal(k.Components, want) {
+		t.Errorf("%s lists the components %v, want %v; without the entry the cluster has no GatewayClass and no rate limit, and the overlay still renders",
+			kustomizationFile, k.Components, want)
+	}
+}
+
+func TestEveryDeletePatchHasATarget(t *testing.T) {
+	// The overlay deletes objects of the base and a filter the component
+	// declares. A delete patch whose target no object matches is the one
+	// mismatch here that kustomize refuses, and no test renders the overlay,
+	// so the first build to fail would be the one of a deploy. kustomize
+	// matches the target by its API version as well as by its kind and name.
+	k := kustomizationOf(t)
+
+	declared := append(baseObjects(t), objectsIn(t, componentDir)...)
+	for _, d := range deletePatches(t, k) {
+		found := slices.ContainsFunc(declared, func(o object) bool {
+			return o.APIVersion == d.APIVersion && o.Kind == d.Kind && o.Metadata.Name == d.Metadata.Name
+		})
+		if !found {
+			t.Errorf("%s deletes %s %s in %s, which neither %s nor %s declares; a delete patch without a target fails the build, and it does so at deploy time alone",
+				kustomizationFile, d.Kind, d.Metadata.Name, d.APIVersion, baseDir, componentDir)
+		}
+	}
+}
+
 func TestGrafanaServesNoMetrics(t *testing.T) {
 	// Grafana answers /metrics on the port its route publishes, and without a
 	// credential unless basic auth is set for it. Nothing on this cluster
@@ -669,12 +706,25 @@ func jsonPatchOf(t *testing.T, k kustomization, group, kind, name string) []json
 }
 
 // deletedObjects returns kind/name of every object a strategic merge patch of
-// the overlay deletes, sorted. The JSON patches are sequences rather than
-// documents and are skipped by their shape.
+// the overlay deletes, sorted.
 func deletedObjects(t *testing.T, k kustomization) []string {
 	t.Helper()
 
 	var deleted []string
+	for _, d := range deletePatches(t, k) {
+		deleted = append(deleted, d.Kind+"/"+d.Metadata.Name)
+	}
+	slices.Sort(deleted)
+	return deleted
+}
+
+// deletePatches returns every strategic merge patch of the overlay that deletes
+// an object. The JSON patches are sequences rather than documents and are
+// skipped by their shape.
+func deletePatches(t *testing.T, k kustomization) []deletePatch {
+	t.Helper()
+
+	var deleted []deletePatch
 	for i, p := range k.Patches {
 		var shape any
 		if err := yaml.Unmarshal([]byte(p.Patch), &shape); err != nil {
@@ -688,10 +738,9 @@ func deletedObjects(t *testing.T, k kustomization) []string {
 			t.Fatalf("parsing patches[%d]: %v", i, err)
 		}
 		if doc.Patch == "delete" {
-			deleted = append(deleted, doc.Kind+"/"+doc.Metadata.Name)
+			deleted = append(deleted, doc)
 		}
 	}
-	slices.Sort(deleted)
 	return deleted
 }
 
@@ -762,14 +811,20 @@ type object struct {
 	raw any
 }
 
-// baseObjects decodes every object the YAML files of the base declare. A
+// baseObjects decodes every object the YAML files of the base declare.
+func baseObjects(t *testing.T) []object {
+	t.Helper()
+	return objectsIn(t, baseDir)
+}
+
+// objectsIn decodes every object the YAML files under one directory declare. A
 // document without a kind and a name, such as a scrape or a provisioning file,
 // is not an object and is skipped.
-func baseObjects(t *testing.T) []object {
+func objectsIn(t *testing.T, dir string) []object {
 	t.Helper()
 
 	var objects []object
-	err := filepath.WalkDir(baseDir, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || filepath.Ext(path) != ".yaml" {
 			return walkErr
 		}
@@ -804,7 +859,7 @@ func baseObjects(t *testing.T) []object {
 		}
 	})
 	if err != nil {
-		t.Fatalf("reading the objects of %s: %v", baseDir, err)
+		t.Fatalf("reading the objects of %s: %v", dir, err)
 	}
 	return objects
 }
