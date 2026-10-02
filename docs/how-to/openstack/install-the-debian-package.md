@@ -214,7 +214,27 @@ notifications it then consumes, and what the cloud has to publish for it, is
    TALLY_OSC_EXCHANGES=nova,neutron,glance,cinder
    ```
 
-2. Upgrade by installing the newer file. Your edits to
+2. Coming from v0.2.0, set the queue type before you upgrade, whichever queue
+   the collector ends on. v0.2.0 declared `tally-notifications` without a
+   type, and the newer version declares a quorum queue. The broker refuses
+   that declare over the existing queue, so the upgraded collector logs
+   `the queue exists with other arguments than TALLY_OSC_QUEUE_TYPE=quorum declares`
+   and consumes nothing, while the queue keeps filling. The package does not
+   restart the service, but Ubuntu's needrestart does at the end of the `apt`
+   run, and so does a crash or a reboot. Add this line to
+   `/etc/default/tally-openstack-collector` before the upgrade. v0.2.0 ignores
+   a variable it does not know, and the file is a conffile, so the line is
+   kept:
+
+   ```sh
+   TALLY_OSC_QUEUE_TYPE=classic
+   ```
+
+   The line keeps the queue. To get the quorum queue, move the queue in
+   step 3, after the install. A broker older than RabbitMQ 4.0 keeps the
+   line.
+
+3. Upgrade by installing the newer file. Your edits to
    `/etc/default/tally-openstack-collector` and to the two credential files are
    kept, because all three are conffiles; a changed default arrives beside them
    as `.dpkg-dist` for you to compare. The outbox is untouched, so events that
@@ -224,14 +244,51 @@ notifications it then consumes, and what the cloud has to publish for it, is
    sudo apt install ./tally-openstack-collector_<newer-version>_amd64.deb
    ```
 
-3. Remove the package to stop and disable the service while keeping its
+   The package neither stops nor restarts the service. Restart it and read
+   the journal. Coming from v0.2.0 without the `classic` line of step 2, the
+   journal carries the queue error of that step; add the line and restart
+   again:
+
+   ```sh
+   sudo systemctl restart tally-openstack-collector
+   journalctl -u tally-openstack-collector -n 5 -o cat
+   ```
+
+   To get the quorum queue, follow
+   [move the queue to another type](/how-to/openstack/connect-the-collector#move-the-queue-to-another-type).
+   The upgraded collector with the `classic` line is the one that fits the
+   existing queue. Wait until the message count of that section's step 1 is 0
+   with it running, then stop the service, delete the queue, take the line out
+   again and start the service:
+
+   ```sh
+   sudo systemctl stop tally-openstack-collector
+   rabbitmqctl delete_queue tally-notifications
+   sudo sed -i '/^[[:space:]]*TALLY_OSC_QUEUE_TYPE[[:space:]]*=/d' /etc/default/tally-openstack-collector
+   sudo systemctl start tally-openstack-collector
+   ```
+
+   Read the type of the queue the collector declared:
+
+   ```sh
+   rabbitmqctl list_queues name type | grep -E '^tally-notifications[[:space:]]'
+   ```
+
+   ```text
+   tally-notifications	quorum
+   ```
+
+   A `classic` there means the queue was not deleted, or the collector was
+   started with `TALLY_OSC_QUEUE_TYPE=classic` still set.
+
+4. Remove the package to stop and disable the service while keeping its
    configuration and its outbox:
 
    ```sh
    sudo apt remove tally-openstack-collector
    ```
 
-4. Purge it to drop the configuration and the credentials as well. The outbox
+5. Purge it to drop the configuration and the credentials as well. The outbox
    is deliberately kept: between the acknowledgement on the bus and the
    delivery, an event lives in that file and nowhere else, so no purge destroys
    usage that exists in no other copy. Delete it by hand once you know it is
