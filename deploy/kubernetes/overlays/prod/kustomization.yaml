@@ -29,7 +29,7 @@ resources:
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
-    newTag: v0.2.0
+    newTag: v0.3.0
 
 # The credentials of this cluster. Each file is untracked and copied from the
 # .example beside it, which says how to fill every key. `make prod-up` checks
