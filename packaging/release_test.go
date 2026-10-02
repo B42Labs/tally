@@ -10,6 +10,7 @@ package packaging_test
 import (
 	"errors"
 	"maps"
+	"os"
 	"os/exec"
 	"path"
 	"regexp"
@@ -32,7 +33,7 @@ const (
 	releaseWorkflowPath = "../.github/workflows/release.yaml"
 
 	// The tag pattern that triggers it, the job that does the work, and the job
-	// that pushes the service images once that one succeeded.
+	// that pushes the release images once that one succeeded.
 	releaseTagPattern = "v*"
 	releaseJob        = "release"
 	imagesJob         = "images"
@@ -196,9 +197,11 @@ func TestReleaseWorkflowRunsEveryActionAtACommit(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowPublishesOneImagePerService(t *testing.T) {
-	// A service added to SERVICES that the release never pushes is an image the
-	// cluster cannot pull, and no pull request runs this workflow to say so.
+func TestReleaseWorkflowPublishesEveryReleaseImage(t *testing.T) {
+	// An image added to RELEASE_IMAGES that the release never pushes is an image
+	// the cluster cannot pull, and no pull request runs this workflow to say so.
+	// The collector image is one the prod overlay pulls, so a name dropped from
+	// the loop leaves that pod in ImagePullBackOff on the next release.
 	// Each line below fails the same way when dropped: a build without CMD
 	// puts the Dockerfile's default binary under every name, GHCR refuses the
 	// owner B42Labs unless it is lower-cased, and a push over a tag already in
@@ -208,13 +211,26 @@ func TestReleaseWorkflowPublishesOneImagePerService(t *testing.T) {
 	// partly pushed release that no re-run completes, and a re-run that skips
 	// the tag check publishes its old commit under a tag moved since. The check
 	// reads refs/tags/, because tags/ answers an annotated tag with a 422.
-	match := servicesRe.FindStringSubmatch(read(t, makefilePath))
-	if match == nil {
-		t.Fatalf("%s has no line matching %s, which names the images the release pushes", makefilePath, servicesRe)
+	makefile := read(t, makefilePath)
+	services := servicesRe.FindStringSubmatch(makefile)
+	if services == nil {
+		t.Fatalf("%s has no line matching %s, which names the services among the images the release pushes", makefilePath, servicesRe)
 	}
-	services := strings.Fields(match[1])
-	if len(services) == 0 {
-		t.Fatalf("SERVICES in %s names no service, want at least one", makefilePath)
+	match := releaseImagesRe.FindStringSubmatch(makefile)
+	if match == nil {
+		t.Fatalf("%s has no line matching %s, which names the images the release pushes", makefilePath, releaseImagesRe)
+	}
+	images := strings.Fields(strings.ReplaceAll(match[1], "$(SERVICES)", services[1]))
+	if len(images) == 0 {
+		t.Fatalf("RELEASE_IMAGES in %s names no image, want at least one", makefilePath)
+	}
+	// The push loop hands each name to the Dockerfile as CMD, which builds
+	// ./cmd/<name>. No pull request builds an image, so a name without a main
+	// package fails at the release, after the images before it are pushed.
+	for _, image := range images {
+		if info, err := os.Stat(path.Join("../cmd", image)); err != nil || !info.IsDir() {
+			t.Errorf("RELEASE_IMAGES names %s, but cmd/%s is no directory the Dockerfile can build", image, image)
+		}
 	}
 
 	var push string
@@ -223,23 +239,23 @@ func TestReleaseWorkflowPublishesOneImagePerService(t *testing.T) {
 			push = step.Run
 		}
 	}
-	loop := serviceLoopRe.FindStringSubmatch(push)
+	loop := imageLoopRe.FindStringSubmatch(push)
 	if loop == nil {
-		t.Fatalf("the push step of the %s job has no line matching %s:\n%s", imagesJob, serviceLoopRe, push)
+		t.Fatalf("the push step of the %s job has no line matching %s:\n%s", imagesJob, imageLoopRe, push)
 	}
-	if got := strings.Fields(loop[1]); !slices.Equal(got, services) {
-		t.Errorf("the push step loops over %v, want SERVICES %v", got, services)
+	if got := strings.Fields(loop[1]); !slices.Equal(got, images) {
+		t.Errorf("the push step loops over %v, want RELEASE_IMAGES %v", got, images)
 	}
 	for _, want := range []string{
 		`tagged="$(gh api "repos/${GITHUB_REPOSITORY}/commits/refs/tags/${GITHUB_REF_NAME}" --jq .sha)"`,
 		`if [ "${tagged}" != "${GITHUB_SHA}" ]; then`,
 		`owner="${GITHUB_REPOSITORY_OWNER,,}"`,
-		`image="ghcr.io/${owner}/${service}:${GITHUB_REF_NAME}"`,
+		`image="ghcr.io/${owner}/${name}:${GITHUB_REF_NAME}"`,
 		`if found="$(docker buildx imagetools inspect "${image}" 2>&1)"; then`,
 		`{{index .Config.Labels "org.opencontainers.image.revision"}}`,
 		`if [ "${revision}" != "${GITHUB_SHA}" ]; then`,
 		`elif [[ "${found}" == *': not found' ]]; then`,
-		`docker build --build-arg "CMD=${service}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .`,
+		`docker build --build-arg "CMD=${name}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .`,
 		`docker push "${image}"`,
 	} {
 		if !strings.Contains(push, want) {
@@ -334,7 +350,7 @@ func releaseStep(t *testing.T, name string) releaseStepSpec {
 	return releaseStepSpec{}
 }
 
-// imagesJobOf returns the job that pushes the service images.
+// imagesJobOf returns the job that pushes the release images.
 func imagesJobOf(t *testing.T) releaseJobSpec {
 	t.Helper()
 
@@ -346,13 +362,17 @@ func imagesJobOf(t *testing.T) releaseJobSpec {
 }
 
 // servicesRe matches the Makefile line that lists the services, capturing the
-// names. Those are the images the cluster runs, and so the ones a release
-// pushes.
+// names. Those are the images the dev cluster runs, and RELEASE_IMAGES starts
+// with them.
 var servicesRe = regexp.MustCompile(`(?m)^SERVICES := (.+)$`)
 
-// serviceLoopRe matches the loop of the push step, capturing the services it
+// releaseImagesRe matches the Makefile line that lists what a release pushes,
+// capturing the names. The line refers to the services as $(SERVICES).
+var releaseImagesRe = regexp.MustCompile(`(?m)^RELEASE_IMAGES := (.+)$`)
+
+// imageLoopRe matches the loop of the push step, capturing the images it
 // builds and pushes.
-var serviceLoopRe = regexp.MustCompile(`(?m)^\s*for service in ([^;]+); do$`)
+var imageLoopRe = regexp.MustCompile(`(?m)^\s*for name in ([^;]+); do$`)
 
 // pinnedActionRe matches the uses: of an action pinned to a full commit SHA.
 var pinnedActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)

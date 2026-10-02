@@ -99,13 +99,16 @@ jobs:
             "${flags[@]}" \
             dist/*.deb dist/*.spdx.json dist/SHA256SUMS dist/attestation.sigstore.json
 
-  # The service images, pushed once the release exists: a tag whose release
+  # The release images, pushed once the release exists: a tag whose release
   # failed publishes no image, and a moved tag stops at gh release create above
-  # or, on a re-run, at the tag check of the push step. A job of its own keeps
-  # packages: write and the ghcr.io login away from the actions the release job
-  # runs. No third-party action logs in or pushes, and the images are not
-  # attested. checkout can reach the token all the same, so it runs at a commit
-  # rather than at a tag its owner can move.
+  # or, on a re-run, at the tag check of the push step. Two of the four are not
+  # services: tally-openstack-collector consumes from a broker, and
+  # tally-reporting-admin is a command line. The entrypoint of each image is its
+  # binary, so the admin image takes the subcommand as its arguments. A job of
+  # its own keeps packages: write and the ghcr.io login away from the actions
+  # the release job runs. No third-party action logs in or pushes, and the
+  # images are not attested. checkout can reach the token all the same, so it
+  # runs at a commit rather than at a tag its owner can move.
   images:
     needs: release
     runs-on: ubuntu-latest
@@ -141,8 +144,8 @@ jobs:
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           # GHCR takes lower-case names only, and the owner is B42Labs.
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for service in tally-reporting tally-engine; do
-            image="ghcr.io/${owner}/${service}:${GITHUB_REF_NAME}"
+          for name in tally-reporting tally-engine tally-openstack-collector tally-reporting-admin; do
+            image="ghcr.io/${owner}/${name}:${GITHUB_REF_NAME}"
             # imagetools answers a 404 with not found and any other status with
             # that status. docker manifest inspect reports a registry it cannot
             # reach as a missing manifest, which would push over the tag.
@@ -155,7 +158,7 @@ jobs:
               fi
               echo "${image} is already in the registry, built from this commit; keeping it"
             elif [[ "${found}" == *': not found' ]]; then
-              docker build --build-arg "CMD=${service}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .
+              docker build --build-arg "CMD=${name}" --label "org.opencontainers.image.revision=${GITHUB_SHA}" -t "${image}" .
               docker push "${image}"
             else
               echo "ERROR: cannot tell whether ${image} is in the registry: ${found}" >&2
