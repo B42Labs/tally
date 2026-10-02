@@ -104,6 +104,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.UnhealthyThresholdSeconds != 600 {
 		t.Errorf("UnhealthyThresholdSeconds = %d, want 600", cfg.UnhealthyThresholdSeconds)
 	}
+	if cfg.SummaryIntervalSeconds != 60 {
+		t.Errorf("SummaryIntervalSeconds = %d, want 60", cfg.SummaryIntervalSeconds)
+	}
 	if err := cfg.ValidateServe(); err != nil {
 		t.Errorf("ValidateServe() error = %v, want nil", err)
 	}
@@ -123,6 +126,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_OSC_BUFFER_MAX_EVENTS":     "250000",
 		"TALLY_OSC_PREFETCH":              "10",
 		"TALLY_OSC_UNHEALTHY_THRESHOLD_S": "30",
+		"TALLY_OSC_SUMMARY_INTERVAL_S":    "15",
 	}))
 
 	cfg, err := Load()
@@ -166,10 +170,25 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	if cfg.UnhealthyThresholdSeconds != 30 {
 		t.Errorf("UnhealthyThresholdSeconds = %d, want 30", cfg.UnhealthyThresholdSeconds)
 	}
+	if cfg.SummaryIntervalSeconds != 15 {
+		t.Errorf("SummaryIntervalSeconds = %d, want 15", cfg.SummaryIntervalSeconds)
+	}
 }
 
 func TestLoadRejectsAnUnparsablePort(t *testing.T) {
 	setEnv(t, withVars(map[string]string{"TALLY_OSC_HTTP_PORT": "http"}))
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsAnUnparsableSummaryInterval(t *testing.T) {
+	setEnv(t, withVars(map[string]string{"TALLY_OSC_SUMMARY_INTERVAL_S": "60s"}))
 
 	_, err := Load()
 	if err == nil {
@@ -280,6 +299,16 @@ func TestLoadRejectsNonPositiveBounds(t *testing.T) {
 			name:  "a negative unhealthy threshold behaves the same way",
 			vars:  map[string]string{"TALLY_OSC_UNHEALTHY_THRESHOLD_S": "-1"},
 			wants: "TALLY_OSC_UNHEALTHY_THRESHOLD_S",
+		},
+		{
+			name:  "a zero summary interval leaves the summary loop no interval to wait",
+			vars:  map[string]string{"TALLY_OSC_SUMMARY_INTERVAL_S": "0"},
+			wants: "TALLY_OSC_SUMMARY_INTERVAL_S: 0 must be positive",
+		},
+		{
+			name:  "a negative summary interval behaves the same way",
+			vars:  map[string]string{"TALLY_OSC_SUMMARY_INTERVAL_S": "-1"},
+			wants: "TALLY_OSC_SUMMARY_INTERVAL_S: -1 must be positive",
 		},
 	}
 

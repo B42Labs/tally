@@ -58,6 +58,7 @@ const (
 	envBufferMaxEvents    = "TALLY_OSC_BUFFER_MAX_EVENTS"
 	envPrefetch           = "TALLY_OSC_PREFETCH"
 	envUnhealthyThreshold = "TALLY_OSC_UNHEALTHY_THRESHOLD_S"
+	envSummaryInterval    = "TALLY_OSC_SUMMARY_INTERVAL_S"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -84,6 +85,7 @@ var EnvNames = []string{
 	envBufferMaxEvents,
 	envPrefetch,
 	envUnhealthyThreshold,
+	envSummaryInterval,
 }
 
 // logLevels maps the accepted values of TALLY_LOG_LEVEL to their slog level.
@@ -187,6 +189,12 @@ type Config struct {
 	// UnhealthyThresholdSeconds is how long readiness may keep failing before
 	// liveness fails too and the orchestrator restarts the pod.
 	UnhealthyThresholdSeconds int `env:"TALLY_OSC_UNHEALTHY_THRESHOLD_S" envDefault:"600"`
+	// SummaryIntervalSeconds is how often the collector logs its summary line: the
+	// notifications consumed, skipped and unparseable and the events delivered
+	// since the previous line, with the state of the session and of the outbox.
+	// The line is logged whether or not anything happened, so a collector at rest
+	// still reports itself. It cannot be turned off; TALLY_LOG_LEVEL=WARN hides it.
+	SummaryIntervalSeconds int `env:"TALLY_OSC_SUMMARY_INTERVAL_S" envDefault:"60"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks the
@@ -262,6 +270,11 @@ func Load() (Config, error) {
 	// restarts at once, which is the storm the threshold exists to prevent.
 	if cfg.UnhealthyThresholdSeconds <= 0 {
 		return Config{}, fmt.Errorf("%s: %d must be positive", envUnhealthyThreshold, cfg.UnhealthyThresholdSeconds)
+	}
+	// Zero leaves the summary loop no interval to wait, so it would log in a
+	// spin.
+	if cfg.SummaryIntervalSeconds <= 0 {
+		return Config{}, fmt.Errorf("%s: %d must be positive", envSummaryInterval, cfg.SummaryIntervalSeconds)
 	}
 
 	return cfg, nil
