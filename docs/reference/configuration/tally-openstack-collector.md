@@ -50,6 +50,7 @@ so a lower-case `info` is refused.
 | `TALLY_OSC_BUFFER_MAX_EVENTS` | integer | `1000000` | no | BufferMaxEvents is the outbox depth at which the collector stops consuming. The events then wait on the bus instead of being dropped, which is what keeps an unreachable Reporting API from costing usage data. |
 | `TALLY_OSC_PREFETCH` | integer | `100` | no | Prefetch is the AMQP QoS bound: how many unacknowledged messages the broker hands out. Acks follow the outbox insert, so this bounds how much work a crash replays. |
 | `TALLY_OSC_UNHEALTHY_THRESHOLD_S` | integer | `600` | no | UnhealthyThresholdSeconds is how long readiness may keep failing before liveness fails too and the orchestrator restarts the pod. |
+| `TALLY_OSC_SUMMARY_INTERVAL_S` | integer | `60` | no | SummaryIntervalSeconds is how often the collector logs its summary line: the notifications consumed, skipped and unparseable and the events delivered since the previous line, with the state of the session and of the outbox. The line is logged whether or not anything happened, so a collector at rest still reports itself. It cannot be turned off; TALLY_LOG_LEVEL=WARN hides it. |
 <!-- refdoc:end settings -->
 
 ## What is checked
@@ -67,6 +68,7 @@ trailing slash off `TALLY_OSC_REPORTING_URL`, and then checks:
 - `TALLY_OSC_BUFFER_MAX_EVENTS` is positive.
 - `TALLY_OSC_PREFETCH` is positive.
 - `TALLY_OSC_UNHEALTHY_THRESHOLD_S` is positive.
+- `TALLY_OSC_SUMMARY_INTERVAL_S` is positive.
 
 `ValidateServe` is the collecting mode's startup gate. It adds:
 
