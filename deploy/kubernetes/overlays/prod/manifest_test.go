@@ -6,8 +6,10 @@
 // renders just as well, and the first sign is an unauthenticated service on a
 // public address. An example secret file without a key the base mounts hands
 // the operator a Secret that fails a pod on its first start rather than the
-// apply. The tests read the YAML from disk and need neither a cluster nor
-// kustomize.
+// apply. The collector fails the same way: two images at two tags render, a
+// settings file without TALLY_OSC_CLOUD renders, and so does one that sets a
+// variable the component fixes, which the pod never sees. The tests read the
+// YAML from disk and need neither a cluster nor kustomize.
 package prod_test
 
 import (
@@ -40,6 +42,11 @@ const (
 	componentDir      = "../../components/envoy-gateway"
 	gitignoreFile     = "../../../../.gitignore"
 
+	// The component that declares the collector, and the file the overlay
+	// generates the collector's non-secret settings from.
+	collectorComponentDir = "../../components/openstack-collector"
+	collectorSettingsFile = "collector.env"
+
 	// The ConfigMap every hostname is read from, and the objects the overlay
 	// points at the real ones.
 	hostsConfigMap = "tally-hosts"
@@ -55,6 +62,15 @@ const (
 	// repository the release workflow publishes it to.
 	reportingImage    = "tally-reporting"
 	reportingRegistry = "ghcr.io/b42labs/tally-reporting"
+
+	// The collector image the same way, the ConfigMap its settings are
+	// generated into, and the Secret of its ingest token, which no generator
+	// carries: the operator creates it from the output of
+	// create-ingest-credential.
+	collectorImage       = "tally-openstack-collector"
+	collectorRegistry    = "ghcr.io/b42labs/tally-openstack-collector"
+	collectorConfigMap   = "tally-openstack-collector"
+	collectorTokenSecret = "tally-collector-token"
 
 	// The line that keeps the filled-in secret files out of the repository.
 	secretsIgnoreLine = "deploy/kubernetes/overlays/prod/secrets/*.env"
@@ -97,6 +113,7 @@ type generator struct {
 	Name     string   `yaml:"name"`
 	Behavior string   `yaml:"behavior"`
 	Files    []string `yaml:"files"`
+	Envs     []string `yaml:"envs"`
 }
 
 type replacement struct {
@@ -433,16 +450,17 @@ func TestNothingUnauthenticatedIsPublished(t *testing.T) {
 	}
 }
 
-func TestTheEnvoyGatewayComponentIsListed(t *testing.T) {
+func TestBothComponentsAreListed(t *testing.T) {
 	// The base is plain Gateway API and names no implementation. The
 	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
-	// OTLP routes and the 403 on Grafana's datasource proxy are the
-	// component's, and this cluster runs Envoy Gateway. An entry lost in an
-	// edit of this file alone is not an error to kustomize.
+	// OTLP routes and the 403 on Grafana's datasource proxy are the first
+	// component's, and this cluster runs Envoy Gateway. The second declares the
+	// collector, without which the stack stores what nothing sends. An entry
+	// lost in an edit of this file alone is not an error to kustomize.
 	k := kustomizationOf(t)
 
-	if want := []string{componentDir}; !slices.Equal(k.Components, want) {
-		t.Errorf("%s lists the components %v, want %v; without the entry the cluster has no GatewayClass and no rate limit, and the overlay still renders",
+	if want := []string{componentDir, collectorComponentDir}; !slices.Equal(k.Components, want) {
+		t.Errorf("%s lists the components %v, want %v; without the first the cluster has no GatewayClass and no rate limit, without the second no collector, and the overlay still renders",
 			kustomizationFile, k.Components, want)
 	}
 }
@@ -500,28 +518,60 @@ func TestGrafanaServesNoMetrics(t *testing.T) {
 }
 
 func TestImagesComeFromTheRegistry(t *testing.T) {
-	// The base names a locally built image, which a real cluster cannot pull.
-	// The tag has to be one the release workflow publishes under; any other
-	// tag names an image that is not in the registry, and the pod sits in
-	// ImagePullBackOff.
+	// The base and the collector component name locally built images, which a
+	// real cluster cannot pull. The tag has to be one the release workflow
+	// publishes under; any other tag names an image that is not in the
+	// registry, and the pod sits in ImagePullBackOff. The overlay deploys one
+	// release, so the two tags are one: make prod-up migrates with the chain of
+	// the checkout, and a collector of another release is one it never ran
+	// against.
 	k := kustomizationOf(t)
 
-	var found int
-	for _, image := range k.Images {
-		if image.Name != reportingImage {
-			continue
+	var tags []string
+	for _, want := range []struct{ name, registry string }{
+		{reportingImage, reportingRegistry},
+		{collectorImage, collectorRegistry},
+	} {
+		var found int
+		for _, image := range k.Images {
+			if image.Name != want.name {
+				continue
+			}
+			found++
+			tags = append(tags, image.NewTag)
+			if image.NewName != want.registry {
+				t.Errorf("image %s is pulled from %q, want %s", want.name, image.NewName, want.registry)
+			}
+			if !releaseTag.MatchString(image.NewTag) {
+				t.Errorf("image %s is pulled at tag %q, want a release tag of the shape packaging/release-version.sh accepts",
+					want.name, image.NewTag)
+			}
 		}
-		found++
-		if image.NewName != reportingRegistry {
-			t.Errorf("image %s is pulled from %q, want %s", reportingImage, image.NewName, reportingRegistry)
-		}
-		if !releaseTag.MatchString(image.NewTag) {
-			t.Errorf("image %s is pulled at tag %q, want a release tag of the shape packaging/release-version.sh accepts",
-				reportingImage, image.NewTag)
+		if found != 1 {
+			t.Errorf("%s holds %d images entries for %s, want exactly one", kustomizationFile, found, want.name)
 		}
 	}
-	if found != 1 {
-		t.Errorf("%s holds %d images entries for %s, want exactly one", kustomizationFile, found, reportingImage)
+	slices.Sort(tags)
+	if distinct := slices.Compact(tags); len(distinct) > 1 {
+		t.Errorf("%s pulls its images at the tags %v, want one tag, the release the overlay deploys", kustomizationFile, distinct)
+	}
+
+	// An images entry rewrites a container by the name before its tag. A name
+	// no container carries matches nothing, the overlay renders, and the pod
+	// pulls a :dev tag no registry holds. A locally built image without an
+	// entry fails the same way.
+	deleted := deletedObjects(t, k)
+	var local []string
+	for _, o := range append(baseObjects(t), objectsIn(t, collectorComponentDir)...) {
+		if !slices.Contains(deleted, o.Kind+"/"+o.Metadata.Name) {
+			local = devImages(o.raw, local)
+		}
+	}
+	slices.Sort(local)
+	local = slices.Compact(local)
+	if want := []string{collectorImage, reportingImage}; !slices.Equal(local, want) {
+		t.Errorf("the objects this overlay keeps run the locally built images %v, want exactly %v, the names %s maps to the registry",
+			local, want, kustomizationFile)
 	}
 }
 
@@ -529,21 +579,29 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	// The operator fills the untracked files from the examples. A key missing
 	// from an example is a key missing from the Secret, which the pod that
 	// mounts it fails on at its first start, after the apply succeeded. The
-	// keys are read from the base, less the objects this overlay deletes, so a
-	// key the base starts to mount is one the example has to carry.
-	// engine-password is among them although no engine runs here: TimescaleDB
-	// reads it for the initdb script that creates the engine's reader role.
+	// keys are read from the base and from the collector component, less the
+	// objects this overlay deletes, so a key either starts to mount is one the
+	// example has to carry. engine-password is among them although no engine
+	// runs here: TimescaleDB reads it for the initdb script that creates the
+	// engine's reader role.
 	k := kustomizationOf(t)
 
 	deleted := deletedObjects(t, k)
 	want := map[string][]string{}
-	for _, o := range baseObjects(t) {
+	for _, o := range append(baseObjects(t), objectsIn(t, collectorComponentDir)...) {
 		if !slices.Contains(deleted, o.Kind+"/"+o.Metadata.Name) {
 			mountedSecretKeys(t, o.raw, want)
 		}
 	}
 	if len(want) == 0 {
-		t.Fatalf("%s mounts no secret key, so this test would assert over nothing", baseDir)
+		t.Fatalf("%s and %s mount no secret key, so this test would assert over nothing", baseDir, collectorComponentDir)
+	}
+	// The ingest token is the one mounted Secret without a file. It can be
+	// issued only once make prod-up has migrated the database, and make prod-up
+	// refuses an unfilled file, so a generator for it would ask for a value the
+	// operator cannot have yet.
+	if _, mounted := want[collectorTokenSecret]; !mounted {
+		t.Errorf("%s mounts no secret %s, which this test exempts from the generators", collectorComponentDir, collectorTokenSecret)
 	}
 	for name, keys := range want {
 		slices.Sort(keys)
@@ -553,9 +611,14 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	generated := make(map[string]bool, len(k.SecretGenerator))
 	for _, g := range k.SecretGenerator {
 		generated[g.Name] = true
+		if g.Name == collectorTokenSecret {
+			t.Errorf("%s generates secret %s, which has no file: the operator creates it from the output of create-ingest-credential",
+				kustomizationFile, g.Name)
+			continue
+		}
 		keys, known := want[g.Name]
 		if !known {
-			t.Errorf("%s generates secret %s, which the base does not mount", kustomizationFile, g.Name)
+			t.Errorf("%s generates secret %s, which neither the base nor the collector component mounts", kustomizationFile, g.Name)
 			continue
 		}
 		file := "secrets/" + g.Name + ".env"
@@ -571,12 +634,12 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 		}
 		slices.Sort(got)
 		if !slices.Equal(got, keys) {
-			t.Errorf("%s carries keys %v, want %v, the keys the base mounts from secret %s", example, got, keys, g.Name)
+			t.Errorf("%s carries keys %v, want %v, the keys mounted from secret %s", example, got, keys, g.Name)
 		}
 	}
 	for name, keys := range want {
-		if !generated[name] {
-			t.Errorf("the base mounts %v from secret %s, which %s does not generate", keys, name, kustomizationFile)
+		if name != collectorTokenSecret && !generated[name] {
+			t.Errorf("%v is mounted from secret %s, which %s does not generate", keys, name, kustomizationFile)
 		}
 	}
 
@@ -588,6 +651,57 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	}
 	if !slices.Contains(strings.Split(string(raw), "\n"), secretsIgnoreLine) {
 		t.Errorf("%s has no line %s, so the filled-in secret files are not ignored", gitignoreFile, secretsIgnoreLine)
+	}
+}
+
+func TestTheCollectorSettingsNameTheCloud(t *testing.T) {
+	// The collector takes its non-secret settings from a ConfigMap generated
+	// from a tracked file, and the file ships with an empty TALLY_OSC_CLOUD the
+	// operator fills. make prod-up reads that line with grep, so a file without
+	// it is refused as leaving the cloud empty, and one with two is judged by
+	// either. The pod's env wins over the ConfigMap, so a variable the
+	// component sets is a line here that changes nothing, and a secret set here
+	// beside its *_FILE companion stops the collector.
+	k := kustomizationOf(t)
+
+	i := slices.IndexFunc(k.ConfigMapGenerator, func(g generator) bool { return g.Name == collectorConfigMap })
+	if i < 0 {
+		t.Fatalf("%s generates no ConfigMap %s, which the collector takes its settings from", kustomizationFile, collectorConfigMap)
+	}
+	if g := k.ConfigMapGenerator[i]; !slices.Equal(g.Envs, []string{collectorSettingsFile}) {
+		t.Errorf("the %s generator reads the env files %v, want exactly [%s]", collectorConfigMap, g.Envs, collectorSettingsFile)
+	}
+
+	// The names the component fixes are read from its manifest, so a variable
+	// it starts to set is one this file may no longer carry.
+	var fixed []string
+	for _, o := range objectsIn(t, collectorComponentDir) {
+		for _, c := range o.Spec.Template.Spec.Containers {
+			for _, e := range c.Env {
+				fixed = append(fixed, e.Name)
+			}
+		}
+	}
+	if len(fixed) == 0 {
+		t.Fatalf("%s sets no variable on any container, so this test would hold %s to nothing", collectorComponentDir, collectorSettingsFile)
+	}
+	refused := append([]string{"TALLY_OSC_AMQP_URL", "TALLY_OSC_TOKEN"}, fixed...)
+
+	keys, err := envKeys(collectorSettingsFile)
+	if err != nil {
+		t.Fatalf("reading the settings of the collector: %v", err)
+	}
+	var clouds int
+	for _, key := range keys {
+		if key == "TALLY_OSC_CLOUD" {
+			clouds++
+		}
+		if slices.Contains(refused, key) {
+			t.Errorf("%s sets %s, which is a secret or a variable the collector component fixes", collectorSettingsFile, key)
+		}
+	}
+	if clouds != 1 {
+		t.Errorf("%s carries %d lines starting TALLY_OSC_CLOUD=, want exactly one, which make prod-up reads", collectorSettingsFile, clouds)
 	}
 }
 
@@ -787,7 +901,8 @@ func baseListeners(t *testing.T) []string {
 }
 
 // object is the part of a Kubernetes object these tests look up, in the base or
-// in a patch. raw is the whole object, which mountedSecretKeys walks.
+// in a patch. raw is the whole object, which mountedSecretKeys and devImages
+// walk.
 type object struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
@@ -915,7 +1030,7 @@ func mountedSecretKeys(t *testing.T, value any, keys map[string][]string) {
 			name, _ := secret["secretName"].(string)
 			items, _ := secret["items"].([]any)
 			if len(items) == 0 {
-				t.Errorf("the base mounts every key of secret %s, which no example can be checked against", name)
+				t.Errorf("a pod mounts every key of secret %s, which no example can be checked against", name)
 			}
 			for _, item := range items {
 				entry, _ := item.(map[string]any)
@@ -931,6 +1046,27 @@ func mountedSecretKeys(t *testing.T, value any, keys map[string][]string) {
 			mountedSecretKeys(t, child, keys)
 		}
 	}
+}
+
+// devImages appends to names the name of every image value runs at the tag
+// dev, which is what `make images` builds, wherever in it a pod spec names one.
+func devImages(value any, names []string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		if image, ok := v["image"].(string); ok {
+			if name, found := strings.CutSuffix(image, ":dev"); found {
+				names = append(names, name)
+			}
+		}
+		for _, child := range v {
+			names = devImages(child, names)
+		}
+	case []any:
+		for _, child := range v {
+			names = devImages(child, names)
+		}
+	}
+	return names
 }
 
 // scrapeConfigOf decodes one scrape file.
