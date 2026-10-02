@@ -41,6 +41,14 @@ it, and compares that against the entries the mapping table carries.
    {"exchange":"nova","routing_key":"notifications.info","message_id":"e3d6f0f4-5b2f-4b1a-9a2b-1c3d5e7f9a0b","event_type":"compute.instance.create.end","timestamp":"2026-03-01T10:00:00Z","payload":{"instance_id":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","tenant_id":"9c4a1b2d3e4f5061728394a5b6c7d8e9","vcpus":4,"memory_mb":8192,"root_gb":40,"ephemeral_gb":40,"instance_type":"m1.large"}}
    ```
 
+   The dump replaces the value of every member whose name contains `password`,
+   `token`, `secret` or `connection_info` with `[redacted]`. A credential under
+   another name is printed as it arrived, and so are project ids, user ids,
+   host names and addresses
+   ([what the dump can and cannot show](/explanation/how-the-collector-consumes-a-bus#what-the-dump-can-and-cannot-show)).
+   Keep `dump.jsonl` off tickets and shared storage, and delete it in the last
+   step of this guide.
+
    The dump consumes through a server-named, exclusive, auto-deleting queue, so
    the durable `tally-notifications` queue, Ceilometer and a collector running
    at the same time keep receiving their own copies. An interrupted dump leaves
@@ -142,9 +150,21 @@ it, and compares that against the entries the mapping table carries.
    {"exchange":"openstack","routing_key":"notifications.info","message_id":"b7c8d9e0-1f2a-4b3c-8d4e-5f6a7b8c9d0e","event_type":"volume.create.end","timestamp":"2026-03-01T10:04:11Z"}
    ```
 
-2. A body the parser refuses prints under `unparseable`, with the credentials
-   an oslo request context carries replaced by `[redacted]` and the rest cut
-   off after 512 bytes:
+2. The members the dump redacted in a parsed payload are listed with the path
+   each stands at. An empty list means no parsed delivery carried one. A
+   refused body carries its redactions inside the `unparseable` string, which
+   the next step prints:
+
+   ```sh
+   jq -r 'paths(. == "[redacted]") | map(tostring) | join(".")' dump.jsonl | sort | uniq -c
+   ```
+
+   ```text
+         2 payload.request_spec.instance_properties.pci_requests._context.auth_token
+   ```
+
+3. A body the parser refuses prints under `unparseable`, with the same members
+   replaced by `[redacted]` and the rest cut off after 512 bytes:
 
    ```sh
    jq -c 'select(.unparseable) | {exchange, unparseable}' dump.jsonl
@@ -154,13 +174,21 @@ it, and compares that against the entries the mapping table carries.
    {"exchange":"nova","unparseable":"{\"_context_auth_token\": \"[redacted]\", \"_context_password\": \"[redacted]\", \"event_type\": \"compute.instance.update\", \"payload\": {"}
    ```
 
-3. A body that is not JSON at all, a msgpack-serialized notification for one,
-   is reported by its size and not printed:
+4. A body that is not JSON at all, a msgpack-serialized notification for one,
+   is reported by its size and not printed, and so is an envelope whose
+   `oslo.message` is not JSON:
 
    ```sh
-   jq -r 'select(.unparseable) | .unparseable' dump.jsonl | grep 'bytes that are not JSON'
+   jq -r 'select(.unparseable) | .unparseable' dump.jsonl | grep -E 'bytes (that are|whose oslo\.message is) not JSON'
    ```
 
    ```text
    2114 bytes that are not JSON
+   187 bytes whose oslo.message is not JSON
+   ```
+
+5. Delete the file once the comparison is done:
+
+   ```sh
+   rm dump.jsonl
    ```

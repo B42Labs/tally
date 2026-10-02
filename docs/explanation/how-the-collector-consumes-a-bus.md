@@ -213,14 +213,30 @@ publishes before the collector is pointed at it.
 The AMQP variables are everything the dump reads. It needs no cloud, no
 Reporting API, no token, and no outbox. It prints one JSON line per delivery
 with the exchange, the routing key, the message id, the event type, the
-timestamp, and the payload. A body it cannot parse is printed under
-`unparseable`, with the credentials an oslo request context carries
-(`_context_auth_token`, `_context_password`) replaced by `[redacted]` and the
-rest cut off after 512 bytes. A body that is not JSON at all, a
-msgpack-serialized notification for one, is reported by its size alone and not
-printed, because that redaction is written against JSON quoting and cannot reach
-a credential in those bytes. The dump's output is a file that gets attached to
-tickets, and a Keystone token stays valid for hours.
+timestamp, and the payload.
+
+A payload carries more than the mapping reads. Nova's
+`scheduler.select_destinations` notifications carry the request context with
+its Keystone token inside the payload, and cinder's `volume.attach` and
+`volume.detach` notifications carry `connection_info` with the Ceph monitors,
+the user and the secret UUID. The dump therefore replaces the value of every
+member whose name contains `password`, `token`, `secret` or `connection_info`,
+in any letter case and at any depth, with `[redacted]`, whatever the value is.
+The rule goes by fragments and not by exact names because services name the
+same credential differently (`auth_token`, `_context_auth_token`,
+`auth_password`), and no member the mapping reads matches one.
+
+A body the dump cannot parse is printed under `unparseable`, with the same
+members replaced and the rest cut off after 512 bytes. A body that is not JSON
+at all, a msgpack-serialized notification for one, is reported by its size
+alone, and so is an envelope whose `oslo.message` is not JSON, because the rule
+reads member names and those bytes have none it can find.
+
+The rule cannot reach a credential under a name that matches none of the four
+fragments, nor one inside a string value, such as a URL that carries a
+password. Project ids, user ids, host names and addresses are printed as they
+arrived. The output is therefore a file to delete once the comparison is done
+and not one to attach to a ticket, and a Keystone token stays valid for hours.
 
 The dump consumes through a server-named, exclusive, auto-deleting queue and
 acknowledges automatically. A topic exchange copies every message to every bound
