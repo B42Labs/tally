@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -45,6 +46,10 @@ var initdbScripts = []string{
 // initdbPath is where one script is mounted inside the container.
 func initdbPath(script string) string { return initdbDir + "/" + script }
 
+// releaseImage is the TimescaleDB image at one release on PostgreSQL 16. A tag
+// that names the PostgreSQL version alone does not match it.
+var releaseImage = regexp.MustCompile(`^timescale/timescaledb:[0-9]+\.[0-9]+\.[0-9]+-pg16$`)
+
 // object is the part of a manifest document this test asserts over. yaml.v3
 // ignores every field not named here, so one shape covers all three kinds.
 type object struct {
@@ -65,6 +70,7 @@ type object struct {
 
 type container struct {
 	Name         string        `yaml:"name"`
+	Image        string        `yaml:"image"`
 	Env          []envVar      `yaml:"env"`
 	VolumeMounts []volumeMount `yaml:"volumeMounts"`
 }
@@ -241,6 +247,20 @@ func TestInitdbConfigMapIsMounted(t *testing.T) {
 			t.Errorf("the timescaledb container carries %v rather than a mount of volume %q at %q with subPath %s, so that script never reaches %s and what it creates is missing from a fresh cluster; mounting the volume as a directory instead hides the initdb scripts the image ships there, which install the timescaledb extension",
 				c.VolumeMounts, name, want, script, initdbDir)
 		}
+	}
+}
+
+func TestImageIsPinnedToARelease(t *testing.T) {
+	// A tag without a release is resolved by the node on the day the pod first
+	// starts there. Two clusters built from one commit then run two TimescaleDB
+	// versions and the integration tests a third, while every pod starts and
+	// passes both probes. `make up` preloads the kind node with the name and
+	// tag written here, so the tag is also what a tutorial run gets.
+	c := containerNamed(t, objectNamed(t, objects(t, manifestFile), "StatefulSet", "timescaledb"), "timescaledb")
+
+	if !releaseImage.MatchString(c.Image) {
+		t.Errorf("the timescaledb container runs %q, want an image matching %s; a tag without a release is whatever the registry points it at when the node pulls it",
+			c.Image, releaseImage)
 	}
 }
 
