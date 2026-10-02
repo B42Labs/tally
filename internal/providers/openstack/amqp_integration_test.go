@@ -1193,9 +1193,12 @@ func TestConsumerRefusesAQuorumQueueOnAnOlderBroker(t *testing.T) {
 	logger, logs := recordingLogger(t)
 	consumer, _, stop := startConsumerWithLogger(t, cfg, newOutbox(t), logger)
 
-	const want = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13"
-	waitFor(t, "the session error names the variable and the broker's version", func() bool {
-		return strings.Contains(logs.String(), want)
+	const (
+		want   = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13"
+		remedy = "set TALLY_OSC_QUEUE_TYPE=classic for this broker"
+	)
+	waitFor(t, "the session error names the variable, the broker's version and the setting to use", func() bool {
+		return strings.Contains(logs.String(), want) && strings.Contains(logs.String(), remedy)
 	})
 	staysDisconnected(t, consumer, "on a broker older than RabbitMQ 4.0")
 
