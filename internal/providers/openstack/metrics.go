@@ -2,6 +2,7 @@ package openstack
 
 import (
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,6 +29,9 @@ import (
 // instead would report full throughput while every event in it is being
 // refused, which is the one failure the counter has to make visible.
 //
+// The totals mirror the five counters as plain numbers for the summary line,
+// which Totals reads.
+//
 // The normative specification is roadmap/01-phase-1-core-platform-openstack.md,
 // WP 1.12.
 type Metrics struct {
@@ -45,6 +49,15 @@ type Metrics struct {
 	unparseable    prometheus.Counter
 	delivered      prometheus.Counter
 	deliveryErrors prometheus.Counter
+
+	// The same five counts as plain numbers. A labelled counter cannot be read
+	// back as one number without a gather, so each recording method adds here
+	// too.
+	totalConsumed       atomic.Int64
+	totalSkipped        atomic.Int64
+	totalUnparseable    atomic.Int64
+	totalDelivered      atomic.Int64
+	totalDeliveryErrors atomic.Int64
 }
 
 // NewMetrics builds the instruments and registers them on reg, along with the Go
@@ -137,6 +150,7 @@ func (m *Metrics) Consumed(eventType string) {
 		return
 	}
 	m.consumed.WithLabelValues(m.limiter.Bound(labelEventType, eventType)).Inc()
+	m.totalConsumed.Add(1)
 }
 
 // Skipped counts one notification that produced no event, because no mapping
@@ -148,6 +162,7 @@ func (m *Metrics) Skipped(eventType string) {
 		return
 	}
 	m.skipped.WithLabelValues(m.limiter.Bound(labelEventType, eventType)).Inc()
+	m.totalSkipped.Add(1)
 }
 
 // Unparseable counts one delivery whose body did not parse.
@@ -156,6 +171,7 @@ func (m *Metrics) Unparseable() {
 		return
 	}
 	m.unparseable.Inc()
+	m.totalUnparseable.Add(1)
 }
 
 // Delivered counts the n events one 200 answer covered.
@@ -164,6 +180,7 @@ func (m *Metrics) Delivered(n int) {
 		return
 	}
 	m.delivered.Add(float64(n))
+	m.totalDelivered.Add(int64(n))
 }
 
 // DeliveryError counts one delivery attempt that failed. A batch the Reporting
@@ -174,6 +191,27 @@ func (m *Metrics) DeliveryError() {
 		return
 	}
 	m.deliveryErrors.Inc()
+	m.totalDeliveryErrors.Add(1)
+}
+
+// Totals is what the collector has counted since it started, as plain numbers.
+// It is what the summary line is computed from.
+type Totals struct {
+	Consumed, Skipped, Unparseable, Delivered, DeliveryErrors int64
+}
+
+// Totals reads the five counts. A nil *Metrics reports zeros.
+func (m *Metrics) Totals() Totals {
+	if m == nil {
+		return Totals{}
+	}
+	return Totals{
+		Consumed:       m.totalConsumed.Load(),
+		Skipped:        m.totalSkipped.Load(),
+		Unparseable:    m.totalUnparseable.Load(),
+		Delivered:      m.totalDelivered.Load(),
+		DeliveryErrors: m.totalDeliveryErrors.Load(),
+	}
 }
 
 // labelEventType is the one label whose values this package does not decide.
