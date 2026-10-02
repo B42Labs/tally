@@ -4,15 +4,17 @@
 // events, buffers them in a SQLite outbox, and posts them to the Reporting API
 // from a loop of its own. Both loops retry what failed, so the process comes up
 // while the broker or the Reporting API is unavailable and reports that state
-// through the probes rather than through a failed start. Next to them it serves
-// the probes and the Prometheus exposition on the configured port; it serves no
-// API of its own.
+// through the probes rather than through a failed start. A third loop logs a
+// summary line every TALLY_OSC_SUMMARY_INTERVAL_S seconds: what the other two
+// counted since the previous line, and the state of the session and of the
+// outbox. Next to them it serves the probes and the Prometheus exposition on
+// the configured port; it serves no API of its own.
 //
 // SIGINT and SIGTERM begin a graceful shutdown: the HTTP server stops accepting
 // connections, the consumer stops reading from the broker, the sender finishes
-// the attempt it is in, and the outbox is closed once both have returned. What
-// is buffered stays in the file, where the next start picks it up, and the
-// process exits zero.
+// the attempt it is in, the summary loop ends, and the outbox is closed once
+// all three have returned. What is buffered stays in the file, where the next
+// start picks it up, and the process exits zero.
 //
 // With --dump the process prints the notifications the broker delivers, one
 // JSON line per delivery, and does nothing else: no HTTP, no outbox, no
@@ -125,8 +127,8 @@ func run(ctx context.Context, dump bool) error {
 	return serve(ctx, cfg, logger)
 }
 
-// serve runs the collector: the consumer and the sender in the background, the
-// probes and the exposition in front of them.
+// serve runs the collector: the consumer, the sender and the summary in the
+// background, the probes and the exposition in front of them.
 func serve(ctx context.Context, cfg openstack.Config, logger *slog.Logger) error {
 	outbox, err := openstack.OpenOutbox(cfg.BufferPath)
 	if err != nil {
@@ -134,7 +136,7 @@ func serve(ctx context.Context, cfg openstack.Config, logger *slog.Logger) error
 	}
 	// The handle is closed last on every path out of this function, which is what
 	// the defers below are ordered for: they run in reverse, so the loops are
-	// stopped and waited for first. Neither of them may touch a closed outbox.
+	// stopped and waited for first. None of them may touch a closed outbox.
 	defer func() {
 		if err := outbox.Close(); err != nil {
 			logger.Error("closing the outbox failed", "error", err)
@@ -153,6 +155,8 @@ func serve(ctx context.Context, cfg openstack.Config, logger *slog.Logger) error
 	consumer := openstack.NewConsumer(cfg, outbox, m, logger)
 	sender := openstack.NewSender(outbox, cfg.ReportingURL, cfg.Token, cfg.BatchMax,
 		time.Duration(cfg.FlushIntervalSeconds)*time.Second, m, logger)
+	summary := openstack.NewSummary(time.Duration(cfg.SummaryIntervalSeconds)*time.Second, m,
+		consumer.Connected, outbox.Depth, outbox.OldestBufferedSeconds, logger)
 
 	// The loops run on a context of their own so that a server which never got to
 	// listen ends them too. They would otherwise keep running until a signal
@@ -162,19 +166,15 @@ func serve(ctx context.Context, cfg openstack.Config, logger *slog.Logger) error
 	defer loops.Wait()
 	defer stopLoops()
 
-	loops.Add(2)
-	// Both return nil once their context is done, which is the only way they
+	// All three return nil once their context is done, which is the only way they
 	// return: a broker or a Reporting API that is unreachable is retried in the
 	// background rather than ending the process. A signal therefore stops the
-	// consumer where it stands and leaves the sender its current attempt.
-	go func() {
-		defer loops.Done()
-		_ = consumer.Run(loopCtx)
-	}()
-	go func() {
-		defer loops.Done()
-		_ = sender.Run(loopCtx)
-	}()
+	// consumer where it stands and leaves the sender its current attempt. The
+	// summary reads the outbox for every line, so it is one of the loops that
+	// have to end before the outbox is closed.
+	loops.Go(func() { _ = consumer.Run(loopCtx) })
+	loops.Go(func() { _ = sender.Run(loopCtx) })
+	loops.Go(func() { _ = summary.Run(loopCtx) })
 
 	tracker := health.New(time.Now, time.Duration(cfg.UnhealthyThresholdSeconds)*time.Second)
 	server := &http.Server{
