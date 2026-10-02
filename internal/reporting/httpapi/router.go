@@ -165,8 +165,9 @@ func NewRouter(opts Options) (http.Handler, error) {
 	// The dispatch middleware is handed to the generated wrapper rather than to
 	// chi, because it needs the route chi matched to know which guard applies.
 	return HandlerWithOptions(srv, ChiServerOptions{
-		BaseRouter:  r,
-		Middlewares: []MiddlewareFunc{newAuthDispatch(opts)},
+		BaseRouter:       r,
+		Middlewares:      []MiddlewareFunc{newAuthDispatch(opts)},
+		ErrorHandlerFunc: writeBindingProblem,
 	}), nil
 }
 
@@ -239,6 +240,12 @@ func newValidator(spec *openapi3.T) func(http.Handler) http.Handler {
 // declares a security scheme this API has no middleware for.
 var errUnenforcedSecurity = errors.New("this security scheme of the contract is not enforced")
 
+// contractDetail is the detail of a request the contract rejects, whichever of
+// the two layers refuses it: the validator or the parameter binding of the
+// generated wrapper. The drill and the simulator how-to under docs/ quote the
+// sentence, so a change to it is a change to those pages.
+const contractDetail = "the request does not match the API contract"
+
 // validationDetail is the sentence a rejected request is answered with. It says
 // what happened without echoing the submitted values back, which the field
 // errors carry instead.
@@ -250,7 +257,7 @@ func validationDetail(err error) string {
 	case errors.As(err, &tooLarge):
 		return fmt.Sprintf("a request body carries at most %d bytes", maxRequestBody)
 	}
-	return "the request does not match the API contract"
+	return contractDetail
 }
 
 // fieldErrors turns what the validator rejected into the per-field entries the
@@ -324,4 +331,36 @@ func validationProblem(err error, suggested int) (status int, typ, title string)
 		// contract, whether it names 400 or 422.
 		return http.StatusBadRequest, problem.TypeValidation, "Validation failed"
 	}
+}
+
+// writeBindingProblem answers a request whose parameters the generated wrapper
+// could not bind. The wrapper calls it once the validator has let the request
+// through, and two cases get this far. One is a repeated query parameter: the
+// validator reads one occurrence of it and checks that one, while the wrapper
+// refuses to pick. The other is a value given once that the two layers parse by
+// different rules, such as a date-time naming a day its month does not have:
+// the validator's format is a pattern rather than a calendar.
+//
+// Which of the two it is, is read from the request and not from the error,
+// whose text comes from the binding library and can carry a submitted value.
+// That text never reaches the response. A failure in a parameter the query does
+// not carry is one this function cannot place, so it is answered with the
+// detail alone and its cause goes to the log.
+func writeBindingProblem(w http.ResponseWriter, r *http.Request, err error) {
+	var invalid *InvalidParamFormatError
+	if errors.As(err, &invalid) {
+		if given := len(r.URL.Query()[invalid.ParamName]); given > 0 {
+			// The same words the validator has for a value it refuses.
+			msg := "does not match the contract"
+			if given > 1 {
+				msg = "is given more than once"
+			}
+			problem.Write(w, http.StatusBadRequest, problem.TypeValidation, "Validation failed", contractDetail,
+				problem.FieldError{Loc: "query." + invalid.ParamName, Msg: msg})
+			return
+		}
+	}
+
+	Logger(r.Context()).Warn("binding the request parameters", "error", err)
+	problem.Write(w, http.StatusBadRequest, problem.TypeValidation, "Validation failed", contractDetail)
 }
