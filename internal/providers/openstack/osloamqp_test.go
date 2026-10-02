@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -290,19 +291,17 @@ func FuzzParseEnvelope(f *testing.F) {
 // the timestamp is required, and every gap besides it is left for the mapping
 // to decide about.
 // TestPreviewRedactsTheRequestContextCredentials covers the encoding the
-// redaction has to match. oslo carries the notification as a JSON string and
-// not as a nested object, so in the raw bytes the inner document's quotes are
-// backslash-escaped and the token reaches the dump as
-// \"_context_auth_token\": \"gAAAAAB…\". A pattern written against bare quotes
-// matches none of that and the body is printed through unchanged.
+// redaction has to read through. oslo carries the notification as a JSON string
+// and not as a nested object, so in the raw bytes the inner document's quotes
+// are backslash-escaped and the token reaches the dump as
+// \"_context_auth_token\": \"gAAAAAB…\". A walk over the envelope finds one
+// string there and no member name, so the inner document is unwrapped first.
 //
 // Redaction runs whenever ParseEnvelope refuses a body, and the most common
 // refusal of a well-formed envelope is a timestamp layout the collector does not
-// know — which is exactly when an operator reaches for the dump and attaches its
-// output to a ticket. A Keystone token is valid for hours.
+// know — which is exactly when an operator reaches for the dump and keeps its
+// output in a file. A Keystone token is valid for hours.
 func TestPreviewRedactsTheRequestContextCredentials(t *testing.T) {
-	const token = "gAAAAABlive-keystone-token"
-
 	tests := []struct {
 		name string
 		body []byte
@@ -314,15 +313,15 @@ func TestPreviewRedactsTheRequestContextCredentials(t *testing.T) {
 			body: wrap(t, `{
 				"event_type": "identity.authenticate",
 				"timestamp": "01.03.2026 12:00",
-				"_context_auth_token": "`+token+`",
+				"_context_auth_token": "`+keystoneToken+`",
 				"_context_password": "hunter2"
 			}`),
 		},
 		{
-			// A body that is no envelope at all is previewed as it arrived, which is
-			// the case the pattern already covered.
+			// A body that is no envelope at all is walked as it arrived: it holds no
+			// inner document to unwrap.
 			name: "a body that is no envelope at all",
-			body: []byte(`{"_context_auth_token": "` + token + `", "_context_password": "hunter2"}`),
+			body: []byte(`{"_context_auth_token": "` + keystoneToken + `", "_context_password": "hunter2"}`),
 		},
 	}
 
@@ -334,7 +333,7 @@ func TestPreviewRedactsTheRequestContextCredentials(t *testing.T) {
 
 			got := preview(tc.body)
 
-			if strings.Contains(got, token) {
+			if strings.Contains(got, keystoneToken) {
 				t.Errorf("preview() printed the Keystone token: %s", got)
 			}
 			if strings.Contains(got, "hunter2") {
@@ -348,17 +347,16 @@ func TestPreviewRedactsTheRequestContextCredentials(t *testing.T) {
 }
 
 // TestPreviewDescribesABodyItCannotRedact covers the bodies the redaction
-// cannot reach. The pattern is written against JSON quoting, so a
+// cannot reach. The rule reads the member names of a JSON document, so a
 // msgpack-serialized notification — oslo.messaging offers that serializer — and
 // anything else a publisher on a bound topic sends carry their
 // _context_auth_token past it untouched. Printing those bytes raw would put a
-// live Keystone token in the file an operator attaches to a ticket, which is
-// what the redaction exists to prevent.
+// live Keystone token in the file an operator keeps, which is what the
+// redaction exists to prevent.
 func TestPreviewDescribesABodyItCannotRedact(t *testing.T) {
-	const token = "gAAAAABlive-keystone-token"
 	// A msgpack map: the member names arrive length-prefixed rather than quoted,
-	// so the pattern matches nothing at all.
-	body := []byte("\x82\xb3_context_auth_token\xd9\x1a" + token + "\xaaevent_type")
+	// so the walk finds none of them.
+	body := []byte("\x82\xb3_context_auth_token\xd9\x1a" + keystoneToken + "\xaaevent_type")
 
 	if _, err := ParseEnvelope(body); err == nil {
 		t.Fatal("ParseEnvelope() error = nil, want the body to reach the preview")
@@ -366,7 +364,7 @@ func TestPreviewDescribesABodyItCannotRedact(t *testing.T) {
 
 	got := preview(body)
 
-	if strings.Contains(got, token) {
+	if strings.Contains(got, keystoneToken) {
 		t.Errorf("preview() printed the Keystone token: %s", got)
 	}
 	// The delivery is still reported: that a body arrived which this collector can
@@ -384,6 +382,125 @@ func TestPreviewCutsTheBodyAtTheBound(t *testing.T) {
 
 	if got := preview(body); len(got) != previewMax {
 		t.Errorf("preview() returned %d bytes, want it cut at %d", len(got), previewMax)
+	}
+}
+
+// TestPreviewRedactsNestedMembers covers what the walk has to reach in a body
+// the parser refused: a credential inside the payload, a member whose value is
+// an object, and a body that is no envelope.
+func TestPreviewRedactsNestedMembers(t *testing.T) {
+	t.Run("a scheduler notification the parser refused for its timestamp", func(t *testing.T) {
+		inner := strings.Replace(schedulerDocument, "2026-03-01 12:34:56.789012", "01.03.2026 12:00", 1)
+		inner = strings.TrimSuffix(inner, "}") + `, "_context_auth_token": "` + keystoneToken + `"}`
+		body := wrap(t, inner)
+		if _, err := ParseEnvelope(body); err == nil {
+			t.Fatal("ParseEnvelope() error = nil, want the body to reach the preview")
+		}
+
+		got := preview(body)
+
+		for _, want := range []string{`"auth_token": "[redacted]"`, `"_context_auth_token": "[redacted]"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("preview() = %s, want it to carry %s", got, want)
+			}
+		}
+		if strings.Contains(got, keystoneToken) {
+			t.Errorf("preview() printed the Keystone token: %s", got)
+		}
+		// The members stand in the order they were written in, so the beginning of
+		// the preview still shows what kind of message it is.
+		const beginning = `{"message_id": "` + schedulerMessageID + `", ` +
+			`"event_type": "scheduler.select_destinations.start"`
+		if !strings.HasPrefix(got, beginning) {
+			t.Errorf("preview() = %s, want it to start with %s", got, beginning)
+		}
+	})
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "an oslo.message that is an object and not a string",
+			body: `{"oslo.message": {"payload": {"connection_info": {"hosts": ["10.0.0.1"]}}}}`,
+			want: `{"oslo.message": {"payload": {"connection_info": "[redacted]"}}}`,
+		},
+		{
+			name: "a body that is null",
+			body: `null`,
+			want: `null`,
+		},
+		{
+			name: "a body that is an array",
+			body: `[{"password": "hunter2"}]`,
+			want: `[{"password": "[redacted]"}]`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preview([]byte(tc.body)); got != tc.want {
+				t.Errorf("preview() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPreviewDescribesAnInnerDocumentItCannotRedact covers the envelope whose
+// oslo.message holds no JSON document. Its member names cannot be read, so
+// nothing in it can be redacted, and it is described by the size of the body
+// the way a body that is not JSON is.
+func TestPreviewDescribesAnInnerDocumentItCannotRedact(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "an oslo.message that is text and not JSON",
+			body: wrap(t, "_context_auth_token = "+keystoneToken),
+		},
+		{
+			name: "an oslo.message that breaks off inside a credential",
+			body: wrap(t, `{"_context_auth_token": "`+keystoneToken),
+		},
+		{
+			name: "an oslo.message that is the empty string",
+			body: wrap(t, ""),
+		},
+		{
+			name: "an oslo.message that is null",
+			body: []byte(`{"oslo.message": null}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := preview(tc.body)
+
+			if want := fmt.Sprintf("%d bytes whose oslo.message is not JSON", len(tc.body)); got != want {
+				t.Errorf("preview() = %q, want %q", got, want)
+			}
+			if strings.Contains(got, keystoneToken) {
+				t.Errorf("preview() printed the Keystone token: %s", got)
+			}
+		})
+	}
+}
+
+// TestPreviewRedactsBeforeItCuts covers a secret that starts before the bound
+// and ends after it. Cutting first would leave its beginning in the preview.
+func TestPreviewRedactsBeforeItCuts(t *testing.T) {
+	body := wrap(t, `{"timestamp": "01.03.2026 12:00", "filler": "`+strings.Repeat("z", previewMax-80)+
+		`", "auth_token": "`+strings.Repeat("s", 2*previewMax)+`"}`)
+
+	got := preview(body)
+
+	if !strings.Contains(got, `"auth_token": "[redacted]"`) {
+		t.Errorf("preview() = %s, want the token redacted", got)
+	}
+	if strings.Contains(got, "sss") {
+		t.Errorf("preview() printed the beginning of the token: %s", got)
 	}
 }
 
@@ -522,6 +639,213 @@ func TestRedactValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRedactJSON covers the rewrite of a document the parser refused. Every byte
+// outside a redacted value stays where it was, and a document that cannot be
+// read to its end yields nothing at all, so nothing half-redacted is printed.
+func TestRedactJSON(t *testing.T) {
+	rewrites := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "an array under a matching name, with the bytes around it kept",
+			raw:  `{"a": [1, {"TOKEN": [1,2]}], "b": 1e3}`,
+			want: `{"a": [1, {"TOKEN": "[redacted]"}], "b": 1e3}`,
+		},
+		{
+			name: "whitespace around the member and the document is kept",
+			raw:  `  {"password"  :  "x"  }  `,
+			want: `  {"password"  :  "[redacted]"  }  `,
+		},
+		{
+			name: "null under a matching name",
+			raw:  `{"password": null}`,
+			want: `{"password": "[redacted]"}`,
+		},
+		{
+			name: "a number under a matching name",
+			raw:  `{"token": 42}`,
+			want: `{"token": "[redacted]"}`,
+		},
+		{
+			name: "an object under a matching name",
+			raw:  `{"connection_info": {"hosts": ["10.0.0.1"]}, "volume_id": "v1"}`,
+			want: `{"connection_info": "[redacted]", "volume_id": "v1"}`,
+		},
+		{
+			name: "a string under a matching name",
+			raw:  `{"secret_uuid": "457eb676-33da-42ec-9a8c-9293d545c337"}`,
+			want: `{"secret_uuid": "[redacted]"}`,
+		},
+		{
+			// encoding/json refuses to turn this number into a float64, and it is
+			// JSON all the same.
+			name: "a number no float64 holds beside a matching member",
+			raw:  `{"n": 1e999, "password": "x"}`,
+			want: `{"n": 1e999, "password": "[redacted]"}`,
+		},
+		{name: "an empty object", raw: `{}`, want: `{}`},
+		{name: "an empty array", raw: `[]`, want: `[]`},
+		{name: "null", raw: `null`, want: `null`},
+		{name: "a string", raw: `"plain"`, want: `"plain"`},
+		{
+			name: "a document with no matching member",
+			raw:  `{"instance_id": "i1", "nics": [{"connection": "c1"}], "vcpus": 2}`,
+			want: `{"instance_id": "i1", "nics": [{"connection": "c1"}], "vcpus": 2}`,
+		},
+	}
+
+	for _, tc := range rewrites {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := redactJSON([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("redactJSON() error = %v, want nil", err)
+			}
+
+			if string(got) != tc.want {
+				t.Errorf("redactJSON() = %s, want %s", got, tc.want)
+			}
+			if !json.Valid(got) {
+				t.Errorf("redactJSON() = %s, want it to stay JSON", got)
+			}
+		})
+	}
+
+	refusals := []struct {
+		name string
+		raw  []byte
+		// refused reports whether err is the one the input is refused with.
+		refused func(err error) bool
+	}{
+		{
+			name:    "the empty input",
+			raw:     []byte{},
+			refused: func(err error) bool { return errors.Is(err, io.EOF) },
+		},
+		{
+			name:    "the nil input",
+			raw:     nil,
+			refused: func(err error) bool { return errors.Is(err, io.EOF) },
+		},
+		{
+			name:    "a document that breaks off behind a member it has redacted",
+			raw:     []byte(`{"a": {"password": "x"}, "b": nope}`),
+			refused: func(err error) bool { return errors.As(err, new(*json.SyntaxError)) },
+		},
+		{
+			name:    "a value under a matching name that is no JSON",
+			raw:     []byte(`{"password": nope}`),
+			refused: func(err error) bool { return errors.As(err, new(*json.SyntaxError)) },
+		},
+		{
+			name:    "a value under a matching name that breaks off",
+			raw:     []byte(`{"auth_token": "` + keystoneToken),
+			refused: func(err error) bool { return errors.Is(err, io.ErrUnexpectedEOF) },
+		},
+		{
+			name:    "a member name that is missing",
+			raw:     []byte(`{"a": 1,}`),
+			refused: func(err error) bool { return errors.As(err, new(*json.SyntaxError)) },
+		},
+		{
+			name:    "an array that is closed as an object",
+			raw:     []byte(`[1}`),
+			refused: func(err error) bool { return errors.As(err, new(*json.SyntaxError)) },
+		},
+		{
+			name: "a second document behind the first",
+			raw:  []byte(`{"a":1} {"b":2}`),
+			refused: func(err error) bool {
+				return err != nil && err.Error() == "reading a JSON document to redact it: data after the document"
+			},
+		},
+	}
+
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := redactJSON(tc.raw)
+
+			if !tc.refused(err) {
+				t.Errorf("redactJSON() error = %v, want the refusal of %s", err, tc.name)
+			}
+			if got != nil {
+				t.Errorf("redactJSON() = %s, want no bytes beside the error", got)
+			}
+		})
+	}
+}
+
+// decodeTree decodes one JSON document into the tree ParseEnvelope hands the
+// dump, numbers as json.Number.
+func decodeTree(t *testing.T, data []byte) any {
+	t.Helper()
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var tree any
+	if err := decoder.Decode(&tree); err != nil {
+		t.Fatalf("decoding %q: %v", data, err)
+	}
+	return tree
+}
+
+// FuzzRedactJSON drives the rewrite with the bytes a broker delivers. The
+// offsets it cuts the input at come out of the decoder, and one that is off by
+// a byte either breaks the document or leaves a part of a credential in it.
+//
+// The invariants are what the dump relies on. A refusal carries no bytes, so
+// nothing half-redacted is printed. A JSON document is never refused, so the
+// description of a body as not JSON holds. And what comes back is JSON in which
+// no matching member kept its value: redacting the decoded result a second time
+// changes nothing. Nor is anything else lost on the way: the result decodes into
+// the tree redactValue leaves of the input.
+func FuzzRedactJSON(f *testing.F) {
+	for _, seed := range []string{
+		schedulerDocument,
+		volumeAttachDocument,
+		`{"a": [1, {"TOKEN": [1,2]}], "b": 1e3}`,
+		`  {"password"  :  "x"  }  `,
+		`{"n": 1e999, "password": "x"}`,
+		`{"pass\u0077ord": "x"}`,
+		`{"token": 1, "token": {"a": 2}}`,
+		``,
+		`{"a": {"password": "x"}, "b": nope}`,
+		`{"a":1} {"b":2}`,
+	} {
+		f.Add([]byte(seed))
+	}
+
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		got, err := redactJSON(raw)
+		if err != nil {
+			if got != nil {
+				t.Errorf("redactJSON(%q) = %q beside the error %v, want no bytes", raw, got, err)
+			}
+			if json.Valid(raw) {
+				t.Errorf("redactJSON(%q) error = %v, want a JSON document read", raw, err)
+			}
+			return
+		}
+
+		if !json.Valid(got) {
+			t.Fatalf("redactJSON(%q) = %q, want a JSON document", raw, got)
+		}
+		redacted := decodeTree(t, got)
+		redactValue(redacted)
+		if want := decodeTree(t, got); !reflect.DeepEqual(redacted, want) {
+			t.Errorf("redactJSON(%q) = %q, want no matching member left with its value", raw, got)
+		}
+		// redactJSON and redactValue are two walks under one rule, so the
+		// rewritten document decodes into the tree redactValue leaves.
+		want := decodeTree(t, raw)
+		redactValue(want)
+		if tree := decodeTree(t, got); !reflect.DeepEqual(tree, want) {
+			t.Errorf("redactJSON(%q) decodes into %#v, want %#v", raw, tree, want)
+		}
+	})
 }
 
 // printedLine runs one notification through printNotification the way the dump

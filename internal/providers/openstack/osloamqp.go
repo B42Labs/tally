@@ -1,6 +1,7 @@
 package openstack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -713,8 +713,9 @@ type dumpLine struct {
 	EventType  string         `json:"event_type,omitempty"`
 	Timestamp  time.Time      `json:"timestamp,omitzero"`
 	Payload    map[string]any `json:"payload,omitempty"`
-	// Unparseable holds the raw body of a delivery the parser refused, and is
-	// absent on every other line.
+	// Unparseable holds what preview makes of a delivery the parser refused: the
+	// beginning of the body with its secret members redacted, or the body's size
+	// where it cannot be redacted. It is absent on every other line.
 	Unparseable string `json:"unparseable,omitempty"`
 }
 
@@ -767,12 +768,74 @@ func redactValue(value any) {
 	}
 }
 
-// contextSecrets matches the members of an oslo request context that hold a
-// credential. An unversioned notification serializes that context next to the
-// payload, and _context_auth_token is the Keystone token of the request that
-// produced the message: valid for hours, and the dump's output is a file an
-// operator attaches to a ticket.
-var contextSecrets = regexp.MustCompile(`("_context_(?:auth_token|password)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
+// redactJSON does to one JSON document what redactValue does to a decoded
+// tree, and keeps every byte outside a redacted value: the member order and the
+// whitespace stay as they arrived. Decoding the document and encoding the tree
+// again is not an option, because encoding/json sorts the members of an object
+// by name. That would put the _context_ members in front of event_type and
+// payload and push those two out of the bytes preview prints.
+//
+// An input that is not exactly one JSON document yields an error and no bytes,
+// so a caller never holds a document that is redacted in part.
+func redactJSON(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// Token otherwise turns every number into a float64 and refuses one no
+	// float64 holds, such as 1e999, which is JSON all the same.
+	decoder.UseNumber()
+	var out bytes.Buffer
+	var copied int64 // how much of raw has been written to out
+
+	// walk reads one value, and the members or elements of one that has any.
+	var walk func() error
+	walk = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		for decoder.More() {
+			if delim == '{' {
+				name, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				// Where an object's member name stands, Token returns a string or
+				// an error, so the assertion holds.
+				if key, _ := name.(string); secretMember(key) {
+					var value json.RawMessage
+					if err := decoder.Decode(&value); err != nil {
+						return err
+					}
+					// Decode hands a json.RawMessage the value without the
+					// whitespace around it and leaves the offset behind the value's
+					// last byte, so the value starts its own length before that.
+					end := decoder.InputOffset()
+					out.Write(raw[copied : end-int64(len(value))])
+					out.WriteString(`"` + redactionMarker + `"`)
+					copied = end
+					continue
+				}
+			}
+			if err := walk(); err != nil {
+				return err
+			}
+		}
+		// More has seen the closing delimiter and left it in the input.
+		_, err = decoder.Token()
+		return err
+	}
+	if err := walk(); err != nil {
+		return nil, fmt.Errorf("reading a JSON document to redact it: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("reading a JSON document to redact it: data after the document")
+	}
+	out.Write(raw[copied:])
+	return out.Bytes(), nil
+}
 
 // printNotification writes one delivery as a JSON line, and neither kind of
 // line is verbatim. A payload carries more than the mapping reads, a Keystone
@@ -805,21 +868,24 @@ func printNotification(encoder *json.Encoder, delivery amqp091.Delivery) error {
 // preview redacts and cuts a body the parser refused.
 //
 // The inner document is unwrapped first, because it travels as a JSON string
-// and not as a nested object: in the raw bytes its quotes are backslash-escaped,
-// so a token arrives as \"_context_auth_token\": \"gAAAAAB…\" and the pattern,
-// which needs a bare quote on both sides of the member name, matches nothing at
-// all. Only after the unwrap are the quotes the ones it is written against.
+// and not as a nested object, and a walk over the envelope never sees the
+// members inside a string. A JSON body whose envelope does not decode, or whose
+// oslo.message is not a string, is walked as it arrived.
 //
-// A JSON body whose envelope does not decode is previewed as it arrived, which
-// is the case the pattern already handled: its quotes are the bare ones.
+// Redaction comes before the cut, so a value that reaches across previewMax is
+// never printed in part.
 //
-// A body that is not JSON at all is described instead of printed. The pattern
-// needs JSON quoting around the member name, so on a msgpack-serialized
-// notification — oslo.messaging offers that serializer — or on anything else a
-// publisher on a bound topic sends, it matches nothing and the request context's
-// credentials would reach the output as they arrived. That such a body arrived,
-// and how long it is, is what the dump can say about those bytes without
-// printing a live Keystone token into a file that goes on a ticket.
+// A body that is not JSON at all is described instead of printed. The rule
+// reads member names, and a msgpack-serialized notification (oslo.messaging
+// offers that serializer) or anything else a publisher on a bound topic sends
+// has none it can find, so the request context's credentials would reach the
+// output as they arrived. That such a body arrived, and how long it is, is what
+// the dump can say about those bytes without printing a live Keystone token
+// into a file an operator keeps.
+//
+// The same holds for an envelope whose oslo.message is a string of something
+// other than one JSON document, the empty string included, or is null, which
+// decodes into the empty string. It is described by the size of the body.
 func preview(body []byte) string {
 	if !json.Valid(body) {
 		return fmt.Sprintf("%d bytes that are not JSON", len(body))
@@ -832,8 +898,11 @@ func preview(body []byte) string {
 			raw = []byte(message)
 		}
 	}
-	redacted := contextSecrets.ReplaceAll(raw, []byte(`${1}"[redacted]"`))
-	return string(redacted[:min(len(redacted), previewMax)])
+	clean, err := redactJSON(raw)
+	if err != nil {
+		return fmt.Sprintf("%d bytes whose %s is not JSON", len(body), osloMessageKey)
+	}
+	return string(clean[:min(len(clean), previewMax)])
 }
 
 // connectLoop runs one AMQP session after another until ctx is done, waiting
