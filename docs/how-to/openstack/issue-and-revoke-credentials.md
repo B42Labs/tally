@@ -20,6 +20,9 @@ database and talks to no API.
 - `tally-reporting-admin` at the version the API runs, with its subcommands and
   flags on the
   [reporting admin CLI](/reference/command-line/tally-reporting-admin) page.
+  A release also publishes it as the image
+  `ghcr.io/b42labs/tally-reporting-admin:<tag>`, whose entrypoint is the
+  binary, so the subcommand and its flags follow the image name.
 - The registry ids of the projects a project-scoped token may read, if you
   issue one.
 - The [Reporting API settings](/reference/configuration/tally-reporting) page,
