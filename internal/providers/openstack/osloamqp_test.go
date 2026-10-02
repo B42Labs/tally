@@ -494,8 +494,10 @@ func TestQueueDeclareError(t *testing.T) {
 // the cases it cannot read are refused and not waved through.
 func TestRequireQuorumBroker(t *testing.T) {
 	const (
-		older = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13.7: " +
-			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue"
+		remedy = "; set TALLY_OSC_QUEUE_TYPE=classic for this broker"
+		older  = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports 3.13.7: " +
+			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue" +
+			remedy
 		unusable = "TALLY_OSC_QUEUE_TYPE=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: "
 	)
 
@@ -517,27 +519,27 @@ func TestRequireQuorumBroker(t *testing.T) {
 		{
 			name:       "no server properties at all",
 			properties: nil,
-			want:       unusable + "<nil>",
+			want:       unusable + "<nil>" + remedy,
 		},
 		{
 			name:       "server properties without a version",
 			properties: amqp091.Table{"product": "RabbitMQ"},
-			want:       unusable + "<nil>",
+			want:       unusable + "<nil>" + remedy,
 		},
 		{
 			name:       "an empty version",
 			properties: amqp091.Table{"version": ""},
-			want:       unusable,
+			want:       unusable + remedy,
 		},
 		{
 			name:       "a version that is not a string",
 			properties: amqp091.Table{"version": int32(4)},
-			want:       unusable + "4",
+			want:       unusable + "4" + remedy,
 		},
 		{
 			name:       "a version that starts with no number",
 			properties: amqp091.Table{"version": "unknown"},
-			want:       unusable + "unknown",
+			want:       unusable + "unknown" + remedy,
 		},
 	}
 

@@ -372,19 +372,23 @@ func (c *Consumer) session(ctx context.Context) (bool, error) {
 // the delivery limit of -1 as a limit and drops a notification on its first
 // requeue, which RabbitMQ 3.13.7 does, so the session ends before it declares
 // anything. A version the gate cannot read is refused the same way: the declare
-// that follows is only safe on a broker known to be new enough.
+// that follows is only safe on a broker known to be new enough. quorum is the
+// default, so the gate also refuses a deployment that set nothing, and the text
+// names the setting that declares on such a broker.
 func requireQuorumBroker(properties amqp091.Table) error {
 	version, _ := properties["version"].(string)
 	leading, _, _ := strings.Cut(version, ".")
 	major, err := strconv.Atoi(leading)
 	if err != nil {
-		return fmt.Errorf("%s=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: %v",
-			envQueueType, properties["version"])
+		return fmt.Errorf("%s=quorum needs RabbitMQ 4.0 or newer and the broker reports no usable version: %v; "+
+			"set %s=%s for this broker",
+			envQueueType, properties["version"], envQueueType, queueTypeClassic)
 	}
 	if major < 4 {
 		return fmt.Errorf("%s=quorum needs RabbitMQ 4.0 or newer and the broker reports %s: "+
-			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue",
-			envQueueType, version)
+			"an older broker reads the delivery limit of -1 as a limit and drops a notification on its first requeue; "+
+			"set %s=%s for this broker",
+			envQueueType, version, envQueueType, queueTypeClassic)
 	}
 	return nil
 }
