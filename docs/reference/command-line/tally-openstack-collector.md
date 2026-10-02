@@ -38,6 +38,13 @@ for `TALLY_OSC_AMQP_URL` alone. The mode is how the exchanges, the topics and
 the event types of a deployment are checked before the collector is pointed at
 it.
 
+In what the dump prints, the value of every member whose name contains
+`password`, `token`, `secret` or `connection_info`, in any letter case and at
+any depth, is replaced by `[redacted]`. That holds for the `payload` of a
+parsed delivery and for the `unparseable` preview of a refused one, which is
+cut off after 512 bytes. A body that is not JSON, and an envelope whose
+`oslo.message` is not JSON, is reported by its size and not printed.
+
 ## AMQP consumption
 
 The queue, the consumer tag and the exchange kind are declared in
