@@ -83,11 +83,14 @@ spec:
               drop: [ALL]
             seccompProfile:
               type: RuntimeDefault
-          # The numbers are an assumption and not a measurement: what the
-          # process holds is the 100 unacknowledged deliveries of the default
-          # TALLY_OSC_PREFETCH, a few kilobytes each, and the page cache of
-          # SQLite. Without a request the pod is BestEffort and first in line
-          # for eviction, and the outbox it was draining waits for the next pod.
+          # The numbers rest on one reading and one assumption. On the dev
+          # cluster the process stood at 21 MiB resident after it drained a
+          # backlog of 14,000 simulated notifications. The limit leaves room
+          # for what that run did not carry: the 100 unacknowledged deliveries
+          # of the default TALLY_OSC_PREFETCH at the size a real cloud sends
+          # them, and the page cache of SQLite over a full outbox. Without a
+          # request the pod is BestEffort and first in line for eviction, and
+          # the outbox it was draining waits for the next pod.
           resources:
             requests:
               cpu: 50m
