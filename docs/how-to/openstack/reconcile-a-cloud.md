@@ -27,6 +27,103 @@ observes and how it corrects the projection is in
   which names `TALLY_REPORTING_CLOUDS_CONFIG` (the clouds file the API reads at
   startup), `TALLY_REPORTING_SYNC_ALLOW_AT` and `TALLY_REPORTING_SYNC_BUDGET_S`.
 
+## Restrict the account to read requests
+
+This section is optional. It replaces the account's password in the Secret with
+an application credential that every API answers for the `GET` requests of a
+sync alone
+([a credential that only reads](/explanation/how-reconciliation-observes-a-cloud#a-credential-that-only-reads)).
+It needs an entry on your machine that authenticates the same account with its
+password, called `os-prod-eu1-password` in the steps.
+
+1. Set `service_type` under `[keystone_authtoken]` in the configuration of each
+   API the sync reads to that API's type in the catalog. List the types:
+
+   ```sh
+   openstack --os-cloud os-prod-eu1-password catalog list -c Name -c Type
+   ```
+
+   ```text
+   +----------+---------------+
+   | Name     | Type          |
+   +----------+---------------+
+   | nova     | compute       |
+   | cinder   | block-storage |
+   | neutron  | network       |
+   | glance   | image         |
+   | octavia  | load-balancer |
+   | keystone | identity      |
+   +----------+---------------+
+   ```
+
+   On a Kolla deployment cinder is the one API to change. Add the setting to
+   `/etc/kolla/config/cinder.conf` and reconfigure cinder:
+
+   ```ini
+   [keystone_authtoken]
+   service_type = block-storage
+   ```
+
+   ```sh
+   kolla-ansible reconfigure -i multinode --tags cinder
+   ```
+
+2. Create the credential as the account itself:
+
+   ```sh
+   openstack --os-cloud os-prod-eu1-password application credential create \
+     --role admin \
+     --access-rules '[
+       {"service": "compute", "method": "GET", "path": "/**/servers/detail"},
+       {"service": "compute", "method": "GET", "path": "/**/flavors/detail"},
+       {"service": "compute", "method": "GET", "path": "/**/"},
+       {"service": "block-storage", "method": "GET", "path": "/**/volumes/detail"},
+       {"service": "network", "method": "GET", "path": "/**/floatingips"},
+       {"service": "image", "method": "GET", "path": "/**/images"},
+       {"service": "load-balancer", "method": "GET", "path": "/**/lbaas/loadbalancers"}
+     ]' \
+     -f yaml -c id -c secret \
+     tally-reconciliation
+   ```
+
+   ```text
+   id: 6b1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d
+   secret: <the secret, shown this once>
+   ```
+
+   The `service` of a rule is the `service_type` of step 1, not the name a
+   client calls the API by. The `load-balancer` rule belongs to a cloud whose
+   entry sets `include_octavia`; leave it out otherwise. Keystone shows the
+   secret once.
+
+3. Replace the entry the Secret carries. `clouds.yaml`:
+
+   ```yaml
+   clouds:
+     os-prod-eu1:
+       auth_type: v3applicationcredential
+       auth:
+         auth_url: https://keystone.example.com:5000/v3
+         application_credential_id: 6b1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d
+       region_name: RegionOne
+       interface: public
+   ```
+
+   `secure.yaml`:
+
+   ```yaml
+   clouds:
+     os-prod-eu1:
+       auth:
+         application_credential_secret: <the secret>
+   ```
+
+   The entry names no user, no password and no project, because the credential
+   carries its project. The `os-prod-eu1-password` entry stays on your machine
+   and never reaches the Secret.
+
+Continue with the sections below, using the new `os-prod-eu1` entry.
+
 ## Mount the clouds file
 
 1. Mount the Secret at `/etc/openstack/`, the directory a Kubernetes Secret
@@ -88,6 +185,11 @@ observes and how it corrects the projection is in
    have to answer with more than the account's own project. A cloud that
    refuses the probe ends the run with an error naming the clouds.yaml entry,
    before a single listing follows.
+
+   With a credential restricted to read requests, a 401 on the second or third
+   call comes from an API that cannot validate the credential's rules. That is
+   repaired in step 1 of
+   [restrict the account to read requests](#restrict-the-account-to-read-requests).
 
 ## Name the cloud
 

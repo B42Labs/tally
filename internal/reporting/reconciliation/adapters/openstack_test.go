@@ -168,6 +168,9 @@ type cloud struct {
 	// token is the document keystone answers with. It is held rather than closed
 	// over so a test can reissue it with the roles of a lesser account.
 	token []byte
+	// tokenBodies is the body of every token request, which is what says how the
+	// clouds.yaml entry authenticated.
+	tokenBodies [][]byte
 	// refuseScope makes nova answer the scope probe the way it answers an account
 	// its policy grants no listing across projects.
 	refuseScope bool
@@ -232,8 +235,15 @@ func newCloud(t *testing.T, missing ...string) *cloud {
 	t.Cleanup(c.Close)
 
 	c.token = keystoneToken(t, c.URL, missing, adminRoles)
-	c.mux.HandleFunc("POST /v3/auth/tokens", func(w http.ResponseWriter, _ *http.Request) {
+	c.mux.HandleFunc("POST /v3/auth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
 		c.mu.Lock()
+		c.tokenBodies = append(c.tokenBodies, body)
 		token := c.token
 		c.mu.Unlock()
 
@@ -453,6 +463,15 @@ func (c *cloud) requestsTo(path string) []request {
 	return matched
 }
 
+// tokenRequests is the body of every token request the cloud answered, in the
+// order they arrived.
+func (c *cloud) tokenRequests() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Clone(c.tokenBodies)
+}
+
 // scopeProbes is every scope request the cloud answered. A run sends exactly
 // one, before it observes anything.
 func (c *cloud) scopeProbes() []request {
@@ -466,16 +485,7 @@ func (c *cloud) scopeProbes() []request {
 }
 
 // writeCloudsYAML points the process at a clouds.yaml that authenticates
-// against serverURL. OS_CLIENT_CONFIG_FILE makes the written file the only search
-// location, so the adapter runs its production lookup and still cannot reach a
-// developer's real clouds.yaml.
-//
-// The other OS_* variables are emptied for the same reason: they override the
-// file, and a shell that has them set from a real cloud would otherwise decide
-// what the test authenticates as.
-//
-// Setting the environment is process-wide, which is why no test in this file
-// runs in parallel.
+// against serverURL.
 func writeCloudsYAML(t *testing.T, serverURL string) {
 	t.Helper()
 
@@ -494,6 +504,63 @@ func writeCloudsYAML(t *testing.T, serverURL string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+
+	useCloudsYAML(t, path)
+}
+
+// testApplicationCredentialID is the credential the entry of
+// writeApplicationCredentialCloudsYAML authenticates with.
+const testApplicationCredentialID = "6b1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d"
+
+// writeApplicationCredentialCloudsYAML points the process at the entry an
+// operator writes for a credential that only reads: the credential's id in
+// clouds.yaml and its secret in the secure.yaml beside it, the two files the
+// Secret mounts. An empty secret writes no secure.yaml, which is a Secret
+// mounted without it.
+func writeApplicationCredentialCloudsYAML(t *testing.T, serverURL, secret string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clouds.yaml")
+	content := fmt.Sprintf(`clouds:
+  %s:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: %s/v3
+      application_credential_id: %s
+    region_name: %s
+    interface: public
+`, testCloud, serverURL, testApplicationCredentialID, testRegion)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if secret != "" {
+		secure := fmt.Sprintf(`clouds:
+  %s:
+    auth:
+      application_credential_secret: %s
+`, testCloud, secret)
+		if err := os.WriteFile(filepath.Join(dir, "secure.yaml"), []byte(secure), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	useCloudsYAML(t, path)
+}
+
+// useCloudsYAML makes path the only clouds.yaml the process searches.
+// OS_CLIENT_CONFIG_FILE is what does that, so the adapter runs its production
+// lookup and still cannot reach a developer's real clouds.yaml.
+//
+// The other OS_* variables are emptied for the same reason: they override the
+// file, and a shell that has them set from a real cloud would otherwise decide
+// what the test authenticates as.
+//
+// Setting the environment is process-wide, which is why no test in this file
+// runs in parallel.
+func useCloudsYAML(t *testing.T, path string) {
+	t.Helper()
 
 	t.Setenv("OS_CLIENT_CONFIG_FILE", path)
 	for _, name := range []string{"OS_CACERT", "OS_CERT", "OS_INTERFACE", "OS_KEY", "OS_REGION_NAME"} {
@@ -747,6 +814,84 @@ func TestOpenStackAbortsWhenTheCloudIsNotInCloudsYAML(t *testing.T) {
 	var enumErr *reconciliation.EnumerationError
 	if errors.As(errs[0], &enumErr) {
 		t.Errorf("ListResources() error = %q, want a plain error that aborts the run", errs[0])
+	}
+}
+
+func TestOpenStackAuthenticatesWithAnApplicationCredentialFromSecureYAML(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumesPath, "volumes.json")
+	writeApplicationCredentialCloudsYAML(t, cloud.URL, "shown-once")
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+	if len(observed) != 2 {
+		t.Errorf("ListResources() yielded %d observations, want the 2 volumes", len(observed))
+	}
+
+	// The entry names no user and no password. What keystone was sent is the
+	// credential, with the id out of clouds.yaml and the secret out of the
+	// secure.yaml beside it.
+	bodies := cloud.tokenRequests()
+	if len(bodies) != 1 {
+		t.Fatalf("the cloud answered %d token requests, want 1", len(bodies))
+	}
+	var sent struct {
+		Auth struct {
+			Identity struct {
+				Methods               []string `json:"methods"`
+				ApplicationCredential struct {
+					ID     string `json:"id"`
+					Secret string `json:"secret"`
+				} `json:"application_credential"`
+			} `json:"identity"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(bodies[0], &sent); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	identity := sent.Auth.Identity
+	if !slices.Equal(identity.Methods, []string{"application_credential"}) {
+		t.Errorf("auth methods = %v, want [application_credential]", identity.Methods)
+	}
+	if identity.ApplicationCredential.ID != testApplicationCredentialID ||
+		identity.ApplicationCredential.Secret != "shown-once" {
+		t.Errorf("application credential = %+v, want id %s with the secret of secure.yaml",
+			identity.ApplicationCredential, testApplicationCredentialID)
+	}
+}
+
+func TestOpenStackAbortsWhenTheApplicationCredentialHasNoSecret(t *testing.T) {
+	cloud := newCloud(t)
+	writeApplicationCredentialCloudsYAML(t, cloud.URL, "")
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+
+	if len(observed) != 0 {
+		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
+	}
+	if len(errs) != 1 {
+		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
+	}
+
+	// A Secret mounted without its secure.yaml leaves the entry a credential id
+	// alone. The run ends on it with the error the explanation page quotes,
+	// before the scope is asked for.
+	want := fmt.Sprintf("authenticating against the cloud %q: "+
+		"You must provide an Application Credential Secret", testCloud)
+	if errs[0].Error() != want {
+		t.Errorf("ListResources() error = %q, want %q", errs[0], want)
+	}
+	var enumErr *reconciliation.EnumerationError
+	if errors.As(errs[0], &enumErr) {
+		t.Errorf("ListResources() error = %q, want a plain error that aborts the run", errs[0])
+	}
+	if probes := cloud.scopeProbes(); len(probes) != 0 {
+		t.Errorf("the cloud answered %d scope probes, want none", len(probes))
 	}
 }
 
