@@ -1,0 +1,19 @@
+{
+  "volume_types": [
+    {
+      "id": "f5c3e7a9-4d6b-4c8f-a02b-3d5e7f9a1b43",
+      "name": "standard",
+      "description": null,
+      "is_public": true,
+      "os-volume-type-access:is_public": true,
+      "qos_specs_id": null,
+      "extra_specs": {}
+    }
+  ],
+  "volume_type_links": [
+    {
+      "rel": "next",
+      "href": "https://openstack.invalid/volume/v3/types?is_public=None&marker=f5c3e7a9-4d6b-4c8f-a02b-3d5e7f9a1b43"
+    }
+  ]
+}

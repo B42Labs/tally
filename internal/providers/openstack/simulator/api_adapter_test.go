@@ -385,3 +385,37 @@ func TestFakeAPIObservesNothingThroughTheRealAdapterBeforeTheMonthBegins(t *test
 			observed.ResourceType, observed.ResourceID, instantText(at))
 	}
 }
+
+func TestFakeAPINamesTheVolumeTypesThroughTheRealAdapter(t *testing.T) {
+	api, err := NewCloudAPI(NewClock(cloudDay(1), 0, time.Now), syncMonth(t).Oracle)
+	if err != nil {
+		t.Fatalf("NewCloudAPI() error = %v, want nil", err)
+	}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	writeSyncCloudsYAML(t, server.URL)
+
+	namer, ok := adapters.NewOpenStack(slog.New(slog.DiscardHandler)).(reconciliation.SizeNamer)
+	if !ok {
+		t.Fatal("the OpenStack adapter names no size values, want it to name the volume types")
+	}
+	names, err := namer.SizeNames(t.Context(), map[string]any{"os_cloud": testCloud})
+	if err != nil {
+		t.Fatalf("SizeNames() error = %v, want nil", err)
+	}
+
+	// Each name is stored under the id the world fixes for it, so a sync of a
+	// simulated cloud stores the same three rows whichever month it reads.
+	var got []string
+	for value, name := range names {
+		want := reconciliation.SizeValue{ResourceType: "volume", Member: "type", Value: volumeTypeIDs[name]}
+		if value != want {
+			t.Errorf("SizeNames() names %q under %+v, want %+v", name, value, want)
+		}
+		got = append(got, name)
+	}
+	slices.Sort(got)
+	if want := []string{"hdd", "ssd", "standard"}; !slices.Equal(got, want) {
+		t.Errorf("SizeNames() names %v, want %v", got, want)
+	}
+}

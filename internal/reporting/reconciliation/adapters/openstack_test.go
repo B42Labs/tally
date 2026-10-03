@@ -8,6 +8,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -50,6 +51,7 @@ const (
 	serversPath        = "/compute/v2.1/servers/detail"
 	flavorsPath        = "/compute/v2.1/flavors/detail"
 	volumesPath        = "/volume/v3/volumes/detail"
+	volumeTypesPath    = "/volume/v3/types"
 	floatingIPsPath    = "/network/v2.0/floatingips"
 	imagesPath         = "/image/v2/images"
 	loadBalancersPath  = "/load-balancer/v2.0/lbaas/loadbalancers"
@@ -2025,4 +2027,181 @@ func TestOpenStackEndsTheStreamWhenTheRunIsCancelled(t *testing.T) {
 				len(requests), volumesPath)
 		}
 	})
+}
+
+// sizeNamer is the adapter as the framework sees it once it asserted the
+// optional part, which is the only way a sync reaches SizeNames.
+func sizeNamer(t *testing.T) reconciliation.SizeNamer {
+	t.Helper()
+
+	namer, ok := adapters.NewOpenStack(discardLogs).(reconciliation.SizeNamer)
+	if !ok {
+		t.Fatal("the OpenStack adapter names no size values, want it to name the volume types")
+	}
+	return namer
+}
+
+// volumeType is the key a volume type's id is named under.
+func volumeType(id string) reconciliation.SizeValue {
+	return reconciliation.SizeValue{ResourceType: "volume", Member: "type", Value: id}
+}
+
+func TestOpenStackNamesEveryVolumeTypeOfTheCloud(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumeTypesPath, "volume_types.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	names, err := sizeNamer(t).SizeNames(t.Context(), map[string]any{"os_cloud": testCloud})
+	if err != nil {
+		t.Fatalf("SizeNames() error = %v, want nil", err)
+	}
+
+	// The private type is named as well: a volume of it carries its id in every
+	// notification all the same.
+	want := map[reconciliation.SizeValue]string{
+		volumeType("d3a1c5e7-2b4f-4a69-8e0d-1f3b5c7d9e21"): "ssd",
+		volumeType("e4b2d6f8-3c5a-4b7e-9f1a-2c4d6e8f0a32"): "hdd",
+	}
+	if !maps.Equal(names, want) {
+		t.Errorf("SizeNames() = %v, want %v", names, want)
+	}
+}
+
+func TestOpenStackAsksCinderForThePrivateTypesWithoutAProbe(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumeTypesPath, "volume_types.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	if _, err := sizeNamer(t).SizeNames(t.Context(), map[string]any{"os_cloud": testCloud}); err != nil {
+		t.Fatalf("SizeNames() error = %v, want nil", err)
+	}
+
+	// Cinder lists the public types alone unless it is asked for both, and
+	// is_public=None is how it is asked.
+	requests := cloud.requestsTo(volumeTypesPath)
+	if len(requests) != 1 {
+		t.Fatalf("the cloud answered %d requests for %s, want 1", len(requests), volumeTypesPath)
+	}
+	if got := requests[0].query.Get("is_public"); got != "None" {
+		t.Errorf("the listing asked for is_public=%q, want %q", got, "None")
+	}
+	// The run that calls this has proven its scope already.
+	if probes := cloud.scopeProbes(); len(probes) != 0 {
+		t.Errorf("the cloud answered %d scope probes, want none", len(probes))
+	}
+}
+
+func TestOpenStackNamesTheVolumeTypesOfEveryPage(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumeTypesPath, "volume_types_page1.json", "volume_types_page2.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	names, err := sizeNamer(t).SizeNames(t.Context(), map[string]any{"os_cloud": testCloud})
+	if err != nil {
+		t.Fatalf("SizeNames() error = %v, want nil", err)
+	}
+
+	want := map[reconciliation.SizeValue]string{
+		volumeType("f5c3e7a9-4d6b-4c8f-a02b-3d5e7f9a1b43"): "standard",
+		volumeType("a6d4f8b0-5e7c-4d9a-b13c-4e6f8a0b2c54"): "archive",
+	}
+	if !maps.Equal(names, want) {
+		t.Errorf("SizeNames() = %v, want %v", names, want)
+	}
+	if requests := cloud.requestsTo(volumeTypesPath); len(requests) != 2 {
+		t.Errorf("the cloud answered %d requests for %s, want the 2 pages", len(requests), volumeTypesPath)
+	}
+}
+
+func TestOpenStackNamesNothingOfACloudWithoutVolumeTypes(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumeTypesPath, "volume_types_empty.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	// An empty listing is an answer: the sync deletes the names it stored.
+	names, err := sizeNamer(t).SizeNames(t.Context(), map[string]any{"os_cloud": testCloud})
+	if err != nil {
+		t.Fatalf("SizeNames() error = %v, want nil", err)
+	}
+	if names == nil || len(names) != 0 {
+		t.Errorf("SizeNames() = %#v, want an empty map", names)
+	}
+}
+
+func TestOpenStackReportsWhyItNamedNoVolumeType(t *testing.T) {
+	tests := []struct {
+		name  string
+		cloud func(t *testing.T) string
+		cfg   map[string]any
+		want  string
+	}{
+		{
+			name: "cinder refuses the listing",
+			cloud: func(t *testing.T) string {
+				// A credential whose access rules predate the type listing is
+				// answered 401 there and nowhere else.
+				cloud := newCloud(t)
+				cloud.mux.HandleFunc("GET "+volumeTypesPath, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusUnauthorized)
+				})
+				return cloud.URL
+			},
+			cfg:  map[string]any{"os_cloud": testCloud},
+			want: "listing the volume types: ",
+		},
+		{
+			name:  "the catalog publishes no block storage endpoint",
+			cloud: func(t *testing.T) string { return newCloud(t, "block-storage").URL },
+			cfg:   map[string]any{"os_cloud": testCloud},
+			want:  "building the block storage client: ",
+		},
+		{
+			name: "keystone refuses the credentials",
+			cloud: func(t *testing.T) string {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusUnauthorized)
+				}))
+				t.Cleanup(server.Close)
+				return server.URL
+			},
+			cfg:  map[string]any{"os_cloud": testCloud},
+			want: fmt.Sprintf("authenticating against the cloud %q: ", testCloud),
+		},
+		{
+			name:  "clouds.yaml holds no such entry",
+			cloud: func(t *testing.T) string { return newCloud(t).URL },
+			cfg:   map[string]any{"os_cloud": "os-prod-eu1"},
+			want:  `reading the clouds.yaml entry "os-prod-eu1": `,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeCloudsYAML(t, tt.cloud(t))
+
+			names, err := sizeNamer(t).SizeNames(t.Context(), tt.cfg)
+
+			if err == nil || !strings.HasPrefix(err.Error(), tt.want) {
+				t.Fatalf("SizeNames() error = %v, want it prefixed %q", err, tt.want)
+			}
+			if names != nil {
+				t.Errorf("SizeNames() = %v, want no names beside the error", names)
+			}
+		})
+	}
+}
+
+func TestOpenStackNamesNothingUnderAConfigItCannotRead(t *testing.T) {
+	cloud := newCloud(t)
+	writeCloudsYAML(t, cloud.URL)
+
+	_, err := sizeNamer(t).SizeNames(t.Context(), map[string]any{})
+
+	if err == nil || err.Error() != "os_cloud must be set" {
+		t.Fatalf("SizeNames() error = %v, want %q", err, "os_cloud must be set")
+	}
+	if requests := cloud.requests(); len(requests) != 0 {
+		t.Errorf("the cloud answered %d requests, want none for a config the adapter cannot read",
+			len(requests))
+	}
 }

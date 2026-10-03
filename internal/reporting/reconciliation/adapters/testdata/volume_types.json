@@ -1,0 +1,26 @@
+{
+  "volume_types": [
+    {
+      "id": "d3a1c5e7-2b4f-4a69-8e0d-1f3b5c7d9e21",
+      "name": "ssd",
+      "description": null,
+      "is_public": true,
+      "os-volume-type-access:is_public": true,
+      "qos_specs_id": null,
+      "extra_specs": {
+        "volume_backend_name": "ceph-ssd"
+      }
+    },
+    {
+      "id": "e4b2d6f8-3c5a-4b7e-9f1a-2c4d6e8f0a32",
+      "name": "hdd",
+      "description": "Spinning disks",
+      "is_public": false,
+      "os-volume-type-access:is_public": false,
+      "qos_specs_id": null,
+      "extra_specs": {
+        "volume_backend_name": "lvm"
+      }
+    }
+  ]
+}
