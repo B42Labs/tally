@@ -55,7 +55,12 @@ twice, once as disk and once as volume.
 
 A volume carries one of the types `ssd`, `hdd`, and `standard`. The first two
 appear under `type_modifiers` in `pricing/2026-03.yaml` and `standard` does
-not, so a month prices both paths. A persistent volume claim is created with
+not, so a month prices both paths. The fake OpenStack API lists the three under
+fixed ids, so a sync of the simulated cloud stores their names the way it does
+on a real one. The simulated notifications carry the name in `volume_type`,
+where cinder sends the id: a month is ingested without a sync before its first
+notification, and volumes booked under ids would match neither the oracle nor
+the totals the tutorials state. A persistent volume claim is created with
 10, 20, or 50 GB, and the root volume of a worker that boots from one is 50 GB
 of `ssd`. Image sizes are drawn at quarter-gibibyte steps from 1 GiB to 4 GiB,
 which keeps the mapping's division into gibibytes on exact decimals.

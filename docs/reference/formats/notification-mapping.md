@@ -112,9 +112,12 @@ registered size schema rather than booking a value nobody reported.
 without ephemeral storage reports no `ephemeral_gb`, and a payload naming
 neither leaves `disk_gb` out altogether.
 
-`volumeSize` reads `size` into `size_gb` and `volume_type` into `type`. A retype
-already names the type the volume was moved to, so one builder serves every
-volume event.
+`volumeSize` reads `size` into `size_gb` and `volume_type` into `type`. Cinder
+reports the volume type's id in `volume_type`, on a retype the id of the type
+the volume was moved to, so one builder serves every volume event. The collector
+sends the id as it reads. The Reporting API replaces it with the type's name at
+ingest once a reconciliation run stored the cloud's types, as
+[Size names](/reference/formats/canonical-event#size-names) states.
 
 `imageSize` reads `size`, which glance reports in bytes, divided by 1073741824
 into `size_gb`.
