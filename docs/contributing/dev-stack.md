@@ -95,10 +95,16 @@ rather than starting over. In order, it installs:
    never find the key it signs with.
 4. `make images`, which builds the four images `IMAGES` lists,
    `tally-reporting`, `tally-engine`, `tally-openstack-collector` and
-   `tally-openstack-simulator`, each tagged `:dev`. `kind load` then puts the
-   two `SERVICES`, `tally-reporting` and `tally-engine`, onto the node.
+   `tally-openstack-simulator`, each tagged `:dev`. The two `SERVICES`,
+   `tally-reporting` and `tally-engine`, then go onto the node as an archive of
+   one platform: `docker save --platform` writes the platform the node reports,
+   and `kind load image-archive` imports the archive. The containerd image store
+   holds one platform of a pulled image, and `kind load docker-image` imports
+   every platform the index names, so it fails on that store. The
+   `--platform` flag of `docker save` needs Docker Engine 28.0.
 5. The images the base runs, which `NODE_IMAGES` reads out of the manifests
-   rather than pinning a second time in the Makefile. The loop pulls only what
+   rather than pinning a second time in the Makefile. They go onto the node
+   as an archive of one platform as well. The loop pulls only what
    the host lacks and skips what the node already carries, which is what keeps
    a second `make up` from moving every image again. Before it existed, the
    node pulled TimescaleDB itself inside a timed readiness wait, and that is
@@ -229,6 +235,17 @@ Every host port is bound to `127.0.0.1` and lies above 1024, for the reason the
 cluster's ports are: 5672 and 15672 for the broker and its management UI, 8090
 for the collector, and 8091 for the simulator's control endpoint.
 
+The collector and the simulator join the `kind` network, the bridge network
+kind creates for its node, beside the stack's own network; the broker stays on
+the stack's network alone. The two reach the Gateway at the node's address on
+the `kind` network, on node port 30443, under the same nip.io names the host
+uses, so the Gateway's certificate and routes match them. The cluster reaches
+the simulator as `tally-openstack-simulator:8080`, its alias on the `kind`
+network and its container port: the `openstack-db-exporter` scrape job reads
+the inventory there, and the Reporting API authenticates against the simulated
+cloud there. No path goes through the host, so the stack runs the same way on
+Docker Desktop and on a Docker Engine on Linux.
+
 The collector's outbox is a named volume mounted at `/home/nonroot`. The image
 runs as uid 65532, and Docker gives a fresh named volume the ownership of the
 directory it is mounted over, which for `/home/nonroot` in the distroless image
@@ -245,10 +262,12 @@ The target then issues an ingest credential for the cloud, and with
 `SIM_REGISTER_PROJECTS=true` an admin api token for the project registry as
 well. The credential is issued fresh on every run, because the cluster may have
 been recreated since the last one and a new database knows none of the tokens
-the old one handed out. Both credentials, with the ten `SIM_` values, are
-written into `deploy/compose/.env` under `umask 077`: that api token writes the
-whole registry, and the default umask of a shell would leave the file readable
-by every other user of the machine.
+the old one handed out. The node's address on the `kind` network is read on
+every run for the same reason. Both credentials, with the ten `SIM_` values and
+that address as `TALLY_KIND_NODE_IP`, are written into `deploy/compose/.env`
+under `umask 077`: that api token writes the whole registry, and the default
+umask of a shell would leave the file readable by every other user of the
+machine.
 
 It prints seven addresses.
 
