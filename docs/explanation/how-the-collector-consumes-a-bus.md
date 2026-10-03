@@ -55,6 +55,12 @@ defaults to `True`, but octavia sends none until the `messagingv2` driver is
 set, because oslo's own default for that setting is the empty string. A service
 left on `noop` sends nothing, and the collector has nothing to consume for it.
 
+A load balancer of the amphora provider also reaches the bus as the nova and
+cinder notifications for its amphorae, and those name octavia's service project
+rather than the customer's.
+[Resources a service creates for itself](/explanation/project-registry-relations-and-attribution#resources-a-service-creates-for-itself)
+says how that project is billed.
+
 ## What bounds resident memory
 
 The broker must cap the message size, because the collector cannot. It bounds
