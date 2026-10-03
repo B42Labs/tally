@@ -60,7 +60,8 @@
             { "text": "Connect the collector to an OpenStack cloud", "link": "/how-to/openstack/connect-the-collector" },
             { "text": "Issue and revoke credentials", "link": "/how-to/openstack/issue-and-revoke-credentials" },
             { "text": "Verify a deployment with the dump", "link": "/how-to/openstack/verify-a-deployment-with-the-dump" },
-            { "text": "Reconcile a cloud", "link": "/how-to/openstack/reconcile-a-cloud" }
+            { "text": "Reconcile a cloud", "link": "/how-to/openstack/reconcile-a-cloud" },
+            { "text": "Zero-rate a service project", "link": "/how-to/openstack/zero-rate-a-service-project" }
           ]
         },
         {
