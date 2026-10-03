@@ -387,8 +387,11 @@ func diskGB(payload map[string]any) (decimal.Decimal, bool) {
 	return total, found
 }
 
-// volumeSize describes a volume. On a retype the payload already names the type
-// the volume was moved to, so the same builder serves every volume event.
+// volumeSize describes a volume. Cinder reports the type by its id in
+// volume_type, on a retype the id of the type the volume was moved to, so the
+// same builder serves every volume event. The Reporting API puts the type's
+// name in place of the id at ingest, from the names a reconciliation run of the
+// cloud stored.
 func volumeSize(payload map[string]any) map[string]any {
 	size := make(map[string]any, 2)
 	setNumber(size, "size_gb", payload, "size")

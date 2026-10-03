@@ -12,7 +12,7 @@
     "state": "in-use",
     "size": {
       "size_gb": 200,
-      "type": "ssd"
+      "type": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203"
     },
     "provider": {
       "oslo_event_type": "volume.resize.end"
