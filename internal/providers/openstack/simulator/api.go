@@ -282,9 +282,10 @@ func (a *cloudAPI) issueToken(w http.ResponseWriter, r *http.Request) {
 //
 // The endpoint URLs are built from the Host header of the request that asked
 // for the token rather than from an address the simulator was configured with.
-// One handler then serves a container reaching it under
-// host.docker.internal:8091 and a test reaching it under an httptest address,
-// and each reads a catalog pointing back at the address it used.
+// One handler then serves a pod reaching it under
+// tally-openstack-simulator:8080, its alias on the kind network, and a test
+// reaching it under an httptest address, and each reads a catalog pointing back
+// at the address it used.
 func tokenDocument(host string) map[string]any {
 	catalog := make([]map[string]any, 0, len(cloudCatalog))
 	for _, entry := range cloudCatalog {

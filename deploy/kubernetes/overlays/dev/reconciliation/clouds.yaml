@@ -4,13 +4,13 @@
 # user and password, and a drawn password would be one nobody could write into
 # a clouds.yaml either.
 #
-# The compose stack publishes the simulator on the host at 127.0.0.1:8091, and
-# host.docker.internal is the name a pod in the kind node resolves that host by
-# under Docker Desktop.
+# A pod in the kind node reaches the simulator of the compose stack as
+# tally-openstack-simulator, its alias on the kind network, on its container
+# port 8080.
 clouds:
   os-sim:
     auth:
-      auth_url: http://host.docker.internal:8091/v3
+      auth_url: http://tally-openstack-simulator:8080/v3
       username: tally-sync
       password: tally-dev-sync-password
       project_id: 4c9d2f6b81e34a7f9b3c5d8e0a1f2b34

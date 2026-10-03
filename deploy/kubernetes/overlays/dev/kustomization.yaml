@@ -286,8 +286,8 @@ patches:
   # edit changes reaches the pod.
   #
   # The clouds.yaml the pod authenticates with points at
-  # host.docker.internal:8091, which is where a pod in the kind node reaches the
-  # simulator the compose stack publishes on the host.
+  # tally-openstack-simulator:8080, which is where a pod in the kind node reaches
+  # the simulator of the compose stack, by its alias on the kind network.
   #
   # TALLY_REPORTING_SYNC_ALLOW_AT lets a sync request name the instant it
   # reconciles at. The simulated cloud runs on a generated month rather than on
