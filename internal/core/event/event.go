@@ -83,7 +83,9 @@ type PayloadEnvelope struct {
 	// size-changing event. Absent means the size did not change.
 	Size map[string]any `json:"size,omitempty"`
 	// Provider is free-form raw provider data, kept for debugging and audit. Core
-	// logic never reads it.
+	// logic never reads it. The Reporting API writes size_as_reported into it,
+	// holding the value each size member arrived with that it replaced with a
+	// stored name.
 	Provider map[string]any `json:"provider,omitempty"`
 
 	extra map[string]json.RawMessage

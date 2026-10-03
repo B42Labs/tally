@@ -19,6 +19,7 @@ import (
 	"github.com/b42labs/tally/internal/reporting/metrics"
 	"github.com/b42labs/tally/internal/reporting/projection"
 	"github.com/b42labs/tally/internal/reporting/registry"
+	"github.com/b42labs/tally/internal/reporting/store/sqlcgen"
 	"github.com/b42labs/tally/internal/reporting/store/storetest"
 )
 
@@ -660,6 +661,330 @@ func TestIngestFailsTheBatchWhenTheHookErrs(t *testing.T) {
 	if got := deadLetters(t, db, res.cloud); got != 0 {
 		t.Errorf("dead-letter rows = %d, want the batch rolled back, 0", got)
 	}
+}
+
+// The volume type a sync stored a name for: the id cinder sends in every volume
+// notification, and the name its volume listing reports for it.
+const (
+	ssdTypeID   = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203"
+	ssdTypeName = "ssd"
+)
+
+// TestIngestResolvesSizeNames holds the pipeline to the names a sync stored: a
+// size value one of them names is stored and folded under the name, and the
+// value it arrived with is kept beside the provider data. The subtests share
+// one database, so each works on a cloud of its own.
+func TestIngestResolvesSizeNames(t *testing.T) {
+	db := storetest.NewDB(t)
+	lax := ingest.New(registry.New(), false, nil, nil)
+
+	// typedVolume is a volume create carrying the type id, with the provider
+	// data a collector sends beside it.
+	typedVolume := func(res resource, eventID, volumeType string) event.Event {
+		e := res.event(eventID, "volume.create", createTime,
+			payloadOf("available", map[string]any{"size_gb": 100.0, "type": volumeType}))
+		e.Payload.Provider = map[string]any{"oslo_event_type": "volume.create.end"}
+		return e
+	}
+
+	t.Run("stores and folds a known type id under its name", func(t *testing.T) {
+		res := resource{cloud: "os-names-resolved", resourceType: "volume", id: "vol-resolved"}
+		storeSizeName(t, db, res.cloud, "volume", "type", ssdTypeID, ssdTypeName)
+
+		assertOutcome(t, batch(t, db, lax,
+			[]json.RawMessage{item(t, typedVolume(res, "vol-resolved-create", ssdTypeID))},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		payload := storedPayload(t, db, "vol-resolved-create")
+		wantSize := map[string]any{"size_gb": 100.0, "type": ssdTypeName}
+		if !reflect.DeepEqual(payload["size"], wantSize) {
+			t.Errorf("stored size = %v, want %v", payload["size"], wantSize)
+		}
+		wantProvider := map[string]any{
+			"oslo_event_type":  "volume.create.end",
+			"size_as_reported": map[string]any{"type": ssdTypeID},
+		}
+		if !reflect.DeepEqual(payload["provider"], wantProvider) {
+			t.Errorf("stored provider = %v, want %v", payload["provider"], wantProvider)
+		}
+		if got := projectedSize(t, db, res.key()); !reflect.DeepEqual(got, wantSize) {
+			t.Errorf("projection size = %v, want %v", got, wantSize)
+		}
+	})
+
+	t.Run("stores the id of a cloud that has no names as it arrived", func(t *testing.T) {
+		res := resource{cloud: "os-names-unnamed", resourceType: "volume", id: "vol-unnamed"}
+		// The other cloud's name for the same id is no name for this one.
+		storeSizeName(t, db, "os-names-elsewhere", "volume", "type", ssdTypeID, ssdTypeName)
+		sent := typedVolume(res, "vol-unnamed-create", ssdTypeID)
+
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, sent)},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		assertStoredAsSent(t, db, sent)
+	})
+
+	t.Run("stores an event without a size without one", func(t *testing.T) {
+		res := resource{cloud: "os-names-sizeless", resourceType: "volume", id: "vol-sizeless"}
+		storeSizeName(t, db, res.cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		sent := res.event("vol-sizeless-attach", "volume.attach", updateTime, payloadOf("in-use", nil))
+
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, sent)},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		payload := storedPayload(t, db, "vol-sizeless-attach")
+		if size, ok := payload["size"]; ok {
+			t.Errorf("stored size = %v, want none", size)
+		}
+		if provider, ok := payload["provider"]; ok {
+			t.Errorf("stored provider = %v, want none", provider)
+		}
+	})
+
+	t.Run("stores a value no row names as it arrived", func(t *testing.T) {
+		tests := []struct {
+			name string
+			res  resource
+			size map[string]any
+		}{
+			{
+				name: "a type no row holds",
+				res:  resource{cloud: "os-names-unknown", resourceType: "volume", id: "vol-unknown"},
+				size: map[string]any{"size_gb": 100.0, "type": "0f1e2d3c-4b5a-4968-8776-655443322110"},
+			},
+			{
+				// The row holds the text 7, and the event the number: the type is
+				// registered nowhere, so no schema refuses the number first.
+				name: "a type that is a number",
+				res:  resource{cloud: "os-names-number", resourceType: "black_hole", id: "bh-number"},
+				size: map[string]any{"mass_kg": 12.0, "type": 7.0},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				storeSizeName(t, db, tt.res.cloud, tt.res.resourceType, "type", ssdTypeID, ssdTypeName)
+				storeSizeName(t, db, tt.res.cloud, tt.res.resourceType, "type", "7", "seven")
+				sent := tt.res.event(tt.res.id+"-create", tt.res.resourceType+".create", createTime,
+					payloadOf("active", tt.size))
+
+				assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, sent)},
+					event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+				assertStoredAsSent(t, db, sent)
+			})
+		}
+	})
+
+	t.Run("resolves a member once when a name is also a value", func(t *testing.T) {
+		res := resource{cloud: "os-names-chained", resourceType: "volume", id: "vol-chained"}
+		// The rows are read in the order of their value, so the second is met
+		// after the first replaced the member with the value the second holds.
+		storeSizeName(t, db, res.cloud, "volume", "type", "1111-id", "ssd")
+		storeSizeName(t, db, res.cloud, "volume", "type", "ssd", "hdd")
+
+		assertOutcome(t, batch(t, db, lax,
+			[]json.RawMessage{item(t, typedVolume(res, "vol-chained-create", "1111-id"))},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		payload := storedPayload(t, db, "vol-chained-create")
+		if want := map[string]any{"size_gb": 100.0, "type": "ssd"}; !reflect.DeepEqual(payload["size"], want) {
+			t.Errorf("stored size = %v, want %v", payload["size"], want)
+		}
+		provider, _ := payload["provider"].(map[string]any)
+		if want := map[string]any{"type": "1111-id"}; !reflect.DeepEqual(provider["size_as_reported"], want) {
+			t.Errorf("stored size_as_reported = %v, want %v", provider["size_as_reported"], want)
+		}
+	})
+
+	t.Run("resolves a reconciliation event like a collector event", func(t *testing.T) {
+		res := resource{cloud: "os-names-reconciled", resourceType: "volume", id: "vol-reconciled"}
+		storeSizeName(t, db, res.cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		sent := res.event("vol-reconciled-create", "sync.create", createTime,
+			payloadOf("available", map[string]any{"size_gb": 100.0, "type": ssdTypeID}))
+
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, sent)},
+			event.SourceReconciliation, nil), ingest.Outcome{Accepted: 1})
+
+		payload := storedPayload(t, db, "vol-reconciled-create")
+		if want := map[string]any{"size_gb": 100.0, "type": ssdTypeName}; !reflect.DeepEqual(payload["size"], want) {
+			t.Errorf("stored size = %v, want %v", payload["size"], want)
+		}
+		want := map[string]any{"size_as_reported": map[string]any{"type": ssdTypeID}}
+		if !reflect.DeepEqual(payload["provider"], want) {
+			t.Errorf("stored provider = %v, want %v", payload["provider"], want)
+		}
+	})
+
+	t.Run("writes its own value over a size_as_reported the item brought", func(t *testing.T) {
+		res := resource{cloud: "os-names-forged", resourceType: "volume", id: "vol-forged"}
+		storeSizeName(t, db, res.cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		sent := typedVolume(res, "vol-forged-create", ssdTypeID)
+		sent.Payload.Provider["size_as_reported"] = map[string]any{"type": "hdd"}
+
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, sent)},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+
+		provider, _ := storedPayload(t, db, "vol-forged-create")["provider"].(map[string]any)
+		if want := map[string]any{"type": ssdTypeID}; !reflect.DeepEqual(provider["size_as_reported"], want) {
+			t.Errorf("stored size_as_reported = %v, want %v", provider["size_as_reported"], want)
+		}
+	})
+
+	t.Run("dead-letters a resolved size the schema refuses as it arrived", func(t *testing.T) {
+		res := resource{cloud: "os-names-refused", resourceType: "volume", id: "vol-refused"}
+		storeSizeName(t, db, res.cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		// The seeded (openstack, volume) schema takes no volume of size 0.
+		refused := item(t, res.event("vol-refused-create", "volume.create", createTime,
+			payloadOf("available", map[string]any{"size_gb": 0.0, "type": ssdTypeID})))
+
+		out := batch(t, db, lax, []json.RawMessage{refused}, event.SourceCollector, nil)
+
+		if out.Accepted != 0 || len(out.Rejected) != 1 {
+			t.Fatalf("Ingest() = %+v, want the event refused", out)
+		}
+		assertRejected(t, out.Rejected[0], 0, "vol-refused-create", "size_schema: ")
+		assertDeadLettered(t, db, out.Rejected[0].Reason, refused)
+	})
+
+	t.Run("validates the resolved size against the schema", func(t *testing.T) {
+		res := resource{cloud: "os-names-schema", resourceType: "named_disk", id: "nd-1"}
+		// A schema that takes the name and refuses the id it stands for.
+		if _, err := sqlcgen.New(db.Store.Pool()).UpsertResourceType(t.Context(), sqlcgen.UpsertResourceTypeParams{
+			Platform: platform, ResourceType: res.resourceType,
+			SizeSchema: []byte(`{"type":"object","properties":{"type":{"enum":["ssd"]}}}`),
+		}); err != nil {
+			t.Fatalf("registering the size schema: %v", err)
+		}
+		storeSizeName(t, db, res.cloud, res.resourceType, "type", ssdTypeID, ssdTypeName)
+
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{item(t, res.event("nd-1-create",
+			"named_disk.create", createTime, payloadOf("active", map[string]any{"type": ssdTypeID})))},
+			event.SourceCollector, nil), ingest.Outcome{Accepted: 1})
+	})
+
+	t.Run("fails the batch when the names cannot be read", func(t *testing.T) {
+		res := resource{cloud: "os-names-cancelled", resourceType: "volume", id: "vol-cancelled"}
+		items := []json.RawMessage{item(t, typedVolume(res, "vol-cancelled-create", ssdTypeID))}
+		cancelled, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// The transaction is begun on a live context, so the first statement the
+		// batch sends on the cancelled one is the read of the names.
+		err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
+			_, err := lax.Ingest(cancelled, tx, items, event.SourceCollector, nil)
+			return err
+		})
+
+		if err == nil || !strings.HasPrefix(err.Error(), "loading the size names of (") {
+			t.Fatalf("Ingest() error = %v, want it prefixed %q", err, "loading the size names of (")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Ingest() error = %v, want it wrapping %v", err, context.Canceled)
+		}
+		if got := storedEvents(t, db, res.cloud); got != 0 {
+			t.Errorf("events rows = %d, want the batch rolled back, 0", got)
+		}
+	})
+
+	t.Run("resolves every event of a batch of one cloud", func(t *testing.T) {
+		const cloud = "os-names-batch"
+		storeSizeName(t, db, cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		var items []json.RawMessage
+		for _, id := range []string{"vol-batch-1", "vol-batch-2", "vol-batch-3"} {
+			res := resource{cloud: cloud, resourceType: "volume", id: id}
+			items = append(items, item(t, typedVolume(res, id+"-create", ssdTypeID)))
+		}
+
+		assertOutcome(t, batch(t, db, lax, items, event.SourceCollector, nil),
+			ingest.Outcome{Accepted: 3})
+
+		for _, id := range []string{"vol-batch-1", "vol-batch-2", "vol-batch-3"} {
+			size, _ := storedPayload(t, db, id+"-create")["size"].(map[string]any)
+			if size["type"] != ssdTypeName {
+				t.Errorf("stored type of %s = %v, want %q", id, size["type"], ssdTypeName)
+			}
+		}
+	})
+
+	t.Run("resolves each event of a mixed batch by the names of its own resource type", func(t *testing.T) {
+		const cloud = "os-names-mixed"
+		storeSizeName(t, db, cloud, "volume", "type", ssdTypeID, ssdTypeName)
+		hole := resource{cloud: cloud, resourceType: "black_hole", id: "bh-mixed"}
+		other := hole.event("bh-mixed-create", "black_hole.create", createTime,
+			payloadOf("active", map[string]any{"mass_kg": 12.0, "type": ssdTypeID}))
+		vol := resource{cloud: cloud, resourceType: "volume", id: "vol-mixed"}
+
+		// The black hole goes first, so names read for the cloud alone would
+		// either name its type or hand its empty rows to the volume.
+		assertOutcome(t, batch(t, db, lax, []json.RawMessage{
+			item(t, other), item(t, typedVolume(vol, "vol-mixed-create", ssdTypeID)),
+		}, event.SourceCollector, nil), ingest.Outcome{Accepted: 2})
+
+		assertStoredAsSent(t, db, other)
+		size, _ := storedPayload(t, db, "vol-mixed-create")["size"].(map[string]any)
+		if size["type"] != ssdTypeName {
+			t.Errorf("stored type = %v, want %q", size["type"], ssdTypeName)
+		}
+	})
+}
+
+// storeSizeName stores one name the way a sync stores it.
+func storeSizeName(t *testing.T, db storetest.DB, cloud, resourceType, member, value, name string) {
+	t.Helper()
+
+	if err := sqlcgen.New(db.Store.Pool()).InsertSizeName(t.Context(), sqlcgen.InsertSizeNameParams{
+		Cloud: cloud, ResourceType: resourceType, Member: member, Value: value, Name: name,
+	}); err != nil {
+		t.Fatalf("storing the size name of %s on %s: %v", value, cloud, err)
+	}
+}
+
+// storedPayload is the payload of a stored event, decoded.
+func storedPayload(t *testing.T, db storetest.DB, eventID string) map[string]any {
+	t.Helper()
+
+	var payload map[string]any
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		`SELECT payload FROM events WHERE event_id = $1`, eventID).Scan(&payload); err != nil {
+		t.Fatalf("reading the payload of %s: %v", eventID, err)
+	}
+	return payload
+}
+
+// assertStoredAsSent fails the test unless the stored payload of sent is the
+// payload it was sent with. The column is JSONB, so the comparison is the
+// equality of the two documents rather than of their bytes.
+func assertStoredAsSent(t *testing.T, db storetest.DB, sent event.Event) {
+	t.Helper()
+
+	raw, err := json.Marshal(sent.Payload)
+	if err != nil {
+		t.Fatalf("marshaling the payload of %s: %v", sent.EventID, err)
+	}
+	var same bool
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		`SELECT payload = $2::jsonb FROM events WHERE event_id = $1`, sent.EventID, string(raw),
+	).Scan(&same); err != nil {
+		t.Fatalf("comparing the payload of %s: %v", sent.EventID, err)
+	}
+	if !same {
+		t.Errorf("stored payload of %s = %v, want %s as it was sent",
+			sent.EventID, storedPayload(t, db, sent.EventID), raw)
+	}
+}
+
+// projectedSize is the size the projection row of a resource holds.
+func projectedSize(t *testing.T, db storetest.DB, key projection.Key) map[string]any {
+	t.Helper()
+
+	var size map[string]any
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		`SELECT size FROM current_resources
+		 WHERE cloud = $1 AND resource_type = $2 AND resource_id = $3`,
+		key.Cloud, key.ResourceType, key.ResourceID).Scan(&size); err != nil {
+		t.Fatalf("reading the projection row of %s: %v", key.ResourceID, err)
+	}
+	return size
 }
 
 // The series the pipeline records a batch under.
