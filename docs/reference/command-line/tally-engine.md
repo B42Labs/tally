@@ -63,8 +63,9 @@ Every subcommand writes its lines to stdout and its refusals to stderr.
 A run that applied adjustments adds `applied <n> pricing adjustments`, and a run
 that superseded an earlier run of the same period adds
 `superseded run <run id>` for each one. A warning the run recorded on its result
-prints as `warning: <code>: <detail>`. The findings held in `runs.stats` are
-counted rather than named, on one line reading
+prints as `warning: <code>: <detail>`. The one code a run prints this way is
+`period_not_ended`, for a period whose end has not passed. The findings held in
+`runs.stats` are counted rather than named, on one line reading
 `warnings recorded in runs.stats: <n> metering, <n> counter, <n> attribution, <n> adjustment, <n> unpriced resource types, <n> unreadable fields, <n> unregistered projects`.
 
 `export` prints
@@ -97,6 +98,11 @@ as `<n> deltas in <n> credit notes` where it moved no adjustment, and as
 `superseded correction run <run id>`, the `warning:` lines and the
 `runs.stats` count follow as they do for a run.
 
+`pricing import` prints
+`imported pricing model <version> valid from <instant>` for a version it stored,
+and `pricing model <version> already imported` for a version the database
+already holds under the same prices.
+
 `tick` prints one line per step a month took, in the order the lifecycle takes
 them: `<month> <transition>` for a period that changed status,
 `<month> run <run id> completed` or `<month> run <run id> finalized` for the run
@@ -117,6 +123,18 @@ the reason on stderr. `tick` is the one that prints before it fails: a walk that
 broke on one month still moved the others, so what it did goes to stdout and the
 exit status carries the failure.
 
+`pricing import` exits 0 both for a version it stored and for one the database
+already holds under the same prices, so importing on every rollout is safe. It
+exits 1 with
+`this version is already imported and prices something else, and a corrected price belongs in a new version`
+for a stored version under other prices, and with
+`another version already starts at valid_from <instant>, and one instant is priced by one version`
+for a new version that claims the `valid_from` of a stored one. The same prices
+means the same model after parsing, as `Model.Equal` in
+[`internal/engine/pricing/pricing.go`](https://github.com/B42Labs/tally/blob/main/internal/engine/pricing/pricing.go)
+compares them: a price respelled as `0.50` for `0.5` is the same model, a
+reordered dimension list is not.
+
 SIGINT and SIGTERM cancel the context the tree runs on, which reaches the
 database calls a run spends its minutes in. The bookkeeping of an interrupted
 run writes the failed run and gives the period lock back on a context of its
@@ -130,6 +148,35 @@ runs `tick` as a CronJob on the schedule `0 * * * *`, with
 meters and fails rather than waits when another process holds it, so a tick that
 outlasted its hour would make the next one fail on the month it is still working
 through.
+
+### Which months a tick walks
+
+A tick walks the months that have ended, from the earliest stored billing
+period through the month before now, and at most the 36 most recent of them.
+With no stored period it walks the month before now.
+
+It never walks a month that begins before the earliest `valid_from` of the
+imported pricing models. A model valid from inside a month prices the following
+month first. A month left out this way prints nothing and fails nothing, a
+period row it already has stays listed by `periods list` as `open` or `grace`,
+and the month is billed once a model valid at its first instant is imported.
+
+A database with no pricing model bounds nothing: the first month whose grace
+window has passed fails every hour with
+`no pricing model is valid for this period` until a model is imported.
+
+The running month is never in the walk. A deployment that enables the engine on
+the 1st has its first rated month after that month has ended and
+`TALLY_ENGINE_GRACE_HOURS` have passed.
+
+`tally-engine run --period <running month>` meters the running month early. It
+prints `warning: period_not_ended: <detail>`, bills every resource that is still
+alive to the end of the month, and its numbers are a forecast. The completed run
+counts as the month's run: a tick after the month has ended does not meter it
+again, and finalizes it where `TALLY_ENGINE_AUTO_FINALIZE` is on. Run
+`tally-engine run --period` again once the month has ended, which supersedes the
+forecast. A finalized period refuses a run, so under
+`TALLY_ENGINE_AUTO_FINALIZE` that rerun belongs inside the grace window.
 
 ## Commands
 
