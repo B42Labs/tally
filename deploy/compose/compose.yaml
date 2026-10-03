@@ -19,7 +19,8 @@
 # metrics interval, and the ingest token issued for that cloud. It also carries
 # the registry switch, the cloud the simulated Gardener projects are registered
 # under, and the admin api token that registers them, which is the empty string
-# unless the switch is on.
+# unless the switch is on. TALLY_KIND_NODE_IP is the kind node's address on the
+# kind network, read from the node on every run.
 #
 # A named volume of one of these images belongs under /home/nonroot; the
 # collector's outbox below says why.
@@ -70,18 +71,26 @@ services:
       # exchange exists.
       TALLY_OSC_REQUIRE_EXCHANGES: "true"
       TALLY_OSC_CLOUD: ${TALLY_SIM_CLOUD}
-      TALLY_OSC_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:8443
+      TALLY_OSC_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:30443
       TALLY_OSC_TOKEN: ${TALLY_OSC_TOKEN}
       TALLY_OSC_BUFFER_PATH: /home/nonroot/outbox.db
       # The dev CA is in no root store the distroless image carries, and the
       # sender is a plain http.Client, so this file is what makes the Gateway's
       # certificate verify.
       SSL_CERT_FILE: /etc/tally/tally-ca.crt
-    # Maps the Gateway's host name to the host, so the container reaches the
-    # kind port published on the host's 127.0.0.1:8443. Verified on this
-    # project's Docker Desktop.
+    # Maps the Gateway's host name to the kind node's address on the kind
+    # network, and the URL above names port 30443, the node port
+    # deploy/kubernetes/overlays/dev/envoyproxy.yaml pins for the https
+    # listener. No path goes through the host, so the stack reaches the cluster
+    # the same way on Docker Desktop and on a Docker Engine on Linux. The name
+    # stays the one the Gateway's certificate and routes carry.
     extra_hosts:
-      - "api.tally.127-0-0-1.nip.io:host-gateway"
+      - "api.tally.127-0-0-1.nip.io:${TALLY_KIND_NODE_IP}"
+    # default carries the broker, and kind, the network kind creates for its
+    # node, carries the cluster.
+    networks:
+      default: {}
+      kind: {}
     volumes:
       - "../../tally-ca.crt:/etc/tally/tally-ca.crt:ro"
       # The outbox sits under /home/nonroot because the image runs as nonroot
@@ -107,13 +116,14 @@ services:
       TALLY_SIM_CLOUD: ${TALLY_SIM_CLOUD}
       # The control endpoint binds loopback unless it is told otherwise, and
       # loopback inside the container is reachable from nothing. The port below
-      # is what publishes it, on the host's 127.0.0.1 alone.
+      # is what publishes it, on the host's 127.0.0.1 alone, and the cluster
+      # reaches it on the kind network under the alias below.
       TALLY_SIM_HTTP_ADDR: 0.0.0.0
       # The three below are read only with --register-projects and ignored
       # otherwise. The CA is here for the reason the collector's comment gives:
       # the registrar posts to the Gateway over the same kind of plain
       # http.Client, so this file is what makes its certificate verify.
-      TALLY_SIM_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:8443
+      TALLY_SIM_REPORTING_URL: https://api.tally.127-0-0-1.nip.io:30443
       TALLY_SIM_API_TOKEN: ${TALLY_SIM_API_TOKEN}
       TALLY_SIM_GARDEN_CLOUD: ${TALLY_SIM_GARDEN_CLOUD}
       SSL_CERT_FILE: /etc/tally/tally-ca.crt
@@ -122,17 +132,24 @@ services:
       # of the month go there. The CA mounted below and SSL_CERT_FILE are what
       # make the Gateway's certificate verify on this path too, and
       # TALLY_SIM_OTLP_INSECURE stays unset because the endpoint is https.
-      TALLY_SIM_OTLP_URL: https://otlp.tally.127-0-0-1.nip.io:8443/v1/metrics
+      TALLY_SIM_OTLP_URL: https://otlp.tally.127-0-0-1.nip.io:30443/v1/metrics
       # The credential the dev overlay generates into tally-otlp-auth, written
       # into .env by `make simulator-up`.
       TALLY_SIM_OTLP_USER: ${TALLY_SIM_OTLP_USER}
       TALLY_SIM_OTLP_PASSWORD: ${TALLY_SIM_OTLP_PASSWORD}
     # Both mirror the collector's above and are there for the reasons given
     # with them. The second name is the OTLP route on the same Gateway, mapped
-    # to the host the same way.
+    # to the node's address the same way.
     extra_hosts:
-      - "api.tally.127-0-0-1.nip.io:host-gateway"
-      - "otlp.tally.127-0-0-1.nip.io:host-gateway"
+      - "api.tally.127-0-0-1.nip.io:${TALLY_KIND_NODE_IP}"
+      - "otlp.tally.127-0-0-1.nip.io:${TALLY_KIND_NODE_IP}"
+    # The same two networks as the collector's. The alias is the name the
+    # simulator answers to on the kind network.
+    networks:
+      default: {}
+      kind:
+        aliases:
+          - tally-openstack-simulator
     volumes:
       - "../../tally-ca.crt:/etc/tally/tally-ca.crt:ro"
     # --metrics-interval reaches the binary as a flag the way --factor does. It
@@ -159,6 +176,12 @@ services:
       # openstack-db-exporter scrape job reads off host.docker.internal:8091,
       # and the fake OpenStack API a run serves on the same listener
       - "127.0.0.1:8091:8080"
+
+# The bridge network kind creates for its node and never deletes. Compose joins
+# it and does not create it.
+networks:
+  kind:
+    external: true
 
 volumes:
   # Everything the collector has consumed and not yet delivered lives here and

@@ -10,6 +10,7 @@ package compose_test
 
 import (
 	"maps"
+	"net"
 	"os"
 	"slices"
 	"strconv"
@@ -36,15 +37,27 @@ const (
 	caSource     = "../../tally-ca.crt"
 
 	// The Reporting API of the dev cluster as the collector reaches it: the name
-	// is mapped to the host by extra_hosts, and kind publishes the Gateway's
-	// https port there.
+	// is mapped to the kind node's address by extra_hosts, and the port is the
+	// node port of the Gateway's https listener.
 	gatewayHost  = "api.tally.127-0-0-1.nip.io"
-	reportingURL = "https://" + gatewayHost + ":8443"
+	gatewayPort  = "30443"
+	reportingURL = "https://" + gatewayHost + ":" + gatewayPort
 
 	// The OTLP endpoint of the same Gateway, as the simulator reaches it: a second
 	// extra_hosts entry maps this name, and the month's samples are pushed there.
 	otlpHost = "otlp.tally.127-0-0-1.nip.io"
-	otlpURL  = "https://" + otlpHost + ":8443"
+	otlpURL  = "https://" + otlpHost + ":" + gatewayPort
+
+	// The network kind creates for its node, the node's address on it as
+	// `make simulator-up` writes it into .env, and the name the cluster reaches
+	// the simulator by there.
+	kindNetwork    = "kind"
+	nodeAddress    = "${TALLY_KIND_NODE_IP}"
+	simulatorAlias = "tally-openstack-simulator"
+
+	// The dev overlay's EnvoyProxy, which pins the node ports of the Gateway's
+	// listeners.
+	envoyProxyPath = "../kubernetes/overlays/dev/envoyproxy.yaml"
 
 	// Every variable Tally itself reads carries this prefix. The environment maps
 	// below also hold variables of the base image, which no EnvNames list knows.
@@ -61,7 +74,10 @@ const (
 type composeFile struct {
 	Name     string
 	Services map[string]service
-	Volumes  map[string]any
+	Networks map[string]struct {
+		External bool
+	}
+	Volumes map[string]any
 }
 
 type service struct {
@@ -71,10 +87,16 @@ type service struct {
 	Environment map[string]string
 	Volumes     []string
 	ExtraHosts  []string `yaml:"extra_hosts"`
+	Networks    map[string]network
 	Command     []string
 	DependsOn   map[string]struct {
 		Condition string
 	} `yaml:"depends_on"`
+}
+
+// network is a service's entry for one network it joins.
+type network struct {
+	Aliases []string
 }
 
 func TestComposeRunsTheThreeServices(t *testing.T) {
@@ -153,12 +175,12 @@ func TestCollectorEnvironmentIsWhatTheCollectorReads(t *testing.T) {
 		t.Errorf("the %s mount carries the options %q, want %q; the collector has no reason to write the CA", caSource, ca.options, "ro")
 	}
 
-	if hosts := []string{gatewayHost + ":host-gateway"}; !slices.Equal(svc.ExtraHosts, hosts) {
+	if hosts := []string{gatewayHost + ":" + nodeAddress}; !slices.Equal(svc.ExtraHosts, hosts) {
 		t.Errorf("extra_hosts = %v, want %v; the name is otherwise resolved in the container's network, where the dev cluster is not",
 			svc.ExtraHosts, hosts)
 	}
 	if url := svc.Environment["TALLY_OSC_REPORTING_URL"]; !strings.HasPrefix(url, reportingURL) {
-		t.Errorf("TALLY_OSC_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
+		t.Errorf("TALLY_OSC_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps to the kind node and the node port of the Gateway's https listener",
 			url, reportingURL)
 	}
 }
@@ -214,16 +236,16 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 		t.Errorf("the %s mount carries the options %q, want %q; the simulator has no reason to write the CA", caSource, ca.options, "ro")
 	}
 
-	if hosts := []string{gatewayHost + ":host-gateway", otlpHost + ":host-gateway"}; !slices.Equal(svc.ExtraHosts, hosts) {
+	if hosts := []string{gatewayHost + ":" + nodeAddress, otlpHost + ":" + nodeAddress}; !slices.Equal(svc.ExtraHosts, hosts) {
 		t.Errorf("extra_hosts = %v, want %v; the names are otherwise resolved in the container's network, where the dev cluster is not",
 			svc.ExtraHosts, hosts)
 	}
 	if url := svc.Environment["TALLY_SIM_REPORTING_URL"]; !strings.HasPrefix(url, reportingURL) {
-		t.Errorf("TALLY_SIM_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
+		t.Errorf("TALLY_SIM_REPORTING_URL = %q, want it to start with %q, which is the name extra_hosts maps to the kind node and the node port of the Gateway's https listener",
 			url, reportingURL)
 	}
 	if url := svc.Environment["TALLY_SIM_OTLP_URL"]; !strings.HasPrefix(url, otlpURL) {
-		t.Errorf("TALLY_SIM_OTLP_URL = %q, want it to start with %q, which is the name extra_hosts maps and the port kind publishes on the host",
+		t.Errorf("TALLY_SIM_OTLP_URL = %q, want it to start with %q, which is the name extra_hosts maps to the kind node and the node port of the Gateway's https listener",
 			url, otlpURL)
 	}
 	// A push without the two is refused by the binary before it dials the broker,
@@ -265,6 +287,107 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 	}
 	if !registers {
 		t.Errorf("command = %v, want an argument starting with %q", svc.Command, "--register-projects=")
+	}
+}
+
+func TestCollectorAndSimulatorJoinTheKindNetwork(t *testing.T) {
+	// The collector and the simulator reach the Gateway at the kind node's
+	// address, and the cluster reaches the simulator by its alias, both on the
+	// network kind creates for its node. A network compose does not take as
+	// external is one it creates under the project's name, with no node on it.
+	// A service that leaves default loses the broker, and a broker on kind puts
+	// the guest password in reach of every pod. A renamed alias is a name no pod
+	// resolves, so the scrape job and the reconciliation reach nothing.
+	file := loadCompose(t)
+
+	if kind, ok := file.Networks[kindNetwork]; !ok || !kind.External {
+		t.Errorf("networks = %v, want %q declared external; otherwise compose creates a network of that name for itself, and the kind node is not on it",
+			file.Networks, kindNetwork)
+	}
+
+	want := []string{"default", kindNetwork}
+	for _, name := range []string{collectorService, simulatorService} {
+		if got := slices.Sorted(maps.Keys(serviceNamed(t, file, name).Networks)); !slices.Equal(got, want) {
+			t.Errorf("%s joins %v, want %v: default carries the broker and %s the cluster", name, got, want, kindNetwork)
+		}
+	}
+	if got := serviceNamed(t, file, rabbitmqService).Networks; len(got) != 0 {
+		t.Errorf("%s joins %v, want no networks key, which leaves it on default alone and out of the cluster's reach",
+			rabbitmqService, slices.Sorted(maps.Keys(got)))
+	}
+
+	if got := serviceNamed(t, file, simulatorService).Networks[kindNetwork].Aliases; !slices.Equal(got, []string{simulatorAlias}) {
+		t.Errorf("%s answers on %s to the aliases %v, want [%s], the name the scrape job and the reconciliation reach it by",
+			simulatorService, kindNetwork, got, simulatorAlias)
+	}
+	if got := serviceNamed(t, file, collectorService).Networks[kindNetwork].Aliases; len(got) != 0 {
+		t.Errorf("%s answers on %s to the aliases %v, want none; nothing in the cluster addresses it", collectorService, kindNetwork, got)
+	}
+}
+
+func TestSimulatorListensWhereTheClusterAndTheHostReachIt(t *testing.T) {
+	// The cluster dials the simulator's own listener by its alias on the kind
+	// network, and the host reaches the same listener through the port compose
+	// publishes. A listener on loopback answers neither, and a publish onto
+	// another container port reaches nothing: the stack starts cleanly either
+	// way while the scrape job stays down and every sync fails to authenticate.
+	svc := serviceNamed(t, loadCompose(t), simulatorService)
+	cfg := simulatorListener(t, svc.Environment)
+
+	if got, want := cfg.ControlAddr(), net.JoinHostPort("0.0.0.0", strconv.Itoa(cfg.HTTPPort)); got != want {
+		t.Errorf("the simulator listens on %s, want %s, every interface of its container", got, want)
+	}
+	for _, entry := range svc.Ports {
+		if port := entry[strings.LastIndex(entry, ":")+1:]; port != strconv.Itoa(cfg.HTTPPort) {
+			t.Errorf("%s publishes %q onto the container port %s, want %d, the port the simulator listens on", simulatorService, entry, port, cfg.HTTPPort)
+		}
+	}
+}
+
+func TestGatewayPortIsTheNodePortOfTheHTTPSListener(t *testing.T) {
+	// The compose services dial the node itself rather than the host port kind
+	// publishes, so the port their URLs name is the node port the dev overlay
+	// pins for the https listener. A node port moved there alone leaves every
+	// flush on a refused dial, which the collector logs and nothing else reports.
+	const httpsPort = 443
+
+	type servicePort struct {
+		Port     int `yaml:"port"`
+		NodePort int `yaml:"nodePort"`
+	}
+	var proxy struct {
+		Spec struct {
+			Provider struct {
+				Kubernetes struct {
+					EnvoyService struct {
+						Patch struct {
+							Value struct {
+								Spec struct {
+									Ports []servicePort `yaml:"ports"`
+								} `yaml:"spec"`
+							} `yaml:"value"`
+						} `yaml:"patch"`
+					} `yaml:"envoyService"`
+				} `yaml:"kubernetes"`
+			} `yaml:"provider"`
+		} `yaml:"spec"`
+	}
+	raw, err := os.ReadFile(envoyProxyPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", envoyProxyPath, err)
+	}
+	if err := yaml.Unmarshal(raw, &proxy); err != nil {
+		t.Fatalf("parsing %s: %v", envoyProxyPath, err)
+	}
+
+	ports := proxy.Spec.Provider.Kubernetes.EnvoyService.Patch.Value.Spec.Ports
+	i := slices.IndexFunc(ports, func(p servicePort) bool { return p.Port == httpsPort })
+	if i < 0 {
+		t.Fatalf("%s pins no node port for the service port %d, so the https listener's node port is whatever Envoy Gateway allocates", envoyProxyPath, httpsPort)
+	}
+	if got := strconv.Itoa(ports[i].NodePort); got != gatewayPort {
+		t.Errorf("%s pins node port %s for the https listener, want %s, the port %s and %s name",
+			envoyProxyPath, got, gatewayPort, reportingURL, otlpURL)
 	}
 }
 
@@ -327,6 +450,27 @@ func serviceNamed(t *testing.T, file composeFile, name string) service {
 		t.Fatalf("%s declares no service %q", composePath, name)
 	}
 	return svc
+}
+
+// simulatorListener loads the simulator's configuration from the two variables
+// of env that place its listener, with every other variable it reads blanked to
+// its default, so a value in the developer's shell never reaches it.
+func simulatorListener(t *testing.T, env map[string]string) simulator.Config {
+	t.Helper()
+
+	for _, name := range simulator.EnvNames {
+		t.Setenv(name, "")
+	}
+	for _, name := range []string{"TALLY_SIM_HTTP_ADDR", "TALLY_SIM_HTTP_PORT"} {
+		if value, ok := env[name]; ok {
+			t.Setenv(name, value)
+		}
+	}
+	cfg, err := simulator.Load()
+	if err != nil {
+		t.Fatalf("loading the simulator's configuration from the %s environment: %v", composePath, err)
+	}
+	return cfg
 }
 
 // mount is one entry of a service's volumes list, source:target[:options].
