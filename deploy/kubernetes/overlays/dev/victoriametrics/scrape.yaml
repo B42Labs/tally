@@ -6,13 +6,14 @@
 # documents under "Replace the scrape targets". Everything below is the base
 # file; the one change is the openstack-db-exporter job.
 #
-# That job scrapes the simulated cloud the compose stack publishes on the host
-# at 127.0.0.1:8091. A pod in the kind node reaches the host as
-# host.docker.internal, the same address reconciliation/clouds.yaml already
-# relies on. The cloud is os-sim, the SIM_CLOUD default; a drill under another
+# That job scrapes the simulated cloud of the compose stack at
+# tally-openstack-simulator:8080, the simulator's alias and container port on
+# the kind network, the same address reconciliation/clouds.yaml relies on. A
+# pod resolves the alias because CoreDNS forwards to the node's resolver, which
+# is Docker's. The cloud is os-sim, the SIM_CLOUD default; a drill under another
 # cloud name edits this file, the rule the reconciliation directory carries too.
 #
-# Between two runs nothing listens on that port, so the job is down and
+# Between two runs no container answers to that name, so the job is down and
 # TallyScrapeTargetDown fires for it after five minutes, which is what it does
 # against the base's placeholder as well. The job goes green while a drill runs.
 #
@@ -77,7 +78,7 @@ scrape_configs:
     scrape_interval: 300s
     scrape_timeout: 60s
     static_configs:
-      - targets: ["host.docker.internal:8091"]
+      - targets: ["tally-openstack-simulator:8080"]
         labels: { platform: "openstack", cloud: "os-sim" }
   - job_name: ceilometer
     scrape_interval: 60s

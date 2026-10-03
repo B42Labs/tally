@@ -173,8 +173,9 @@ services:
     ports:
       # the control endpoint: GET /clock, PUT /clock, POST /release, GET /healthz,
       # GET /metrics, which is the inventory the dev cluster's
-      # openstack-db-exporter scrape job reads off host.docker.internal:8091,
-      # and the fake OpenStack API a run serves on the same listener
+      # openstack-db-exporter scrape job reads off the kind network at
+      # tally-openstack-simulator:8080, and the fake OpenStack API a run serves
+      # on the same listener
       - "127.0.0.1:8091:8080"
 
 # The bridge network kind creates for its node and never deletes. Compose joins

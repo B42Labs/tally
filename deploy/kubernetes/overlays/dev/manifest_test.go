@@ -5,11 +5,12 @@
 // TallyExporterServiceSilent selecting jobs this cluster no longer scrapes, and
 // neither the scrape nor the rules fail on their own. An exporter job on
 // another address or under another cloud label scrapes nothing while the
-// inventory of the simulated month sits unread. A counter sources file the
-// engine refuses to load fails every hourly tick before it opens a database,
-// and a patch whose variable and mount path disagree does the same on a file
-// the pod never carried. The tests read the YAML from disk and need neither a
-// cluster nor kustomize.
+// inventory of the simulated month sits unread, and an address that is not the
+// simulator's alias in the compose stack is one no pod resolves. A counter
+// sources file the engine refuses to load fails every hourly tick before it
+// opens a database, and a patch whose variable and mount path disagree does the
+// same on a file the pod never carried. The tests read the YAML from disk and
+// need neither a cluster nor kustomize.
 package dev_test
 
 import (
@@ -17,12 +18,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/b42labs/tally/internal/engine/counters"
+	"github.com/b42labs/tally/internal/providers/openstack/simulator"
 )
 
 const (
@@ -36,10 +39,19 @@ const (
 	exporterJob   = "openstack-db-exporter"
 	ceilometerJob = "ceilometer"
 
-	// Where the compose stack publishes the simulator, as a pod in the kind
-	// node reaches it, and the cloud the simulated month is booked under.
-	simulatorTarget = "host.docker.internal:8091"
+	// The simulator as a pod in the kind node reaches it, by its alias on the
+	// kind network and its container port, and the cloud the simulated month is
+	// booked under.
+	simulatorTarget = "tally-openstack-simulator:8080"
 	simulatedCloud  = "os-sim"
+
+	// The compose stack that gives the simulator its alias, the network and the
+	// service that carry it, and the clouds.yaml the Reporting API authenticates
+	// against the simulated cloud with.
+	composeFile      = "../../../compose/compose.yaml"
+	kindNetwork      = "kind"
+	simulatorService = "simulator"
+	cloudsFile       = "reconciliation/clouds.yaml"
 
 	// The generated ConfigMaps, by their unsuffixed names, and the CronJob the
 	// second one is mounted into, which carries a container of the same name.
@@ -151,10 +163,10 @@ func TestScrapeConfigKeepsTheBaseJobs(t *testing.T) {
 
 func TestExporterJobScrapesTheSimulator(t *testing.T) {
 	// The one change this file makes against the base. The target is where a
-	// pod in the kind node reaches the simulator the compose stack publishes on
-	// the host, and the cloud label is what the simulated month's events are
-	// booked under: another value leaves the inventory series under a cloud no
-	// metering row meets. A scrape of a port nothing listens on is a job that
+	// pod in the kind node reaches the simulator of the compose stack, and the
+	// cloud label is what the simulated month's events are booked under:
+	// another value leaves the inventory series under a cloud no metering row
+	// meets. A scrape of an address nothing answers on is a job that
 	// TallyScrapeTargetDown reports, which is also what it does between two
 	// drill runs, so neither mistake shows up as anything else.
 	overlay := scrapeConfigOf(t, scrapeFile)
@@ -166,7 +178,7 @@ func TestExporterJobScrapesTheSimulator(t *testing.T) {
 		Labels:  map[string]string{"platform": "openstack", "cloud": simulatedCloud},
 	}}
 	if !sameStaticConfigs(exporter.StaticConfigs, want) {
-		t.Errorf("job %s scrapes %+v, want %+v, which is the simulator the compose stack publishes on the host",
+		t.Errorf("job %s scrapes %+v, want %+v, which is the simulator by its alias on the kind network",
 			exporterJob, exporter.StaticConfigs, want)
 	}
 
@@ -190,6 +202,49 @@ func TestExporterJobScrapesTheSimulator(t *testing.T) {
 	if !sameStaticConfigs(ceilometer.StaticConfigs, baseCeilometer.StaticConfigs) {
 		t.Errorf("job %s scrapes %+v, want the base's %+v: the simulator's traffic counters are pushed over OTLP, not scraped",
 			ceilometerJob, ceilometer.StaticConfigs, baseCeilometer.StaticConfigs)
+	}
+}
+
+func TestSimulatorAddressIsTheComposeAlias(t *testing.T) {
+	// The scrape job and the clouds.yaml address the simulator by the alias the
+	// compose stack gives it on the kind network, on the port it listens on in
+	// its container. Any other name is one no pod resolves, and any other port
+	// is one nothing listens on: the job stays down and every sync fails to
+	// authenticate, which is what a dev cluster shows between two drills too.
+	var stack struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+			Networks    map[string]struct {
+				Aliases []string `yaml:"aliases"`
+			} `yaml:"networks"`
+		} `yaml:"services"`
+	}
+	decodeFile(t, composeFile, &stack)
+
+	sim, ok := stack.Services[simulatorService]
+	if !ok {
+		t.Fatalf("%s declares no service %q", composeFile, simulatorService)
+	}
+	aliases := sim.Networks[kindNetwork].Aliases
+	if len(aliases) != 1 {
+		t.Fatalf("%s gives %s the aliases %v on %s, want exactly one", composeFile, simulatorService, aliases, kindNetwork)
+	}
+	if got := aliases[0] + ":" + strconv.Itoa(simulatorListener(t, sim.Environment).HTTPPort); got != simulatorTarget {
+		t.Errorf("%s gives %s the address %s on %s, want %s, which the %s job scrapes",
+			composeFile, simulatorService, got, kindNetwork, simulatorTarget, exporterJob)
+	}
+
+	var clouds struct {
+		Clouds map[string]struct {
+			Auth struct {
+				AuthURL string `yaml:"auth_url"`
+			} `yaml:"auth"`
+		} `yaml:"clouds"`
+	}
+	decodeFile(t, cloudsFile, &clouds)
+	if got, want := clouds.Clouds[simulatedCloud].Auth.AuthURL, "http://"+simulatorTarget+"/v3"; got != want {
+		t.Errorf("%s authenticates %s at %q, want %q, the simulator's identity endpoint at the address the job scrapes",
+			cloudsFile, simulatedCloud, got, want)
 	}
 }
 
@@ -355,18 +410,46 @@ func kustomizationOf(t *testing.T) kustomization {
 	return k
 }
 
-// scrapeConfigOf decodes one scrape file.
-func scrapeConfigOf(t *testing.T, path string) scrapeConfig {
+// decodeFile decodes one YAML file into v.
+func decodeFile(t *testing.T, path string, v any) {
 	t.Helper()
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	var cfg scrapeConfig
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	if err := yaml.Unmarshal(raw, v); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
+}
+
+// simulatorListener loads the simulator's configuration from the two variables
+// of env that place its listener, with every other variable it reads blanked to
+// its default, so a value in the developer's shell never reaches it.
+func simulatorListener(t *testing.T, env map[string]string) simulator.Config {
+	t.Helper()
+
+	for _, name := range simulator.EnvNames {
+		t.Setenv(name, "")
+	}
+	for _, name := range []string{"TALLY_SIM_HTTP_ADDR", "TALLY_SIM_HTTP_PORT"} {
+		if value, ok := env[name]; ok {
+			t.Setenv(name, value)
+		}
+	}
+	cfg, err := simulator.Load()
+	if err != nil {
+		t.Fatalf("loading the simulator's configuration from the %s environment: %v", composeFile, err)
+	}
+	return cfg
+}
+
+// scrapeConfigOf decodes one scrape file.
+func scrapeConfigOf(t *testing.T, path string) scrapeConfig {
+	t.Helper()
+
+	var cfg scrapeConfig
+	decodeFile(t, path, &cfg)
 	if len(cfg.ScrapeConfigs) == 0 {
 		t.Fatalf("%s declares no scrape jobs, so this test would assert over nothing", path)
 	}
