@@ -29,6 +29,7 @@ import (
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack"
 	"github.com/gophercloud/gophercloud/v2/openstack/blockstorage/v3/volumes"
+	"github.com/gophercloud/gophercloud/v2/openstack/blockstorage/v3/volumetypes"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
 	"github.com/gophercloud/gophercloud/v2/openstack/config"
@@ -65,6 +66,9 @@ type openStack struct {
 func NewOpenStack(logger *slog.Logger) reconciliation.Adapter {
 	return &openStack{logger: logger}
 }
+
+// The adapter names the volume types the cloud's notifications carry by id.
+var _ reconciliation.SizeNamer = (*openStack)(nil)
 
 // Platform is the platform this adapter observes. It is the same string the
 // collector writes into every event, which is what lets LoadConfig catch a
@@ -214,17 +218,9 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			return
 		}
 
-		authOptions, endpointOptions, tlsConfig, err := clouds.Parse(clouds.WithCloudName(parsed.osCloud))
+		provider, endpointOptions, err := authenticate(ctx, parsed)
 		if err != nil {
-			yield(reconciliation.ObservedResource{},
-				fmt.Errorf("reading the clouds.yaml entry %q: %w", parsed.osCloud, err))
-			return
-		}
-
-		provider, err := config.NewProviderClient(ctx, authOptions, config.WithTLSConfig(tlsConfig))
-		if err != nil {
-			yield(reconciliation.ObservedResource{},
-				fmt.Errorf("authenticating against the cloud %q: %w", parsed.osCloud, err))
+			yield(reconciliation.ObservedResource{}, err)
 			return
 		}
 
@@ -254,6 +250,71 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 			}
 		}
 	}
+}
+
+// SizeNames lists the volume types of one OpenStack cloud. Cinder reports a
+// volume's type by id in every notification and by name in its volume
+// listing, so the names stored from here are what the Reporting API resolves
+// the ids of the collector's events by.
+//
+// The zero ListOpts sends is_public=None, which is what makes cinder list the
+// private types beside the public ones for an admin; without the parameter it
+// lists the public ones alone. No scope probe is sent: the framework calls this
+// once ListResources of the same run proved the scope.
+func (a *openStack) SizeNames(ctx context.Context, cfg map[string]any,
+) (map[reconciliation.SizeValue]string, error) {
+	parsed, err := parseConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, endpointOptions, err := authenticate(ctx, parsed)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := openstack.NewBlockStorageV3(provider, endpointOptions)
+	if err != nil {
+		return nil, fmt.Errorf("building the block storage client: %w", err)
+	}
+
+	names := map[reconciliation.SizeValue]string{}
+	err = volumetypes.List(client, volumetypes.ListOpts{}).EachPage(ctx,
+		func(_ context.Context, page pagination.Page) (bool, error) {
+			listed, err := volumetypes.ExtractVolumeTypes(page)
+			if err != nil {
+				return false, err
+			}
+			for _, volumeType := range listed {
+				names[reconciliation.SizeValue{
+					ResourceType: "volume", Member: "type", Value: volumeType.ID,
+				}] = volumeType.Name
+			}
+			return true, nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("listing the volume types: %w", err)
+	}
+	return names, nil
+}
+
+// authenticate resolves the clouds.yaml entry parsed names and signs in with
+// it. Both calls a run makes go through here, so an entry that is missing or
+// refused reads the same whichever of them met it.
+func authenticate(ctx context.Context, parsed openStackConfig,
+) (*gophercloud.ProviderClient, gophercloud.EndpointOpts, error) {
+	authOptions, endpointOptions, tlsConfig, err := clouds.Parse(clouds.WithCloudName(parsed.osCloud))
+	if err != nil {
+		return nil, gophercloud.EndpointOpts{},
+			fmt.Errorf("reading the clouds.yaml entry %q: %w", parsed.osCloud, err)
+	}
+
+	provider, err := config.NewProviderClient(ctx, authOptions, config.WithTLSConfig(tlsConfig))
+	if err != nil {
+		return nil, gophercloud.EndpointOpts{},
+			fmt.Errorf("authenticating against the cloud %q: %w", parsed.osCloud, err)
+	}
+	return provider, endpointOptions, nil
 }
 
 // probeAdminScope sends the one listing a cloud refuses a lesser account

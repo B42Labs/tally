@@ -1,0 +1,13 @@
+{
+  "volume_types": [
+    {
+      "id": "a6d4f8b0-5e7c-4d9a-b13c-4e6f8a0b2c54",
+      "name": "archive",
+      "description": null,
+      "is_public": true,
+      "os-volume-type-access:is_public": true,
+      "qos_specs_id": null,
+      "extra_specs": {}
+    }
+  ]
+}
