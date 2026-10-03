@@ -43,7 +43,7 @@ the generator built, which is described in
 2. Take the two values the overlay sets. It sets `TALLY_REPORTING_SYNC_ALLOW_AT`
    to true, so the `at` member of a sync body is taken. The cloud is `os-sim`,
    the `SIM_CLOUD` default, reached from the pod in the kind node at
-   `http://host.docker.internal:8091/v3`.
+   `http://tally-openstack-simulator:8080/v3`.
 
 3. Edit both files of that directory for a drill under another cloud name. What
    an entry holds, and what the adapter needs of the account behind it, is in
