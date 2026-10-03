@@ -171,8 +171,8 @@ steps below say, and each of them names the time range its panels need.
    `ceilometer` down (0), which is the designed dev state, a placeholder target
    for an exporter that runs beside a real control plane.
    `openstack-db-exporter` is up (1), because the holding simulator still
-   serves its inventory on port 8091, which that job scrapes. Between simulator
-   runs it reads 0.
+   serves its inventory, which that job scrapes over the `kind` network.
+   Between simulator runs it reads 0.
 
 3. `Tally / Project Drilldown`. Pick `005be5adeef3d87e280d03d9d57c38b4` in the
    `project_id` variable, one of the six ids and the Gardener tenant with the

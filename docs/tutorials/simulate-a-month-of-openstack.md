@@ -24,7 +24,7 @@ This lesson takes about 15 minutes.
 - The state lesson 1 leaves: the kind cluster from `make up`, `tally-ca.crt` at
   the repository root, `TALLY_REPORTING_DB_URL` and `TALLY_API_TOKEN` in the
   shell, and that shell at the repository root.
-- Docker Desktop running, with `docker compose` on the path. The stack of this
+- Docker running, with `docker compose` on the path. The stack of this
   lesson runs beside the cluster, as three containers of its own.
 
 If you closed that shell, restore it with this block:
