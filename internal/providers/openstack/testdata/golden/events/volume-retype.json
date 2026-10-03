@@ -12,7 +12,7 @@
     "state": "available",
     "size": {
       "size_gb": 100,
-      "type": "fast-ssd"
+      "type": "8b9c0d1e-2f3a-4b4c-9d5e-6f7081920314"
     },
     "provider": {
       "oslo_event_type": "volume.retype"

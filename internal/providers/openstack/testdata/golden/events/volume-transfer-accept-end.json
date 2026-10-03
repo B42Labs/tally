@@ -12,7 +12,7 @@
     "state": "available",
     "size": {
       "size_gb": 50,
-      "type": "standard"
+      "type": "9c0d1e2f-3a4b-4c5d-8e6f-708192031425"
     },
     "provider": {
       "oslo_event_type": "volume.transfer.accept.end"
