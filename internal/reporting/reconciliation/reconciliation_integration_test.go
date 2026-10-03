@@ -1161,6 +1161,248 @@ func TestSync(t *testing.T) {
 	})
 }
 
+// The volume types the naming adapter lists: the ids a cinder notification
+// carries, and the names its volume listing reports for them.
+const (
+	ssdTypeID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203"
+	hddTypeID = "8b9c0d1e-2f3a-4b4c-9d5e-6f7081920314"
+)
+
+// TestSyncStoresSizeNames holds the sync to the size names an adapter lists: a
+// run replaces the cloud's rows with what the listing reported, and a listing
+// that failed or that it cannot store leaves them as they were, without
+// holding back a single correction.
+func TestSyncStoresSizeNames(t *testing.T) {
+	db := storetest.NewDB(t)
+	pipeline := ingest.New(registry.New(), false, nil, nil)
+
+	ssd := reconciliation.SizeValue{ResourceType: "volume", Member: "type", Value: ssdTypeID}
+	hdd := reconciliation.SizeValue{ResourceType: "volume", Member: "type", Value: hddTypeID}
+
+	t.Run("stores the names the adapter lists", func(t *testing.T) {
+		const cloud = "os-names-store"
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{typeShare}},
+			names:       map[reconciliation.SizeValue]string{ssd: "ssd", hdd: "hdd"},
+		}
+
+		res := mustSync(t, newSyncer(t, db, pipeline, cloud, naming), cloud)
+
+		assertRun(t, db, res, statusCompleted)
+		assertSizeNames(t, db, cloud, []sizeName{
+			{resourceType: "volume", member: "type", value: ssdTypeID, name: "ssd"},
+			{resourceType: "volume", member: "type", value: hddTypeID, name: "hdd"},
+		})
+	})
+
+	t.Run("replaces the names an earlier run stored", func(t *testing.T) {
+		const cloud = "os-names-replace"
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{typeShare}},
+			names:       map[reconciliation.SizeValue]string{ssd: "ssd", hdd: "hdd"},
+		}
+		syncer := newSyncer(t, db, pipeline, cloud, naming)
+		mustSync(t, syncer, cloud)
+
+		naming.names = map[reconciliation.SizeValue]string{ssd: "fast-ssd"}
+		res := mustSync(t, syncer, cloud)
+
+		assertRun(t, db, res, statusCompleted)
+		assertSizeNames(t, db, cloud, []sizeName{
+			{resourceType: "volume", member: "type", value: ssdTypeID, name: "fast-ssd"},
+		})
+	})
+
+	t.Run("deletes the names of a cloud whose listing is empty", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			names map[reconciliation.SizeValue]string
+		}{
+			{name: "an empty map", names: map[reconciliation.SizeValue]string{}},
+			{name: "a nil map", names: nil},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cloud := "os-names-empty-" + strings.ReplaceAll(tt.name, " ", "-")
+				other := cloud + "-other"
+				storeSizeName(t, db, cloud, sizeName{"volume", "type", ssdTypeID, "ssd"})
+				storeSizeName(t, db, other, sizeName{"volume", "type", ssdTypeID, "ssd"})
+				naming := &namingAdapter{fakeAdapter: &fakeAdapter{types: []string{typeShare}}, names: tt.names}
+
+				res := mustSync(t, newSyncer(t, db, pipeline, cloud, naming), cloud)
+
+				assertRun(t, db, res, statusCompleted)
+				assertSizeNames(t, db, cloud, nil)
+				assertSizeNames(t, db, other, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+			})
+		}
+	})
+
+	t.Run("leaves the names alone for an adapter that names nothing", func(t *testing.T) {
+		const cloud = "os-names-unnamed"
+		storeSizeName(t, db, cloud, sizeName{"volume", "type", ssdTypeID, "ssd"})
+
+		res := mustSync(t, newSyncer(t, db, pipeline, cloud, &fakeAdapter{types: []string{typeShare}}), cloud)
+
+		assertRun(t, db, res, statusCompleted)
+		assertSizeNames(t, db, cloud, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+	})
+
+	t.Run("keeps the names and the corrections when the listing fails", func(t *testing.T) {
+		const cloud = "os-names-listing-error"
+		share := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		missed := seen(typeShare, "share-missed", projectB, "available", map[string]any{"size_gb": 20})
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{typeShare}, steps: stream(share, missed)},
+			names:       map[reconciliation.SizeValue]string{ssd: "ssd"},
+		}
+		syncer := newSyncer(t, db, pipeline, cloud, naming)
+		mustSync(t, syncer, cloud)
+
+		// The listing of the names breaks, and the inventory drifted twice: a
+		// share is new and one is gone. Neither correction depends on the names.
+		fresh := seen(typeShare, "share-fresh", projectA, "available", map[string]any{"size_gb": 30})
+		naming.steps, naming.namesErr = stream(share, fresh), errManilaDown
+		res, err := syncer.Sync(t.Context(), cloud, nil)
+
+		if err == nil {
+			t.Fatal("Sync() error = nil, want the run reporting that it did not finish clean")
+		}
+		want := reconciliation.Stats{
+			Created: 1, Deleted: 1, ErrorCount: 1,
+			Errors: []string{"listing the size names of " + cloud + ": " + errManilaDown.Error()},
+		}
+		assertStats(t, res.Stats, want)
+		assertRun(t, db, res, statusFailed)
+		if row := rowOf(t, db, cloud, typeShare, "share-missed"); row.state != "deleted" {
+			t.Errorf("share-missed state = %q, want the missed delete booked", row.state)
+		}
+		assertSizeNames(t, db, cloud, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+	})
+
+	t.Run("leaves the names alone when the listing ends the run", func(t *testing.T) {
+		const cloud = "os-names-aborted"
+		storeSizeName(t, db, cloud, sizeName{"volume", "type", ssdTypeID, "ssd"})
+		// The resource listing is what proves the account's scope, so a run it
+		// ended must not read names an account of a lesser scope would see.
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{typeShare}, steps: []step{{err: errManilaDown}}},
+			names:       map[reconciliation.SizeValue]string{hdd: "hdd"},
+		}
+
+		res, err := newSyncer(t, db, pipeline, cloud, naming).Sync(t.Context(), cloud, nil)
+
+		if !errors.Is(err, errManilaDown) {
+			t.Fatalf("Sync() error = %v, want it wrapping %v", err, errManilaDown)
+		}
+		assertRun(t, db, res, statusFailed)
+		assertSizeNames(t, db, cloud, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+	})
+
+	t.Run("keeps the stored names when the database refuses one", func(t *testing.T) {
+		const cloud = "os-names-refused-write"
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{typeShare}},
+			names:       map[reconciliation.SizeValue]string{ssd: "ssd"},
+		}
+		syncer := newSyncer(t, db, pipeline, cloud, naming)
+		mustSync(t, syncer, cloud)
+
+		// The ssd row sorts first, so its new name is written before the database
+		// refuses the NUL in the hdd row's name.
+		naming.names = map[reconciliation.SizeValue]string{ssd: "fast-ssd", hdd: "hd\x00d"}
+		res, err := syncer.Sync(t.Context(), cloud, nil)
+
+		if err == nil {
+			t.Fatal("Sync() error = nil, want the run reporting that it did not finish clean")
+		}
+		assertRun(t, db, res, statusFailed)
+		prefix := "storing the size names of " + cloud + ": inserting the name of "
+		if len(res.Stats.Errors) != 1 || !strings.HasPrefix(res.Stats.Errors[0], prefix) {
+			t.Errorf("stats errors = %v, want one prefixed %q", res.Stats.Errors, prefix)
+		}
+		assertSizeNames(t, db, cloud, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+	})
+
+	t.Run("refuses an incomplete name and keeps the stored ones", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			value reconciliation.SizeValue
+			named string
+		}{
+			{name: "the name is empty", value: hdd, named: ""},
+			{name: "the value is empty", value: reconciliation.SizeValue{ResourceType: "volume", Member: "type"}, named: "hdd"},
+			{name: "the member is empty", value: reconciliation.SizeValue{ResourceType: "volume", Value: hddTypeID}, named: "hdd"},
+			{name: "the resource type is empty", value: reconciliation.SizeValue{Member: "type", Value: hddTypeID}, named: "hdd"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cloud := "os-names-incomplete-" + strings.ReplaceAll(tt.name, " ", "-")
+				naming := &namingAdapter{
+					fakeAdapter: &fakeAdapter{types: []string{typeShare}},
+					names:       map[reconciliation.SizeValue]string{ssd: "ssd"},
+				}
+				syncer := newSyncer(t, db, pipeline, cloud, naming)
+				mustSync(t, syncer, cloud)
+
+				naming.names = map[reconciliation.SizeValue]string{ssd: "fast-ssd", tt.value: tt.named}
+				res, err := syncer.Sync(t.Context(), cloud, nil)
+
+				if err == nil {
+					t.Fatal("Sync() error = nil, want the run reporting that it did not finish clean")
+				}
+				assertRun(t, db, res, statusFailed)
+				prefix := "storing the size names of " + cloud + ": the adapter reported an incomplete size name"
+				if len(res.Stats.Errors) != 1 || !strings.HasPrefix(res.Stats.Errors[0], prefix) {
+					t.Errorf("stats errors = %v, want one prefixed %q", res.Stats.Errors, prefix)
+				}
+				assertSizeNames(t, db, cloud, []sizeName{{"volume", "type", ssdTypeID, "ssd"}})
+			})
+		}
+	})
+
+	t.Run("books no correction for a collector event the names resolved", func(t *testing.T) {
+		const cloud = "os-names-no-drift"
+		naming := &namingAdapter{
+			fakeAdapter: &fakeAdapter{types: []string{"volume"}, steps: stream(
+				seen("volume", "vol-1", projectA, "available", map[string]any{"size_gb": 100, "type": "ssd"}))},
+			names: map[reconciliation.SizeValue]string{ssd: "ssd"},
+		}
+		syncer := newSyncer(t, db, pipeline, cloud, naming)
+		mustSync(t, syncer, cloud)
+
+		// The collector reports a resize the way cinder sends it: under the type's
+		// id, which the names the first run stored resolve.
+		state := "available"
+		resize := event.Event{
+			EventID: "vol-1-resize", Timestamp: pollTime.Add(time.Hour), EventType: "volume.resize",
+			Platform: platform, Cloud: cloud, ResourceType: "volume", ResourceID: "vol-1",
+			ProjectID: projectA, Source: event.SourceCollector,
+			Payload: event.PayloadEnvelope{
+				State: &state,
+				Size:  map[string]any{"size_gb": 200, "type": ssdTypeID},
+			},
+		}
+		raw, err := json.Marshal(resize)
+		if err != nil {
+			t.Fatalf("marshaling the resize: %v", err)
+		}
+		if err := db.Store.WithTx(t.Context(), func(tx pgx.Tx) error {
+			_, err := pipeline.Ingest(t.Context(), tx, []json.RawMessage{raw}, event.SourceCollector, nil)
+			return err
+		}); err != nil {
+			t.Fatalf("Ingest() error = %v, want nil", err)
+		}
+
+		naming.steps = stream(
+			seen("volume", "vol-1", projectA, "available", map[string]any{"size_gb": 200, "type": "ssd"}))
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(0, 0, 0))
+		assertRun(t, db, res, statusCompleted)
+	})
+}
+
 // The series a finished run lands in.
 const (
 	runsSeries       = "tally_sync_runs_total"
@@ -1383,6 +1625,20 @@ func (a *fakeAdapter) ListResources(ctx context.Context, _ map[string]any, since
 	}
 }
 
+// namingAdapter is a fake that also lists size names, the way the adapter of a
+// platform whose events carry a size member under an id does. What it lists,
+// and whether the listing fails, is scripted per subtest.
+type namingAdapter struct {
+	*fakeAdapter
+	names    map[reconciliation.SizeValue]string
+	namesErr error
+}
+
+func (a *namingAdapter) SizeNames(context.Context, map[string]any,
+) (map[reconciliation.SizeValue]string, error) {
+	return a.names, a.namesErr
+}
+
 // seen is a live resource as the platform reports it.
 func seen(resourceType, id, project, state string, size map[string]any) reconciliation.ObservedResource {
 	return reconciliation.ObservedResource{
@@ -1414,7 +1670,7 @@ func stream(resources ...reconciliation.ObservedResource) []step {
 // always answers pollTime so that a correction dated at the poll is one a test
 // can name.
 func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud string,
-	fake *fakeAdapter,
+	fake reconciliation.Adapter,
 ) *reconciliation.Syncer {
 	t.Helper()
 
@@ -1850,6 +2106,56 @@ func rowOf(t *testing.T, db storetest.DB, cloud, resourceType, resourceID string
 	}
 	t.Fatalf("no projection row for %s %s in %s, want one", resourceType, resourceID, cloud)
 	return projectionRow{}
+}
+
+// sizeName is a size_names row as the assertions compare it.
+type sizeName struct {
+	resourceType string
+	member       string
+	value        string
+	name         string
+}
+
+// storeSizeName stores one row of cloud the way a sync stores it, which is how a
+// subtest gives a cloud names no run of its own listed.
+func storeSizeName(t *testing.T, db storetest.DB, cloud string, row sizeName) {
+	t.Helper()
+
+	if err := sqlcgen.New(db.Store.Pool()).InsertSizeName(t.Context(), sqlcgen.InsertSizeNameParams{
+		Cloud: cloud, ResourceType: row.resourceType, Member: row.member, Value: row.value, Name: row.name,
+	}); err != nil {
+		t.Fatalf("storing the size name of %s on %s: %v", row.value, cloud, err)
+	}
+}
+
+// assertSizeNames fails the test unless cloud holds exactly the rows of want,
+// which lists them in the order of their key.
+func assertSizeNames(t *testing.T, db storetest.DB, cloud string, want []sizeName) {
+	t.Helper()
+
+	rows, err := db.Store.Pool().Query(t.Context(),
+		`SELECT resource_type, member, value, name FROM size_names
+		 WHERE cloud = $1
+		 ORDER BY resource_type, member, value`, cloud)
+	if err != nil {
+		t.Fatalf("reading the size names of %s: %v", cloud, err)
+	}
+	defer rows.Close()
+
+	var got []sizeName
+	for rows.Next() {
+		var row sizeName
+		if err := rows.Scan(&row.resourceType, &row.member, &row.value, &row.name); err != nil {
+			t.Fatalf("scanning a size name: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the size names of %s: %v", cloud, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("size names of %s = %+v, want %+v", cloud, got, want)
+	}
 }
 
 // registerSizeSchema registers raw as the size schema of (platform,

@@ -159,6 +159,11 @@ func New(db *store.Store, pipeline *ingest.Pipeline, cfg Config, adapters map[st
 // can report the run id and the tally of a run that went badly. What such a run
 // did observe is kept: an enumeration failure is missing information, and the
 // corrections it did not keep the run from are facts either way.
+//
+// An adapter that implements SizeNamer has the cloud's size names replaced once
+// the listing finished. A failure there is recorded like any other and fails
+// the run, but it costs no resource type its completeness: the names say
+// nothing about what the cloud holds.
 func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result, error) {
 	entry, ok := s.clouds[cloud]
 	if !ok {
@@ -237,6 +242,12 @@ func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result,
 		&stats)
 	if err != nil {
 		return abort(fmt.Errorf("listing the resources of %s: %w", cloud, err))
+	}
+
+	if namer, ok := adapter.(SizeNamer); ok {
+		if err := s.storeSizeNames(ctx, namer, entry); err != nil {
+			recordError(&stats, err.Error())
+		}
 	}
 
 	types, err := adapter.ResourceTypes(entry.AdapterConfig)
@@ -473,6 +484,52 @@ func collect(ctx context.Context, adapter Adapter, cfg map[string]any, since *ti
 	return observed, incomplete, nil
 }
 
+// storeSizeNames replaces the size names stored for the cloud of entry with the
+// ones namer lists, in one transaction. A listing that failed is no
+// information rather than an empty list, and one naming an entry incompletely
+// is an adapter bug: either leaves the stored rows as they are, and so does a
+// write the database refused. A listing that succeeded empty deletes them.
+func (s *Syncer) storeSizeNames(ctx context.Context, namer SizeNamer, entry CloudConfig) error {
+	names, err := namer.SizeNames(ctx, entry.AdapterConfig)
+	if err != nil {
+		return fmt.Errorf("listing the size names of %s: %w", entry.Cloud, err)
+	}
+
+	// Sorted, so a listing with two incomplete entries names the same one on
+	// every run, and the rows are inserted in one order.
+	values := slices.SortedFunc(maps.Keys(names), compareSizeValue)
+	for _, value := range values {
+		if name := names[value]; value.ResourceType == "" || value.Member == "" ||
+			value.Value == "" || name == "" {
+			return fmt.Errorf("storing the size names of %s: the adapter reported an incomplete size name "+
+				"(resource type %q, member %q, value %q, name %q)",
+				entry.Cloud, value.ResourceType, value.Member, value.Value, name)
+		}
+	}
+
+	if err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		q := sqlcgen.New(tx)
+		if err := q.DeleteSizeNames(ctx, entry.Cloud); err != nil {
+			return fmt.Errorf("deleting the stored names: %w", err)
+		}
+		for _, value := range values {
+			if err := q.InsertSizeName(ctx, sqlcgen.InsertSizeNameParams{
+				Cloud:        entry.Cloud,
+				ResourceType: value.ResourceType,
+				Member:       value.Member,
+				Value:        value.Value,
+				Name:         names[value],
+			}); err != nil {
+				return fmt.Errorf("inserting the name of %q: %w", value.Value, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("storing the size names of %s: %w", entry.Cloud, err)
+	}
+	return nil
+}
+
 // recordError keeps one reason the run has to report, and counts it either way.
 // Past the cap only the count grows: the entries are stored, answered, and
 // joined into one string, and nothing bounds how many an adapter produces.
@@ -705,6 +762,16 @@ func sameSize(observed map[string]any, stored []byte) (bool, error) {
 		return false, fmt.Errorf("decoding the stored size: %w", err)
 	}
 	return reflect.DeepEqual(reported, held), nil
+}
+
+// compareSizeValue orders two size values byte-wise over their three fields,
+// which is the order a run stores its size names in.
+func compareSizeValue(a, b SizeValue) int {
+	return cmp.Or(
+		strings.Compare(a.ResourceType, b.ResourceType),
+		strings.Compare(a.Member, b.Member),
+		strings.Compare(a.Value, b.Value),
+	)
 }
 
 // compareResourceKey orders two keys byte-wise over their two fields, which is
