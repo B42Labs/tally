@@ -77,6 +77,12 @@ the context project id is taken, and where that is empty the context tenant id
 is. An entry with no path at all is the `request context` the table's project id
 column names.
 
+The mapping reads the project and does not judge it. An instance or a volume a
+service created in its own project, an octavia amphora for instance, is booked
+to that project like any other.
+[Zero-rate a service project](/how-to/openstack/zero-rate-a-service-project)
+bills such a project at zero.
+
 ## State rules
 
 `vmState` reads `state` out of the payload and normalizes it: `stopped` becomes
