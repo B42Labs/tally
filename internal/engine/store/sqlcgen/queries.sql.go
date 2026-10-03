@@ -141,6 +141,20 @@ func (q *Queries) EarliestBillingPeriod(ctx context.Context) (pgtype.Timestamptz
 	return column_1, err
 }
 
+const earliestPricingValidFrom = `-- name: EarliestPricingValidFrom :one
+SELECT min(valid_from)::timestamptz FROM pricing_models
+`
+
+// The first instant any pricing model is valid from, which bounds the
+// scheduler's walk from below: a month that begins before it is priced by no
+// model. The aggregate answers over an empty table too, with one NULL row.
+func (q *Queries) EarliestPricingValidFrom(ctx context.Context) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, earliestPricingValidFrom)
+	var column_1 pgtype.Timestamptz
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const failRun = `-- name: FailRun :execrows
 UPDATE runs
 SET status = 'failed', completed_at = now(), stats = $2

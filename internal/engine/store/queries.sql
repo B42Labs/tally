@@ -80,6 +80,12 @@ WHERE period_from = $1;
 -- name: EarliestBillingPeriod :one
 SELECT min(period_from)::timestamptz FROM billing_periods;
 
+-- The first instant any pricing model is valid from, which bounds the
+-- scheduler's walk from below: a month that begins before it is priced by no
+-- model. The aggregate answers over an empty table too, with one NULL row.
+-- name: EarliestPricingValidFrom :one
+SELECT min(valid_from)::timestamptz FROM pricing_models;
+
 -- Opens a run. status stays at the column default 'running' and completed_at
 -- stays null until the run ends. The caller writes its records under the
 -- returned id and reports the returned start time. A regular run binds NULL for
