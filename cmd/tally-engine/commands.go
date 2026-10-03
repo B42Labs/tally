@@ -197,7 +197,9 @@ func newRunCmd() *cobra.Command {
 		Long: "Meter and rate one billing period.\n\n" +
 			"The run reads the period's resources and events from the reporting database, derives the usage " +
 			"records of every project, and rates them against the imported pricing catalog. It leaves a run " +
-			"row the other subcommands work on.",
+			"row the other subcommands work on. A period that has not ended is metered as if it had: every resource " +
+			"that is still alive is billed to the end of the month, the run carries the warning period_not_ended, " +
+			"and its numbers are a forecast of the month rather than its invoice.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			from, to, err := validatePeriod(month)
@@ -395,7 +397,12 @@ func newPricingImportCmd() *cobra.Command {
 		Short: "Import a pricing catalog from a YAML file",
 		Long: "Import a pricing catalog from a YAML file.\n\n" +
 			"A catalog is imported once and then referred to by its version, which every rated record carries, " +
-			"so a price change never rewrites what an earlier run billed.",
+			"so a price change never rewrites what an earlier run billed. The import only ever inserts. A version " +
+			"the database does not hold is stored. A file that carries a stored version and the same prices stores " +
+			"nothing, says that the version is already imported and exits 0, so a deployment may import its catalogs " +
+			"on every rollout. A file that carries a stored version and prices something else is refused as a " +
+			"version conflict, and a new version whose valid_from is that of a stored one is refused too, because " +
+			"one instant is priced by one version. Both refusals exit 1 and leave the stored catalogs as they were.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := os.ReadFile(args[0])
@@ -747,7 +754,13 @@ func newTickCmd() *cobra.Command {
 		Short: "Run the scheduler tick the hourly CronJob invokes",
 		Long: "Run the scheduler tick the hourly CronJob invokes.\n\n" +
 			"It advances every billing period whose next step is due: a period whose grace window has passed " +
-			"gets its run, and a completed run is finalized where TALLY_ENGINE_AUTO_FINALIZE allows it.",
+			"gets its run, and a completed run is finalized where TALLY_ENGINE_AUTO_FINALIZE allows it. It walks the " +
+			"months that have ended and never the running one, so a month is metered TALLY_ENGINE_GRACE_HOURS after " +
+			"its end at the earliest. The walk starts at the earliest stored billing period, or at the month before " +
+			"now where none is stored. It never reaches a month that begins before the first pricing catalog becomes " +
+			"valid: nothing prices such a month, so the tick leaves it alone, and it is billed once a catalog valid " +
+			"at its first instant is imported. A database that holds no catalog bounds nothing, and the first month " +
+			"that falls due fails there, because no pricing model is valid for it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p, err := openPipeline(cmd.Context())
