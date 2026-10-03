@@ -49,6 +49,9 @@ Tally sit together.
 - [Reconcile a cloud](/how-to/openstack/reconcile-a-cloud) gives the Reporting
   API the clouds file, the account and the entry a sync of one cloud needs, and
   runs that sync.
+- [Zero-rate a service project](/how-to/openstack/zero-rate-a-service-project)
+  registers the project an OpenStack service keeps its own resources in, and
+  bills it at zero or under a project of the operator.
 
 ### Engine
 
