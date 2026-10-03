@@ -88,6 +88,24 @@ type Adapter interface {
 	) iter.Seq2[ObservedResource, error]
 }
 
+// SizeValue identifies one value a size member carries on the event path.
+type SizeValue struct {
+	ResourceType string
+	Member       string
+	Value        string
+}
+
+// SizeNamer is the optional part of an adapter, for a platform whose events
+// carry a size member under an id while its listing reports the name. The
+// framework detects it with a type assertion, so an adapter that has nothing to
+// name implements Adapter alone.
+type SizeNamer interface {
+	// SizeNames lists every such id of cfg's cloud with the name the listing
+	// reports for it. The framework calls it after ListResources finished
+	// without ending the run, so the account's scope is already proven.
+	SizeNames(ctx context.Context, cfg map[string]any) (map[SizeValue]string, error)
+}
+
 // EnumerationError reports that one resource type could not be fully
 // enumerated. An adapter yields it through the error side of the stream and
 // continues with its remaining types; any other error aborts the run.
