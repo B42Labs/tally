@@ -22,9 +22,8 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
 ## Before you start
 
-- macOS with Docker Desktop running, given enough of the machine to run the
-  whole stack on one node. The lessons are written for macOS with Docker
-  Desktop, the platform the `Makefile` and `deploy/kind/kind.yaml` assume.
+- Docker running, Docker Desktop on macOS or Docker Engine on Linux, given
+  enough of the machine to run the whole stack on one node.
 - `git`, `kind`, `kubectl`, Go, `jq` and `curl` on the path, and `docker` with
   its `compose` plugin. No version is named here. The clone below carries
   `make check-tools`, which calls every one of them, prints what each answered
@@ -40,7 +39,7 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
   `No kind clusters found.` when there is none. If it prints `tally`, tear that
   cluster down with the `make down` of
   [Tear down your local Tally](/tutorials/tear-down-your-local-tally) first.
-- 13 GB of free disk for Docker Desktop, measured with `docker system df`
+- 13 GB of free disk for Docker, measured with `docker system df`
   across images, volumes and build cache. The eight images the stack runs come
   to 3.3 GB and are held twice from here on, once by Docker and once inside the
   node, which is what lets `make up` copy them onto the node instead of leaving
@@ -122,7 +121,7 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
    ```text
    ==> pulling busybox:1.37
-   Image: "busybox:1.37" with ID "sha256:6df9636795d37473994366014c25264edeb6c00d7a57188ff62d5a94276b4297" not yet present on node "tally-control-plane", loading...
+   ==> loading busybox:1.37 onto the node
    ```
 
    Which of the eight are fetched is your machine's, and a second `make up`

@@ -35,7 +35,7 @@ This lesson takes about 5 minutes.
 - The shell that holds the port-forward Meter and rate your first month
   started: a correction meters the month again and reads the egress counter
   from the store through it.
-- Docker Desktop running, with the three containers of the simulator stack.
+- Docker running, with the three containers of the simulator stack.
 - `jq` on the path, which the `make check-tools` of lesson 1 called.
 
 If you closed that shell, restore it with this block:
