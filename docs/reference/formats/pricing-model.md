@@ -93,7 +93,11 @@ at it, which is the scale a statement prints it at.
 
 `type_modifiers` is keyed by the value the usage carries under `type`, the size
 member a volume and some servers carry. A resource that reports no type is
-billed unmodified.
+billed unmodified. For an OpenStack volume the value is the volume type's name
+on a cloud a reconciliation run reads, and the type's id on a cloud nothing
+reconciles, because cinder's notifications carry the id and only a run stores
+the names the Reporting API resolves it by
+([Size names](/reference/formats/canonical-event#size-names)).
 
 A resource type the model does not price is not billed as free. Its resources
 are skipped and counted per platform and resource type, and the count reaches an

@@ -29,6 +29,15 @@ the images of all projects of the cloud, and its load balancers where
 the last completed run, which is the one listing that dates a missed delete at
 the instant the platform performed it.
 
+After the listings, a run reads cinder's volume types, the private ones
+included, and stores each type's id with its name in the `size_names` table.
+Cinder's notifications carry a volume's type by id while its volume listing
+reports the name, and a price list keys `type_modifiers` by name. The stored
+names are what the Reporting API replaces the id with when a collector event
+arrives, so a collector event and a correction carry the same type
+([size names](/reference/formats/canonical-event#size-names)). The type listing
+sends no probe of its own: the listings before it already proved the scope.
+
 The adapter is compiled into `tally-reporting` and runs inside it. It has no
 process, image, or port of its own. What a deployment provides is a clouds.yaml
 the Reporting API pod can read, an account in it that may list every project's
@@ -170,17 +179,19 @@ Rules for `GET` that name the requests a run sends leave the credential those
 requests and nothing else.
 
 A run sends `compute`, `block-storage`, `network`, `image` and `load-balancer`
-nothing but `GET`. Seven paths need a rule: `servers/detail` for the probe and
+nothing but `GET`. Eight paths need a rule: `servers/detail` for the probe and
 both instance listings, `flavors/detail`, nova's version document, which the
-run reads to negotiate the microversion, `volumes/detail`, `floatingips`,
-`images` and `lbaas/loadbalancers`. The version documents gophercloud reads
-from glance, neutron and octavia before it uses them are answered before
-keystonemiddleware sees the request, so they need none
+run reads to negotiate the microversion, `volumes/detail`, `types` for cinder's
+volume type listing, `floatingips`, `images` and `lbaas/loadbalancers`. The
+version documents gophercloud reads from glance, neutron and octavia before it
+uses them are answered before keystonemiddleware sees the request, so they need
+none
 ([glance](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/etc/glance-api-paste.ini#L42),
 [neutron](https://github.com/openstack/neutron/blob/6dc774b25b9cc9b47dee127bfb41d67975677446/etc/api-paste.ini#L1-L15),
 [octavia](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/keystone.py#L25-L26)).
-The one `POST` of a run is the token request. It goes to keystone with the
-credential's secret, before a token exists that a rule could apply to.
+The only `POST` a run sends is the token request, once for the listings and
+once for the volume types. It goes to keystone with the credential's secret,
+before a token exists that a rule could apply to.
 
 The role behind the credential is still `admin`, which is why the probe passes
 and all five listings are complete. The restriction is on the credential: it
@@ -219,7 +230,7 @@ the project ID, and on some a prefix the API is served under. `**` matches
 across `/`, at the start of a pattern too
 ([the match](https://github.com/openstack/keystonemiddleware/blob/9401c513219f86008d1df380a10d57464bb20b2d/keystonemiddleware/auth_token/__init__.py#L280-L297)),
 so `/**/servers/detail` matches the server listing in each of those shapes, and
-`/**/` matches nova's version document in each of them. None of the seven
+`/**/` matches nova's version document in each of them. None of the eight
 matches an image's data, a port or a backup: a leaked credential reads what a
 run reads and nothing more.
 
@@ -371,6 +382,15 @@ registered it, which this run has no way to recover, so the image type stays
 incomplete rather than that live row being booked deleted. A deactivated image
 is not one of these: it still exists, still occupies the store, and is observed
 like any other.
+
+A volume type listing that fails costs no resource type its completeness,
+because the names describe no resource. The reason lands in `stats.errors` as
+`listing the size names of os-prod-eu1: listing the volume types: ...`. The run
+ends `failed` and keeps every correction it made; like every failed run, it
+does not move the bound the next run starts from. The names an earlier run
+stored stay as they are, and collector events go on being resolved by them. A
+credential whose access rules have no rule for `types` is one such case: cinder
+answers its type listing 401 on every run.
 
 A failure that says nothing about any single resource type ends the whole run
 before a type is observed: an `adapter_config` that does not parse, a

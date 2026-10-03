@@ -78,6 +78,7 @@ password, called `os-prod-eu1-password` in the steps.
        {"service": "compute", "method": "GET", "path": "/**/flavors/detail"},
        {"service": "compute", "method": "GET", "path": "/**/"},
        {"service": "block-storage", "method": "GET", "path": "/**/volumes/detail"},
+       {"service": "block-storage", "method": "GET", "path": "/**/types"},
        {"service": "network", "method": "GET", "path": "/**/floatingips"},
        {"service": "image", "method": "GET", "path": "/**/images"},
        {"service": "load-balancer", "method": "GET", "path": "/**/lbaas/loadbalancers"}
@@ -95,6 +96,11 @@ password, called `os-prod-eu1-password` in the steps.
    client calls the API by. The `load-balancer` rule belongs to a cloud whose
    entry sets `include_octavia`; leave it out otherwise. Keystone shows the
    secret once.
+
+   Keystone cannot change the rules of an existing credential. A credential
+   created with seven rules, without the `types` one, ends every run `failed`
+   on the volume type listing: create a new one with all eight and replace the
+   entry with it in step 3.
 
 3. Replace the entry the Secret carries. `clouds.yaml`:
 

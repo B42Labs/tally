@@ -161,6 +161,74 @@ registers is accepted unvalidated by default and counted; setting
 [Reporting API settings](/reference/configuration/tally-reporting) page states
 the variable.
 
+## Size names
+
+A size member can arrive under an id where the platform's listing reports a
+name. Cinder sends the volume type's id in every volume notification, and its
+volume listing reports the type's name. The Reporting API replaces such an id
+with the name before it validates the size, so a collector event and a
+reconciliation correction carry the same `type`.
+
+The names are rows of the `size_names` table in the reporting database:
+
+| Column | Holds |
+| --- | --- |
+| `cloud` | the cloud the row applies to |
+| `resource_type` | the resource type whose size carries the member |
+| `member` | the size member, `type` for a volume |
+| `value` | the value an event carries, the volume type's id for a volume |
+| `name` | the name that replaces the value, the volume type's name for a volume |
+
+The primary key is `(cloud, resource_type, member, value)`. A reconciliation run
+writes the rows: every run of a cloud whose adapter lists names replaces that
+cloud's rows with the list in one transaction. The OpenStack adapter lists the
+cloud's volume types, as
+[How reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud)
+explains. No route of the Reporting API reads or writes the table.
+
+The rule applies to every item that carries `payload.size`, whatever its
+`source`, after the scope check and before the size schema:
+
+- The pipeline reads the rows of the event's `(cloud, resource_type)`, once per
+  pair and batch.
+- A size member that holds a string equal to a row's `value` under that row's
+  `member` is replaced by the row's `name`. The rows alone decide, so the rule
+  names no platform.
+- A member that is absent, is not a string, or matches no row stays as it
+  arrived, and so does every member of an event whose pair has no rows.
+- The size schema validates the size after the replacement, so the size it
+  accepts is the size that is stored and folded. An item it refuses is
+  dead-lettered as it arrived.
+
+An event with at least one replaced member carries
+`payload.provider.size_as_reported`, an object holding each replaced member with
+the value it arrived with. The pipeline owns that member: an item that brings
+one of its own and is resolved is stored with the pipeline's value. A volume
+create stored under a resolved type reads:
+
+```json
+{
+  "state": "available",
+  "size": {"size_gb": 100, "type": "ssd"},
+  "provider": {
+    "oslo_event_type": "volume.create.end",
+    "size_as_reported": {"type": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203"}
+  }
+}
+```
+
+Two limits follow from where the names come from:
+
+- An event that arrives before the first run of its cloud stored names, or that
+  names a type created after the last run, is stored with the id. The next run
+  observes the volume under the name and writes a `sync.update` dated at poll
+  time, and the interval before that correction stays billed under the id.
+- A cloud nothing reconciles has no rows. Its volume events keep the id, and a
+  price list for it keys `type_modifiers` by id.
+
+Stored events are never rewritten, so an event stored before its names existed
+keeps the id.
+
 ## Delivery
 
 The body of `POST /api/v1/events` is one event or an array of at most 1000 of

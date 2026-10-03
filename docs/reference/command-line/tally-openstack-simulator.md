@@ -227,10 +227,12 @@ endpoint without a version in its path: `GET /compute/v2.1/`, `GET /image/`,
 2.47, so a client negotiates the microversion that embeds a server's flavor in
 the server rather than falling back to the flavor catalog.
 
-Six routes answer a listing: `GET /compute/v2.1/servers/detail`,
+Seven routes answer a listing: `GET /compute/v2.1/servers/detail`,
 `GET /compute/v2.1/flavors/detail`, `GET /volume/v3/volumes/detail`,
-`GET /network/v2.0/floatingips`, `GET /image/v2/images` and
-`GET /load-balancer/v2.0/lbaas/loadbalancers`.
+`GET /volume/v3/types`, `GET /network/v2.0/floatingips`, `GET /image/v2/images`
+and `GET /load-balancer/v2.0/lbaas/loadbalancers`. `GET /volume/v3/types`
+answers the three volume types of the world, `ssd`, `hdd` and `standard`, each
+under an id that is the same in every run.
 
 Nova's server path serves two listings. A request carrying `deleted=true`
 together with a `changes-since` instant is answered with the instances the month
