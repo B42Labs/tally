@@ -109,6 +109,123 @@ and what anyone who can edit the mounted `clouds.yaml`/`secure.yaml` Secret can
 arrange. The probe turns both into a failed run rather than into a wiped
 projection.
 
+## Why no reader account passes
+
+Under the stock policies no reader role lists across projects. The probe and
+both instance listings need nova's
+`os_compute_api:servers:detail:get_all_tenants`, which nova checks before it
+answers a request that carries `all_tenants`
+([the server listing](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/api/openstack/compute/servers.py#L285-L291)).
+The deleted-servers listing needs `os_compute_api:servers:allow_all_filters` as
+well. Without it nova drops `deleted` from the query, because `deleted` is not
+among the filters it takes from an account that lacks the rule
+([the filters](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/api/openstack/compute/servers.py#L1436-L1458),
+[their removal](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/api/openstack/compute/servers.py#L1538-L1554)).
+Both rules resolve to `context_is_admin` and both are project-scoped
+([the rules](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/policies/servers.py#L59-L97)),
+and `context_is_admin` is `role:admin`
+([`ADMIN`](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/policies/base.py#L40),
+[`context_is_admin`](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/policies/base.py#L73-L77)).
+A project reader is refused by the probe with a 403, and a system reader holds
+neither the role nor a scope those rules accept.
+
+Cinder, neutron and glance have no policy rule for a listing of every project.
+They decide it by whether the request has an admin context, which is their
+`context_is_admin` rule, `role:admin` unless a deployment changed it. Cinder
+lists every project for such a context and the caller's own for any other
+([the volume listing](https://github.com/openstack/cinder/blob/ef0d50cb18d0ceb5d70d500c9a032b0eb66e749b/cinder/volume/api.py#L665-L679),
+[`context_is_admin`](https://github.com/openstack/cinder/blob/ef0d50cb18d0ceb5d70d500c9a032b0eb66e749b/cinder/policies/base.py#L153-L155)).
+Neutron scopes a query to the caller's project unless the context is admin or
+holds the `service` role OpenStack services call one another with
+([the query scope](https://github.com/openstack/neutron-lib/blob/8c44d586e209a910495540284da7424e3db147c3/neutron_lib/db/utils.py#L167-L185),
+[`context_is_admin`](https://github.com/openstack/neutron/blob/6dc774b25b9cc9b47dee127bfb41d67975677446/neutron/conf/policies/base.py#L102-L105)).
+Glance treats every context that is not admin as a regular user
+([the image query](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/db/sqlalchemy/api.py#L599),
+[`is_admin`](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/api/policy.py#L93-L100)).
+An account without the admin context is answered `200 OK` with its own project.
+
+The probe proves nova's rule and nothing else. Under the stock policies that is
+enough, because the role nova's rule asks for is the role the other services
+treat as admin. A deployment that grants nova's two rules to a role of its own
+in `policy.yaml`, and leaves the other services alone, hands that role a probe
+it passes and four listings that narrow. The missed-delete pass then books a
+delete for every volume, floating IP address, image and load balancer of every
+other project, and no later run undoes it. Such a role is not supported. A role
+a deployment makes `context_is_admin` in every service is an admin by another
+name.
+
+A reconciliation account that only reads is therefore established at the
+credential, not at the role:
+[a credential that only reads](#a-credential-that-only-reads).
+
+## A credential that only reads
+
+An application credential can carry access rules, each naming a service type, a
+method and a path
+([access rules](https://github.com/openstack/keystone/blob/537e65b2b1d4b8e0fe1faa09c8f882a6b2899b21/doc/source/user/application_credentials.rst?plain=1#L171-L228)).
+The keystonemiddleware in front of each API compares every request made with the
+credential's token against them and answers 401 when none matches
+([the check](https://github.com/openstack/keystonemiddleware/blob/9401c513219f86008d1df380a10d57464bb20b2d/keystonemiddleware/auth_token/__init__.py#L545-L588)).
+Rules for `GET` that name the requests a run sends leave the credential those
+requests and nothing else.
+
+A run sends `compute`, `block-storage`, `network`, `image` and `load-balancer`
+nothing but `GET`. Seven paths need a rule: `servers/detail` for the probe and
+both instance listings, `flavors/detail`, nova's version document, which the
+run reads to negotiate the microversion, `volumes/detail`, `floatingips`,
+`images` and `lbaas/loadbalancers`. The version documents gophercloud reads
+from glance, neutron and octavia before it uses them are answered before
+keystonemiddleware sees the request, so they need none
+([glance](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/etc/glance-api-paste.ini#L42),
+[neutron](https://github.com/openstack/neutron/blob/6dc774b25b9cc9b47dee127bfb41d67975677446/etc/api-paste.ini#L1-L15),
+[octavia](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/keystone.py#L25-L26)).
+The one `POST` of a run is the token request. It goes to keystone with the
+credential's secret, before a token exists that a rule could apply to.
+
+The role behind the credential is still `admin`, which is why the probe passes
+and all five listings are complete. The restriction is on the credential: it
+cannot write, and keystone does not let it create further credentials unless it
+was created `--unrestricted`
+([restricted credentials](https://github.com/openstack/keystone/blob/537e65b2b1d4b8e0fe1faa09c8f882a6b2899b21/doc/source/user/application_credentials.rst?plain=1#L144-L153)).
+The account's password is not restricted by any of it, so it stays out of the
+Secret.
+
+An API accepts the credential under two conditions: its `[keystone_authtoken]`
+section sets `service_type`, and that type is one the catalog lists. Otherwise
+keystonemiddleware answers every request of the credential with 401
+([the conditions](https://github.com/openstack/keystonemiddleware/blob/9401c513219f86008d1df380a10d57464bb20b2d/keystonemiddleware/auth_token/__init__.py#L551-L574)).
+A rule's `service` is that type. Kolla renders `service_type = volume` for
+cinder
+([the template](https://github.com/openstack/kolla-ansible/blob/570f2b77142d7145e55f39126e3987002afe7494/ansible/roles/cinder/templates/cinder.conf.j2#L116-L117))
+and registers cinder in the catalog as `block-storage` and `volumev3`
+([the catalog entries](https://github.com/openstack/kolla-ansible/blob/570f2b77142d7145e55f39126e3987002afe7494/ansible/roles/cinder/defaults/main.yml#L346-L355)),
+so cinder refuses the credential there until the setting is overridden.
+
+A cloud that misses a condition fails the run with an error, never with a
+narrowed listing. A nova that cannot validate the rules answers the probe 401,
+and the run ends before a listing with
+`the clouds.yaml entry "os-prod-eu1" cannot observe the whole cloud: ...`. Any
+other API that answers 401 costs its resource type the run's completeness:
+`enumerating volume: ...` lands in `stats.errors`, the run ends `failed`, and
+the missed-delete pass leaves that type alone. An entry without its secret ends
+the run with
+`authenticating against the cloud "os-prod-eu1": You must provide an Application Credential Secret`,
+and a credential keystone no longer accepts (expired or deleted) ends it with
+keystone's refusal after the same `authenticating against the cloud` prefix.
+
+Each path starts with `/**`, because a rule is matched against the whole path
+the API receives, and that path carries the API version, on some deployments
+the project ID, and on some a prefix the API is served under. `**` matches
+across `/`, at the start of a pattern too
+([the match](https://github.com/openstack/keystonemiddleware/blob/9401c513219f86008d1df380a10d57464bb20b2d/keystonemiddleware/auth_token/__init__.py#L280-L297)),
+so `/**/servers/detail` matches the server listing in each of those shapes, and
+`/**/` matches nova's version document in each of them. None of the seven
+matches an image's data, a port or a backup: a leaked credential reads what a
+run reads and nothing more.
+
+The steps are in
+[restrict the account to read requests](/how-to/openstack/reconcile-a-cloud#restrict-the-account-to-read-requests).
+
 ## Why adapter settings are checked on the first run
 
 `include_octavia` adds `loadbalancer` to the enumerated types, and it is off by
