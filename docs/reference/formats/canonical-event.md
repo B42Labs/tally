@@ -51,7 +51,7 @@ PayloadEnvelope is the normalized payload every event carries. Collectors map pr
 | --- | --- | --- | --- |
 | `state` | string or null | omitted when empty | State is the resource state at or after the event. It is required on every event except a delete, where the core sets "deleted" itself. |
 | `size` | object | omitted when empty | Size is the full replacement size object, required on create and on any size-changing event. Absent means the size did not change. |
-| `provider` | object | omitted when empty | Provider is free-form raw provider data, kept for debugging and audit. Core logic never reads it. |
+| `provider` | object | omitted when empty | Provider is free-form raw provider data, kept for debugging and audit. Core logic never reads it. The Reporting API writes size_as_reported into it, holding the value each size member arrived with that it replaced with a stored name. |
 <!-- refdoc:end event -->
 
 ## Bounds

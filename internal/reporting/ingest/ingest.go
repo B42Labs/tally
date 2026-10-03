@@ -1,8 +1,9 @@
 // Package ingest is the batch pipeline every event reaches the reporting
 // database through. It decodes an item, validates it, checks it against the
-// scope its credential may report for, checks its size against the registered
-// schema, stores it, and folds what it stored into the projection. All of that
-// runs in the caller's transaction, so a batch lands whole or not at all.
+// scope its credential may report for, puts a stored name in place of a size
+// value a sync named, checks its size against the registered schema, stores
+// it, and folds what it stored into the projection. All of that runs in the
+// caller's transaction, so a batch lands whole or not at all.
 //
 // A refused item does not fail the batch. Schema and size violations are
 // dead-lettered into rejected_events and reported per item, which is what lets
@@ -61,6 +62,19 @@ const (
 	auditObjectType      = "events"
 	actionScopeViolation = auditObjectType + ".scope_violation"
 )
+
+// sizeAsReported is the provider member under which a resolved event records
+// the value each replaced size member arrived with. The pipeline owns it: an
+// item that brings one of its own and is resolved carries the pipeline's value
+// instead.
+const sizeAsReported = "size_as_reported"
+
+// sizeNamesKey is one (cloud, resource_type) pair whose size names a batch has
+// loaded.
+type sizeNamesKey struct {
+	cloud        string
+	resourceType string
+}
 
 // Scope is the platform and cloud an ingest credential may report for. A nil
 // *Scope skips the check, which is how reconciliation ingests events for every
@@ -156,9 +170,14 @@ func (p *Pipeline) Ingest(ctx context.Context, tx pgx.Tx, items []json.RawMessag
 		refusedCloud = scope.Cloud
 	}
 
+	// The size names of every (cloud, resource_type) pair the batch met, loaded
+	// once per pair: a batch is one cloud's events as a rule, so most batches
+	// send one query.
+	names := map[sizeNamesKey][]sqlcgen.ListSizeNamesRow{}
+
 	screened := make([]event.Event, 0, len(items))
 	for i, raw := range items {
-		e, reason, unvalidated, err := p.screen(ctx, q, raw, scope)
+		e, reason, unvalidated, err := p.screen(ctx, q, raw, scope, names)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -257,14 +276,21 @@ type unvalidatedSize struct {
 }
 
 // screen runs the checks one item passes before it is stored: decode and
-// validate, scope, size. It returns the event the item carries, the reason it
-// was refused, which is empty for an item that survives, and whether its size
-// was taken without a schema validating it.
+// validate, scope, size. Between the scope and the size it resolves the size
+// names, so what the schema validates is the size that is stored and folded.
+// It returns the event the item carries, the reason it was refused, which is
+// empty for an item that survives, and whether its size was taken without a
+// schema validating it.
 //
 // Refusing an item is not an error. What the refusal leaves behind, a
 // dead-letter row or an audit row, is written here, and the error return is for
-// what takes the whole batch down.
-func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawMessage, scope *Scope) (event.Event, string, bool, error) {
+// what takes the whole batch down. A refused item is dead-lettered as it
+// arrived, not as it was resolved.
+//
+// names caches the size names of the batch per (cloud, resource_type).
+func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawMessage, scope *Scope,
+	names map[sizeNamesKey][]sqlcgen.ListSizeNamesRow,
+) (event.Event, string, bool, error) {
 	var e event.Event
 	if carriesNUL(raw) {
 		// The item never reaches the decoder: a NUL is refused here rather than
@@ -294,6 +320,9 @@ func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawM
 	if e.Payload.Size == nil {
 		return e, "", false, nil
 	}
+	if err := resolveSizeNames(ctx, q, names, &e); err != nil {
+		return e, "", false, err
+	}
 	reason, unvalidated, err := p.checkSize(ctx, q, e)
 	if err != nil {
 		return e, "", false, err
@@ -302,6 +331,51 @@ func (p *Pipeline) screen(ctx context.Context, q *sqlcgen.Queries, raw json.RawM
 		return e, "", unvalidated, nil
 	}
 	return e, reason, false, deadLetter(ctx, q, reason, raw)
+}
+
+// resolveSizeNames puts the stored name in place of every size member whose
+// value a sync stored a name for, and records under provider.size_as_reported
+// the value each replaced member arrived with. The rows of the event's (cloud,
+// resource_type) are read once per batch and kept in names.
+//
+// The rows alone decide, whatever platform or source the event names. A member
+// that is absent, is not a string, or matches no row stays as it is, and so
+// does every member of an event whose pair has no rows. A member is replaced at
+// most once, so a name that is also another row's value is not resolved again.
+func resolveSizeNames(ctx context.Context, q *sqlcgen.Queries,
+	names map[sizeNamesKey][]sqlcgen.ListSizeNamesRow, e *event.Event,
+) error {
+	key := sizeNamesKey{cloud: e.Cloud, resourceType: e.ResourceType}
+	rows, loaded := names[key]
+	if !loaded {
+		var err error
+		rows, err = q.ListSizeNames(ctx, sqlcgen.ListSizeNamesParams{
+			Cloud: e.Cloud, ResourceType: e.ResourceType,
+		})
+		if err != nil {
+			return fmt.Errorf("loading the size names of (%s, %s): %w", e.Cloud, e.ResourceType, err)
+		}
+		names[key] = rows
+	}
+
+	reported := map[string]any{}
+	for _, row := range rows {
+		if _, replaced := reported[row.Member]; replaced {
+			continue
+		}
+		if value, ok := e.Payload.Size[row.Member].(string); ok && value == row.Value {
+			reported[row.Member] = value
+			e.Payload.Size[row.Member] = row.Name
+		}
+	}
+	if len(reported) == 0 {
+		return nil
+	}
+	if e.Payload.Provider == nil {
+		e.Payload.Provider = map[string]any{}
+	}
+	e.Payload.Provider[sizeAsReported] = reported
+	return nil
 }
 
 // checkSize validates the event's size object against the schema registered for
