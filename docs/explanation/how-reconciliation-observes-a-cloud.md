@@ -84,15 +84,16 @@ cloud.
 The run establishes that against the cloud, before it observes anything: it asks
 nova for one server across every project, and a cloud that refuses that request
 ends the run with an error naming the clouds.yaml entry. Not one listing
-follows. This is not a formality: only nova and cinder answer a lesser account
-with a 403, which the run would report as an enumeration error for that one
-resource type. Neutron, glance and octavia have no `all_tenants` flag at all,
-so they narrow the listing to the caller's own project and answer `200 OK`. A
-narrowed listing is a complete listing as far as the framework can tell, so
-every resource of every other project would be a projection row the run did not
-name, and the missed-delete pass would book a delete for each one. That
-correction is permanent: the diff skips a row it already holds as deleted, so no
-later run with a repaired account undoes it.
+follows. This is not a formality: only nova answers a lesser account with a 403,
+which the run would report as an enumeration error for that one resource type.
+Cinder accepts `all_tenants` and ignores it for an account that is not admin,
+and neutron, glance and octavia have no such flag at all, so all four narrow the
+listing to the caller's own project and answer `200 OK`. A narrowed listing is a
+complete listing as far as the framework can tell, so every resource of every
+other project would be a projection row the run did not name, and the
+missed-delete pass would book a delete for each one. That correction is
+permanent: the diff skips a row it already holds as deleted, so no later run
+with a repaired account undoes it.
 
 Nothing configures this, and nothing can. `policy.yaml` is a per-deployment
 file, so a cloud that resolves `context_is_admin` to a role of its own name
@@ -100,7 +101,7 @@ needs no setting here: the cloud answers an account that holds that role and
 refuses one that does not, whatever it is called. A setting naming the role
 would establish nothing either way. It would only say which name to compare
 against, so naming a role the token already carries would pass the check while
-the three silent listings still narrowed.
+the four silent listings still narrowed.
 
 Losing the reach is not a hypothetical. It is what a credential rotation that
 recreates an application credential without its role assignment leaves behind,

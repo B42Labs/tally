@@ -257,12 +257,13 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 }
 
 // probeAdminScope sends the one listing a cloud refuses a lesser account
-// outright, before any of the three that would narrow silently.
+// outright, before any of the four that would narrow silently.
 //
-// Only two of the five listings say so themselves: nova and cinder answer an
-// account without the reach with a 403 on all_tenants. Floating IP addresses,
-// images and load balancers carry no such flag — neutron, glance and octavia
-// narrow the listing to the caller's own project and answer 200. That answer is
+// Only one of the five listings says so itself: nova answers an account without
+// the reach with a 403 on all_tenants. Cinder takes the flag and ignores it for
+// an account that is not admin, and floating IP addresses, images and load
+// balancers carry no such flag — cinder, neutron, glance and octavia narrow the
+// listing to the caller's own project and answer 200. That answer is
 // indistinguishable from a complete one, so the missed-delete pass books a
 // delete correction for every projection row of every other project, the
 // endpoint reports a completed run, and no later run with a restored account
@@ -274,7 +275,7 @@ func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since
 // here: whatever the role is called, an account that holds it is answered and
 // one that does not is refused. A name in adapter_config could establish
 // neither — it would only say which name to compare against, so a name that
-// happens to be in the token would pass the check while the three silent
+// happens to be in the token would pass the check while the four silent
 // listings still narrowed, and the run would wipe every other project's rows
 // with nothing to say it had.
 func probeAdminScope(ctx context.Context, provider *gophercloud.ProviderClient,
