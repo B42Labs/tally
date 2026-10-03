@@ -65,7 +65,8 @@ SIM_IMAGES := tally-openstack-collector tally-openstack-simulator
 
 # The simulator stack, deploy/compose/compose.yaml: a broker, the collector, and
 # the simulator, run beside the dev cluster rather than in it. The ten SIM_
-# values below are what `simulator-up` writes into the .env file compose reads.
+# values below are what `simulator-up` writes into the .env file compose reads,
+# beside the kind node's address on the kind network.
 # A factor of 744 puts a 31-day month on the bus in an hour.
 SIM_CLOUD ?= os-sim
 SIM_SEED ?= 1
@@ -163,6 +164,15 @@ define kind_load
 	docker save --platform "$$platform" -o "$$dir/image.tar" "$(1)" && \
 	kind load image-archive "$$dir/image.tar" --name '$(CLUSTER_NAME)' || status=$$?; \
 	rm -rf "$$dir"; [ "$$status" -eq 0 ]
+endef
+
+# kind_node_ip sets node_ip to the kind node's address on the kind network, and
+# ends the shell with an error while the node has none. A missing node fails
+# docker inspect. A stopped one keeps its entry for the network without an
+# address, which Docker prints as nothing or as `invalid IP` by version, so the
+# address is read off a running node alone.
+define kind_node_ip
+	node_ip="$$(docker inspect -f '{{if .State.Running}}{{.NetworkSettings.Networks.kind.IPAddress}}{{end}}' '$(CLUSTER_NAME)-control-plane' 2>/dev/null)" && [ -n "$$node_ip" ] || { echo 'ERROR: the kind node $(CLUSTER_NAME)-control-plane has no address on the kind network; make up creates the cluster' >&2; exit 1; }
 endef
 
 # prod_context_guard is the first recipe line of every prod target. It stops
@@ -544,9 +554,11 @@ down:
 dev:
 	tilt up
 
-# The stack needs a dev cluster from `make up`. Nothing here creates one, and
-# the credential step below is where a missing one fails, with the admin CLI's
-# connection error.
+# The stack needs a dev cluster from `make up`. Nothing here creates one, and a
+# missing one fails at the kind_node_ip guard below, which asks the node for its
+# address on the kind network. That address goes into .env for the compose
+# services, and it is read on every run for the reason the ingest credential is
+# issued fresh.
 #
 # That credential is issued fresh on every run because the cluster may have been
 # recreated since the last one, and a new database knows none of the tokens the
@@ -566,11 +578,13 @@ dev:
 simulator-up:
 	@[ -n '$(SIM_PERIOD)' ] || { echo 'ERROR: set SIM_PERIOD to the past month to simulate, e.g. make simulator-up SIM_PERIOD=2026-07' >&2; exit 1; }
 	@case '$(SIM_REGISTER_PROJECTS)' in true|false) ;; *) echo 'ERROR: SIM_REGISTER_PROJECTS must be true or false' >&2; exit 1;; esac
+	@$(call kind_node_ip)
 	$(MAKE) images IMAGES='$(SIM_IMAGES)'
 	@echo '==> writing the dev CA to tally-ca.crt'
 	$(MAKE) -s ca > tally-ca.crt
 	@echo '==> issuing an ingest credential for $(SIM_CLOUD)'
-	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-ingest-credential --platform openstack --cloud '$(SIM_CLOUD)' --description 'openstack simulator')"; \
+	@$(call kind_node_ip); \
+	token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-ingest-credential --platform openstack --cloud '$(SIM_CLOUD)' --description 'openstack simulator')"; \
 	api_token=''; \
 	if [ '$(SIM_REGISTER_PROJECTS)' = true ]; then \
 		echo '==> issuing an admin api token for the project registry'; \
@@ -578,8 +592,8 @@ simulator-up:
 	fi; \
 	rm -f deploy/compose/.env; \
 	umask 077; \
-	printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_SIM_FAULTS=%s\nTALLY_SIM_REGISTER_PROJECTS=%s\nTALLY_SIM_GARDEN_CLOUD=%s\nTALLY_OSC_TOKEN=%s\nTALLY_SIM_API_TOKEN=%s\nTALLY_SIM_OTLP_USER=%s\nTALLY_SIM_OTLP_PASSWORD=%s\nTALLY_SIM_METRICS_INTERVAL=%s\n' \
-		'$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' '$(SIM_FAULTS)' '$(SIM_REGISTER_PROJECTS)' '$(SIM_GARDEN_CLOUD)' "$$token" "$$api_token" '$(SIM_OTLP_USER)' '$(SIM_OTLP_PASSWORD)' '$(SIM_METRICS_INTERVAL)' > deploy/compose/.env
+	printf 'TALLY_SIM_CLOUD=%s\nTALLY_SIM_PERIOD=%s\nTALLY_SIM_SEED=%s\nTALLY_SIM_FACTOR=%s\nTALLY_SIM_FAULTS=%s\nTALLY_SIM_REGISTER_PROJECTS=%s\nTALLY_SIM_GARDEN_CLOUD=%s\nTALLY_OSC_TOKEN=%s\nTALLY_SIM_API_TOKEN=%s\nTALLY_SIM_OTLP_USER=%s\nTALLY_SIM_OTLP_PASSWORD=%s\nTALLY_SIM_METRICS_INTERVAL=%s\nTALLY_KIND_NODE_IP=%s\n' \
+		'$(SIM_CLOUD)' '$(SIM_PERIOD)' '$(SIM_SEED)' '$(SIM_FACTOR)' '$(SIM_FAULTS)' '$(SIM_REGISTER_PROJECTS)' '$(SIM_GARDEN_CLOUD)' "$$token" "$$api_token" '$(SIM_OTLP_USER)' '$(SIM_OTLP_PASSWORD)' '$(SIM_METRICS_INTERVAL)' "$$node_ip" > deploy/compose/.env
 	$(COMPOSE) up -d
 	@echo
 	@echo 'Simulator stack is up:'

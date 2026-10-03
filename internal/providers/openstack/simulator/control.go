@@ -164,13 +164,14 @@ func (h *holdback) held() int {
 // each under the timestamp it always carried. What keeps it from answering
 // anybody is where it is bound: TALLY_SIM_HTTP_ADDR is loopback unless a
 // deployment says otherwise, and the compose stack publishes its port on
-// 127.0.0.1. Within that reach the worst a caller does is make somebody's demo
-// run at a different speed, or end its hold early. What a page in a browser
-// could send there unasked is refused a step earlier: a request a page makes
-// carries Origin however the page sent it, and one that carries it answers 403
-// on both routes that change something, without reaching the clock or the hold.
-// Beyond that a release takes a JSON body or none, and a form-encoded one
-// answers 415.
+// 127.0.0.1 and puts the container on the kind network, where every pod of a
+// kind cluster on the machine reaches it. Within that reach the worst a caller
+// does is make somebody's demo run at a different speed, or end its hold early.
+// What a page in a browser could send there unasked is refused a step earlier:
+// a request a page makes carries Origin however the page sent it, and one that
+// carries it answers 403 on both routes that change something, without reaching
+// the clock or the hold. Beyond that a release takes a JSON body or none, and a
+// form-encoded one answers 415.
 //
 // A nil release is a run that holds nothing back, and every request to /release
 // is refused as one.
