@@ -404,6 +404,24 @@ SELECT pg_try_advisory_lock(hashtextextended('sync:' || $1::text, 0));
 -- name: UnlockSync :exec
 SELECT pg_advisory_unlock(hashtextextended('sync:' || $1::text, 0));
 
+-- The size names of one cloud. A sync replaces them whole, the delete and the
+-- inserts in one transaction, so the ingest pipeline reads either the list of
+-- the last run or the one before it and never a mix of the two.
+-- name: DeleteSizeNames :exec
+DELETE FROM size_names WHERE cloud = $1;
+
+-- name: InsertSizeName :exec
+INSERT INTO size_names (cloud, resource_type, member, value, name)
+VALUES ($1, $2, $3, $4, $5);
+
+-- What the ingest pipeline resolves an event's size against: every name stored
+-- for its cloud and resource type.
+-- name: ListSizeNames :many
+SELECT member, value, name
+FROM size_names
+WHERE cloud = $1 AND resource_type = $2
+ORDER BY member, value;
+
 -- The fleet the projection holds, grouped the way tally_current_resources is
 -- labeled. The gauge is derived from this count rather than from the events as
 -- they are folded, so it cannot drift from the rows the API serves. Deleted

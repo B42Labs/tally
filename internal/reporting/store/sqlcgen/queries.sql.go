@@ -433,6 +433,18 @@ func (q *Queries) CreateIngestCredential(ctx context.Context, arg CreateIngestCr
 	return id, err
 }
 
+const deleteSizeNames = `-- name: DeleteSizeNames :exec
+DELETE FROM size_names WHERE cloud = $1
+`
+
+// The size names of one cloud. A sync replaces them whole, the delete and the
+// inserts in one transaction, so the ingest pipeline reads either the list of
+// the last run or the one before it and never a mix of the two.
+func (q *Queries) DeleteSizeNames(ctx context.Context, cloud string) error {
+	_, err := q.db.Exec(ctx, deleteSizeNames, cloud)
+	return err
+}
+
 const getAPITokenByTokenHash = `-- name: GetAPITokenByTokenHash :one
 SELECT id, token_hash, role, project_ids, description, created_at, revoked_at
 FROM api_tokens
@@ -926,6 +938,30 @@ type InsertRejectedEventParams struct {
 
 func (q *Queries) InsertRejectedEvent(ctx context.Context, arg InsertRejectedEventParams) error {
 	_, err := q.db.Exec(ctx, insertRejectedEvent, arg.Reason, arg.Raw)
+	return err
+}
+
+const insertSizeName = `-- name: InsertSizeName :exec
+INSERT INTO size_names (cloud, resource_type, member, value, name)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertSizeNameParams struct {
+	Cloud        string
+	ResourceType string
+	Member       string
+	Value        string
+	Name         string
+}
+
+func (q *Queries) InsertSizeName(ctx context.Context, arg InsertSizeNameParams) error {
+	_, err := q.db.Exec(ctx, insertSizeName,
+		arg.Cloud,
+		arg.ResourceType,
+		arg.Member,
+		arg.Value,
+		arg.Name,
+	)
 	return err
 }
 
@@ -1672,6 +1708,46 @@ func (q *Queries) ListResourceTypes(ctx context.Context) ([]ResourceType, error)
 			&i.SizeSchema,
 			&i.UpdatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSizeNames = `-- name: ListSizeNames :many
+SELECT member, value, name
+FROM size_names
+WHERE cloud = $1 AND resource_type = $2
+ORDER BY member, value
+`
+
+type ListSizeNamesParams struct {
+	Cloud        string
+	ResourceType string
+}
+
+type ListSizeNamesRow struct {
+	Member string
+	Value  string
+	Name   string
+}
+
+// What the ingest pipeline resolves an event's size against: every name stored
+// for its cloud and resource type.
+func (q *Queries) ListSizeNames(ctx context.Context, arg ListSizeNamesParams) ([]ListSizeNamesRow, error) {
+	rows, err := q.db.Query(ctx, listSizeNames, arg.Cloud, arg.ResourceType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSizeNamesRow
+	for rows.Next() {
+		var i ListSizeNamesRow
+		if err := rows.Scan(&i.Member, &i.Value, &i.Name); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

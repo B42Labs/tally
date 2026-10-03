@@ -104,6 +104,14 @@ type ResourceType struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type SizeName struct {
+	Cloud        string
+	ResourceType string
+	Member       string
+	Value        string
+	Name         string
+}
+
 type SyncRun struct {
 	ID          uuid.UUID
 	Cloud       string
