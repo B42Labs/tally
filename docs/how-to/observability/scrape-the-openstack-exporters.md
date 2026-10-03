@@ -237,6 +237,7 @@ job scrapes. What the pull path collects and what it cannot is in
 2. Four jobs are listed. `reporting-api` and `otel-collector` are up.
    `ceilometer` is down with an unresolved-host error, because its target
    exists in no dev cluster. `openstack-db-exporter` is down between simulator
-   runs, when nothing listens on `host.docker.internal:8091`, and up while
-   `make simulator-up` publishes a month. Neither is a fault to chase on a dev
-   cluster: both are the dev state as it is designed.
+   runs, when no container answers to `tally-openstack-simulator`, with the
+   unresolved-host error `ceilometer` shows, and up while `make simulator-up`
+   publishes a month. Neither is a fault to chase on a dev cluster: both are
+   the dev state as it is designed.
