@@ -18,6 +18,17 @@
 // maxTickMonths all the same: nothing bounds how old the earliest row is, and a
 // walk of thousands of months is a tick that never ends.
 //
+// The walk is bounded from below as well, at the first month a stored pricing
+// model prices (the author's decision of 2026-10-03). The bound is the earliest
+// valid_from, read from the engine database like the rest of the horizon. A
+// month that begins before it is one runs.Execute refuses before a run row
+// exists, so no failed run ever counts towards the backoff and the month would
+// fail every hourly tick for as long as its row stands. Such a month is left
+// out, nothing is printed about it, and it is billed once a model valid at its
+// first instant is imported. A database with no model bounds nothing: the first
+// month that falls due fails there, which is the signal of a deployment that
+// has not imported a price list.
+//
 // The two steps of the state machine are made against the status a month is
 // stored with, so a month that has just ended moves into grace on one tick and
 // is metered on a later one. At an hourly tick that costs an hour.
@@ -144,12 +155,13 @@ type Month struct {
 // testable; the CLI passes time.Now().UTC().
 //
 // A month whose step fails is reported in its own MonthReport.Err and the walk
-// goes on with the months after it: one month nothing prices must not keep the
-// rest from being billed. The error Tick returns joins those failures, so the
-// exit status of the CronJob still reports them. A canceled context ends the
-// walk where it is and comes back as context.Canceled.
+// goes on with the months after it: one month whose history no later event
+// repairs must not keep the rest from being billed. The error Tick returns joins
+// those failures, so the exit status of the CronJob still reports them. A
+// canceled context ends the walk where it is and comes back as context.Canceled.
 func Tick(ctx context.Context, engine *pgxpool.Pool, now time.Time, opts Options) (Report, error) {
-	first, err := sqlcgen.New(engine).EarliestBillingPeriod(ctx)
+	q := sqlcgen.New(engine)
+	first, err := q.EarliestBillingPeriod(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reading the earliest billing period: %w", err)
 	}
@@ -159,12 +171,22 @@ func Tick(ctx context.Context, engine *pgxpool.Pool, now time.Time, opts Options
 	if first.Valid {
 		earliest = &first.Time
 	}
+	// The same holds for the pricing models: a NULL is a deployment that has not
+	// imported a price list, and bounds nothing.
+	firstModel, err := q.EarliestPricingValidFrom(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading the earliest pricing model: %w", err)
+	}
+	var priced *time.Time
+	if firstModel.Valid {
+		priced = &firstModel.Time
+	}
 
 	var (
 		report   Report
 		failures []error
 	)
-	walk, skipped := monthsDue(earliest, now)
+	walk, skipped := monthsDue(earliest, priced, now)
 	for i, due := range walk {
 		// A tick that was told to stop stops between months rather than in the
 		// middle of one: the month it is on has already written what it wrote.
@@ -343,11 +365,12 @@ func bill(ctx context.Context, engine *pgxpool.Pool, due Month, now time.Time, o
 
 // deferMetering reports whether this tick leaves a month whose runs keep failing
 // alone, and writes the wait into the month's report where it does. A month
-// nothing prices, or one whose history carries an ordering no later event
-// repairs, fails every run it is given, and metering it hourly for as long as
-// the deployment stands costs a full pass over the reporting database and
-// another stats blob every hour. The report is what turns such a month from a
-// silently churning one into one an operator sees.
+// whose history carries an ordering no later event repairs fails every run it
+// is given, and metering it hourly for as long as the deployment stands costs a
+// full pass over the reporting database and another stats blob every hour. The
+// report is what turns such a month from a silently churning one into one an
+// operator sees. A month nothing prices is not one of them: runs.Execute
+// refuses it before a run row exists, so it leaves no failed run to count.
 func deferMetering(
 	ctx context.Context,
 	q *sqlcgen.Queries,
@@ -406,7 +429,16 @@ func retryDelay(failures int) time.Duration {
 // second return is how many months that moving up dropped: no tick ever reaches
 // them again, so a walk that says nothing about them is one an operator can
 // only find by reading tally-engine periods against what has been billed.
-func monthsDue(earliest *time.Time, now time.Time) (due []Month, skipped int) {
+//
+// priced is the earliest valid_from of the stored pricing models, nil where no
+// model is stored, and a start before the first month it prices is moved up to
+// that month (the author's decision of 2026-10-03). runs.Execute refuses such a
+// month before a run row exists, so no backoff would ever hold it back, and it
+// is billed once a model valid at its first instant is imported. A nil priced
+// bounds nothing. The bound is applied before the cap, so the months the cap
+// drops are ones a model prices: the skipped count never names a month that
+// tally-engine run --period would refuse.
+func monthsDue(earliest, priced *time.Time, now time.Time) (due []Month, skipped int) {
 	// period_to is the first instant of the next month, so an instant exactly on
 	// a month boundary belongs to the month starting there, and the month before
 	// it is the last one that has ended.
@@ -414,6 +446,11 @@ func monthsDue(earliest *time.Time, now time.Time) (due []Month, skipped int) {
 	start := end
 	if earliest != nil {
 		start = monthStart(*earliest)
+	}
+	if priced != nil {
+		if first := firstPricedMonth(*priced); start.Before(first) {
+			start = first
+		}
 	}
 	// The walk is the most recent maxTickMonths months of that range and nothing
 	// older: a period row from a mistyped --period is centuries back, and the
@@ -427,6 +464,18 @@ func monthsDue(earliest *time.Time, now time.Time) (due []Month, skipped int) {
 		due = append(due, Month{From: from, To: from.AddDate(0, 1, 0)})
 	}
 	return due, skipped
+}
+
+// firstPricedMonth is the first month start at or after validFrom, in UTC: the
+// first billing month a model valid from that instant prices. A model is
+// selected by valid_from <= period_from (PricingModelForPeriod), so one valid
+// from the 15th prices the month after it first.
+func firstPricedMonth(validFrom time.Time) time.Time {
+	start := monthStart(validFrom)
+	if start.Equal(validFrom) {
+		return start
+	}
+	return start.AddDate(0, 1, 0)
 }
 
 // monthsBetween is how many whole months lie between two month starts, from

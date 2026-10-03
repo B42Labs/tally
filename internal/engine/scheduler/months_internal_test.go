@@ -19,6 +19,12 @@ func earliestAt(t time.Time) *time.Time {
 	return &t
 }
 
+// pricedAt is the earliest valid_from as monthsDue takes it: a pointer, because
+// a database that has not imported a pricing model has none.
+func pricedAt(t time.Time) *time.Time {
+	return &t
+}
+
 // monthsBack is the count months ending at last, oldest first: what the walk of
 // a tick that is capped covers.
 func monthsBack(last time.Time, count int) []string {
@@ -31,13 +37,14 @@ func monthsBack(last time.Time, count int) []string {
 
 // TestMonthsDue pins which months one tick walks. The walk decides what the
 // tick touches at all, and it is the one part of the state machine that needs
-// no database: both of its inputs are arguments.
+// no database: all three of its inputs are arguments.
 func TestMonthsDue(t *testing.T) {
 	// +02:00, the zone a European connection reads a timestamp back in.
 	cest := time.FixedZone("CEST", 2*3600)
 
 	for name, tc := range map[string]struct {
 		earliest    *time.Time
+		priced      *time.Time
 		now         time.Time
 		want        []string
 		wantSkipped int
@@ -102,9 +109,83 @@ func TestMonthsDue(t *testing.T) {
 			now:      at(2026, time.April, 15, 10, 30),
 			want:     monthsBack(at(2026, time.March, 1, 0, 0), maxTickMonths),
 		},
+		// The reporter's deployment: the first price list starts in the running
+		// month, and a first tick that walked the month before now would fail on
+		// it every hour.
+		"a first model in the running month leaves a first tick nothing to walk": {
+			earliest: nil,
+			priced:   pricedAt(at(2026, time.April, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     nil,
+		},
+		"a first model from the month before now has a first tick walk it": {
+			earliest: nil,
+			priced:   pricedAt(at(2026, time.March, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-03"},
+		},
+		// The bound is a lower bound and nothing else: a first tick does not walk
+		// back to the month the oldest model starts in.
+		"an old first model does not walk a first tick back to it": {
+			earliest: nil,
+			priced:   pricedAt(at(2025, time.January, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-03"},
+		},
+		"stored months before the first model leave the walk": {
+			earliest: earliestAt(at(2026, time.January, 1, 0, 0)),
+			priced:   pricedAt(at(2026, time.March, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-03"},
+		},
+		"a stored month before a model of the running month walks nothing": {
+			earliest: earliestAt(at(2026, time.March, 1, 0, 0)),
+			priced:   pricedAt(at(2026, time.April, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     nil,
+		},
+		// A model is selected by valid_from <= period_from, so the 1st of March
+		// is the first period start one valid from the 15th of February prices.
+		"a model valid from inside a month prices the month after it first": {
+			earliest: earliestAt(at(2026, time.January, 1, 0, 0)),
+			priced:   pricedAt(at(2026, time.February, 15, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-03"},
+		},
+		// 2026-02-28T22:30Z read back as 2026-03-01T00:30+02:00. The zone would
+		// anchor the bound on March 00:00 in CEST, which is still February in
+		// UTC, and move it on to April.
+		"a model valid from in another zone is bounded on its utc instant": {
+			earliest: earliestAt(at(2026, time.January, 1, 0, 0)),
+			priced:   pricedAt(time.Date(2026, time.March, 1, 0, 30, 0, 0, cest)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-03"},
+		},
+		"a model older than every stored period bounds nothing": {
+			earliest: earliestAt(at(2026, time.January, 1, 0, 0)),
+			priced:   pricedAt(at(2025, time.June, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-01", "2026-02", "2026-03"},
+		},
+		// The bound comes before the cap: the months no model prices are not
+		// counted as skipped, because tally-engine run --period refuses them.
+		"an ancient earliest before the first model is bounded before it is capped": {
+			earliest: earliestAt(at(1, time.January, 1, 0, 0)),
+			priced:   pricedAt(at(2026, time.February, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     []string{"2026-02", "2026-03"},
+		},
+		"the cap counts only the months a model prices": {
+			earliest: earliestAt(at(1, time.January, 1, 0, 0)),
+			priced:   pricedAt(at(2000, time.January, 1, 0, 0)),
+			now:      at(2026, time.April, 15, 10, 30),
+			want:     monthsBack(at(2026, time.March, 1, 0, 0), maxTickMonths),
+			// 2000-01 through 2023-03.
+			wantSkipped: 279,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			due, skipped := monthsDue(tc.earliest, tc.now)
+			due, skipped := monthsDue(tc.earliest, tc.priced, tc.now)
 
 			if skipped != tc.wantSkipped {
 				t.Errorf("monthsDue() skipped %d months, want %d", skipped, tc.wantSkipped)
