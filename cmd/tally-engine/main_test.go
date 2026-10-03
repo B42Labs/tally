@@ -2030,6 +2030,70 @@ func TestTickCLI(t *testing.T) {
 	})
 }
 
+// TestTickCLIBeforeTheFirstPricingModel drives the tick over a deployment whose
+// first price list starts in the running month. Every month before it is priced
+// by no model, and a tick that walked one would fail on it every hour.
+func TestTickCLIBeforeTheFirstPricingModel(t *testing.T) {
+	// newPipelineFixture imports a model valid from 36 months back, which is
+	// exactly what this case must not have.
+	f := pipelineFixture{engine: storetest.NewDB(t), reporting: reportingtest.NewDB(t)}
+	usePipeline(t, f.engine.URL, f.reporting.URL)
+
+	current, _ := billingMonth(0)
+	path := writeModel(t, "first.yaml", modelYAML("first", current.Format(time.RFC3339), "0.02"))
+	if _, stderr, err := runCLI(t, "pricing", "import", path); err != nil {
+		t.Fatalf("importing the first pricing model: %v (stderr %q)", err, stderr)
+	}
+
+	// The first tick of an empty table would walk the month before now, which
+	// the only model does not price.
+	stdout, stderr, err := runCLI(t, "tick")
+	if err != nil {
+		t.Fatalf("tick error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "nothing due\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	stdout, stderr, err = runCLI(t, "periods", "list")
+	if err != nil {
+		t.Fatalf("periods list error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "no billing periods\n"; stdout != want {
+		t.Errorf("periods list stdout = %q, want %q: the tick wrote a period row", stdout, want)
+	}
+
+	// A stored month before the first model, which an earlier tick or a run
+	// --period of that month leaves behind. Walked, it fails with no pricing
+	// model is valid for this period on every tick.
+	due, dueTo := billingMonth(-2)
+	f.seedPeriod(t, due, dueTo, "grace")
+	previous, _ := billingMonth(-1)
+
+	stdout, stderr, err = runCLI(t, "tick")
+	if err != nil {
+		t.Fatalf("the second tick error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if want := "nothing due\n"; stdout != want {
+		t.Errorf("the second tick stdout = %q, want %q", stdout, want)
+	}
+
+	// A model valid at the first instant of the stored month moves the bound
+	// back, and the month re-enters the walk at the next tick.
+	path = writeModel(t, "earlier.yaml", modelYAML("earlier", due.Format(time.RFC3339), "0.02"))
+	if _, stderr, err := runCLI(t, "pricing", "import", path); err != nil {
+		t.Fatalf("importing the earlier pricing model: %v (stderr %q)", err, stderr)
+	}
+	stdout, stderr, err = runCLI(t, "tick")
+	if err != nil {
+		t.Fatalf("the third tick error = %v, want nil (stderr %q)", err, stderr)
+	}
+	want := fmt.Sprintf("%s run %s completed\n%s open -> grace\n",
+		period.Format(due), f.completedRun(t, due), period.Format(previous))
+	if stdout != want {
+		t.Errorf("the third tick stdout = %q, want %q", stdout, want)
+	}
+}
+
 // modelVersion is the version of the pricing model the run and tick cases are
 // rated with, which they print beside the run.
 const modelVersion = "v1"

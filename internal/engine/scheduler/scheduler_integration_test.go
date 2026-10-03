@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/b42labs/tally/internal/engine/period"
 	"github.com/b42labs/tally/internal/engine/runs"
@@ -60,8 +62,9 @@ func newFixture(t *testing.T) fixture {
 func (f fixture) reset(t *testing.T) {
 	t.Helper()
 
-	if _, err := f.db.Store.Pool().Exec(t.Context(), `TRUNCATE billing_periods, runs CASCADE`); err != nil {
-		t.Fatalf("emptying the billing periods and runs: %v", err)
+	if _, err := f.db.Store.Pool().Exec(t.Context(),
+		`TRUNCATE billing_periods, runs, pricing_models CASCADE`); err != nil {
+		t.Fatalf("emptying the billing periods, runs and pricing models: %v", err)
 	}
 }
 
@@ -94,6 +97,19 @@ func (f fixture) seedPeriod(t *testing.T, from, to time.Time, status string) {
 		from, to, status,
 	); err != nil {
 		t.Fatalf("seeding the %s period %s: %v", status, period.Format(from), err)
+	}
+}
+
+// seedModel stores a pricing model valid from validFrom. The tick reads the
+// earliest valid_from and never parses the document, so an empty one does.
+func (f fixture) seedModel(t *testing.T, version string, validFrom time.Time) {
+	t.Helper()
+
+	if _, err := f.db.Store.Pool().Exec(t.Context(),
+		`INSERT INTO pricing_models (version, valid_from, currency, document) VALUES ($1, $2, 'EUR', '{}')`,
+		version, validFrom,
+	); err != nil {
+		t.Fatalf("seeding the pricing model %s: %v", version, err)
 	}
 }
 
@@ -709,6 +725,136 @@ func TestTick(t *testing.T) {
 		}
 		if got := f.countRuns(t, marchFrom); got != 0 {
 			t.Errorf("2026-03 carries %d runs, want none inside its grace window", got)
+		}
+		if len(calls) != 0 {
+			t.Errorf("the executor was called for %v, want not at all", calls)
+		}
+	})
+
+	t.Run("walks no month before the first pricing model on an empty table", func(t *testing.T) {
+		f.reset(t)
+		// The first price list starts after March, so the month a first tick
+		// would walk is one nothing prices.
+		f.seedModel(t, "first", marchTo)
+		var calls []string
+
+		report, err := f.tick(t, afterGrace, scheduler.Options{
+			GraceHours: graceHours,
+			Execute:    f.recorder(t, &calls),
+		})
+		if err != nil {
+			t.Fatalf("Tick() error = %v, want nil", err)
+		}
+
+		if len(report) != 0 {
+			t.Errorf("Tick() walked %v, want nothing: no month before the first model is due", months(report))
+		}
+		if len(calls) != 0 {
+			t.Errorf("the executor was called for %v, want not at all", calls)
+		}
+		var periods int
+		if err := f.db.Store.Pool().QueryRow(t.Context(), `SELECT count(*) FROM billing_periods`).Scan(&periods); err != nil {
+			t.Fatalf("counting the billing periods: %v", err)
+		}
+		if periods != 0 {
+			t.Errorf("the tick left %d billing periods, want none", periods)
+		}
+	})
+
+	t.Run("leaves a stored month before the first pricing model alone", func(t *testing.T) {
+		f.reset(t)
+		// What an earlier tick or a tally-engine run --period of March leaves
+		// behind. runs.Execute refuses the month before it opens a run, so no
+		// failed run would ever hold it back and every tick would fail on it.
+		f.seedPeriod(t, marchFrom, marchTo, "grace")
+		f.seedModel(t, "first", marchTo)
+		var calls []string
+
+		report, err := f.tick(t, afterGrace, scheduler.Options{
+			GraceHours: graceHours,
+			Execute:    f.recorder(t, &calls),
+		})
+		if err != nil {
+			t.Fatalf("Tick() error = %v, want nil", err)
+		}
+
+		if len(report) != 0 {
+			t.Errorf("Tick() walked %v, want nothing", months(report))
+		}
+		if len(calls) != 0 {
+			t.Errorf("the executor was called for %v, want not at all", calls)
+		}
+		if got := f.periodStatus(t, marchFrom); got != "grace" {
+			t.Errorf("the period 2026-03 is %q, want it left in grace", got)
+		}
+		if got := f.countRuns(t, marchFrom); got != 0 {
+			t.Errorf("2026-03 carries %d runs, want none", got)
+		}
+	})
+
+	t.Run("meters a stored month once a model valid at its first instant is stored", func(t *testing.T) {
+		f.reset(t)
+		f.seedPeriod(t, marchFrom, marchTo, "grace")
+		f.seedModel(t, "first", marchTo)
+		var calls []string
+		execute := f.recorder(t, &calls)
+
+		if _, err := f.tick(t, afterGrace, scheduler.Options{GraceHours: graceHours, Execute: execute}); err != nil {
+			t.Fatalf("the first Tick() error = %v, want nil", err)
+		}
+		// The import that moves the bound back to March is all it takes: the
+		// month re-enters the walk at the next tick.
+		f.seedModel(t, "earlier", marchFrom)
+
+		report, err := f.tick(t, afterGrace, scheduler.Options{GraceHours: graceHours, Execute: execute})
+		if err != nil {
+			t.Fatalf("the second Tick() error = %v, want nil", err)
+		}
+
+		if !equal(calls, []string{"2026-03"}) {
+			t.Fatalf("the executor was called for %v, want [2026-03] exactly once", calls)
+		}
+		if got := months(report); !equal(got, []string{"2026-03"}) {
+			t.Fatalf("Tick() walked %v, want [2026-03]", got)
+		}
+		if report[0].RunID == uuid.Nil {
+			t.Fatal("RunID = none, want the run the tick had metered")
+		}
+		if got := f.runStatus(t, report[0].RunID); got != "completed" {
+			t.Errorf("the reported run is %q, want the completed run of the month", got)
+		}
+	})
+
+	t.Run("fails before it walks when the pricing models cannot be read", func(t *testing.T) {
+		f.reset(t)
+		pool := f.db.Store.Pool()
+		if _, err := pool.Exec(t.Context(), `ALTER TABLE pricing_models RENAME TO pricing_models_gone`); err != nil {
+			t.Fatalf("renaming the pricing models away: %v", err)
+		}
+		// The name is restored in a defer rather than a t.Cleanup: a cleanup runs
+		// after t.Context() is canceled, and the subtests after this one need the
+		// table back.
+		defer func() {
+			if _, err := pool.Exec(t.Context(), `ALTER TABLE pricing_models_gone RENAME TO pricing_models`); err != nil {
+				t.Fatalf("restoring the pricing models: %v", err)
+			}
+		}()
+		var calls []string
+
+		report, err := f.tick(t, afterGrace, scheduler.Options{
+			GraceHours: graceHours,
+			Execute:    f.recorder(t, &calls),
+		})
+
+		if report != nil {
+			t.Errorf("Tick() report = %v, want nil: nothing was walked", months(report))
+		}
+		if err == nil || !strings.Contains(err.Error(), "reading the earliest pricing model") {
+			t.Fatalf("Tick() error = %v, want it to name the earliest pricing model", err)
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+			t.Errorf("Tick() error = %v, want it to wrap the undefined_table error of the database", err)
 		}
 		if len(calls) != 0 {
 			t.Errorf("the executor was called for %v, want not at all", calls)
