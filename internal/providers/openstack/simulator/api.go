@@ -234,6 +234,7 @@ func NewCloudAPI(clock *Clock, oracle Oracle) (http.Handler, error) {
 
 	mux.HandleFunc("GET /compute/v2.1/servers/detail", api.authorized(api.serveServers))
 	mux.HandleFunc("GET /compute/v2.1/flavors/detail", api.authorized(serveFlavors))
+	mux.HandleFunc("GET /volume/v3/types", api.authorized(serveVolumeTypes))
 	mux.HandleFunc("GET /volume/v3/volumes/detail",
 		api.listing(typeVolume, "volumes", volumeDocument))
 	mux.HandleFunc("GET /network/v2.0/floatingips",
@@ -391,6 +392,18 @@ func serveFlavors(w http.ResponseWriter, _ *http.Request) {
 	}
 	documents = append(documents, flavorDocument(bootVolumeFlavor))
 	writeListing(w, "flavors", documents)
+}
+
+// serveVolumeTypes answers cinder's volume type listing: every type of the world
+// under its fixed id. A sync stores the names it reads here. The simulated
+// notifications carry the name already, so no event of a generated month is
+// resolved by them.
+func serveVolumeTypes(w http.ResponseWriter, _ *http.Request) {
+	documents := make([]map[string]any, 0, len(volumeTypes))
+	for _, name := range volumeTypes {
+		documents = append(documents, volumeTypeDocument(name))
+	}
+	writeListing(w, "volume_types", documents)
 }
 
 // effective is the instant a listing is answered at: where the virtual clock
@@ -553,6 +566,20 @@ func flavorDocument(held flavor) map[string]any {
 		"OS-FLV-DISABLED:disabled":   false,
 		"os-flavor-access:is_public": true,
 		"description":                nil,
+	}
+}
+
+// volumeTypeDocument is one volume type as cinder's listing reports it to an
+// admin: a public type without a description, a QoS spec or extra specs.
+func volumeTypeDocument(name string) map[string]any {
+	return map[string]any{
+		"id":                              volumeTypeIDs[name],
+		"name":                            name,
+		"description":                     nil,
+		"is_public":                       true,
+		"os-volume-type-access:is_public": true,
+		"qos_specs_id":                    nil,
+		"extra_specs":                     map[string]any{},
 	}
 }
 

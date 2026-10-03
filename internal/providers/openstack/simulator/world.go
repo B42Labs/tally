@@ -110,6 +110,16 @@ var runnerFlavors = []flavor{flavors[0], flavors[1]}
 // a month price both paths.
 var volumeTypes = []string{"ssd", "hdd", "standard"}
 
+// volumeTypeIDs are the ids cinder holds the volume types under. The fake API
+// lists every type under its id, which is what a sync stores the names of. The
+// ids are catalog constants like the flavor ids: a type outlives a billing
+// month, so they are not salted with the period or the cloud.
+var volumeTypeIDs = map[string]string{
+	"ssd":      "2f6d8b1a-4c3e-4f70-9a52-7e1c3b5d9f08",
+	"hdd":      "5a9e7c3b-6d1f-4b82-8c64-0f2e4a6c8b1d",
+	"standard": "b3c1e5f7-8a29-4d46-a7e0-1d3f5b7c9e2a",
+}
+
 // volumeSizesGB are the sizes a volume is created with, in gibibytes.
 var volumeSizesGB = []int{50, 100, 200}
 

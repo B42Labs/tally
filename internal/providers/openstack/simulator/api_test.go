@@ -32,6 +32,7 @@ const (
 	serversPath       = "/compute/v2.1/servers/detail"
 	flavorsPath       = "/compute/v2.1/flavors/detail"
 	volumesPath       = "/volume/v3/volumes/detail"
+	volumeTypesPath   = "/volume/v3/types"
 	floatingIPsPath   = "/network/v2.0/floatingips"
 	imagesPath        = "/image/v2/images"
 	loadBalancersPath = "/load-balancer/v2.0/lbaas/loadbalancers"
@@ -838,6 +839,47 @@ func TestFakeAPIPublishesTheFlavorCatalogOfTheWorld(t *testing.T) {
 		holdsMember(t, document, "ram", float64(held.memoryMB))
 		holdsMember(t, document, "disk", float64(held.rootGB))
 		holdsMember(t, document, "OS-FLV-EXT-DATA:ephemeral", float64(held.ephemeralGB))
+	}
+}
+
+func TestFakeAPIListsTheVolumeTypesOfTheWorld(t *testing.T) {
+	server, token := cloudServer(t, cloudDay(1))
+
+	status, body := askCloud(t, server, token, volumeTypesPath)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d (body %q)", volumeTypesPath, status, http.StatusOK, body)
+	}
+
+	var names []string
+	ids := map[string]bool{}
+	for _, document := range servedDocuments(t, body, "volume_types") {
+		name, _ := document["name"].(string)
+		id, _ := document["id"].(string)
+		names = append(names, name)
+		if id == "" || ids[id] {
+			t.Errorf("the type %s is listed under the id %q, want one of its own", name, id)
+		}
+		ids[id] = true
+		// The id is the one the world fixes, so a sync stores the same name for
+		// it whichever run of the simulator it reads.
+		holdsMember(t, document, "id", volumeTypeIDs[name])
+		holdsMember(t, document, "os-volume-type-access:is_public", true)
+	}
+	if want := []string{"ssd", "hdd", "standard"}; !slices.Equal(names, want) {
+		t.Errorf("the listing names the types %v, want %v", names, want)
+	}
+
+	// A caller that never authenticated is refused the way every listing refuses
+	// one.
+	status, body = askCloud(t, server, "", volumeTypesPath)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("GET %s without a token = %d, want %d (body %q)",
+			volumeTypesPath, status, http.StatusUnauthorized, body)
+	}
+	want := `{"error": {"code": 401, "title": "Unauthorized", ` +
+		`"message": "the token is not the one this run issued"}}`
+	if body != want {
+		t.Errorf("GET %s body = %q, want %q", volumeTypesPath, body, want)
 	}
 }
 
