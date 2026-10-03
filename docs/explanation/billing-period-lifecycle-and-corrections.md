@@ -29,6 +29,9 @@ It walks the months that have ended, moves a month that has just ended from open
 into grace, and has a month metered once its grace window has passed. The window
 is `TALLY_ENGINE_GRACE_HOURS`, 72 hours by default
 ([`internal/engine/scheduler`](https://github.com/B42Labs/tally/blob/main/internal/engine/scheduler/scheduler.go)).
+The walk never reaches a month that begins before the first pricing model is
+valid, and such a month is metered once a model valid at its first instant is
+imported.
 
 The window exists because the last events of a month do not all arrive inside
 it. A collector that was buffering to disk drains afterwards, and a

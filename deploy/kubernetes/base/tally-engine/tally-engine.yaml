@@ -6,8 +6,10 @@
 # On a fresh cluster the first tick past a period's grace window fails that month
 # with "no pricing model is valid for this period", and the Job's exit status
 # shows it. That is the intended signal: the period is due and nothing prices it.
-# `tally-engine pricing import` puts a catalog in, and the next hour runs the
-# month.
+# `tally-engine pricing import` puts a catalog in. One valid at the first
+# instant of that month has the next hour run it, and one that becomes valid
+# later takes the month out of the walk, so the tick reports nothing due until
+# the first month the catalog prices has ended.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
