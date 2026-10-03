@@ -127,12 +127,14 @@ listed to show that the shape holds across platforms.
 
 ## The tables
 
-The reporting database holds ten tables. `events` is the source of truth and
+The reporting database holds eleven tables. `events` is the source of truth and
 `rejected_events` its dead letter. `current_resources` is the projection folded
 from `events`. `resource_types` holds the size schemas, `projects` and
 `project_relations` the registry and the graph over it. `ingest_credentials` and
 `api_tokens` are the two credential stores, `audit_log` records every write, and
-`sync_runs` records each reconciliation run.
+`sync_runs` records each reconciliation run. `size_names` holds the names a
+reconciliation run read for the ids a size member carries, which the ingest
+pipeline puts in place of those ids.
 
 `events` is a TimescaleDB hypertable, partitioned by `timestamp` and compressed
 by a policy on chunks older than 90 days, segmented by `cloud` and

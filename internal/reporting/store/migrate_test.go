@@ -411,6 +411,71 @@ func TestMigrate(t *testing.T) {
 		}
 	})
 
+	t.Run("the size names table comes and goes with 0012", func(t *testing.T) {
+		named := db.NewSiblingDB(t, "migrate_size_names")
+		if _, err := store.Migrate(t.Context(), named); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), named, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+
+		if !tableExists(t, s, "size_names") {
+			t.Fatal("the size names table is missing after the chain")
+		}
+		// The key is what makes one cloud's name for a value unique, and its
+		// columns lead with the pair the ingest pipeline reads by.
+		want := []string{"cloud", "resource_type", "member", "value"}
+		if got := primaryKey(t, s, "size_names"); !slices.Equal(got, want) {
+			t.Errorf("primary key of size_names = %v, want %v", got, want)
+		}
+
+		rolledBack, err := store.MigrateDownTo(t.Context(), named, 11)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(11) error = %v, want nil", err)
+		}
+		if want := []int64{12}; !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(11) = %v, want %v", rolledBack, want)
+		}
+		if tableExists(t, s, "size_names") {
+			t.Error("the size names table survived the rollback to 11")
+		}
+
+		if _, err := store.Migrate(t.Context(), named); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if !tableExists(t, s, "size_names") {
+			t.Error("the size names table is missing after the repeated upgrade")
+		}
+	})
+
+	t.Run("a rollback repeats after one that dropped the size names by hand", func(t *testing.T) {
+		// A table an operator already dropped must not leave version 12 recorded
+		// as applied, which only an edit of goose_db_version would undo.
+		dropped := db.NewSiblingDB(t, "migrate_size_names_dropped")
+		if _, err := store.Migrate(t.Context(), dropped); err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		s, err := store.New(t.Context(), dropped, 1)
+		if err != nil {
+			t.Fatalf("New() error = %v, want nil", err)
+		}
+		defer s.Close()
+		if _, err := s.Pool().Exec(t.Context(), "DROP TABLE size_names"); err != nil {
+			t.Fatalf("dropping size_names the way an operator leaves it: %v", err)
+		}
+
+		rolledBack, err := store.MigrateDownTo(t.Context(), dropped, 11)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(11) error = %v, want the rollback to tolerate the table that is gone", err)
+		}
+		if want := []int64{12}; !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(11) = %v, want %v", rolledBack, want)
+		}
+	})
+
 	t.Run("the projection refuses a resource under a virtual literal", func(t *testing.T) {
 		// The count 0010 runs over current_resources guarantees nothing on its
 		// own: the old binary accepts a virtual cloud and keeps ingesting under it
@@ -1109,6 +1174,45 @@ func indexExists(t *testing.T, s *store.Store, name string) bool {
 		t.Fatalf("querying pg_indexes: %v", err)
 	}
 	return exists
+}
+
+// tableExists says whether the database s is opened on carries a table of that
+// name in the public schema.
+func tableExists(t *testing.T, s *store.Store, name string) bool {
+	t.Helper()
+
+	var exists bool
+	if err := s.Pool().QueryRow(t.Context(),
+		`SELECT EXISTS (
+		     SELECT 1 FROM information_schema.tables
+		     WHERE table_schema = 'public' AND table_name = $1
+		 )`, name).Scan(&exists); err != nil {
+		t.Fatalf("querying information_schema.tables: %v", err)
+	}
+	return exists
+}
+
+// primaryKey is the columns of a table's primary key, in key order.
+func primaryKey(t *testing.T, s *store.Store, table string) []string {
+	t.Helper()
+
+	rows, err := s.Pool().Query(t.Context(),
+		`SELECT kcu.column_name
+		 FROM information_schema.table_constraints tc
+		 JOIN information_schema.key_column_usage kcu
+		   ON kcu.constraint_schema = tc.constraint_schema
+		  AND kcu.constraint_name = tc.constraint_name
+		 WHERE tc.table_schema = 'public' AND tc.table_name = $1
+		   AND tc.constraint_type = 'PRIMARY KEY'
+		 ORDER BY kcu.ordinal_position`, table)
+	if err != nil {
+		t.Fatalf("querying the primary key of %s: %v", table, err)
+	}
+	columns, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("reading the primary key of %s: %v", table, err)
+	}
+	return columns
 }
 
 // eventsTableExists reports whether the hypertable the chain creates first and

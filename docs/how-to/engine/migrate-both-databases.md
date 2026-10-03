@@ -26,17 +26,18 @@ runs DDL.
   names `TALLY_ENGINE_DB_URL`, beside the
   [Reporting API settings](/reference/configuration/tally-reporting) page,
   which names `TALLY_REPORTING_DB_URL`.
-- `pg_dump` and `psql` at the version of the server, and somewhere to put a
-  dump, for the rollback below. Neither CLI copies anything before it drops,
-  and a rollback drops what every migration above the target created.
+- `pg_dump`, `pg_restore` and `psql` at the version of the server, and
+  somewhere to put a dump, for the rollback below. Neither CLI copies anything
+  before it drops, and a rollback drops what every migration above the target
+  created.
 - A `~/.pgpass` at mode `0600` with one line per database:
   `db.internal:5432:tally_engine:tally:<password>` and the same for
-  `tally_reporting`. The `psql` and `pg_dump` calls below connect with a URI
-  that carries no password and read it from there: a password in the URI is an
-  argument, and arguments stand in `ps` output and in the world-readable
-  `/proc/<pid>/cmdline` for the life of the process, which for a dump of a
-  billing database is minutes. The CLIs of this repository are unaffected —
-  they read their URL from the environment.
+  `tally_reporting`. The `psql`, `pg_dump` and `pg_restore` calls below
+  connect with a URI that carries no password and read it from there: a
+  password in the URI is an argument, and arguments stand in `ps` output and in
+  the world-readable `/proc/<pid>/cmdline` for the life of the process, which
+  for a dump of a billing database is minutes. The CLIs of this repository are
+  unaffected — they read their URL from the environment.
 
 ## Apply both chains
 
@@ -193,6 +194,9 @@ says the rows are gone. The dump taken first is what they come back from.
    (
      set -e
      export TALLY_REPORTING_DB_URL='postgres://tally:password@db.internal:5432/tally_reporting?sslmode=require'
+     migrations="$(tally-reporting-admin migrate-status)"
+     printf '%s\n' "$migrations" | tail -1 | grep -q ' applied$' \
+       || { echo "the chain is not at its head; finish the stopped rollback instead" >&2; exit 1; }
      (umask 077; pg_dump -Fc \
        'postgres://tally@db.internal:5432/tally_reporting?sslmode=require' \
        > reporting-pre-rollback.dump)
@@ -222,8 +226,14 @@ says the rows are gone. The dump taken first is what they come back from.
      kubectl -n tally scale deployment/reporting-api --replicas=0
      kubectl -n tally wait --for=delete pod \
        -l app.kubernetes.io/name=reporting-api --timeout=2m
+     (umask 077; pg_dump -Fc --table=size_names \
+       'postgres://tally@db.internal:5432/tally_reporting?sslmode=require' \
+       > size-names.dump)
      tally-reporting-admin migrate-down-to 9 --yes
      tally-reporting-admin migrate
+     pg_restore --data-only --strict-names --table=size_names \
+       -d 'postgres://tally@db.internal:5432/tally_reporting?sslmode=require' \
+       size-names.dump
    )
    ```
 
@@ -231,8 +241,12 @@ says the rows are gone. The dump taken first is what they come back from.
    cronjob.batch/tally-engine patched
    deployment.apps/reporting-api scaled
    pod/reporting-api-7d9f4c8b5c-2xk9v condition met
+   rolled back migration 12
+   rolled back migration 11
    rolled back migration 10
    applied migration 10
+   applied migration 11
+   applied migration 12
    deployment.apps/reporting-api scaled
    cronjob.batch/tally-engine patched
    ```
@@ -261,6 +275,38 @@ says the rows are gone. The dump taken first is what they come back from.
    Ingest is refused for the length of the block: a collector holds its events
    in its own outbox and delivers them when the API answers again.
 
+   The down of `migrations/reporting/0012_size_names.sql` drops `size_names`,
+   the volume type names the last reconciliation run of each cloud stored, and
+   the `migrate` after it re-creates the table empty. The `pg_restore` puts the
+   rows back before the `trap` scales the Deployment up, because ingest
+   replaces the type id of a volume event with its name through them. Without
+   them, the backlog the collectors deliver first is stored under the id,
+   stored events are never rewritten, and the intervals those events open stay
+   billed under the id until the next run of their cloud, as
+   [Size names](/reference/formats/canonical-event#size-names) describes. The
+   rows come from `size-names.dump`, taken once the pod is gone, rather than
+   from the full dump: the API serves `POST /internal/sync/{cloud}` until then,
+   and a run that stored names while the block waited would be put back to the
+   ones before it. `--strict-names` makes a dump without the table an error;
+   without it, `pg_restore` restores nothing and exits 0.
+
+   The `migrate-status` check refuses a chain that is not at its head, because
+   a rerun of a block that stopped would lose the names. Each down commits on
+   its own, so a down of 10 that aborts leaves 12 and 11 rolled back, and
+   `migrate-down-to` reports a `partial migration error` without a
+   `rolled back migration` line. `size-names.dump` is then the only copy of the
+   names, and a rerun would write both dumps over from the rolled-back
+   database. Finish a block that stopped in `migrate-down-to` or after it by
+   running it again without the check and the two `pg_dump` commands, so the
+   `pg_restore` reads the dump the stopped run wrote. That includes a stop in
+   the `pg_restore` itself, which leaves the chain at its head and passes the
+   check. The status is read into a variable before the `grep` because a
+   pipeline's status is that of its last command: piped straight into it, a
+   `migrate-status` that cannot reach the database would read as a chain below
+   its head and send you to finish a rollback that never started. The
+   assignment fails with the command's own error instead, and `set -e` stops
+   the block there.
+
 4. `migrate-down-to` without `--yes` is refused before the database is opened,
    and nothing is dropped. The refusal goes to stderr and the command exits 1:
 
@@ -283,8 +329,8 @@ says the rows are gone. The dump taken first is what they come back from.
    ```
 
    ```text
-   migration 10 applied
    migration 11 applied
+   migration 12 applied
    migration 1 applied
    migration 2 applied
    ```
