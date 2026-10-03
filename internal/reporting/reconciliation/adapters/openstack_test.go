@@ -764,11 +764,12 @@ func TestOpenStackRefusesAnAccountThatCannotSeeEveryProject(t *testing.T) {
 	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
 		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
 
-	// neutron, glance and octavia would each have answered 200 with the account's
-	// own project, and nothing downstream can tell that from the whole cloud: the
-	// missed-delete pass would book a delete for every row of every other project.
-	// So the run ends before the first listing rather than reporting one type at a
-	// time, and it names the entry an operator has to repair.
+	// cinder, neutron, glance and octavia would each have answered 200 with the
+	// account's own project, and nothing downstream can tell that from the whole
+	// cloud: the missed-delete pass would book a delete for every row of every
+	// other project. So the run ends before the first listing rather than
+	// reporting one type at a time, and it names the entry an operator has to
+	// repair.
 	if len(errs) != 1 {
 		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
 	}
@@ -792,9 +793,11 @@ func TestOpenStackRefusesAnAccountThatCannotSeeEveryProject(t *testing.T) {
 	}
 
 	// Not one listing followed it. An account that cannot prove its scope must
-	// not observe at all, not even through the two listings that would have
+	// not observe at all, not even through the one listing that would have
 	// refused it loudly.
-	for _, path := range []string{serversPath, floatingIPsPath, imagesPath} {
+	for _, path := range []string{
+		serversPath, volumesPath, floatingIPsPath, imagesPath, loadBalancersPath,
+	} {
 		if requests := cloud.requestsTo(path); len(requests) != 0 {
 			t.Errorf("the cloud answered %d requests for %s, want none", len(requests), path)
 		}
@@ -813,7 +816,7 @@ func TestOpenStackRefusesACloudThatPublishesNoComputeEndpoint(t *testing.T) {
 	// Nova is where the scope is established, so a cloud that publishes none
 	// leaves the run with no way to establish it at all. That ends the run rather
 	// than costing instances alone their completeness: the four listings after it
-	// would go out unprobed, and three of them narrow to one project without
+	// would go out unprobed, and every one of them narrows to one project without
 	// saying so.
 	if len(observed) != 0 {
 		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
