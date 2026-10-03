@@ -144,6 +144,27 @@ define await
 	@attempt=1; 	until $(KUBECTL) $(1) --timeout=$(WAIT_TIMEOUT); do 		if [ "$$attempt" -ge '$(WAIT_ATTEMPTS)' ]; then 			echo '' >&2; 			echo 'ERROR: $(2) did not become ready in $(WAIT_ATTEMPTS) waits of $(WAIT_TIMEOUT).' >&2; 			echo '       make up stops here, so the stack is incomplete. Stopping before' >&2; 			echo '       the migration chain leaves the Reporting API at 0/1 until a later' >&2; 			echo '       make up applies it: it never migrates on its own.' >&2; 			echo '       kubectl --context $(KUBE_CONTEXT) get pods -A, and the events of' >&2; 			echo '       the pod that is not ready, say why it is not.' >&2; 			echo '       make up is safe to run again: it reuses the cluster and carries on.' >&2; 			exit 1; 		fi; 		attempt=$$((attempt + 1)); 		echo '==> $(2) is not ready after $(WAIT_TIMEOUT); the node may still be pulling an image, waiting again ('"$$attempt"'/$(WAIT_ATTEMPTS))'; 	done
 endef
 
+# kind_load puts one image onto the kind node. $(1) is the image reference. The
+# image goes over as an archive of the node's platform, which
+# `docker save --platform` writes from Docker Engine 28.0 (API 1.48) on. The
+# platform is asked of the node rather than of the engine: with
+# DOCKER_DEFAULT_PLATFORM set, the node and the images are of that platform and
+# not of the engine's. The call is one command list whose status is the load's,
+# so a caller inside a loop ends it with `|| exit 1`: make 3.81, the one macOS
+# ships, ignores .SHELLFLAGS, and without errexit a loop's status is only its
+# last iteration's. The status is caught with `||` rather than read after the
+# list, because under errexit a failing last command of an `&&` list ends the
+# shell, and the archive is removed after a load that failed as well.
+define kind_load
+	dir="$$(mktemp -d)"; \
+	echo "==> loading $(1) onto the node"; \
+	status=0; \
+	platform="$$($(KUBECTL) get node '$(CLUSTER_NAME)-control-plane' -o jsonpath='{.status.nodeInfo.operatingSystem}/{.status.nodeInfo.architecture}')" && \
+	docker save --platform "$$platform" -o "$$dir/image.tar" "$(1)" && \
+	kind load image-archive "$$dir/image.tar" --name '$(CLUSTER_NAME)' || status=$$?; \
+	rm -rf "$$dir"; [ "$$status" -eq 0 ]
+endef
+
 # prod_context_guard is the first recipe line of every prod target. It stops
 # the target while PROD_CONTEXT is empty, and $@ names the target the operator
 # ran in the example it prints.
@@ -412,7 +433,7 @@ up:
 	$(MAKE) images
 	@echo '==> loading images into the cluster'
 	@for service in $(SERVICES); do \
-		kind load docker-image "$$service:dev" --name '$(CLUSTER_NAME)'; \
+		$(call kind_load,$$service:dev) || exit 1; \
 	done
 	@# A kind node holds none of the stack's other images on the first `make up`,
 	@# so it pulls each of them itself, one at a time, inside the readiness waits
@@ -425,6 +446,11 @@ up:
 	@#
 	@# An image the node already carries is skipped, which is what keeps a second
 	@# `make up` from moving every one of them again.
+	@#
+	@# Every image goes over as an archive of one platform, which kind_load
+	@# writes. The containerd image store holds one platform of a pulled image,
+	@# and `kind load docker-image` imports every platform the index names, so
+	@# on that store it fails on the first platform the host never pulled.
 	@for image in $(NODE_IMAGES); do \
 		if docker exec '$(CLUSTER_NAME)-control-plane' crictl inspecti "$$image" >/dev/null 2>&1; then \
 			continue; \
@@ -433,7 +459,7 @@ up:
 			echo "==> pulling $$image"; \
 			docker pull --quiet "$$image" >/dev/null; \
 		}; \
-		kind load docker-image "$$image" --name '$(CLUSTER_NAME)'; \
+		$(call kind_load,$$image) || exit 1; \
 	done
 	@echo '==> applying the dev overlay'
 	$(KUBECTL) apply -k $(DEV_OVERLAY)
