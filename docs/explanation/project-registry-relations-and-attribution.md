@@ -97,6 +97,53 @@ records that the two belong together without attributing anything. The statement
 this produces is the last example of
 [worked examples](/explanation/worked-examples).
 
+## Resources a service creates for itself
+
+An OpenStack service that builds its product out of other services' resources
+owns them in a project of its own. Octavia's amphora provider boots every
+amphora as a nova instance with the credentials of `[service_auth]`
+([`clients.py`](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/clients.py#L52)),
+one per load balancer under the topology `SINGLE` and two under
+`ACTIVE_STANDBY`
+([`config.py`](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/config.py#L497-L503)),
+and with a volume driver configured it creates one cinder boot volume per
+amphora
+([`nova_driver.py`](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/compute/drivers/nova_driver.py#L123-L141)).
+Kolla scopes those credentials to the project `service`
+([`defaults/main.yml`](https://github.com/openstack/kolla-ansible/blob/570f2b77142d7145e55f39126e3987002afe7494/ansible/roles/octavia/defaults/main.yml#L241)).
+
+Nova and cinder notify for an amphora the way they do for any instance and any
+volume, and the payload names the service project. The collector books the
+resource there
+([notification mapping](/reference/formats/notification-mapping)), and a sync
+that lists every project's resources books the same
+([how reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud)).
+One load balancer therefore arrives as a `loadbalancer` in the customer's
+project and as instances and volumes in the service project.
+
+Tally has no filter by project or by flavor. Metering records what the cloud
+holds, and whether a resource is billed is decided where the prices and the
+relations are
+([metering separated from rating](/explanation/metering-separated-from-rating)).
+A filter in the collector alone would be undone by the next sync, which
+observes the instance and books a create for it.
+
+An amphora cannot be billed under the load balancer's project. The registry
+relates projects, not resources, and the service project holds the amphorae of
+every customer. What a customer pays for a load balancer is the price of the
+resource type `loadbalancer`; what the service project's statement shows is
+what running them costs the operator.
+
+The operator has two ways to keep that statement out of what is invoiced, and
+both are mechanisms that already exist. A `member_of` relation to a
+meta-project, carrying a `project_discount` of rate `1`, leaves the line items
+on the statement and brings its total to zero. An `infrastructure_tenant`
+relation from a project of the operator moves the costs under that project as
+related costs. A service project nobody registered is billed standalone and
+named in `runs.stats.unregistered_projects`.
+[Zero-rate a service project](/how-to/openstack/zero-rate-a-service-project)
+has the steps.
+
 ## What the registry does not model
 
 Project-to-resource mapping is not modelled here. A resource names its
