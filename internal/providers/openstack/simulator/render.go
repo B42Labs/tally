@@ -811,25 +811,13 @@ func volumeAttachmentPayload(p *project, vol *volume, status string,
 	return payload
 }
 
-// listenerSpecs are the listeners a load balancer gets, in the order a shoot
-// adds them. A service publishes one port after another, so a balancer that
-// carries two listeners carries the first two of these.
-var listenerSpecs = []struct {
-	name     string
-	protocol string
-	port     int
-}{
-	{name: "http", protocol: "HTTP", port: 80},
-	{name: "https", protocol: "TERMINATED_HTTPS", port: 443},
-	{name: "metrics", protocol: "TCP", port: 9100},
-}
-
-// loadBalancerPayload describes one octavia load balancer. Octavia reports the
-// listeners and the pools on an update alone, which is why the collector books
-// a balancer's size from the update: the create carries a size of zero
-// listeners and zero pools, and the delete carries neither member at all.
-func loadBalancerPayload(p *project, s *shoot, lb *loadBalancer, withMembers bool) map[string]any {
-	payload := map[string]any{
+// loadBalancerPayload describes one octavia load balancer the way octavia's
+// worker publishes it, on a create, an update and a delete alike. The
+// dictionary names none of the balancer's collections, so the listeners and the
+// pools the balancer holds are in none of the three. They reach Tally through
+// the fake API a sync reads.
+func loadBalancerPayload(p *project, s *shoot, lb *loadBalancer) map[string]any {
+	return map[string]any{
 		"admin_state_up":    true,
 		"description":       "",
 		"loadbalancer_id":   lb.id,
@@ -843,56 +831,6 @@ func loadBalancerPayload(p *project, s *shoot, lb *loadBalancer, withMembers boo
 		"vip_sg_ids":        []any{},
 		"additional_vips":   []any{},
 	}
-	if !withMembers {
-		return payload
-	}
-
-	// Both members are slices even when they hold nothing, because the mapping
-	// counts the array and a null is not one it can count.
-	listeners := make([]any, 0, len(lb.listenerIDs))
-	for index, id := range lb.listenerIDs {
-		// A balancer that carries more listeners than the catalog names takes the
-		// catalog from the front again. The mapping books the count and nothing
-		// else of a listener, so a repeated name and port cost the month nothing,
-		// where reaching past the catalog would end the run in this renderer with
-		// the balancer that outgrew it named nowhere.
-		spec := listenerSpecs[index%len(listenerSpecs)]
-		// A listener points at the pool behind it, and a balancer with fewer
-		// pools than listeners has them share one. One with no pool at all points
-		// its listeners at nothing, the way octavia reports a listener whose
-		// default pool was never created, rather than ending the run here.
-		var poolID any
-		if len(lb.poolIDs) > 0 {
-			poolID = lb.poolIDs[index%len(lb.poolIDs)]
-		}
-		listeners = append(listeners, map[string]any{
-			"admin_state_up":  true,
-			"default_pool_id": poolID,
-			"listener_id":     id,
-			"loadbalancer_id": lb.id,
-			"name":            spec.name,
-			"project_id":      p.id,
-			"protocol":        spec.protocol,
-			"protocol_port":   spec.port,
-		})
-	}
-
-	pools := make([]any, 0, len(lb.poolIDs))
-	for index, id := range lb.poolIDs {
-		pools = append(pools, map[string]any{
-			"admin_state_up":  true,
-			"lb_algorithm":    "ROUND_ROBIN",
-			"loadbalancer_id": lb.id,
-			"name":            fmt.Sprintf("pool-%d", index),
-			"pool_id":         id,
-			"project_id":      p.id,
-			"protocol":        "HTTP",
-		})
-	}
-
-	payload["listeners"] = listeners
-	payload["pools"] = pools
-	return payload
 }
 
 // identityPayload describes a project or a user keystone has created. Keystone

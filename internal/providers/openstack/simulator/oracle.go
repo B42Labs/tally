@@ -30,7 +30,9 @@ import (
 //
 // The vocabulary is the one the collector's mapping records rather than the one
 // the emitting service uses: nova reports a stopped server, the mapping books it
-// as shutoff, and shutoff is what the ledger says.
+// as shutoff, and shutoff is what the ledger says. A load balancer's size is the
+// one thing the ledger states that the mapping never records, because no
+// notification carries it.
 
 // effect is what one billable transition leaves behind on its resource.
 type effect struct {
@@ -131,12 +133,23 @@ func floatingIPSizeOf() map[string]any {
 }
 
 // loadBalancerSizeOf describes a load balancer by the two counts its registered
-// size schema requires.
+// size schema requires. The counts are what the cloud holds, and no
+// notification carries them.
 func loadBalancerSizeOf(listeners, pools int) map[string]any {
 	return map[string]any{
 		"listeners": json.Number(strconv.Itoa(listeners)),
 		"pools":     json.Number(strconv.Itoa(pools)),
 	}
+}
+
+// sizedByReconciliation reports whether a resource type's size is one no
+// notification states. Octavia publishes a load balancer without its listeners
+// and its pools, so the bus books a balancer at the zero counts of its create
+// for as long as it lives, and the counts the ledger states reach Tally through
+// a sync against the cloud's API. Whatever holds the oracle against what the
+// bus alone booked asks this first.
+func sizedByReconciliation(resourceType string) bool {
+	return resourceType == typeLoadBalancer
 }
 
 // fact is one booked transition and the effect it had. The generator appends
@@ -230,7 +243,9 @@ const oracleFormat = 4
 // Oracle is the generator's statement of what a month contained: for every
 // billable resource the intervals of constant state, size and project it
 // intended, clipped to the month, and the count of events it expects the
-// collector to record per project and Tally event type.
+// collector to record per project and Tally event type. The size of a load
+// balancer is the listeners and pools the cloud holds, which no notification
+// carries and only a reconciliation sync books.
 type Oracle struct {
 	Format     int              `json:"format"`
 	Cloud      string           `json:"cloud"`

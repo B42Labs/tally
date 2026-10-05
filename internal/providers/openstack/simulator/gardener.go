@@ -220,15 +220,16 @@ func (g *generator) shootDay(s *shoot, d time.Time) {
 	}
 
 	// A service that publishes another port gets another listener on the
-	// balancer it already has. Creating the listener sends no notification of
-	// its own, the way octavia notifies on the load balancer alone, so the
-	// balancer's update is where the new count arrives.
+	// balancer it already has. Octavia sends no notification for a listener, and
+	// the update the cloud controller sends for the balancer names none either,
+	// so the new count is in the ledger and on the fake API and in no
+	// notification.
 	if !s.listenerDay.IsZero() && d.Equal(s.listenerDay) {
 		lb := s.loadBalancers[0]
 		lb.listenerIDs = append(lb.listenerIDs, g.identifiers.nextUUID())
 		g.emit(drawWorkingInstant(g.shape, at(d, 9, 0), at(d, 17, 0)),
 			"octavia.loadbalancer.update.end", "", lb.id, s.owner.tenant,
-			loadBalancerPayload(s.owner.tenant, s, lb, true),
+			loadBalancerPayload(s.owner.tenant, s, lb),
 			alive(stateActive, loadBalancerSizeOf(len(lb.listenerIDs), len(lb.poolIDs))))
 	}
 
@@ -418,13 +419,15 @@ func (g *generator) claimActivity(s *shoot, d time.Time) {
 
 // createLoadBalancer publishes one service of type LoadBalancer: neutron gives
 // the balancer the port it holds its VIP on, octavia creates the balancer, the
-// floating address follows, and the listeners and pools of the service arrive
-// on the update after that.
+// floating address follows, and the cloud controller updates the balancer once
+// the listeners and pools of the service are attached.
 //
-// The update is the notification the balancer's size is booked from. Octavia
-// reports the listeners and the pools on an update alone, and the create is
-// sent before the service's ports are attached, so the create carries a
-// balancer of zero listeners and zero pools.
+// Neither the create nor the update names a listener or a pool, because octavia
+// publishes a dictionary without the balancer's collections. The collector
+// books a balancer at zero of both from its create and reads no size off its
+// update. The ledger states what the cloud holds, zero of both from the create
+// and the service's counts from the update on, and the fake API reports those
+// counts, which is how a sync books them.
 //
 // The first balancer of a shoot is what its ingress record points at, since
 // that is the address every service of the cluster is reached under. A balancer
@@ -468,7 +471,7 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 		portPayload(tenant, vipPort, false))
 
 	g.emit(t, "octavia.loadbalancer.create.end", "", lb.id, tenant,
-		loadBalancerPayload(tenant, s, lb, false), alive(stateActive, loadBalancerSizeOf(0, 0)))
+		loadBalancerPayload(tenant, s, lb), alive(stateActive, loadBalancerSizeOf(0, 0)))
 	allocatedAt := t.Add(span(g.shape, 2*time.Second, 10*time.Second))
 	g.emit(allocatedAt, "floatingip.create.end", networkPublisher, lb.fip.id, tenant,
 		floatingIPCreatePayload(tenant, lb.fip, g.networkID), alive(stateActive, floatingIPSizeOf()))
@@ -486,10 +489,10 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 		g.createRecordSet(s.owner, s.ingressRecord, t.Add(ingressRecordLag))
 	}
 
-	// The https listener is the second of the catalog, so a balancer that gets
-	// two of them is the one that terminates TLS. Its certificate goes into
-	// barbican as a secret with the private key and a container that holds the
-	// two together.
+	// A balancer that gets two listeners is the one that terminates TLS,
+	// because a service publishes http first and https second. Its certificate
+	// goes into barbican as a secret with the private key and a container that
+	// holds the two together.
 	if listeners >= 2 {
 		lb.secretID, lb.containerID = g.noiseIDs.nextUUID(), g.noiseIDs.nextUUID()
 		g.barbicanCall(tenant, t.Add(certificateLag), "POST", "/v1/secrets",
@@ -500,7 +503,7 @@ func (g *generator) createLoadBalancer(s *shoot, t time.Time, name string, liste
 
 	g.emit(t.Add(span(g.shape, 60*time.Second, 300*time.Second)),
 		"octavia.loadbalancer.update.end", "", lb.id, tenant,
-		loadBalancerPayload(tenant, s, lb, true),
+		loadBalancerPayload(tenant, s, lb),
 		alive(stateActive, loadBalancerSizeOf(len(lb.listenerIDs), len(lb.poolIDs))))
 }
 
@@ -522,7 +525,7 @@ func (g *generator) tearDown(s *shoot) {
 			floatingIPDeletePayload(lb.fip), deleted)
 		t = t.Add(span(g.shape, 5*time.Second, 15*time.Second))
 		g.emit(t, "octavia.loadbalancer.delete.end", "", lb.id, tenant,
-			loadBalancerPayload(tenant, s, lb, false), deleted)
+			loadBalancerPayload(tenant, s, lb), deleted)
 		// The VIP port goes with the balancer that held it.
 		g.noise(t.Add(time.Second), "port.delete.start", networkPublisher, lb.vipPortID, tenant,
 			neutronDeletePayload("port", lb.vipPortID))

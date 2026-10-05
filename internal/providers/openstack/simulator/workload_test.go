@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1167,13 +1166,47 @@ func TestShootsFollowTheirLives(t *testing.T) {
 	}
 }
 
-// TestLoadBalancersAreBookedFromTheirUpdate covers the notification order a
-// balancer's size depends on. Octavia sends the create before the service's
-// ports are attached, so it carries no listener and no pool, and the update
-// that follows carries both: a month booked from the create alone would bill
-// every balancer of it as empty.
-func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
+// TestLoadBalancerSizesTravelOnNoNotification covers where a balancer's size
+// lives. Octavia publishes a balancer without its listeners and its pools, so
+// the collector books zero of both from the create and no size from the update,
+// while the ledger states the counts the cloud holds from the update on. Those
+// counts reach Tally through the fake API a sync reads, and a notification that
+// named them would be one no octavia release sends.
+func TestLoadBalancerSizesTravelOnNoNotification(t *testing.T) {
 	g := buildMonth(t, 1)
+
+	ledger := make(map[factKey]fact, len(g.facts))
+	for _, f := range g.facts {
+		ledger[factKey{at: f.at, resourceID: f.resourceID}] = f
+	}
+	// stated returns the size the ledger states for the balancer from the
+	// instant of one of its transitions on.
+	stated := func(t *testing.T, transition Transition) map[string]any {
+		t.Helper()
+
+		f, ok := ledger[factKey{at: transition.At, resourceID: transition.ResourceID}]
+		if !ok {
+			t.Fatalf("the ledger states nothing for %s of %s at %s, want the fact the generator "+
+				"booked with it", transition.EventType, transition.ResourceID, transition.At)
+		}
+		return f.effect.size
+	}
+	// unsized maps an update and fails unless it books no size and its
+	// notification names neither collection.
+	unsized := func(t *testing.T, name string, transition Transition) {
+		t.Helper()
+
+		size, notification := sizeOf(t, transition)
+		if size != nil {
+			t.Errorf("the update of %s books the size %v, want none: octavia publishes a balancer "+
+				"without its listeners and its pools", name, size)
+		}
+		for _, member := range []string{"listeners", "pools"} {
+			if got, ok := notification.Payload[member]; ok {
+				t.Errorf("the update of %s names %s = %v, want no such member", name, member, got)
+			}
+		}
+	}
 
 	want := []string{
 		"octavia.loadbalancer.create.end",
@@ -1200,29 +1233,26 @@ func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
 				for i, eventType := range want {
 					if of[i].EventType != eventType {
 						t.Errorf("the balancer %s reports %s as its transition %d, want %s: octavia "+
-							"creates the balancer, neutron gives it its address, and the update carries "+
-							"what the service attached", lb.name, of[i].EventType, i, eventType)
+							"creates the balancer, neutron gives it its address, and the cloud controller "+
+							"updates it once the service's ports are attached", lb.name, of[i].EventType, i, eventType)
 					}
 				}
 
 				size, _ := sizeOf(t, of[0])
 				for _, member := range []string{"listeners", "pools"} {
 					if got := fmt.Sprint(size[member]); got != "0" {
-						t.Errorf("the create of %s books %s = %s, want 0: it is sent before the "+
-							"service's ports are attached", lb.name, member, got)
+						t.Errorf("the create of %s books %s = %s, want 0: no octavia notification "+
+							"names a listener or a pool", lb.name, member, got)
 					}
 				}
 
-				size, notification := sizeOf(t, of[2])
+				unsized(t, lb.name, of[2])
+				held := stated(t, of[2])
 				for _, member := range []string{"listeners", "pools"} {
-					elements, _ := notification.Payload[member].([]any)
-					if len(elements) == 0 {
-						t.Errorf("the update of %s carries no %s, want the ones the service attached",
-							lb.name, member)
-					}
-					if got, count := fmt.Sprint(size[member]), strconv.Itoa(len(elements)); got != count {
-						t.Errorf("the update of %s books %s = %s, want %s, the number its payload "+
-							"carries", lb.name, member, got, count)
+					if got := sizeInt(held, member); got <= 0 {
+						t.Errorf("the ledger states %s = %d for %s from its update on, want the "+
+							"service's count above 0: the cloud holds what no notification names",
+							member, got, lb.name)
 					}
 				}
 			}
@@ -1234,8 +1264,16 @@ func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
 
 	deletes := 0
 	for _, transition := range g.schedule {
-		if transition.EventType == "octavia.loadbalancer.delete.end" {
-			deletes++
+		if transition.EventType != "octavia.loadbalancer.delete.end" {
+			continue
+		}
+		deletes++
+		notification := parse(t, render(t, transition))
+		for _, member := range []string{"listeners", "pools"} {
+			if got, ok := notification.Payload[member]; ok {
+				t.Errorf("the delete of %s names %s = %v, want no such member",
+					transition.ResourceID, member, got)
+			}
 		}
 	}
 	if deletes == 0 {
@@ -1244,10 +1282,10 @@ func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
 	}
 
 	// The listener day publishes another port on the ingress balancer of
-	// api-prod. Octavia notifies on the balancer alone, so the new count arrives
-	// on a second update rather than on a notification of the listener itself,
-	// and that update is the one place a booked balancer grows inside the month.
-	t.Run("a listener added later is booked on a second update", func(t *testing.T) {
+	// api-prod. Octavia sends nothing for the listener, and the update the
+	// cloud controller sends for the balancer names none, so the grown count is
+	// in the ledger alone.
+	t.Run("a listener added later reaches no notification", func(t *testing.T) {
 		s := shootNamed(t, g, "api-prod")
 		lb := s.loadBalancers[0]
 
@@ -1258,23 +1296,22 @@ func TestLoadBalancersAreBookedFromTheirUpdate(t *testing.T) {
 			}
 		}
 		if len(updates) != 2 {
-			t.Fatalf("the balancer %s reports %d updates, want 2: the one its service attaches its "+
-				"ports on and the one the listener day adds a port on", lb.name, len(updates))
+			t.Fatalf("the balancer %s reports %d updates, want 2: the one after its service attaches "+
+				"its ports and the one the listener day adds a port on", lb.name, len(updates))
+		}
+		for _, update := range updates {
+			unsized(t, lb.name, update)
 		}
 
-		attached, _ := sizeOf(t, updates[0])
-		grown, _ := sizeOf(t, updates[1])
-		before, _ := attached["listeners"].(int)
-		after, _ := grown["listeners"].(int)
-		if after != before+1 {
-			t.Errorf("the balancer %s books %d listeners on its second update and %d on its first, "+
-				"want one more: a service that publishes another port adds a listener to the balancer "+
-				"it already has", lb.name, after, before)
+		attached, grown := stated(t, updates[0]), stated(t, updates[1])
+		if before, after := sizeInt(attached, "listeners"), sizeInt(grown, "listeners"); after != before+1 {
+			t.Errorf("the ledger states %d listeners for %s from its second update and %d from its "+
+				"first, want one more: a service that publishes another port adds a listener to the "+
+				"balancer it already has", after, lb.name, before)
 		}
-		if grown["pools"] != attached["pools"] {
-			t.Errorf("the balancer %s books %v pools on its second update and %v on its first, want "+
-				"them unchanged: the new listener shares the pool behind it",
-				lb.name, grown["pools"], attached["pools"])
+		if before, after := sizeInt(attached, "pools"), sizeInt(grown, "pools"); after != before {
+			t.Errorf("the ledger states %d pools for %s from its second update and %d from its first, "+
+				"want them unchanged: the new listener shares the pool behind it", after, lb.name, before)
 		}
 	})
 }

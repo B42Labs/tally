@@ -421,7 +421,7 @@ Line is one line of notifications.jsonl: the message body a service put on the b
 <!-- refdoc:begin oracle -->
 #### `Oracle`
 
-Oracle is the generator's statement of what a month contained: for every billable resource the intervals of constant state, size and project it intended, clipped to the month, and the count of events it expects the collector to record per project and Tally event type.
+Oracle is the generator's statement of what a month contained: for every billable resource the intervals of constant state, size and project it intended, clipped to the month, and the count of events it expects the collector to record per project and Tally event type. The size of a load balancer is the listeners and pools the cloud holds, which no notification carries and only a reconciliation sync books.
 
 | Member | Type | Presence | Description |
 | --- | --- | --- | --- |

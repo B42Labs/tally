@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/reporting/reconciliation"
 	"github.com/b42labs/tally/internal/reporting/reconciliation/adapters"
 )
@@ -383,6 +384,75 @@ func TestFakeAPIObservesNothingThroughTheRealAdapterBeforeTheMonthBegins(t *test
 	for _, observed := range run.resources {
 		t.Errorf("%s %s is observed at %s, an hour before the month the oracle states begins",
 			observed.ResourceType, observed.ResourceID, instantText(at))
+	}
+}
+
+// TestFakeAPIReportsTheCountsNoNotificationCarried covers the one path a load
+// balancer's listeners and pools reach Tally on. No notification of the month
+// names them, so the collector books a balancer at the zero counts of its
+// create, while the fake API, read through the real adapter, reports the counts
+// the oracle states. That observation is what a sync books as a sync.update.
+func TestFakeAPIReportsTheCountsNoNotificationCarried(t *testing.T) {
+	month := syncMonth(t)
+	at := month.Oracle.PeriodFrom.AddDate(0, 0, 20)
+
+	run := observeMonth(t, month.Oracle, at, at.Add(-syncWindow))
+	if len(run.errs) != 0 {
+		t.Fatalf("the enumeration reported %v, want no error", run.errs)
+	}
+	live, _ := partition(run.resources)
+
+	published := make(map[string][]Transition)
+	for _, transition := range month.Schedule.Billable() {
+		if !transition.At.After(at) {
+			published[transition.ResourceID] = append(published[transition.ResourceID], transition)
+		}
+	}
+
+	checked := 0
+	for _, resource := range month.Oracle.Resources {
+		if resource.ResourceType != typeLoadBalancer {
+			continue
+		}
+		interval, ok := statedAt(resource, at)
+		if !ok || sizeInt(interval.Size, "listeners") == 0 {
+			continue
+		}
+		checked++
+
+		observed, ok := live[resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}]
+		if !ok {
+			t.Errorf("load balancer %s is not observed, and the oracle states it live at %s",
+				resource.ResourceID, instantText(at))
+			continue
+		}
+		for _, member := range []string{"listeners", "pools"} {
+			if got, want := fmt.Sprint(observed.Size[member]), fmt.Sprint(interval.Size[member]); got != want {
+				t.Errorf("load balancer %s is observed with %s = %s, want the %s the oracle states",
+					resource.ResourceID, member, got, want)
+			}
+		}
+
+		for _, transition := range published[resource.ResourceID] {
+			mapped, ok := openstack.MapNotification(parse(t, render(t, transition)), testCloud)
+			if !ok {
+				t.Fatalf("the mapping records nothing for %s at %s, want an event per billable transition",
+					transition.EventType, instantText(transition.At))
+			}
+			size := mapped.Payload.Size
+			if size == nil {
+				continue
+			}
+			if fmt.Sprint(size["listeners"]) != "0" || fmt.Sprint(size["pools"]) != "0" {
+				t.Errorf("%s of load balancer %s books the size %v, want none or zero of both: "+
+					"no octavia notification names a listener or a pool", transition.EventType,
+					resource.ResourceID, size)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("the oracle states no load balancer with a listener at %s, so nothing holds the "+
+			"fake API to the counts no notification carried", instantText(at))
 	}
 }
 
