@@ -4,7 +4,7 @@ description: Register three projects of the simulated cloud, group them under a 
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 01d2aff with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Discount a customer group
 
@@ -313,10 +313,10 @@ the same. Both are cured by
    ```
 
    ```text
-   run ee0b363e-2449-4085-bca4-218150d1e546 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 945 usage records, 3101 rated records and 6 project statements
+   run 3935cd7f-204e-411a-baee-c8fa395abdd9 completed for 2026-07 with pricing model 2026-03
+   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
    applied 3 pricing adjustments
-   superseded run 6ed8bcbd-1f79-4b65-b954-5fd346848128
+   superseded run 108a9c8a-8ea5-4788-a869-f3aa796ca76a
    warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 3 unregistered projects
    ```
 
@@ -324,8 +324,8 @@ the same. Both are cured by
    have to match. Both run ids are your own, and the superseded one is the run
    Meter and rate your first month made.
 
-   The `metered` counts are the ones that run printed, 867 candidates, 945
-   usage records, 3101 rated records and 6 statements, because nothing in the
+   The `metered` counts are the ones that run printed, 867 candidates, 940
+   usage records, 3081 rated records and 6 statements, because nothing in the
    month changed. An adjustment is a record of its own kind beside the rated
    records, which is what `applied 3` counts, one line per member statement.
    The warnings line now ends in `3 unregistered projects`: the three
@@ -338,7 +338,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=ee0b363e-2449-4085-bca4-218150d1e546
+   export RUN_ID=3935cd7f-204e-411a-baee-c8fa395abdd9
    ```
 
    Every command below reads `RUN_ID`.
@@ -367,7 +367,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run ee0b363e-2449-4085-bca4-218150d1e546 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-group
+   run 3935cd7f-204e-411a-baee-c8fa395abdd9 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-group
    wrote run.json and 6 statements
    wrote kickbacks.json with 0 kickbacks
    wrote 1 rollup documents over member_of
@@ -487,7 +487,7 @@ the same. Both are cured by
          "file": "statement-os-sim%2F34e991db9fc6466f8ca69b43f70fce65.json",
          "cloud": "os-sim",
          "project_id": "34e991db9fc6466f8ca69b43f70fce65",
-         "total": 538.55,
+         "total": 586.47,
          "currency": "EUR"
        },
        {
@@ -498,14 +498,14 @@ the same. Both are cured by
          "currency": "EUR"
        }
      ],
-     "total": 2142.11,
+     "total": 2190.03,
      "currency": "EUR"
    }
    ```
 
    `project_id` `acme`, `platform` `meta`, `relation_type` `member_of`, `kind`
    `regular`, the three `members` with their files and their totals 788.97,
-   538.55 and 814.59, and the `total` 2142.11, their sum, have to match. The
+   586.47 and 814.59, and the `total` 2190.03, their sum, have to match. The
    rollup is read from the registry at export time and sums the statements
    without changing them: [rollup](/reference/formats/exports#rollup).
 
@@ -524,7 +524,7 @@ the same. Both are cured by
          "cloud": "meta",
          "project_id": "acme",
          "members": 3,
-         "total": 2142.11,
+         "total": 2190.03,
          "currency": "EUR"
        }
      ]

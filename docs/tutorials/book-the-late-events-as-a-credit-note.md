@@ -4,7 +4,7 @@ description: Release the notifications the simulator held back, see the engine f
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 01d2aff with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Book the late events as a credit note
 
@@ -67,10 +67,10 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T07:30:56Z","factor":0,"published":15643,"total":15727,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `factor` 0, `published` 15643, `total` 15727, `held` 84 and `holding` true
+   `factor` 0, `published` 15657, `total` 15741, `held` 84 and `holding` true
    have to match, the state Simulate a month of OpenStack left the simulator
    in. `virtual_now` is your own.
 
@@ -81,12 +81,12 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T07:30:56Z","factor":0,"published":15643,"total":15727,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    The route answers with the document as it stood the moment before the
    release, with `held` 0 and `holding` false, the two members the release
-   changed. `published` 15643, `total` 15727, `held` 0 and `holding` false have
+   changed. `published` 15657, `total` 15741, `held` 0 and `holding` false have
    to match, and `virtual_now` is your own.
 
    The 84 notifications go onto the bus at once, each under the July timestamp
@@ -117,11 +117,11 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   consumed 1812 skipped 13915 unparseable 0 depth 0
+   consumed 1812 skipped 13929 unparseable 0 depth 0
    ```
 
    Repeat the read until `depth` reads 0. The four numbers have to match. 1812
-   is the 1728 Simulate a month of OpenStack counted plus the 84, 13915 is
+   is the 1728 Simulate a month of OpenStack counted plus the 84, 13929 is
    unchanged because the held share carried only billable transitions, and a
    depth of 0 is the outbox drained into the Reporting API.
 
@@ -153,17 +153,17 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 77fb51f8-82c9-4d52-98a2-7fd3e0b43c53 read 2026-07 at 2026-09-07T21:28:09Z
-   os-sim/openstack/floating_ip/c8d4f029-050e-488c-a7d3-6e93f99561ff: 1 late events, last received 2026-09-07T22:05:22Z
-   os-sim/openstack/floating_ip/e04358d1-1601-403c-b0d8-25f6f708c8ba: 1 late events, last received 2026-09-07T22:05:22Z
-   os-sim/openstack/image/6a493a19-c938-461b-883f-5444a7310e78: 1 late events, last received 2026-09-07T22:05:22Z
+   run 923dc7cb-09da-44bf-9203-18140e0ac759 read 2026-07 at 2026-10-05T08:21:53Z
+   os-sim/openstack/floating_ip/c8d4f029-050e-488c-a7d3-6e93f99561ff: 1 late events, last received 2026-10-05T08:22:24Z
+   os-sim/openstack/floating_ip/e04358d1-1601-403c-b0d8-25f6f708c8ba: 1 late events, last received 2026-10-05T08:22:24Z
+   os-sim/openstack/image/6a493a19-c938-461b-883f-5444a7310e78: 1 late events, last received 2026-10-05T08:22:24Z
    ```
 
    77 more lines of the same shape follow, one per resource, and the report
    ends with these two lines:
 
    ```text
-   os-sim/openstack/volume/f74f35a4-f24f-49e3-8952-21554eefbebe: 1 late events, last received 2026-09-07T22:05:22Z
+   os-sim/openstack/volume/f74f35a4-f24f-49e3-8952-21554eefbebe: 1 late events, last received 2026-10-05T08:22:24Z
    book them with tally-engine correct --period 2026-07
    ```
 
@@ -192,8 +192,8 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 9a8770d7-89d9-45dc-a127-7edfe77b9018 completed as a correction of run 77fb51f8-82c9-4d52-98a2-7fd3e0b43c53 for 2026-07 with pricing model 2026-03
-   metered 871 candidates into 996 usage records and 3265 rated records
+   run e855f2f2-3e8c-4d21-a0be-17592aeb898a completed as a correction of run 923dc7cb-09da-44bf-9203-18140e0ac759 for 2026-07 with pricing model 2026-03
+   metered 871 candidates into 990 usage records and 3241 rated records
    184 deltas and 5 adjustment deltas in 6 credit notes
    warnings recorded in runs.stats: 0 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
    ```
@@ -210,7 +210,7 @@ A connection error from any `go run` command means the cluster is not up, and
    The counts moved because the 84 notifications changed the histories. There
    are 871 candidates rather than 867: the four new ones are resources whose
    create and delete were both held, so the finalized run never saw them. The
-   usage records are 996 and the rated records 3265, rather than 945 and 3101.
+   usage records are 990 and the rated records 3241, rather than 940 and 3081.
    The warnings line reads `0 metering`: the 38
    `history_starts_without_create` warnings of Meter and rate your first month
    are gone because every create is in the history now. The 184 deltas reach
@@ -229,7 +229,7 @@ A connection error from any `go run` command means the cluster is not up, and
 2. Put the first id on the first line of your own output in place of this one:
 
    ```sh
-   export CORRECTION_ID=9a8770d7-89d9-45dc-a127-7edfe77b9018
+   export CORRECTION_ID=e855f2f2-3e8c-4d21-a0be-17592aeb898a
    ```
 
    Every command below reads `CORRECTION_ID`.
@@ -258,7 +258,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 9a8770d7-89d9-45dc-a127-7edfe77b9018 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-notes
+   run e855f2f2-3e8c-4d21-a0be-17592aeb898a exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-notes
    wrote run.json and 6 credit notes
    wrote kickbacks.json with 1 kickback deltas
    ```
@@ -321,7 +321,7 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```json
    {
-     "corrects_run_id": "77fb51f8-82c9-4d52-98a2-7fd3e0b43c53",
+     "corrects_run_id": "923dc7cb-09da-44bf-9203-18140e0ac759",
      "items": 37,
      "base_delta": -682.93,
      "adjustments": [
@@ -329,7 +329,7 @@ A connection error from any `go run` command means the cluster is not up, and
          "type": "discount",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
          "scope": "all",
          "rate": 0.150000,
          "old": -104.74,
@@ -340,7 +340,7 @@ A connection error from any `go run` command means the cluster is not up, and
          "type": "kickback",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
          "scope": "all",
          "rate": 0.100000,
          "old": 59.36,
@@ -439,9 +439,9 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```json
    {
-     "run_id": "9a8770d7-89d9-45dc-a127-7edfe77b9018",
+     "run_id": "e855f2f2-3e8c-4d21-a0be-17592aeb898a",
      "kind": "correction",
-     "corrects_run_id": "77fb51f8-82c9-4d52-98a2-7fd3e0b43c53",
+     "corrects_run_id": "923dc7cb-09da-44bf-9203-18140e0ac759",
      "period_from": "2026-07-01T00:00:00Z",
      "period_to": "2026-08-01T00:00:00Z",
      "beneficiaries": [
@@ -454,7 +454,7 @@ A connection error from any `go run` command means the cluster is not up, and
            {
              "cloud": "os-sim",
              "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-             "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+             "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
              "scope": "all",
              "rate": 0.100000,
              "base": -580.49,
@@ -482,7 +482,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   correction run 9a8770d7-89d9-45dc-a127-7edfe77b9018 finalized for 2026-07
+   correction run e855f2f2-3e8c-4d21-a0be-17592aeb898a finalized for 2026-07
    ```
 
    The line has to match with your own correction id in it. A correction closes
@@ -495,8 +495,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   2026-07 finalized finalized_run=77fb51f8-82c9-4d52-98a2-7fd3e0b43c53 finalized_at=2026-09-07T22:04:35Z
-   2026-08 grace
+   2026-07 finalized finalized_run=923dc7cb-09da-44bf-9203-18140e0ac759 finalized_at=2026-10-05T08:22:09Z
    ```
 
    `finalized_run` still names `RUN_ID`, the regular run that closed the month,
@@ -509,7 +508,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 9a8770d7-89d9-45dc-a127-7edfe77b9018 read 2026-07 at 2026-09-07T22:05:50Z
+   run e855f2f2-3e8c-4d21-a0be-17592aeb898a read 2026-07 at 2026-10-05T08:22:39Z
    no events arrived later
    ```
 

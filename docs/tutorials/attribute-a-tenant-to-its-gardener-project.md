@@ -4,7 +4,7 @@ description: Register the two Gardener projects and the tenants their shoots run
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 01d2aff with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Attribute a tenant to its Gardener project
 
@@ -281,10 +281,10 @@ the same. Both are cured by
    ```
 
    ```text
-   run 77fb51f8-82c9-4d52-98a2-7fd3e0b43c53 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 945 usage records, 3101 rated records and 6 project statements
+   run 923dc7cb-09da-44bf-9203-18140e0ac759 completed for 2026-07 with pricing model 2026-03
+   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
    applied 5 pricing adjustments
-   superseded run 72584a66-9bb2-4d5b-9cf2-fa43fcb6e886
+   superseded run d49e7469-4052-45e2-a44d-0936e29b0906
    warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
    ```
 
@@ -301,7 +301,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=77fb51f8-82c9-4d52-98a2-7fd3e0b43c53
+   export RUN_ID=923dc7cb-09da-44bf-9203-18140e0ac759
    ```
 
    Every command below reads `RUN_ID`.
@@ -334,7 +334,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run 77fb51f8-82c9-4d52-98a2-7fd3e0b43c53 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-attributed
+   run 923dc7cb-09da-44bf-9203-18140e0ac759 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-attributed
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    ```
@@ -408,7 +408,7 @@ the same. Both are cured by
    garden-sim/beta	651.24
    os-sim/018504a6cc10019a40e3f9eef4dae529	788.97
    os-sim/10e287d5788957a2a331cabd1b5dccdf	593.55
-   os-sim/34e991db9fc6466f8ca69b43f70fce65	538.55
+   os-sim/34e991db9fc6466f8ca69b43f70fce65	586.47
    os-sim/d5a8024946ddf673277b9e2490643a2c	814.59
    ```
 
@@ -423,7 +423,7 @@ the same. Both are cured by
    ```
 
    ```text
-   7048.22
+   7096.14
    ```
 
    ```sh
@@ -431,7 +431,7 @@ the same. Both are cured by
    ```
 
    ```text
-   7048.220000000001
+   7096.140000000001
    ```
 
    The two sums are equal. The trailing digits of the second are `jq`'s

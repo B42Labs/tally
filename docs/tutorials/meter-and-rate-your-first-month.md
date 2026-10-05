@@ -4,7 +4,7 @@ description: Point the metering engine at the month lesson 2 ingested, import a 
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit d0d5905 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Meter and rate your first month
 
@@ -112,7 +112,7 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   2026-03 valid_from=2026-03-01T00:00:00Z currency=EUR imported_at=2026-09-07T12:46:13Z
+   2026-03 valid_from=2026-03-01T00:00:00Z currency=EUR imported_at=2026-10-05T08:20:14Z
    ```
 
    The version, `valid_from` and `currency=EUR` have to match. `imported_at` is
@@ -140,8 +140,8 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   run 66a9c8b9-2e20-43ef-9f8e-7e421e1832f9 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 945 usage records, 3101 rated records and 6 project statements
+   run 108a9c8a-8ea5-4788-a869-f3aa796ca76a completed for 2026-07 with pricing model 2026-03
+   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
    warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
    ```
 
@@ -156,7 +156,7 @@ both. Lesson 4 needs neither.
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=66a9c8b9-2e20-43ef-9f8e-7e421e1832f9
+   export RUN_ID=108a9c8a-8ea5-4788-a869-f3aa796ca76a
    ```
 
    Every command below reads `RUN_ID`.
@@ -226,7 +226,7 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   run 66a9c8b9-2e20-43ef-9f8e-7e421e1832f9 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07
+   run 108a9c8a-8ea5-4788-a869-f3aa796ca76a exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07
    wrote run.json and 6 statements
    wrote kickbacks.json with 0 kickbacks
    ```
@@ -280,9 +280,9 @@ both. Lesson 4 needs neither.
      ],
      "candidates": 867,
      "statements": 6,
-     "snapshot_at": "2026-09-07T12:46:14.395319Z",
-     "rated_records": 3101,
-     "usage_records": 945,
+     "snapshot_at": "2026-10-05T08:20:15.195541Z",
+     "rated_records": 3081,
+     "usage_records": 940,
      "metering_warnings": [
        {
          "code": "history_starts_without_create",
@@ -367,7 +367,7 @@ both. Lesson 4 needs neither.
    005be5adeef3d87e280d03d9d57c38b4	3661.32	EUR
    018504a6cc10019a40e3f9eef4dae529	876.63	EUR
    10e287d5788957a2a331cabd1b5dccdf	698.29	EUR
-   34e991db9fc6466f8ca69b43f70fce65	598.39	EUR
+   34e991db9fc6466f8ca69b43f70fce65	651.63	EUR
    d5a8024946ddf673277b9e2490643a2c	905.10	EUR
    e31f9083a7e5ee15071a3bd53cb2bac7	651.24	EUR
    ```
