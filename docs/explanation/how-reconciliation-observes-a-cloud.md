@@ -244,8 +244,9 @@ default because a deployment that runs no octavia would otherwise fail to
 enumerate a type it does not have, on every sync, forever. A load balancer is
 reported with its listener and pool counts. No octavia notification carries
 them, so the sync is their only source: the collector books a load balancer at
-zero of both on its create, and the first sync after it books the counts as a
-`sync.update`. Migration `0006_seed_loadbalancer_type.sql` registers the size
+zero of both on its create, and the first sync that finds the load balancer out
+of `pending_*` and not changed inside the settle window books the counts as a
+`sync.update` (see [what a run defers](#what-a-run-defers)). Migration `0006_seed_loadbalancer_type.sql` registers the size
 schema those two are validated against, so on a database the chain seeded the
 corrections land whatever `TALLY_INGEST_REQUIRE_SIZE_SCHEMA` is set to.
 
@@ -400,13 +401,100 @@ clouds.yaml entry that cannot be resolved, and a Keystone that refuses the
 credentials are all of that kind. Reporting them per type would let a sync
 conclude that a cloud it never reached holds nothing.
 
+## What a run defers
+
+A run compares the cloud at the instant it looks with the events the collector
+delivered up to then. Nova lists an instance in `building` seconds before it
+sends `create.end`, and reports a `terminated_at` seconds before `delete.end`,
+so a correction booked at that instant books what the collector is about to
+book. A run therefore books no correction for a resource the platform reports
+as in transition, or for one whose change lies inside the settle window before
+the run. The next run books the correction if the difference is still there.
+
+The adapter reports the evidence, and the framework applies the rules. Whether a
+resource is in transition, and when the platform last changed it, comes from
+these fields:
+
+| Type | In transition | Last changed |
+| --- | --- | --- |
+| `instance` | any `OS-EXT-STS:task_state`, or `OS-EXT-STS:vm_state` `building` | `updated`, else `created` |
+| `instance` from the deleted listing | never | not reported; the deletion carries `terminated_at` |
+| `volume` | one of the twelve statuses below | `updated_at`, else `created_at` |
+| `floating_ip` | never | `updated_at`, else `created_at` |
+| `image` | never | `updated_at`, else `created_at` |
+| `loadbalancer` | a `provisioning_status` that starts with `PENDING_` | `updated_at`, else `created_at` |
+
+Nova sets a task state for every operation in flight and clears it when the
+operation ends
+([`task_states.py`](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/compute/task_states.py)),
+so any task state covers a build, a delete, a resize and every other operation
+without a list to maintain. `building` is the `vm_state` of an instance that was
+never active
+([`vm_states.py`](https://github.com/openstack/nova/blob/ce37978276744e92d91251210a1d9c2784eea375/nova/compute/vm_states.py#L38)).
+
+Cinder holds a volume in `creating`, `deleting`, `managing`, `attaching`,
+`detaching`, `reserved`, `restoring-backup`, `backing-up`, `downloading`,
+`uploading`, `retyping` or `extending` while an operation on it is in flight.
+Its other ten statuses are statuses a volume rests in
+([`fields.py`](https://github.com/openstack/cinder/blob/ef0d50cb18d0ceb5d70d500c9a032b0eb66e749b/cinder/objects/fields.py#L168-L190)),
+and a status cinder does not define is not a transition. Cinder reports
+`updated_at` as null until a volume is first updated, which is why a resource
+without an update instant is read at its creation.
+
+Octavia's `PENDING_CREATE`, `PENDING_UPDATE` and `PENDING_DELETE` are a load
+balancer it is still changing
+([`constants.py`](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/constants.py#L167-L175)).
+A load balancer in `PENDING_DELETE` is observed for that reason: left out of the
+listing, its row would be a live row the run did not name, and the absence pass
+would book its delete before octavia sends `delete.end`. A `DELETED` one is not
+observed.
+
+The framework decides per correction, once it found the difference:
+
+| Correction | Deferred as `transitional` | Deferred as `recent` |
+| --- | --- | --- |
+| Create: a live resource the projection holds no live row for | the resource is in transition | the platform changed it inside the window, or the row exists and its newest event is inside it |
+| Update: the state, size or project differs | the resource is in transition | the platform changed it inside the window, or the row's newest event is inside it |
+| Delete the platform reported, from nova's deleted listing | never | the deletion, or the row's newest event, is inside the window |
+| Delete by absence: a live row of an enumerated type the listing did not name | never | the row's newest event is inside the window |
+
+The window is `TALLY_REPORTING_SYNC_SETTLE_S` seconds, 60 by default, before the
+instant the run looks. An instant after that one counts as inside it too: a
+platform clock ahead of the Reporting API's host, or a told instant behind the
+cloud's present, dates a change the run cannot place before itself. A resource
+the platform gives no instant for is not deferred as recent. 0 turns the window
+off, and a resource in transition is deferred all the same.
+
+The row's newest event counts because a run reads the listing before the
+projection. An instance created after nova answered, whose `create.end` the
+collector delivered before the run read the rows, is a live row the listing did
+not name, and without the rule the absence pass would book a delete for an
+instance that exists.
+
+A resource in transition is deferred for as long as it stays there, with no
+cap: the collector books nothing before the `.end` notification either. One
+correction counts once, as `transitional` when both reasons hold, and a
+resource that matches its row is no correction and counts nowhere. What a run
+deferred is in `stats.deferred` of its `sync_runs` row and in
+`tally_sync_resources_deferred_total{cloud, reason}`. Both count corrections a
+run did not book rather than distinct resources, so a resource deferred in five
+runs counts five times, and a count that stays above zero for one cloud points
+at a resource stuck in transition.
+
+A correction a later run books is dated the way any correction is: a create at
+the platform's creation instant, a reported delete at `terminated_at`, an update
+and a delete by absence at the poll of the run that books them.
+
 ## The instants a missed delete is booked at
 
 Two passes book a delete the collector missed, and they date it differently.
 
 The deleted-servers listing asks nova for `deleted=true` bounded by
-`changes-since`, at the start of the last completed run, and every server it
-returns is booked at the `terminated_at` nova reports. A cloud's first run has
+`changes-since`, at the start of the last completed run less the settle window,
+and every server it returns is booked at the `terminated_at` nova reports. The
+window is subtracted because a deletion a run deferred happened before that run
+started: without it, the next run's listing would no longer name the deletion,
+and the absence pass would date it at poll time. A cloud's first run has
 no such bound and asks for no deleted servers, because it has no window behind
 it to catch up on. The absence pass books what the observation did not name at
 poll time, the instant the sync ran.

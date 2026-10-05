@@ -40,10 +40,13 @@ the generator built, which is described in
    The [clouds file example](/reference/configuration/clouds-file#example) is the
    entry that directory carries.
 
-2. Take the two values the overlay sets. It sets `TALLY_REPORTING_SYNC_ALLOW_AT`
-   to true, so the `at` member of a sync body is taken. The cloud is `os-sim`,
-   the `SIM_CLOUD` default, reached from the pod in the kind node at
-   `http://tally-openstack-simulator:8080/v3`.
+2. Take the three values the overlay sets. It sets
+   `TALLY_REPORTING_SYNC_ALLOW_AT` to true, so the `at` member of a sync body is
+   taken. It sets `TALLY_REPORTING_SYNC_SETTLE_S` to 0, so the settle window is
+   off there and a run defers nothing for a recent change: the window would be
+   measured against the told instant of a month that runs faster than the wall
+   clock. The cloud is `os-sim`, the `SIM_CLOUD` default, reached from the pod
+   in the kind node at `http://tally-openstack-simulator:8080/v3`.
 
 3. Edit both files of that directory for a drill under another cloud name. What
    an entry holds, and what the adapter needs of the account behind it, is in

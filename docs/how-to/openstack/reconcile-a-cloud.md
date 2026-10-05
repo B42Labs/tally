@@ -25,7 +25,8 @@ observes and how it corrects the projection is in
   account check.
 - The [Reporting API settings](/reference/configuration/tally-reporting) page,
   which names `TALLY_REPORTING_CLOUDS_CONFIG` (the clouds file the API reads at
-  startup), `TALLY_REPORTING_SYNC_ALLOW_AT` and `TALLY_REPORTING_SYNC_BUDGET_S`.
+  startup), `TALLY_REPORTING_SYNC_ALLOW_AT`, `TALLY_REPORTING_SYNC_BUDGET_S` and
+  `TALLY_REPORTING_SYNC_SETTLE_S`.
 
 ## Restrict the account to read requests
 
@@ -348,11 +349,16 @@ instant its caller picked.
    ```
 
    ```text
-            started_at         |        completed_at        |  status   |                          stats
-   ----------------------------+----------------------------+-----------+----------------------------------------------------------
-    2026-07-09 14:22:00.512+00 | 2026-07-09 14:22:07.118+00 | completed | {"errors": [], "created": 3, "deleted": 2, "updated": 1}
+            started_at         |        completed_at        |  status   |                                                 stats
+   ----------------------------+----------------------------+-----------+--------------------------------------------------------------------------------------------------------
+    2026-07-09 14:22:00.512+00 | 2026-07-09 14:22:07.118+00 | completed | {"errors": [], "created": 3, "deleted": 2, "updated": 1, "deferred": {"recent": 0, "transitional": 0}}
     2026-07-09 13:22:00.401+00 | 2026-07-09 13:22:01.930+00 | failed    | {"errors": ["unknown setting \"include_octavia_lb\""]}
    ```
+
+   `deferred` counts the corrections the run left to a later run: `transitional`
+   for a resource the platform was still changing, `recent` for one changed
+   inside `TALLY_REPORTING_SYNC_SETTLE_S` before the run. A count that stays
+   above zero for the same cloud points at a resource stuck in transition.
 
    The Reporting API's log carries the same reasons on the request that
    triggered the run, together with the `sync_run_id` the row is found by.

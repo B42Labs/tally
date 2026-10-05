@@ -1,6 +1,6 @@
 ---
 title: Dual ingestion and reconciliation
-description: Why events and a periodic sync are both needed, what the sync repairs, and the two gaps it accepts.
+description: Why events and a periodic sync are both needed, what the sync repairs, and the three gaps it accepts.
 quadrant: explanation
 audience: all
 ---
@@ -83,9 +83,19 @@ and are trivially identifiable in a history. Each carries
 `source: "reconciliation"` and a deterministic `event_id` derived from the sync
 run and the resource, so re-running a sync never duplicates them.
 
+A run compares the platform at the instant it looks with the events the
+collectors delivered up to then. The notification of a change the platform is
+still making, or made a moment ago, may still be on its way, and a correction
+booked for it would book what the collector is about to book. A run therefore
+defers a difference on a resource the platform reports as in transition, or one
+that the platform or the projection dates inside the settle window before the
+run. The next run books the correction if the difference is still there.
+[What a run defers](/explanation/how-reconciliation-observes-a-cloud#what-a-run-defers)
+lists the rules.
+
 A sync is started per cloud through `POST /internal/sync/{cloud}` and recorded
 in `sync_runs`. The repository ships no CronJob for it: what drives the schedule
-belongs to the deployment. The concept suggested short intervals, and the two
+belongs to the deployment. The concept suggested short intervals, and the first two
 limitations below say why.
 
 A platform API that stops answering must read as "no information" and never as
@@ -103,7 +113,7 @@ time rather than the time the sync happened to look.
 
 ## Known limitations
 
-Two gaps are accepted rather than closed. Both are monitored.
+Three gaps are accepted rather than closed. The first two are monitored.
 
 A synthetic delete event carries the poll time and not the actual deletion time.
 Each lost delete event therefore costs up to one sync interval of overbilling.
@@ -124,3 +134,12 @@ collector events in the last 24 hours has produced none for an hour, and
 says what to do about it. It sits beside
 `TallySyncErrors`, `TallySyncStale` and `TallyReconciliationDriftHigh` in
 [the alerting rules](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules.yaml).
+
+A correction can also come at the wrong moment. A delete found by absence can
+race its own notification: a volume, floating IP, image or load balancer whose
+delete notification is in flight when the run looks is gone from the listing,
+its row is live and old, and the platform gives no instant for the deletion. The
+run books that delete seconds before the collector's event arrives. The other
+side of the settle window is that a real difference inside it is corrected one
+run later, and an update or a delete by absence is then dated at that later
+poll.
