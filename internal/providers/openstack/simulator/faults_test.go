@@ -811,6 +811,8 @@ func TestVersionedTwinOfAFinishResize(t *testing.T) {
 		{"compute.instance.delete.end", "instance.delete.end"},
 		{"compute.instance.resize.end", "instance.resize.end"},
 		{"compute.instance.finish_resize.end", "instance.resize_finish.end"},
+		{"compute.instance.resize.confirm.end", "instance.resize_confirm.end"},
+		{"compute.instance.resize.revert.end", "instance.resize_revert.end"},
 		{"compute.instance.shelve_offload.end", "instance.shelve_offload.end"},
 		{"compute.instance.unshelve.end", "instance.unshelve.end"},
 		{"compute.instance.power_off.end", "instance.power_off.end"},

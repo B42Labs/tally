@@ -464,13 +464,19 @@ func versionedTwin(t Transition, messageID string) Transition {
 }
 
 // versionedType is the name nova publishes an unversioned compute type under
-// when it is configured for versioned notifications. The verb of a finished
-// resize is the other way round there, so compute.instance.finish_resize.end
-// becomes instance.resize_finish.end.
+// when it is configured for versioned notifications. Three verbs of a resize
+// are spelled differently there: compute.instance.finish_resize.end becomes
+// instance.resize_finish.end, compute.instance.resize.confirm.end becomes
+// instance.resize_confirm.end, and compute.instance.resize.revert.end becomes
+// instance.resize_revert.end.
 func versionedType(eventType string) string {
-	name := strings.TrimPrefix(eventType, "compute.instance.")
-	return "instance." + strings.Replace(name, "finish_resize", "resize_finish", 1)
+	return "instance." + versionedVerbs.Replace(strings.TrimPrefix(eventType, "compute.instance."))
 }
+
+// versionedVerbs respells the three verbs of a resize for versionedType. It is
+// built once because the table never changes.
+var versionedVerbs = strings.NewReplacer("finish_resize", "resize_finish",
+	"resize.confirm", "resize_confirm", "resize.revert", "resize_revert")
 
 // truncatedTwin is a notification that arrives cut in half. Render cuts the
 // inner message of a transition marked this way, and the collector's second
