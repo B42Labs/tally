@@ -64,6 +64,14 @@ month the oracle describes is in
    loadbalancer: 5 resources are not priced by pricing model 2026-03 and were not compared
    ```
 
+   A model that prices `loadbalancer` gets this line instead, because the
+   oracle states the listeners and pools the cloud holds and the engine bills
+   what the create and the syncs booked:
+
+   ```text
+   loadbalancer: 5 resources are sized by reconciliation and were not compared
+   ```
+
    Rated records of another cloud or another platform are skipped and counted on
    one more line, `skipped N rated records of other clouds or platforms`, which
    is what an export of a deployment that bills more than the simulated cloud
