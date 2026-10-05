@@ -82,8 +82,11 @@ Every classic project gets:
 - four instances, created within the first six hours, each with one to three
   power cycles. A resize always falls on the first instance and on any other
   with probability 1/2; a shelve always on the second and on any other with
-  probability 1/3. The first instance is deleted in the last ten days of the
-  month, together with its floating IP and its volumes.
+  probability 1/3. Ten minutes after nova finished a resize, the user decides:
+  the first instance's resize is reverted in the first classic project and
+  confirmed in the other two, and every other resize is confirmed. The first
+  instance is deleted in the last ten days of the month, together with its
+  floating IP and its volumes.
 - one or two volumes per instance. The second instance's first volume always
   resizes and retypes.
 - one floating IP per instance. The third instance's is released mid-month,
@@ -194,15 +197,16 @@ the shoot and the CI activity onto that month's working days.
 
 ## The noise
 
-Beside the 21 types the mapping knows, a month renders 62 the collector bills
+Beside the 22 types the mapping knows, a month renders 65 the collector bills
 nothing for. They are what a real bus carries around every billable transition:
 the scheduler's placement decisions, the ports of every server, the networks,
 subnets, routers and security groups underneath them, the keypairs, keystone's
 authentications, designate's zones and record sets, barbican's audit records,
-the attach and the detach of a volume, and the `.start` half of every step that
-has one. The collector receives all of them and counts each as skipped, so a
-month without them is a month whose skip counters stay at zero and whose ratio
-of billable to received says nothing.
+the attach and the detach of a volume, the `.start` half of every step that has
+one, and the `compute.instance.resize.end` the source host of a resize sends.
+The collector receives all of them and counts each as skipped, so a month
+without them is a month whose skip counters stay at zero and whose ratio of
+billable to received says nothing.
 
 Three rules hold for the whole catalogue.
 
@@ -261,18 +265,21 @@ An audit sits at the midnight itself and is pushed on by whole seconds while the
 instance already reports a transition at that second, which keeps two
 notifications about one resource a second apart. An instance created and deleted
 between two midnights is audited once, at the midnight that follows. What an
-audit repeats is the instance as it stands: a resize moves the flavor over, and
-every `.end` moves the state over.
+audit repeats is the instance as it stands: a resize moves the flavor over, a
+revert moves it back, and every `.end` moves the state over.
 
 ### The paired steps
 
-Seven steps send a `.start` five seconds before the `.end` the collector books:
+Nine steps send a `.start` five seconds before their `.end`:
 `compute.instance.power_off`, `compute.instance.power_on`,
 `compute.instance.resize`, `compute.instance.finish_resize`,
+`compute.instance.resize.confirm`, `compute.instance.resize.revert`,
 `compute.instance.shelve_offload`, `compute.instance.unshelve`, and
-`volume.resize`. `volume.transfer.accept.start` comes one second before its
-`.end`. That the catalogue carries both halves of every such step is the
-author's decision of 2026-08-30.
+`volume.resize`. The collector books every one of those `.end`s except
+`compute.instance.resize.end`, which still carries the flavor the server is
+leaving. `volume.transfer.accept.start` comes one second before its `.end`. That
+the catalogue carries both halves of every such step is the author's decision of
+2026-08-30.
 
 ### The volumes and the images
 
@@ -359,6 +366,9 @@ endpoint the audit records name is `https://barbican.<cloud>.example:9311`.
 | `compute.instance.power_on.start` | `nova` | paired step |
 | `compute.instance.resize.start` | `nova` | paired step |
 | `compute.instance.finish_resize.start` | `nova` | paired step |
+| `compute.instance.resize.end` | `nova` | paired step |
+| `compute.instance.resize.confirm.start` | `nova` | paired step |
+| `compute.instance.resize.revert.start` | `nova` | paired step |
 | `compute.instance.shelve_offload.start` | `nova` | paired step |
 | `compute.instance.unshelve.start` | `nova` | paired step |
 | `keypair.import.start` | `nova` | shoot infrastructure |
@@ -410,11 +420,12 @@ endpoint the audit records name is `https://barbican.<cloud>.example:9311`.
 | `audit.http.request` | `barbican` | load balancer |
 | `audit.http.response` | `barbican` | load balancer |
 
-No recorded sample exists for any of the 62. The fixtures under
+Of the 65, only `compute.instance.resize.end` has a recorded sample, the 2025.1
+shape the collector skips. The fixtures under
 [`internal/providers/openstack/testdata/golden/notifications/`](https://github.com/B42Labs/tally/tree/main/internal/providers/openstack/testdata/golden/notifications)
 are the collector's, and it maps none of these types, so a real deployment never
-had one recorded there. The member sets are the simulator's own, chosen after
-the legacy notification payloads of the services, and
+had one of the others recorded there. The member sets are the simulator's own,
+chosen after the legacy notification payloads of the services, and
 `TestNoisePayloadsCarryTheirMembers` pins them the way the fixtures pin the
 billable ones. `TestEverySeedRendersTheWholeCatalogue` holds seeds 1 to 5 to the
 whole list, so a type that leaves the catalogue fails the suite.
@@ -422,22 +433,23 @@ whole list, so a type that leaves the catalogue fails the suite.
 The collector's label limiter admits 100 distinct `event_type` values, which is
 `LabelValueLimit` in
 [`internal/providers/openstack/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/metrics.go),
-and the consumed and the skipped series share that bound. The 83 types of a
+and the consumed and the skipped series share that bound. The 87 types of a
 month stay inside it, so no series of a simulated month lands under
 `event_type="other"`. `TestAMonthStaysInsideTheCollectorsLabelBudget` holds the
 month to the bound, so a catalogue or a mapping that grows past it fails the
 suite rather than silently folding the types that arrive last.
 
-The workload renders 83 oslo notification types: the 21 of the table below,
-which the collector's mapping knows, and the 62 of the catalogue above, which it
+The workload renders 87 oslo notification types: the 22 of the table below,
+which the collector's mapping knows, and the 65 of the catalogue above, which it
 skips.
 
 | Notification | Exchange | Billable |
 | --- | --- | --- |
 | `compute.instance.create.end` | `nova` | yes |
 | `compute.instance.delete.end` | `nova` | yes |
-| `compute.instance.resize.end` | `nova` | yes |
 | `compute.instance.finish_resize.end` | `nova` | yes |
+| `compute.instance.resize.confirm.end` | `nova` | yes |
+| `compute.instance.resize.revert.end` | `nova` | yes |
 | `compute.instance.power_off.end` | `nova` | yes |
 | `compute.instance.power_on.end` | `nova` | yes |
 | `compute.instance.shelve_offload.end` | `nova` | yes |
@@ -470,7 +482,8 @@ it under `runs.stats.unpriced` instead of billing it. Pricing the resource type
 is a change to that model and not to this simulator.
 
 The forced steps of the classic tenants and of the shoots (the resize on the
-first instance, the shelve on the second, the resize and retype of the second
+first instance with its revert in the first project and its confirm in the
+others, the shelve on the second, the resize and retype of the second
 instance's first volume, the rolling update of `api-prod`, the tear-down of
 `batch`, and the load balancers) are what make every seed render every type
 rather than most of them. The test suite holds seeds 1 to 5 over July 2026
@@ -574,17 +587,16 @@ members are on
 The state is the one the billable notification reports, translated the way
 [`mapping.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/mapping.go)
 translates it. A power-off books `shutoff`, a shelve `shelved`, and an
-unshelve, a power-on, and a `finish_resize` book `active`. A
-`compute.instance.resize.end` books `resized` for the sixty seconds until its
-`finish_resize`, because `osmap.VMState` passes
-nova's `resized` through unchanged. A volume books `available` on its create
-whatever attaches it a second later, which is the state the mapping fixes on
-`volume.create.end`, and on a resize, a retype, and a transfer it books `in-use`
-when the world holds it attached and `available` otherwise. A state change that
-only a non-billable notification carries, the attach and the detach of the noise
-catalogue, changes nothing in the oracle until the next billable notification
-reports it. A floating IP, an image, and a load balancer are `active` from their
-create to their delete.
+unshelve, a power-on, a `finish_resize`, a confirm, and a revert book `active`.
+A `finish_resize` reports nova's `resized`, which `osmap.VMState` normalizes to
+`active`, and the `compute.instance.resize.end` before it is not booked. A
+volume books `available` on its create whatever attaches it a second later,
+which is the state the mapping fixes on `volume.create.end`, and on a resize, a
+retype, and a transfer it books `in-use` when the world holds it attached and
+`available` otherwise. A state change that only a non-billable notification
+carries, the attach and the detach of the noise catalogue, changes nothing in
+the oracle until the next billable notification reports it. A floating IP, an
+image, and a load balancer are `active` from their create to their delete.
 
 The size is the simulator's own view of the resource, written as JSON numbers
 that carry every digit. An instance holds `vcpus`, `ram_gb` (the reported memory
@@ -630,11 +642,11 @@ and then by `from`.
 ```
 
 A row states the exact sum of the grid steps of "The metric series" that fall
-inside its interval, so an interval the instance spent `shutoff`, `shelved`, or
-`resized` carries 0, and an interval shorter than the grid, which holds no step
-at all, carries 0 as well rather than being left out: a comparison reads a row
-of every interval the oracle holds. The rows stand beside the resources rather
-than inside their intervals because of the fold: two adjacent facts that repeat
+inside its interval, so an interval the instance spent `shutoff` or `shelved`
+carries 0, and an interval shorter than the grid, which holds no step at all,
+carries 0 as well rather than being left out: a comparison reads a row of every
+interval the oracle holds. The rows stand beside the resources rather than
+inside their intervals because of the fold: two adjacent facts that repeat
 the state, the size, and the project are kept in one interval, and a traffic
 figure inside an interval would make two such facts compare unequal and split
 that fold.
@@ -664,9 +676,9 @@ not read, and one that leaves a member it does read unstated. The last of the
 three is the one nothing else would catch, because JSON leaves an absent member
 at its zero value: an oracle without its sizes would be compared, and every
 `time_gauge` dimension of every priced resource would come out as a difference
-the engine did not cause. This build is at format 3, the number the `traffic`
-rows were added in, so a file an earlier build wrote at format 2 is refused
-rather than compared.
+the engine did not cause. This build is at format 4, which books a resize from
+its `finish_resize` and its confirm or revert, so a file an earlier build wrote
+at format 3 is refused rather than compared.
 
 ## The fault switches
 
@@ -765,10 +777,10 @@ and a quotient that went through a float64 would arrive carrying digits nobody
 placed.
 
 A step accrues bytes only while the interval its start falls in is `active`. A
-`shutoff`, a `shelved`, and a `resized` instance move nothing, so their steps
-carry zero and the counter behind them stays flat, which is what the counter of
-a stopped machine does. A step that falls into a gap between two intervals
-belongs to no state and accrues nothing either.
+`shutoff` and a `shelved` instance move nothing, so their steps carry zero and
+the counter behind them stays flat, which is what the counter of a stopped
+machine does. A step that falls into a gap between two intervals belongs to no
+state and accrues nothing either.
 
 A series begins at 0 on the first grid step at or after the instance's first
 interval start and ends before the end of its last interval, which is where
@@ -796,15 +808,15 @@ all its generated id, because the oracle these gauges are folded out of holds no
 display name; the fake OpenStack API answers a listing the same way.
 
 The `status` of a server is nova's own word, read through the same table the
-fake OpenStack API answers a listing with, so it is `active`, `stopped`,
-`shelved_offloaded`, or `resized` where the oracle states the state the
-collector books. The memory is `ram_gb` times 1024, because nova's limits report
-megabytes where a size states gibibytes. The three maxima are constants: the
-simulated world has no quota, and the drilldown's gauge panels divide a used
-series by a maximum one, so a panel without the divisor would show a division by
-an absent series rather than a ratio. A size member an interval does not carry
-reads as zero, so one malformed interval costs its own series a value instead of
-failing a whole scrape.
+fake OpenStack API answers a listing with, so it is `active`, `stopped`, or
+`shelved_offloaded` where the oracle states the state the collector books. The
+memory is `ram_gb` times 1024, because nova's limits report megabytes where a
+size states gibibytes. The three maxima are constants: the simulated world has
+no quota, and the drilldown's gauge panels divide a used series by a maximum
+one, so a panel without the divisor would show a division by an absent series
+rather than a ratio. A size member an interval does not carry reads as zero, so
+one malformed interval costs its own series a value instead of failing a whole
+scrape.
 
 The routers are the one family the oracle does not hold, because nothing bills a
 router and the generator books none. They are folded out of the schedule's
