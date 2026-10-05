@@ -620,9 +620,11 @@ func rendered(t *testing.T, resource reconciliation.ObservedResource) string {
 		}
 		size = string(encoded)
 	}
-	return fmt.Sprintf("type=%s id=%s project=%s state=%s size=%s created=%s deleted=%s",
+	return fmt.Sprintf("type=%s id=%s project=%s state=%s size=%s created=%s deleted=%s "+
+		"changed=%s transitional=%t",
 		resource.ResourceType, resource.ResourceID, resource.ProjectID, resource.State, size,
-		instant(resource.CreatedAt), instant(resource.DeletedAt))
+		instant(resource.CreatedAt), instant(resource.DeletedAt), instant(resource.ChangedAt),
+		resource.Transitional)
 }
 
 // instant renders a timestamp the way an observation has to carry it. The zone
@@ -1007,10 +1009,12 @@ func TestOpenStackObservesACloudThatGrantsTheScopeUnderAnotherRoleName(t *testin
 	assertObserved(t, observed,
 		`type=volume id=5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=in-use `+
-			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none`,
+			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:13:02Z UTC transitional=false`,
 		`type=volume id=c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=error_deleting `+
-			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none`)
+			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none `+
+			`changed=2026-08-05T02:41:18Z UTC transitional=false`)
 	if probes := cloud.scopeProbes(); len(probes) != 1 {
 		t.Errorf("the cloud answered %d scope probes, want 1", len(probes))
 	}
@@ -1215,15 +1219,51 @@ func TestOpenStackObservesEveryProjectsInstances(t *testing.T) {
 		`type=instance id=7f3a1c58-9d2b-4e17-8c6a-2b5d0e9f4a31 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
 			`size={"disk_gb":30,"flavor":"m1.small","ram_gb":0.5,"vcpus":1} `+
-			`created=2026-07-14T09:12:33Z UTC deleted=none`,
+			`created=2026-07-14T09:12:33Z UTC deleted=none `+
+			`changed=2026-08-01T11:04:52Z UTC transitional=false`,
 		`type=instance id=2d8b6e10-4f3c-49a5-b7d2-6c1a8e5f0937 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=shutoff `+
 			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
-			`created=2026-07-20T16:45:02Z UTC deleted=none`,
+			`created=2026-07-20T16:45:02Z UTC deleted=none `+
+			`changed=2026-08-09T05:22:10Z UTC transitional=false`,
 		`type=instance id=9c4f7a23-1e6d-4b80-95af-3d2c7b1e6048 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=rescued `+
 			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
-			`created=2026-07-21T08:03:44Z UTC deleted=none`)
+			`created=2026-07-21T08:03:44Z UTC deleted=none `+
+			`changed=2026-08-12T13:57:01Z UTC transitional=false`)
+}
+
+func TestOpenStackReportsAnInstanceWithAnOperationInFlight(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, serversPath, "servers_transitional.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	// Nova sets a task state for every operation in flight, whatever the
+	// vm_state reads, and building is an instance that was never active. Nova
+	// reports no updated instant for the building one, so its change is its
+	// creation. An instance nova left at rest is no transition.
+	assertObserved(t, observed,
+		`type=instance id=a1c4e7f0-2b5d-4836-9e1a-4c7f0b3d6e92 `+
+			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
+			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
+			`created=2026-08-10T06:14:55Z UTC deleted=none `+
+			`changed=2026-08-19T23:41:07Z UTC transitional=true`,
+		`type=instance id=b2d5f801-3c6e-4947-8f2b-5d801c4e7fa3 `+
+			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=building `+
+			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
+			`created=2026-08-19T23:50:31Z UTC deleted=none `+
+			`changed=2026-08-19T23:50:31Z UTC transitional=true`,
+		`type=instance id=c3e60912-4d7f-4a58-903c-6e912d5f80b4 `+
+			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
+			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
+			`created=2026-06-03T10:22:18Z UTC deleted=none `+
+			`changed=2026-06-03T10:22:40Z UTC transitional=false`)
 }
 
 func TestOpenStackReadsTheFlavorsOfOneRunOnlyOnce(t *testing.T) {
@@ -1259,10 +1299,12 @@ func TestOpenStackReadsTheFlavorsOfOneRunOnlyOnce(t *testing.T) {
 		`type=instance id=1e5d9b74-3c2a-4f68-b019-7d4c6a2e8f53 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
 			`size={"disk_gb":40,"flavor":"m1.medium","ram_gb":4,"vcpus":2} `+
-			`created=2026-02-03T11:20:15Z UTC deleted=none`,
+			`created=2026-02-03T11:20:15Z UTC deleted=none `+
+			`changed=2026-08-02T04:11:09Z UTC transitional=false`,
 		`type=instance id=6b0e2f81-5a7d-4c39-8e42-1f9b3d5c7a06 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
-			`size=none created=2026-02-04T14:52:40Z UTC deleted=none`)
+			`size=none created=2026-02-04T14:52:40Z UTC deleted=none `+
+			`changed=2026-08-03T19:38:27Z UTC transitional=false`)
 }
 
 func TestOpenStackReportsAFailedFlavorListingForInstancesAlone(t *testing.T) {
@@ -1294,10 +1336,12 @@ func TestOpenStackReportsAFailedFlavorListingForInstancesAlone(t *testing.T) {
 	assertObserved(t, observed,
 		`type=instance id=1e5d9b74-3c2a-4f68-b019-7d4c6a2e8f53 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size=none created=2026-02-03T11:20:15Z UTC deleted=none`,
+			`size=none created=2026-02-03T11:20:15Z UTC deleted=none `+
+			`changed=2026-08-02T04:11:09Z UTC transitional=false`,
 		`type=instance id=6b0e2f81-5a7d-4c39-8e42-1f9b3d5c7a06 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
-			`size=none created=2026-02-04T14:52:40Z UTC deleted=none`)
+			`size=none created=2026-02-04T14:52:40Z UTC deleted=none `+
+			`changed=2026-08-03T19:38:27Z UTC transitional=false`)
 }
 
 func TestOpenStackObservesEveryProjectsVolumes(t *testing.T) {
@@ -1325,10 +1369,53 @@ func TestOpenStackObservesEveryProjectsVolumes(t *testing.T) {
 	assertObserved(t, observed,
 		`type=volume id=5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=in-use `+
-			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none`,
+			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:13:02Z UTC transitional=false`,
 		`type=volume id=c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=error_deleting `+
-			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none`)
+			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none `+
+			`changed=2026-08-05T02:41:18Z UTC transitional=false`)
+}
+
+func TestOpenStackReportsAVolumeInTransitionByItsStatus(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, volumesPath, "volumes_transitional.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	// Twelve of cinder's statuses are an operation in flight. A status a volume
+	// rests in, error included, is not, and neither is one cinder does not
+	// define.
+	got := map[string]bool{}
+	for _, resource := range observed {
+		got[resource.State] = resource.Transitional
+	}
+	want := map[string]bool{
+		"creating": true, "deleting": true, "managing": true, "attaching": true,
+		"detaching": true, "reserved": true, "restoring-backup": true, "backing-up": true,
+		"downloading": true, "uploading": true, "retyping": true, "extending": true,
+		"available": false, "in-use": false, "error": false, "frobnicating": false,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("transitional by status = %v, want %v", got, want)
+	}
+
+	// Cinder reports updated_at as null until a volume is first updated, so the
+	// creating volume changed when it was created.
+	for _, resource := range observed {
+		if resource.State != "creating" {
+			continue
+		}
+		if resource.ChangedAt == nil || resource.CreatedAt == nil || !resource.ChangedAt.Equal(*resource.CreatedAt) {
+			t.Errorf("the creating volume changed at %s, want its creation %s",
+				instant(resource.ChangedAt), instant(resource.CreatedAt))
+		}
+	}
 }
 
 func TestOpenStackObservesEveryProjectsFloatingIPs(t *testing.T) {
@@ -1353,16 +1440,40 @@ func TestOpenStackObservesEveryProjectsFloatingIPs(t *testing.T) {
 	assertObserved(t, observed,
 		`type=floating_ip id=e1a7c3b5-0d92-4f68-8a41-6b2c9d5e7f03 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"ip_version":4} created=2026-05-11T07:30:00Z UTC deleted=none`,
+			`size={"ip_version":4} created=2026-05-11T07:30:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:14:26Z UTC transitional=false`,
 		`type=floating_ip id=f28d5a91-6c04-4e73-b1f8-9a2d7c3e5b46 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
-			`size={"ip_version":6} created=2026-05-12T09:00:00Z UTC deleted=none`,
+			`size={"ip_version":6} created=2026-05-12T09:00:00Z UTC deleted=none `+
+			`changed=2026-05-12T09:00:00Z UTC transitional=false`,
 		`type=floating_ip id=a3b6d8f2-4e01-4c95-87a3-5d1b9c6e2f48 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
-			`size={"ip_version":4} created=none deleted=none`,
+			`size={"ip_version":4} created=none deleted=none `+
+			`changed=none transitional=false`,
 		`type=floating_ip id=b45c9e17-2a68-4d03-91f7-6c8e0b3a5d92 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active `+
-			`size={"ip_version":4} created=2026-05-13T18:22:07Z UTC deleted=none`)
+			`size={"ip_version":4} created=2026-05-13T18:22:07Z UTC deleted=none `+
+			`changed=2026-07-20T16:46:11Z UTC transitional=false`)
+}
+
+func TestOpenStackReportsNoChangeInstantForAnUndatedAddress(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, floatingIPsPath, "floatingips_undated.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	// Neutron reports neither instant for this address, which is no evidence of
+	// a recent change rather than a change at the zero instant.
+	assertObserved(t, observed,
+		`type=floating_ip id=c56d0f28-3b79-4e14-a208-7d9f1c4b6e03 `+
+			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
+			`size={"ip_version":4} created=none deleted=none `+
+			`changed=none transitional=false`)
 }
 
 func TestOpenStackObservesEveryProjectsImages(t *testing.T) {
@@ -1387,10 +1498,12 @@ func TestOpenStackObservesEveryProjectsImages(t *testing.T) {
 	assertObserved(t, observed,
 		`type=image id=0b1c2d3e-4f50-4617-8394-0516273849ab `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none`,
+			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none `+
+			`changed=2026-03-01T12:07:42Z UTC transitional=false`,
 		`type=image id=3e4f5061-7283-494a-b627-38495061728d `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"size_gb":5} created=2026-03-06T09:45:31Z UTC deleted=none`)
+			`size={"size_gb":5} created=2026-03-06T09:45:31Z UTC deleted=none `+
+			`changed=2026-08-10T17:02:14Z UTC transitional=false`)
 }
 
 func TestOpenStackHoldsBackImagesGlanceNamesNoOwnerFor(t *testing.T) {
@@ -1434,13 +1547,28 @@ func TestOpenStackHoldsBackImagesGlanceNamesNoOwnerFor(t *testing.T) {
 	assertObserved(t, observed,
 		`type=volume id=5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=in-use `+
-			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none`,
+			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:13:02Z UTC transitional=false`,
 		`type=volume id=c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=error_deleting `+
-			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none`,
+			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none `+
+			`changed=2026-08-05T02:41:18Z UTC transitional=false`,
 		`type=loadbalancer id=4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"listeners":2,"pools":1} created=2026-04-20T10:00:00Z UTC deleted=none`)
+			`size={"listeners":2,"pools":1} created=2026-04-20T10:00:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:20:31Z UTC transitional=false`,
+		`type=loadbalancer id=6c7d8e90-1234-4567-8901-2d3e4f5a6b78 `+
+			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_delete `+
+			`size={"listeners":1,"pools":0} created=2026-05-28T16:11:39Z UTC deleted=none `+
+			`changed=2026-08-16T21:58:04Z UTC transitional=true`,
+		`type=loadbalancer id=7d8e9012-3456-4789-a012-3e4f5a6b7c89 `+
+			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=pending_create `+
+			`size={"listeners":0,"pools":0} created=2026-08-19T08:30:12Z UTC deleted=none `+
+			`changed=2026-08-19T08:30:12Z UTC transitional=true`,
+		`type=loadbalancer id=8e901234-5678-4890-b123-4f5a6b7c8d90 `+
+			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_update `+
+			`size={"listeners":1,"pools":1} created=2026-03-12T08:40:27Z UTC deleted=none `+
+			`changed=2026-08-19T11:25:40Z UTC transitional=true`)
 }
 
 func TestOpenStackWalksTheImageListingPastTheOneItCannotPlace(t *testing.T) {
@@ -1475,7 +1603,8 @@ func TestOpenStackWalksTheImageListingPastTheOneItCannotPlace(t *testing.T) {
 	assertObserved(t, observed,
 		`type=image id=0b1c2d3e-4f50-4617-8394-0516273849ab `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none`)
+			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none `+
+			`changed=2026-03-01T12:07:42Z UTC transitional=false`)
 }
 
 func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
@@ -1512,13 +1641,28 @@ func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
 			t.Fatalf("ListResources() errors = %v, want none", errs)
 		}
 
-		// Octavia keeps a deleted load balancer in its listing, and one on its way
-		// out is already paid for up to the delete the collector recorded.
-		// Observing either would resurrect a resource that is gone.
+		// Octavia keeps a deleted load balancer in its listing, and observing one
+		// would resurrect a resource that is gone. One in pending_create,
+		// pending_update or pending_delete is observed in transition: the run books
+		// nothing for it, and its row is not booked deleted before octavia sends
+		// delete.end. A balancer octavia never updated changed when it was created.
 		assertObserved(t, observed,
 			`type=loadbalancer id=4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23 `+
 				`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-				`size={"listeners":2,"pools":1} created=2026-04-20T10:00:00Z UTC deleted=none`)
+				`size={"listeners":2,"pools":1} created=2026-04-20T10:00:00Z UTC deleted=none `+
+				`changed=2026-07-14T09:20:31Z UTC transitional=false`,
+			`type=loadbalancer id=6c7d8e90-1234-4567-8901-2d3e4f5a6b78 `+
+				`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_delete `+
+				`size={"listeners":1,"pools":0} created=2026-05-28T16:11:39Z UTC deleted=none `+
+				`changed=2026-08-16T21:58:04Z UTC transitional=true`,
+			`type=loadbalancer id=7d8e9012-3456-4789-a012-3e4f5a6b7c89 `+
+				`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=pending_create `+
+				`size={"listeners":0,"pools":0} created=2026-08-19T08:30:12Z UTC deleted=none `+
+				`changed=2026-08-19T08:30:12Z UTC transitional=true`,
+			`type=loadbalancer id=8e901234-5678-4890-b123-4f5a6b7c8d90 `+
+				`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_update `+
+				`size={"listeners":1,"pools":1} created=2026-03-12T08:40:27Z UTC deleted=none `+
+				`changed=2026-08-19T11:25:40Z UTC transitional=true`)
 	})
 }
 
@@ -1584,13 +1728,16 @@ func TestOpenStackHoldsBackOnlyTheTypeWhoseListingBreaks(t *testing.T) {
 		`type=instance id=7f3a1c58-9d2b-4e17-8c6a-2b5d0e9f4a31 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
 			`size={"disk_gb":30,"flavor":"m1.small","ram_gb":0.5,"vcpus":1} `+
-			`created=2026-07-14T09:12:33Z UTC deleted=none`,
+			`created=2026-07-14T09:12:33Z UTC deleted=none `+
+			`changed=2026-08-01T11:04:52Z UTC transitional=false`,
 		`type=volume id=5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=in-use `+
-			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none`,
+			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:13:02Z UTC transitional=false`,
 		`type=volume id=c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=error_deleting `+
-			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none`)
+			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none `+
+			`changed=2026-08-05T02:41:18Z UTC transitional=false`)
 }
 
 func TestOpenStackReportsWhatTheCloudAnsweredOnTheTypeThatFailed(t *testing.T) {
@@ -1631,10 +1778,12 @@ func TestOpenStackReportsWhatTheCloudAnsweredOnTheTypeThatFailed(t *testing.T) {
 	assertObserved(t, observed,
 		`type=image id=0b1c2d3e-4f50-4617-8394-0516273849ab `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none`,
+			`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none `+
+			`changed=2026-03-01T12:07:42Z UTC transitional=false`,
 		`type=image id=3e4f5061-7283-494a-b627-38495061728d `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
-			`size={"size_gb":5} created=2026-03-06T09:45:31Z UTC deleted=none`)
+			`size={"size_gb":5} created=2026-03-06T09:45:31Z UTC deleted=none `+
+			`changed=2026-08-10T17:02:14Z UTC transitional=false`)
 }
 
 func TestOpenStackObservesTheInstancesDeletedSinceTheLastRun(t *testing.T) {
@@ -1688,9 +1837,11 @@ func TestOpenStackObservesTheInstancesDeletedSinceTheLastRun(t *testing.T) {
 	// the precision nova reported it in, which is the whole reason for this pass.
 	assertObserved(t, observed,
 		`type=instance id=3a9e5c07-2b81-4d6f-9a34-5c7e1b0d8f26 `+
-			`project= state= size=none created=none deleted=2026-08-14T10:31:07Z UTC`,
+			`project= state= size=none created=none deleted=2026-08-14T10:31:07Z UTC `+
+			`changed=none transitional=false`,
 		`type=instance id=b6d2f483-7e15-4a90-8c73-0d5b9a1e6c42 `+
-			`project= state= size=none created=none deleted=2026-08-15T22:03:41.5Z UTC`)
+			`project= state= size=none created=none deleted=2026-08-15T22:03:41.5Z UTC `+
+			`changed=none transitional=false`)
 }
 
 func TestOpenStackBoundsHowFarBackItAsksNovaForDeletions(t *testing.T) {
@@ -1821,7 +1972,8 @@ func TestOpenStackSkipsADeletedInstanceNovaDestroyedAfterTheRun(t *testing.T) {
 	// books it at poll time, the way it books every delete this pass leaves out.
 	assertObserved(t, observed,
 		`type=instance id=3a9e5c07-2b81-4d6f-9a34-5c7e1b0d8f26 `+
-			`project= state= size=none created=none deleted=2026-08-14T10:31:07Z UTC`)
+			`project= state= size=none created=none deleted=2026-08-14T10:31:07Z UTC `+
+			`changed=none transitional=false`)
 
 	// A clock on the nova host that runs ahead of this one by more than a sync
 	// interval puts every delete of every run past the instant the run is at, so
@@ -1889,7 +2041,8 @@ func TestOpenStackSkipsADeletedInstanceNovaDidNotDate(t *testing.T) {
 	// instance nova did date is observed here.
 	assertObserved(t, observed,
 		`type=instance id=5e2c8a41-3f79-4b05-9d68-1a4b7c2e0f93 `+
-			`project= state= size=none created=none deleted=2026-08-16T04:12:59Z UTC`)
+			`project= state= size=none created=none deleted=2026-08-16T04:12:59Z UTC `+
+			`changed=none transitional=false`)
 }
 
 func TestOpenStackHoldsBackInstancesWhenTheDeletedListingFails(t *testing.T) {
@@ -1930,21 +2083,26 @@ func TestOpenStackHoldsBackInstancesWhenTheDeletedListingFails(t *testing.T) {
 		`type=instance id=7f3a1c58-9d2b-4e17-8c6a-2b5d0e9f4a31 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
 			`size={"disk_gb":30,"flavor":"m1.small","ram_gb":0.5,"vcpus":1} `+
-			`created=2026-07-14T09:12:33Z UTC deleted=none`,
+			`created=2026-07-14T09:12:33Z UTC deleted=none `+
+			`changed=2026-08-01T11:04:52Z UTC transitional=false`,
 		`type=instance id=2d8b6e10-4f3c-49a5-b7d2-6c1a8e5f0937 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=shutoff `+
 			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
-			`created=2026-07-20T16:45:02Z UTC deleted=none`,
+			`created=2026-07-20T16:45:02Z UTC deleted=none `+
+			`changed=2026-08-09T05:22:10Z UTC transitional=false`,
 		`type=instance id=9c4f7a23-1e6d-4b80-95af-3d2c7b1e6048 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=rescued `+
 			`size={"disk_gb":5,"flavor":"m1.tiny","ram_gb":1,"vcpus":1} `+
-			`created=2026-07-21T08:03:44Z UTC deleted=none`,
+			`created=2026-07-21T08:03:44Z UTC deleted=none `+
+			`changed=2026-08-12T13:57:01Z UTC transitional=false`,
 		`type=volume id=5b8c2d17-6e94-4a30-b7f1-2c8d5e0a9b64 `+
 			`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=in-use `+
-			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none`,
+			`size={"size_gb":100,"type":"ssd"} created=2026-06-02T08:15:00Z UTC deleted=none `+
+			`changed=2026-07-14T09:13:02Z UTC transitional=false`,
 		`type=volume id=c3f9a041-8b25-4d67-9e13-7a6c2b4d8e50 `+
 			`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=error_deleting `+
-			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none`)
+			`size={"size_gb":25,"type":"hdd"} created=2026-06-11T21:03:44Z UTC deleted=none `+
+			`changed=2026-08-05T02:41:18Z UTC transitional=false`)
 }
 
 // assertRunEnded holds a cancelled run's errors to the one error it may yield.
@@ -1993,7 +2151,8 @@ func TestOpenStackEndsTheStreamWhenTheRunIsCancelled(t *testing.T) {
 			`type=instance id=7f3a1c58-9d2b-4e17-8c6a-2b5d0e9f4a31 `+
 				`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active `+
 				`size={"disk_gb":30,"flavor":"m1.small","ram_gb":0.5,"vcpus":1} `+
-				`created=2026-07-14T09:12:33Z UTC deleted=none`)
+				`created=2026-07-14T09:12:33Z UTC deleted=none `+
+				`changed=2026-08-01T11:04:52Z UTC transitional=false`)
 		if requests := cloud.requestsTo(volumesPath); len(requests) != 0 {
 			t.Errorf("the cloud answered %d requests for %s, want none after the run ended",
 				len(requests), volumesPath)

@@ -204,10 +204,11 @@ func (a *openStack) ResourceTypes(cfg map[string]any) ([]string, error) {
 // downstream can tell a narrowed listing from a complete one, so a run that
 // cannot prove its scope must not observe at all.
 //
-// since bounds the deleted listing alone, never the live one. It is the last
-// completed run of this cloud, so the deleted listing walks exactly the window
-// this sync may have missed. at is the instant this run is at, and how far back
-// that window may reach is measured from it.
+// since bounds the deleted listing alone, never the live one. It is the start
+// of the last completed run of this cloud less the settle window, so the
+// deleted listing walks the window this sync may have missed and names again a
+// deletion the last run deferred. at is the instant this run is at, and how far
+// back that window may reach is measured from it.
 func (a *openStack) ListResources(ctx context.Context, cfg map[string]any, since *time.Time,
 	at time.Time,
 ) iter.Seq2[reconciliation.ObservedResource, error] {
@@ -487,6 +488,11 @@ func (a *openStack) listInstances(ctx context.Context, client *gophercloud.Servi
 				State:      osmap.VMState(server.VmState),
 				Size:       size,
 				CreatedAt:  timestamp(server.Created),
+				// Nova sets a task state for every operation in flight and clears it
+				// when the operation ends, and building is the vm_state of an
+				// instance that was never active.
+				Transitional: server.TaskState != "" || server.VmState == "building",
+				ChangedAt:    changedAt(server.Updated, server.Created),
 			})
 		})
 	if !live {
@@ -638,6 +644,26 @@ func (o deletedServerOpts) ToServerListQuery() (string, error) {
 	return "?" + values.Encode(), nil
 }
 
+// transitionalVolumeStatuses are the statuses cinder holds a volume in while an
+// operation on it is in flight
+// (https://github.com/openstack/cinder/blob/ef0d50cb18d0ceb5d70d500c9a032b0eb66e749b/cinder/objects/fields.py#L168-L190).
+// The others are statuses a volume rests in, and a status cinder does not define
+// is not transitional either.
+var transitionalVolumeStatuses = map[string]bool{
+	"creating":         true,
+	"deleting":         true,
+	"managing":         true,
+	"attaching":        true,
+	"detaching":        true,
+	"reserved":         true,
+	"restoring-backup": true,
+	"backing-up":       true,
+	"downloading":      true,
+	"uploading":        true,
+	"retyping":         true,
+	"extending":        true,
+}
+
 // listVolumes observes every project's volumes.
 func listVolumes(ctx context.Context, client *gophercloud.ServiceClient, out *observer) bool {
 	return enumerate(ctx, out, volumes.List(client, volumes.ListOpts{AllTenants: true}),
@@ -652,7 +678,9 @@ func listVolumes(ctx context.Context, client *gophercloud.ServiceClient, out *ob
 					"size_gb": quantity(int64(volume.Size)),
 					"type":    volume.VolumeType,
 				},
-				CreatedAt: timestamp(volume.CreatedAt),
+				CreatedAt:    timestamp(volume.CreatedAt),
+				Transitional: transitionalVolumeStatuses[volume.Status],
+				ChangedAt:    changedAt(volume.UpdatedAt, volume.CreatedAt),
 			})
 		})
 }
@@ -677,6 +705,7 @@ func listFloatingIPs(ctx context.Context, client *gophercloud.ServiceClient, out
 				State:     "active",
 				Size:      map[string]any{"ip_version": version},
 				CreatedAt: timestamp(address.CreatedAt),
+				ChangedAt: changedAt(address.UpdatedAt, address.CreatedAt),
 			})
 		})
 }
@@ -739,6 +768,7 @@ func listImages(ctx context.Context, client *gophercloud.ServiceClient, out *obs
 						money.Div(decimal.NewFromInt(image.SizeBytes), osmap.BytesPerGibibyte).String()),
 				},
 				CreatedAt: timestamp(image.CreatedAt),
+				ChangedAt: changedAt(image.UpdatedAt, image.CreatedAt),
 			})
 		})
 }
@@ -749,8 +779,12 @@ func listLoadBalancers(ctx context.Context, client *gophercloud.ServiceClient, o
 		loadbalancers.ExtractLoadBalancers, func(balancer loadbalancers.LoadBalancer) bool {
 			state := strings.ToLower(balancer.ProvisioningStatus)
 			// Octavia keeps a deleted load balancer in its listing. Observing one
-			// would resurrect a resource the collector already booked as gone.
-			if state == "deleted" || state == "pending_delete" {
+			// would resurrect a resource the collector already booked as gone. One
+			// in pending_create, pending_update or pending_delete is observed as in
+			// transition: the run books nothing for it, and the absence pass does
+			// not book the delete of one on its way out before octavia sends
+			// delete.end.
+			if state == "deleted" {
 				return true
 			}
 			return out.observe(reconciliation.ObservedResource{
@@ -761,7 +795,9 @@ func listLoadBalancers(ctx context.Context, client *gophercloud.ServiceClient, o
 					"listeners": len(balancer.Listeners),
 					"pools":     len(balancer.Pools),
 				},
-				CreatedAt: timestamp(balancer.CreatedAt),
+				CreatedAt:    timestamp(balancer.CreatedAt),
+				Transitional: strings.HasPrefix(state, "pending_"),
+				ChangedAt:    changedAt(balancer.UpdatedAt, balancer.CreatedAt),
 			})
 		})
 }
@@ -905,6 +941,16 @@ func truncate(reason string) string {
 		return reason
 	}
 	return reason[:maxLoggedErrorBytes] + "… (truncated)"
+}
+
+// changedAt is the instant the platform last changed a resource: when it was
+// updated, and when it was created for a resource the platform reports no
+// update of. Cinder reports updated_at as null until the first update.
+func changedAt(updated, created time.Time) *time.Time {
+	if changed := timestamp(updated); changed != nil {
+		return changed
+	}
+	return timestamp(created)
 }
 
 // timestamp is a platform-reported instant as an observation carries it: absent
