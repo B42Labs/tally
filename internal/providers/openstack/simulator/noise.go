@@ -594,10 +594,11 @@ type auditEntry struct {
 // An audit sits at the midnight itself. When the instance already reports a
 // transition at that second, the audit is pushed on by whole seconds until it
 // finds a free one, which keeps two notifications about one resource a second
-// apart. What the audit repeats is the instance as it stands: a resize moves
-// the flavor over, and every .end moves the state over, so the audits after a
-// resize report the flavor the server runs on from then on. A deleted instance
-// is audited one last time, at the midnight that follows its delete.
+// apart. What the audit repeats is the instance as it stands: the .end of a
+// finished resize, of a confirm and of a revert moves the flavor over, and
+// every .end moves the state over, so the audits after a resize report the
+// flavor the server runs on from then on. A deleted instance is audited one
+// last time, at the midnight that follows its delete.
 func (g *generator) audits() {
 	sorted := slices.Clone(g.schedule)
 	slices.SortStableFunc(sorted, func(a, b Transition) int { return a.At.Compare(b.At) })
@@ -695,8 +696,14 @@ func (g *generator) audits() {
 			continue
 		}
 
+		// Every .end moves the state over; the delete below overrides it.
+		if state, ok := tr.Payload["state"].(string); ok {
+			entry.base["state"] = state
+		}
+
 		switch tr.EventType {
-		case "compute.instance.resize.end", "compute.instance.finish_resize.end":
+		case "compute.instance.finish_resize.end", "compute.instance.resize.confirm.end",
+			"compute.instance.resize.revert.end":
 			for _, member := range auditFlavorMembers {
 				if value, ok := tr.Payload[member]; ok {
 					entry.base[member] = value
@@ -721,10 +728,6 @@ func (g *generator) audits() {
 		case "compute.instance.delete.end":
 			entry.deletedAt = tr.At
 			entry.base["state"] = "deleted"
-		default:
-			if state, ok := tr.Payload["state"].(string); ok {
-				entry.base["state"] = state
-			}
 		}
 	}
 

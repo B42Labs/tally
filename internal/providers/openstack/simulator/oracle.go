@@ -66,7 +66,6 @@ const (
 	stateActive    = "active"
 	stateShutoff   = "shutoff"
 	stateShelved   = "shelved"
-	stateResized   = "resized"
 	stateAvailable = "available"
 	stateInUse     = "in-use"
 )
@@ -177,8 +176,9 @@ type billableType struct {
 var billableTypes = map[string]billableType{
 	"compute.instance.create.end":         {"instance", "compute.instance.create.end"},
 	"compute.instance.delete.end":         {"instance", "compute.instance.delete.end"},
-	"compute.instance.resize.end":         {"instance", "compute.instance.resize.end"},
 	"compute.instance.finish_resize.end":  {"instance", "compute.instance.resize.end"},
+	"compute.instance.resize.confirm.end": {"instance", "compute.instance.resize.confirm.end"},
+	"compute.instance.resize.revert.end":  {"instance", "compute.instance.resize.revert.end"},
 	"compute.instance.shelve_offload.end": {"instance", "compute.instance.shelve"},
 	"compute.instance.unshelve.end":       {"instance", "compute.instance.unshelve"},
 	"compute.instance.power_off.end":      {"instance", "compute.instance.power_off"},
@@ -221,8 +221,11 @@ var billableTypes = map[string]billableType{
 // not read.
 //
 // Format 2 added the faults member on the document and on every resource.
-// Format 3 added the traffic member on the document.
-const oracleFormat = 3
+// Format 3 added the traffic member on the document. Format 4 books a resize
+// from compute.instance.finish_resize.end and its
+// compute.instance.resize.confirm.end or compute.instance.resize.revert.end
+// rather than from compute.instance.resize.end, and drops the state resized.
+const oracleFormat = 4
 
 // Oracle is the generator's statement of what a month contained: for every
 // billable resource the intervals of constant state, size and project it

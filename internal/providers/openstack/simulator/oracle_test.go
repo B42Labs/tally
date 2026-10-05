@@ -437,8 +437,9 @@ func TestOracleUsesNoEngineFold(t *testing.T) {
 
 // TestOracleIntervalsFollowTheLives holds the folded month against the lives the
 // generator gave its resources: the transfer that moves a volume between two
-// projects, the resize that puts a server into a state of its own for a minute,
-// the delete that ends a life, and the shoot that is gone before the month is.
+// projects, the confirmed resize that keeps the new flavor and the reverted one
+// that bills it for the wait alone, the delete that ends a life, and the shoot
+// that is gone before the month is.
 func TestOracleIntervalsFollowTheLives(t *testing.T) {
 	g := buildMonth(t, 1)
 
@@ -493,25 +494,63 @@ func TestOracleIntervalsFollowTheLives(t *testing.T) {
 		}
 	})
 
-	t.Run("the resized server is billed as resized for the resize alone", func(t *testing.T) {
-		first := resourceNamed(t, oracle, g.projects[0].instances[0].id)
+	t.Run("the confirmed resize bills the new flavor from its finish on", func(t *testing.T) {
+		first := resourceNamed(t, oracle, g.projects[1].instances[0].id)
+		finished := transitionAt(t, g.schedule, "compute.instance.finish_resize.end", first.ResourceID)
+		confirmed := transitionAt(t, g.schedule, "compute.instance.resize.confirm.end", first.ResourceID)
 		index := slices.IndexFunc(first.Intervals, func(iv OracleInterval) bool {
-			return iv.State == stateResized
+			return iv.From.Equal(finished)
 		})
-		if index < 0 || index == len(first.Intervals)-1 {
-			t.Fatalf("the first instance runs through the states %v, want a resized one that is followed",
-				statesOf(first))
+		if index <= 0 {
+			t.Fatalf("the first instance of the second project runs through the states %v and no "+
+				"interval after the first starts at its finish at %s, want the resize to open one",
+				statesOf(first), finished.Format(time.RFC3339))
 		}
-		resized, active := first.Intervals[index], first.Intervals[index+1]
-		if got := resized.To.Sub(resized.From); got != resizeDuration {
-			t.Errorf("the first instance is resized for %s, want %s", got, resizeDuration)
+		before, resized := first.Intervals[index-1], first.Intervals[index]
+		if resized.State != stateActive {
+			t.Errorf("the instance is billed as %q from its finish, want %q", resized.State, stateActive)
 		}
-		if active.State != stateActive {
-			t.Errorf("the first instance is billed as %q after the resize, want %q", active.State, stateActive)
+		if resized.Size["flavor"] == before.Size["flavor"] {
+			t.Errorf("the instance carries the flavor %v before its finish and after it, want the "+
+				"resize to move it", resized.Size["flavor"])
 		}
-		if resized.Size["vcpus"] != active.Size["vcpus"] {
-			t.Errorf("the first instance carries %v vcpus while it resizes and %v after it, want the "+
-				"flavor it is moving to on both", resized.Size["vcpus"], active.Size["vcpus"])
+		if !resized.To.After(confirmed) {
+			t.Errorf("the interval opened at the finish ends at %s, want it past the confirm at %s: a "+
+				"confirm that restates the server opens no interval of its own",
+				resized.To.Format(time.RFC3339), confirmed.Format(time.RFC3339))
+		}
+	})
+
+	t.Run("the reverted resize bills the new flavor for the wait alone", func(t *testing.T) {
+		first := resourceNamed(t, oracle, g.projects[0].instances[0].id)
+		finished := transitionAt(t, g.schedule, "compute.instance.finish_resize.end", first.ResourceID)
+		reverted := transitionAt(t, g.schedule, "compute.instance.resize.revert.end", first.ResourceID)
+		index := slices.IndexFunc(first.Intervals, func(iv OracleInterval) bool {
+			return iv.From.Equal(finished)
+		})
+		if index <= 0 || index == len(first.Intervals)-1 {
+			t.Fatalf("the first instance of the first project runs through the states %v and no "+
+				"interval between two others starts at its finish at %s, want the resize to open one "+
+				"the revert closes", statesOf(first), finished.Format(time.RFC3339))
+		}
+		before, resized, back := first.Intervals[index-1], first.Intervals[index], first.Intervals[index+1]
+		if !resized.To.Equal(reverted) {
+			t.Errorf("the new flavor is billed to %s, want the revert at %s",
+				resized.To.Format(time.RFC3339), reverted.Format(time.RFC3339))
+		}
+		if got := resized.To.Sub(resized.From); got != verifyDuration {
+			t.Errorf("the instance carries the new flavor for %s, want %s", got, verifyDuration)
+		}
+		if resized.Size["flavor"] == before.Size["flavor"] {
+			t.Errorf("the instance carries the flavor %v before its finish and after it, want the "+
+				"resize to move it", resized.Size["flavor"])
+		}
+		if back.State != stateActive {
+			t.Errorf("the instance is billed as %q after the revert, want %q", back.State, stateActive)
+		}
+		if back.Size["flavor"] != before.Size["flavor"] {
+			t.Errorf("the instance carries the flavor %v after the revert, want the %v it ran on "+
+				"before the resize", back.Size["flavor"], before.Size["flavor"])
 		}
 		last := first.Intervals[len(first.Intervals)-1]
 		deleted := transitionAt(t, g.schedule, "compute.instance.delete.end", first.ResourceID)
@@ -699,9 +738,9 @@ func TestBuildOracleClipsToTheMonth(t *testing.T) {
 }
 
 // TestBuildOracleKeepsAFactThatRestatesTheOpenInterval folds two facts that
-// say the same thing about one resource at two instants. No generated month
-// holds such a pair today — a retype always picks another type and a resize
-// always doubles the size — so the ledger is written by hand. The fold has to
+// say the same thing about one resource at two instants. In a generated month
+// every confirm restates the finish of its resize; the ledger here is written
+// by hand all the same, so the rule stays visible on its own. The fold has to
 // pass the second fact over rather than close the interval at it: an event that
 // changed nothing the month is billed by opens no interval of its own, and an
 // oracle that split one there would report the engine for a fold that is right.
@@ -806,7 +845,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 	// surface is the format the lists below are stated for. A change to any of
 	// them raises this number and oracleFormat with it.
-	const surface = 3
+	const surface = 4
 
 	if oracleFormat != surface {
 		t.Fatalf("oracleFormat = %d and the surface below is stated for format %d, want the two "+
@@ -820,7 +859,8 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 			"compute.instance.finish_resize.end -> instance/compute.instance.resize.end",
 			"compute.instance.power_off.end -> instance/compute.instance.power_off",
 			"compute.instance.power_on.end -> instance/compute.instance.power_on",
-			"compute.instance.resize.end -> instance/compute.instance.resize.end",
+			"compute.instance.resize.confirm.end -> instance/compute.instance.resize.confirm.end",
+			"compute.instance.resize.revert.end -> instance/compute.instance.resize.revert.end",
 			"compute.instance.shelve_offload.end -> instance/compute.instance.shelve",
 			"compute.instance.unshelve.end -> instance/compute.instance.unshelve",
 			"floatingip.create.end -> floating_ip/floatingip.create.end",
@@ -928,9 +968,9 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 	// something else than it did, and every interval of an oracle written before
 	// the rename reads as a difference.
 	t.Run("the states a resource is booked under", func(t *testing.T) {
-		want := []string{"active", "available", "in-use", "resized", "shelved", "shutoff"}
+		want := []string{"active", "available", "in-use", "shelved", "shutoff"}
 
-		booked := []string{stateActive, stateAvailable, stateInUse, stateResized, stateShelved, stateShutoff}
+		booked := []string{stateActive, stateAvailable, stateInUse, stateShelved, stateShutoff}
 		slices.Sort(booked)
 
 		if !slices.Equal(booked, want) {
@@ -942,7 +982,7 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 // emptyOracleDocument is an oracle of a month that states no resource, written
 // out by hand because buildOracle only folds one from a ledger the generator
 // never produces.
-const emptyOracleDocument = `{"format":3,"cloud":"os-test","seed":1,` +
+const emptyOracleDocument = `{"format":4,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z",` +
 	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[],"faults":[],"traffic":[]}`
 
@@ -953,7 +993,7 @@ const emptyOracleDocument = `{"format":3,"cloud":"os-test","seed":1,` +
 const oracleIntervalDocument = `{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
 	`"state":"available","project_id":"p1","size":{"size_gb":50}}`
 
-const completeOracleDocument = `{"format":3,"cloud":"os-test","seed":1,` +
+const completeOracleDocument = `{"format":4,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",` +
 	`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",` +
 	`"intervals":[` + oracleIntervalDocument + `],"faults":[]}],"counts":[],"faults":[],` +
@@ -1162,11 +1202,11 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 	})
 
 	t.Run("an oracle written to another format", func(t *testing.T) {
-		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":3`, `"format":2`, 1))
+		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":4`, `"format":3`, 1))
 
 		_, err := ReadOracle(path)
 
-		want := fmt.Sprintf("%s states format 2 and this build writes format %d", path, oracleFormat)
+		want := fmt.Sprintf("%s states format 3 and this build writes format %d", path, oracleFormat)
 		if err == nil || err.Error() != want {
 			t.Fatalf("ReadOracle() error = %v, want %q", err, want)
 		}

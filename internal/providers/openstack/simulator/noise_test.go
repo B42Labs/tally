@@ -17,10 +17,11 @@ import (
 
 // noiseTypes is the catalogue of notifications a month carries and the
 // collector bills nothing for, in the order noise.go renders them, grouped by
-// the exchange they are published on. None of them has a recorded sample, so
-// this list and the member sets of noiseMembers (render_test.go) are what holds
-// the catalogue in place: a type that leaves one of them is a type no test
-// covers any more.
+// the exchange they are published on. compute.instance.resize.end is the one of
+// them with a recorded sample, the 2025.1 shape the collector skips; for every
+// other type, this list and the member sets of noiseMembers (render_test.go)
+// are what holds the catalogue in place: a type that leaves one of them is a
+// type no test covers any more.
 var noiseTypes = []string{
 	// nova
 	"scheduler.select_destinations.start",
@@ -35,6 +36,9 @@ var noiseTypes = []string{
 	"compute.instance.power_on.start",
 	"compute.instance.resize.start",
 	"compute.instance.finish_resize.start",
+	"compute.instance.resize.end",
+	"compute.instance.resize.confirm.start",
+	"compute.instance.resize.revert.start",
 	"compute.instance.shelve_offload.start",
 	"compute.instance.unshelve.start",
 	"keypair.import.start",
@@ -150,11 +154,11 @@ func buildWorld(t *testing.T, seed uint64) *generator {
 }
 
 // TestEverySeedRendersTheWholeCatalogue is the drift guard of the catalogue. A
-// month that renders 61 of the 62 types is a month whose skip counters are
+// month that renders 64 of the 65 types is a month whose skip counters are
 // short of one type, whichever seed an operator picks, so every seed is held
 // against the whole list rather than one month against most of it.
 func TestEverySeedRendersTheWholeCatalogue(t *testing.T) {
-	const want = 62
+	const want = 65
 	if len(noiseTypes) != want {
 		t.Fatalf("the catalogue names %d types, want %d: the list is what the member sets and the "+
 			"sequences below are held against", len(noiseTypes), want)
@@ -361,7 +365,8 @@ func TestExchangeForNamesEveryService(t *testing.T) {
 func TestInstancesBootAndDieInSequence(t *testing.T) {
 	for seed := uint64(1); seed <= 5; seed++ {
 		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
-			schedule := generateMonth(t, seed, july2026, testCloud)
+			g := buildMonth(t, seed)
+			schedule := g.schedule
 			byID := byResource(schedule)
 
 			// A server's transitions carry no port id, so the port of one is found
@@ -386,9 +391,10 @@ func TestInstancesBootAndDieInSequence(t *testing.T) {
 			}
 
 			// Every step of an instance is a pair, and the .start half of one is
-			// five seconds before the .end the collector books.
+			// five seconds before its .end.
 			for _, step := range []string{
-				"power_off", "power_on", "resize", "finish_resize", "shelve_offload", "unshelve",
+				"power_off", "power_on", "resize", "finish_resize", "resize.confirm", "resize.revert",
+				"shelve_offload", "unshelve",
 			} {
 				start, end := "compute.instance."+step+".start", "compute.instance."+step+".end"
 				for _, transition := range schedule {
@@ -402,6 +408,26 @@ func TestInstancesBootAndDieInSequence(t *testing.T) {
 							transition.ResourceID, start, transition.At, end,
 							transition.At.Add(stepLead))
 					}
+				}
+			}
+
+			// Every finished resize waits verifyDuration for one decision, and only
+			// the first instance of the first project reverts.
+			for _, finish := range schedule {
+				if finish.EventType != "compute.instance.finish_resize.end" {
+					continue
+				}
+				of, settledAt := byID[finish.ResourceID], finish.At.Add(verifyDuration)
+				_, confirmed := has(of, "compute.instance.resize.confirm.end", settledAt)
+				_, reverted := has(of, "compute.instance.resize.revert.end", settledAt)
+				if confirmed == reverted {
+					t.Errorf("the instance %s finishes a resize at %s with confirmed = %t and "+
+						"reverted = %t at %s, want exactly one decision", finish.ResourceID,
+						finish.At, confirmed, reverted, settledAt)
+				}
+				if reverted && finish.ResourceID != g.projects[0].instances[0].id {
+					t.Errorf("the instance %s reverts its resize at %s, want only the first instance "+
+						"of the first project to revert", finish.ResourceID, settledAt)
 				}
 			}
 		})
@@ -596,7 +622,7 @@ func TestExistsAuditsCoverEveryDayAnInstanceExisted(t *testing.T) {
 	to := july2026.AddDate(0, 1, 0)
 	byID := byResource(schedule)
 
-	shortLived, resized, stopped := 0, 0, 0
+	shortLived, resized, reverted, stopped := 0, 0, 0, 0
 	for _, create := range schedule {
 		if create.EventType != "compute.instance.create.end" {
 			continue
@@ -700,39 +726,58 @@ func TestExistsAuditsCoverEveryDayAnInstanceExisted(t *testing.T) {
 		if create.Workload != workloadClassic {
 			continue
 		}
-		resize, ok := firstOf(of, "compute.instance.resize.end")
-		if !ok {
+		if _, ok := firstOf(of, "compute.instance.finish_resize.end"); !ok {
 			continue
 		}
 		resized++
 		booted, _ := create.Payload["instance_type"].(string)
 		bootedID, _ := create.Payload["instance_flavor_id"].(string)
 		bootedDisk, _ := create.Payload["disk_gb"].(int)
-		moved, _ := resize.Payload["instance_type"].(string)
-		movedRoot, _ := resize.Payload["root_gb"].(int)
-		movedEphemeral, _ := resize.Payload["ephemeral_gb"].(int)
 		for midnight, audit := range daily {
+			// The flavor an audit repeats is the one of the last finish, confirm
+			// or revert before its midnight, and the boot flavor before the first
+			// of them and after a revert.
+			var moved Transition
+			for _, transition := range of {
+				switch transition.EventType {
+				case "compute.instance.finish_resize.end", "compute.instance.resize.confirm.end",
+					"compute.instance.resize.revert.end":
+					if transition.At.Before(midnight) {
+						moved = transition
+					}
+				}
+			}
 			want, wantID, wantDisk := booted, bootedID, bootedDisk
-			if audit.At.After(resize.At) {
+			since := fmt.Sprintf("it booted at %s", create.At)
+			switch moved.EventType {
+			case "":
+			case "compute.instance.resize.revert.end":
+				reverted++
+				since = fmt.Sprintf("it reverted its resize at %s", moved.At)
+			default:
 				// The resize payload names the flavor by its type id and reports the
 				// two disks apart, so the uuid and the sum an audit carries come
 				// from the catalog and from the payload's two members.
-				want, wantID, wantDisk = moved, flavorIDNamed(t, moved), movedRoot+movedEphemeral
+				name, _ := moved.Payload["instance_type"].(string)
+				root, _ := moved.Payload["root_gb"].(int)
+				ephemeral, _ := moved.Payload["ephemeral_gb"].(int)
+				want, wantID, wantDisk = name, flavorIDNamed(t, name), root+ephemeral
+				since = fmt.Sprintf("it reported %s at %s", moved.EventType, moved.At)
 			}
 			if got, _ := audit.Payload["instance_type"].(string); got != want {
 				t.Errorf("the audit of %s over the day that ends at %s reports the flavor %q, want "+
-					"%q: an audit repeats the server as it stands, and it resized at %s",
-					id, midnight, got, want, resize.At)
+					"%q: an audit repeats the server as it stands, and %s",
+					id, midnight, got, want, since)
 			}
 			if got, _ := audit.Payload["instance_flavor_id"].(string); got != wantID {
 				t.Errorf("the audit of %s over the day that ends at %s reports the flavor uuid %q, "+
-					"want %q: the three names of a flavor move together, and it resized at %s",
-					id, midnight, got, wantID, resize.At)
+					"want %q: the three names of a flavor move together, and %s",
+					id, midnight, got, wantID, since)
 			}
 			if got, _ := audit.Payload["disk_gb"].(int); got != wantDisk {
 				t.Errorf("the audit of %s over the day that ends at %s reports %d disk gibibytes, "+
 					"want %d: the disk of an audit is the root and the ephemeral of its flavor "+
-					"summed, and it resized at %s", id, midnight, got, wantDisk, resize.At)
+					"summed, and %s", id, midnight, got, wantDisk, since)
 			}
 		}
 	}
@@ -744,6 +789,10 @@ func TestExistsAuditsCoverEveryDayAnInstanceExisted(t *testing.T) {
 	if resized == 0 {
 		t.Errorf("no classic instance of the month resizes, want the first of every project: without " +
 			"one nothing holds the flavor an audit carries forward")
+	}
+	if reverted == 0 {
+		t.Errorf("no classic instance of the month is audited after a revert, want the first of the " +
+			"first project: without one nothing holds the flavor a revert puts back")
 	}
 	if stopped == 0 {
 		t.Errorf("no instance of the month is audited while it is powered off, want the power " +
@@ -1615,6 +1664,60 @@ func TestAuditsStepAsideFromAnOccupiedSecond(t *testing.T) {
 		if audits[i].Workload != workloadClassic {
 			t.Errorf("audit %d carries the workload %q, want %q, the one of the create it repeats",
 				i, audits[i].Workload, workloadClassic)
+		}
+	}
+}
+
+// TestAuditsRepeatAServerWaitingForItsResize covers a midnight between a
+// finish_resize.end and the confirm that ends the wait. The audit there reports
+// the state resized on the new flavor, and the next one active. A generated
+// month reaches that window only when a finish falls in the ten minutes before
+// a midnight, so the three transitions are written out here rather than drawn.
+func TestAuditsRepeatAServerWaitingForItsResize(t *testing.T) {
+	g := buildWorld(t, 1)
+	p := g.projects[0]
+	inst := p.instances[0]
+	inst.flavor = largeFlavor
+	inst.host = computeHosts[0]
+	inst.createdAt = time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	finishedAt := time.Date(2026, 7, 3, 23, 55, 0, 0, time.UTC)
+	settledAt := finishedAt.Add(verifyDuration)
+
+	create := instanceCreatePayload(p, inst, testCloud)
+	inst.flavor = otherFlavor(g.shape, inst.flavor)
+	transition := func(at time.Time, eventType string, payload map[string]any) Transition {
+		return Transition{
+			At: at, EventType: eventType, Workload: workloadClassic,
+			PublisherID: computePublisher(inst), ProjectID: p.id, UserID: p.userID,
+			ResourceID: inst.id, Payload: payload,
+		}
+	}
+	g.schedule = Schedule{
+		transition(inst.createdAt, "compute.instance.create.end", create),
+		transition(finishedAt, "compute.instance.finish_resize.end", instanceResizePayload(p, inst, "resized")),
+		transition(settledAt, "compute.instance.resize.confirm.end", instanceResizePayload(p, inst, "active")),
+	}
+	g.audits()
+
+	for _, want := range []struct {
+		at    time.Time
+		state string
+	}{
+		{time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC), "resized"},
+		{time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC), "active"},
+	} {
+		audit, ok := has(g.schedule, "compute.instance.exists", want.at)
+		if !ok {
+			t.Errorf("the instance reports no audit at %s, want one for the day before", want.at)
+			continue
+		}
+		if got, _ := audit.Payload["state"].(string); got != want.state {
+			t.Errorf("the audit at %s reports the state %q, want %q: the finish at %s and the "+
+				"confirm at %s each move the state over", want.at, got, want.state, finishedAt, settledAt)
+		}
+		if got, _ := audit.Payload["instance_type"].(string); got != inst.flavor.name {
+			t.Errorf("the audit at %s reports the flavor %q, want %q, the one the finish moved to",
+				want.at, got, inst.flavor.name)
 		}
 	}
 }

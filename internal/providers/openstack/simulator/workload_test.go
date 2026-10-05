@@ -763,6 +763,124 @@ func TestMonthNamesItsTenants(t *testing.T) {
 	})
 }
 
+// TestTheFirstInstancesResizeTheWayNovaDoes holds the resize the first
+// instance of every classic project goes through against the sequence nova
+// 2025.1 sends: the source host reports the flavor the server leaves, the
+// destination the one it moves to under vm_state resized, and the user's
+// decision ends the wait, a revert in the first project and a confirm in the
+// other two. Only the finish and the decision are billable.
+func TestTheFirstInstancesResizeTheWayNovaDoes(t *testing.T) {
+	g := buildMonth(t, 1)
+	byID := byResource(g.schedule)
+
+	for i, p := range g.projects {
+		t.Run(fmt.Sprintf("classic project %d", i+1), func(t *testing.T) {
+			of := byID[p.instances[0].id]
+			create, ok := firstOf(of, "compute.instance.create.end")
+			if !ok {
+				t.Fatalf("the first instance renders no compute.instance.create.end, want its boot")
+			}
+			booted, _ := create.Payload["instance_type"].(string)
+			resize, ok := firstOf(of, "compute.instance.resize.end")
+			if !ok {
+				t.Fatalf("the first instance renders no compute.instance.resize.end, want the resize it " +
+					"always goes through")
+			}
+			finishedAt := resize.At.Add(resizeDuration)
+			settledAt := finishedAt.Add(verifyDuration)
+			finish, ok := has(of, "compute.instance.finish_resize.end", finishedAt)
+			if !ok {
+				t.Fatalf("the first instance renders no compute.instance.finish_resize.end at %s, want "+
+					"the destination to finish the resize %s after the source", finishedAt, resizeDuration)
+			}
+			moved, _ := finish.Payload["instance_type"].(string)
+			if moved == booted {
+				t.Fatalf("the resize finishes on the flavor %q the instance booted with, want another one",
+					booted)
+			}
+
+			// The first project reverts, which puts the boot flavor back, and the
+			// other two confirm the flavor the resize moved to.
+			ending, skipped, settled := "compute.instance.resize.confirm", "compute.instance.resize.revert", moved
+			if i == 0 {
+				ending, skipped, settled = skipped, ending, booted
+			}
+			if extra, ok := firstOf(of, skipped+".end"); ok {
+				t.Errorf("the first instance renders a %s at %s, want its resize to end in a %s alone",
+					extra.EventType, extra.At, ending+".end")
+			}
+
+			for _, step := range []struct {
+				eventType string
+				at        time.Time
+				flavor    string
+				state     string
+				billable  bool
+			}{
+				{"compute.instance.resize.start", resize.At.Add(-stepLead), booted, "active", false},
+				{"compute.instance.resize.end", resize.At, booted, "active", false},
+				{"compute.instance.finish_resize.start", finishedAt.Add(-stepLead), moved, "active", false},
+				{"compute.instance.finish_resize.end", finishedAt, moved, "resized", true},
+				{ending + ".start", settledAt.Add(-stepLead), moved, "resized", false},
+				{ending + ".end", settledAt, settled, "active", true},
+			} {
+				transition, ok := has(of, step.eventType, step.at)
+				if !ok {
+					t.Errorf("the first instance renders no %s at %s, want every step of the resize in "+
+						"nova's order", step.eventType, step.at)
+					continue
+				}
+				if got, _ := transition.Payload["instance_type"].(string); got != step.flavor {
+					t.Errorf("%s carries the flavor %q, want %q", step.eventType, got, step.flavor)
+				}
+				if got, _ := transition.Payload["state"].(string); got != step.state {
+					t.Errorf("%s carries the state %q, want %q", step.eventType, got, step.state)
+				}
+				if transition.Billable != step.billable {
+					t.Errorf("%s is billable = %t, want %t", step.eventType, transition.Billable, step.billable)
+				}
+			}
+		})
+	}
+}
+
+// TestAResizeThatCannotSettleBeforeTheEndIsDropped covers an instance whose end
+// falls between its finish_resize.end and the decision that would follow it. A
+// generated month reaches that window only by chance, so the walk is run twice
+// on the same draws: once to learn where the finish lies, once with the end
+// inside the wait. A decision after the end would be a server reporting after
+// its delete, or a step straddling the month's end.
+func TestAResizeThatCannotSettleBeforeTheEndIsDropped(t *testing.T) {
+	walk := func(end time.Time) []Transition {
+		g := buildWorld(t, 1)
+		p := g.projects[0]
+		inst := p.instances[0]
+		inst.flavor = largeFlavor
+		inst.host = computeHosts[0]
+		inst.createdAt = july2026.Add(2 * time.Hour)
+		g.lifetime(p, inst, 0, end)
+		return byResource(g.schedule)[inst.id]
+	}
+
+	finish, ok := firstOf(walk(july2026.AddDate(0, 2, 0)), "compute.instance.finish_resize.end")
+	if !ok {
+		t.Fatal("the first instance renders no compute.instance.finish_resize.end, want the resize it " +
+			"always goes through")
+	}
+
+	end := finish.At.Add(verifyDuration / 2)
+	for _, transition := range walk(end) {
+		if strings.Contains(transition.EventType, "resize") {
+			t.Errorf("%s at %s is rendered, want the resize dropped: its decision would fall after "+
+				"the end at %s", transition.EventType, transition.At, end)
+		}
+		if !transition.At.Before(end) {
+			t.Errorf("%s lies at %s, want every transition before the end at %s",
+				transition.EventType, transition.At, end)
+		}
+	}
+}
+
 // sizeOf maps one transition the way the collector does and returns the size
 // the booked event carries, together with the notification it was read from.
 func sizeOf(t *testing.T, transition Transition) (map[string]any, openstack.Notification) {

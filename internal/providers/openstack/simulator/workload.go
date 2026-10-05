@@ -175,6 +175,11 @@ const (
 	volumeDeleteLead = 60 * time.Second
 	volumeDeleteGap  = 10 * time.Second
 	resizeDuration   = 60 * time.Second
+	// verifyDuration is how long a resized server waits for its confirm or
+	// revert. lifetime draws the gap to the next step from the finish, and the
+	// shortest such gap (one hour) is longer than this, so the next step never
+	// starts inside the wait.
+	verifyDuration = 10 * time.Minute
 )
 
 // shapeStream is the second half of the shape generator's state. It is a
@@ -732,9 +737,10 @@ func (g *generator) instances(p *project) {
 }
 
 // lifetime walks one instance through the month: power cycles first, then a
-// resize, then a shelve, each a gap apart. The first instance always resizes
-// and the second always shelves, which is what makes every seed produce every
-// recorded notification type instead of most of them.
+// resize, then a shelve, each a gap apart. The first instance always resizes,
+// reverts in the first classic project and confirms in the others, and the
+// second always shelves, which is what makes every seed produce every recorded
+// notification type instead of most of them.
 //
 // A step whose last notification would fall at or after the instance's end
 // stops the walk. Dropping the rest with it is what keeps a deleted instance
@@ -764,23 +770,40 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 
 	if index == 0 || g.shape.IntN(2) == 0 {
 		finishedAt := cursor.Add(resizeDuration)
-		if !finishedAt.Before(end) {
+		settledAt := finishedAt.Add(verifyDuration)
+		if !settledAt.Before(end) {
 			return
 		}
-		// The start of a resize is the one .start half that reports another
-		// flavor than its .end: it announces the server as it still is, which is
-		// why it is rendered before the new flavor is drawn.
+		// The source host reports the flavor the server is leaving in both
+		// halves of resize_instance, so both are rendered before the new flavor
+		// is drawn. The collector books neither.
 		g.noise(cursor.Add(-stepLead), "compute.instance.resize.start", computePublisher(inst),
 			inst.id, p, instanceResizePayload(p, inst, "active"))
-		// Both halves of a resize report the flavor the instance is moving to,
-		// and every notification after them reports it as well.
+		g.noise(cursor, "compute.instance.resize.end", computePublisher(inst),
+			inst.id, p, instanceResizePayload(p, inst, "active"))
+		previous := inst.flavor
 		inst.flavor = otherFlavor(g.shape, inst.flavor)
-		g.emit(cursor, "compute.instance.resize.end", computePublisher(inst), inst.id, p,
-			instanceResizePayload(p, inst, "resized"), alive(stateResized, instanceSizeOf(inst.flavor)))
 		g.noise(finishedAt.Add(-stepLead), "compute.instance.finish_resize.start", computePublisher(inst),
-			inst.id, p, instanceResizePayload(p, inst, "resized"))
+			inst.id, p, instanceResizePayload(p, inst, "active"))
 		g.emit(finishedAt, "compute.instance.finish_resize.end", computePublisher(inst), inst.id, p,
-			instanceResizePayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
+			instanceResizePayload(p, inst, "resized"), alive(stateActive, instanceSizeOf(inst.flavor)))
+		// The first instance of the first project reverts and every other resize
+		// is confirmed, which puts both endings into every month without a draw.
+		if index == 0 && p == g.projects[0] {
+			g.noise(settledAt.Add(-stepLead), "compute.instance.resize.revert.start", computePublisher(inst),
+				inst.id, p, instanceResizePayload(p, inst, "resized"))
+			inst.flavor = previous
+			g.emit(settledAt, "compute.instance.resize.revert.end", computePublisher(inst), inst.id, p,
+				instanceResizePayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
+		} else {
+			g.noise(settledAt.Add(-stepLead), "compute.instance.resize.confirm.start", computePublisher(inst),
+				inst.id, p, instanceResizePayload(p, inst, "resized"))
+			g.emit(settledAt, "compute.instance.resize.confirm.end", computePublisher(inst), inst.id, p,
+				instanceResizePayload(p, inst, "active"), alive(stateActive, instanceSizeOf(inst.flavor)))
+		}
+		// The gap runs from the finish, so the decision moves no later step. Its
+		// lower bound has to stay above verifyDuration plus stepLead, or the next
+		// step's .start lands at or before the decision.
 		cursor = finishedAt.Add(span(g.shape, time.Hour, 3*day))
 	}
 

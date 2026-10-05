@@ -522,7 +522,31 @@ func TestRunPublishesWhatTheCollectorConsumes(t *testing.T) {
 				eventType, got, expected[eventType])
 		}
 	}
-	// The 83 types of the month lie inside the bound the collector holds the
+	// The confirm and the revert that end a resize are consumed under their oslo
+	// names, while the resize.end before them is among the skips above. The
+	// consumer counts an event once it is buffered and acknowledged, so the
+	// counter is waited for as well.
+	for _, eventType := range []string{"compute.instance.resize.confirm.end", "compute.instance.resize.revert.end"} {
+		booked := 0
+		for _, transition := range month {
+			if transition.Billable && transition.EventType == eventType {
+				booked++
+			}
+		}
+		if booked == 0 {
+			t.Fatalf("the month books no %s, want the first instance of every classic project to end "+
+				"its resize", eventType)
+		}
+		waitFor(t, "every "+eventType+" is counted as consumed", func() bool {
+			return counterValue(t, reg, "tally_collector_consumed_total", "event_type", eventType) ==
+				float64(booked)
+		})
+	}
+	if expected["compute.instance.resize.end"] == 0 {
+		t.Error("the month skips no compute.instance.resize.end, want the source host's half of " +
+			"every resize")
+	}
+	// The 87 types of the month lie inside the bound the collector holds the
 	// label's values to, so none of them is folded into the overflow value.
 	if got := counterValue(t, reg, "tally_collector_skipped_total",
 		"event_type", cardinality.Overflow); got != 0 {

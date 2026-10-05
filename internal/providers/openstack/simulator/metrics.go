@@ -168,9 +168,9 @@ type trafficStep struct {
 // stops.
 //
 // A step accrues bytes only while the interval it starts in is active. A
-// stopped, a shelved and a resized instance move nothing, so their steps carry
-// zero and the counter behind them stays flat, which is what a real counter of
-// a stopped instance does.
+// stopped and a shelved instance move nothing, so their steps carry zero and
+// the counter behind them stays flat, which is what a real counter of a
+// stopped instance does.
 //
 // A step that falls into a gap between two intervals belongs to no state, so it
 // accrues nothing. It is booked under the project of the interval before it,

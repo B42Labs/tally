@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b42labs/tally/internal/core/event"
 	"github.com/b42labs/tally/internal/core/ids"
 	"github.com/b42labs/tally/internal/core/testkit"
 )
@@ -135,6 +136,7 @@ func TestVMStateNormalizesNovaStates(t *testing.T) {
 			payload: map[string]any{"state": "shelved_offloaded"},
 			want:    "shelved",
 		},
+		{name: "resized becomes active", payload: map[string]any{"state": "resized"}, want: "active"},
 		{name: "paused stays paused", payload: map[string]any{"state": "paused"}, want: "paused"},
 		{name: "suspended stays suspended", payload: map[string]any{"state": "suspended"}, want: "suspended"},
 		{name: "error stays error", payload: map[string]any{"state": "error"}, want: "error"},
@@ -197,14 +199,14 @@ func TestVolumeStatusFallsBackToAvailable(t *testing.T) {
 }
 
 // TestMapNotificationRenamesFinishResize pins the alias: nova finishes a resize
-// under a second name, both notifications carry the new size, and both are
-// booked as one Tally event. The oslo name survives in the provider data, so the
-// renamed event can still be traced back.
+// under a second name, with the new flavor and vm_state resized, and it is
+// booked as compute.instance.resize.end with the state active. The oslo name
+// survives in the provider data, so the renamed event can still be traced back.
 func TestMapNotificationRenamesFinishResize(t *testing.T) {
 	got, ok := MapNotification(notify("compute.instance.finish_resize.end", map[string]any{
 		"instance_id":   "instance-1",
 		"tenant_id":     "project-1",
-		"state":         "active",
+		"state":         "resized",
 		"vcpus":         json.Number("8"),
 		"memory_mb":     json.Number("16384"),
 		"root_gb":       json.Number("160"),
@@ -219,6 +221,34 @@ func TestMapNotificationRenamesFinishResize(t *testing.T) {
 	}
 	if want := "compute.instance.finish_resize.end"; got.Payload.Provider["oslo_event_type"] != want {
 		t.Errorf("provider.oslo_event_type = %v, want %q", got.Payload.Provider["oslo_event_type"], want)
+	}
+	if got.Payload.State == nil || *got.Payload.State != "active" {
+		t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, "active")
+	}
+	if want := "m1.xlarge"; got.Payload.Size["flavor"] != want {
+		t.Errorf("size[flavor] = %v, want %q", got.Payload.Size["flavor"], want)
+	}
+}
+
+// TestMapNotificationSkipsResizeEnd covers the half of a resize the source host
+// sends. It still carries the flavor the server is leaving, so a full payload is
+// skipped like any type the table has no entry for.
+func TestMapNotificationSkipsResizeEnd(t *testing.T) {
+	got, ok := MapNotification(notify("compute.instance.resize.end", map[string]any{
+		"instance_id":   "instance-1",
+		"tenant_id":     "project-1",
+		"state":         "active",
+		"vcpus":         json.Number("1"),
+		"memory_mb":     json.Number("512"),
+		"root_gb":       json.Number("1"),
+		"ephemeral_gb":  json.Number("0"),
+		"instance_type": "m1.tiny",
+	}), goldenCloud)
+	if ok {
+		t.Error("MapNotification() ok = true, want false")
+	}
+	if !reflect.DeepEqual(got, event.Event{}) {
+		t.Errorf("event = %+v, want the zero Event", got)
 	}
 }
 
