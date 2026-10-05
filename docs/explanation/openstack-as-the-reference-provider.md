@@ -62,8 +62,8 @@ redelivered notification and a retried batch both deduplicate on arrival.
 Among the notifications it maps are these:
 
 ```text
-compute.instance.create.end / delete.end / resize.end
-compute.instance.finish_resize.end
+compute.instance.create.end / delete.end / finish_resize.end
+compute.instance.resize.confirm.end / resize.revert.end
 compute.instance.shelve_offload.end / unshelve.end
 compute.instance.power_on.end / power_off.end
 volume.create.end / volume.delete.end / volume.resize.end / volume.retype

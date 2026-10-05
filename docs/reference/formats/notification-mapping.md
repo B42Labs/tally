@@ -87,10 +87,22 @@ bills such a project at zero.
 ## State rules
 
 `vmState` reads `state` out of the payload and normalizes it: `stopped` becomes
-`shutoff` and `shelved_offloaded` becomes `shelved`. A state the normalization
-table has no entry for passes through as nova reported it, because substituting
-something known for an unknown one would hide it, and an absent `state` stays
-empty.
+`shutoff`, `shelved_offloaded` becomes `shelved`, and `resized` becomes
+`active`. Nova reports a server it resized while stopped as `resized` as well
+and keeps it powered off, and neither the payload nor the table tells the two
+apart, so such a server is booked `active` until the confirm or the revert
+reports it stopped. A state the normalization table has no entry for passes
+through as nova reported it, because substituting something known for an
+unknown one would hide it, and an absent `state` stays empty.
+
+A collector or a Reporting API up to v0.5.0 records `resized` as nova reports
+it. The reconciliation sync normalizes through the same table as the collector,
+so while the two run different versions, it books a correction for every
+instance it finds waiting for its resize to be confirmed or reverted. The first
+sync after both are upgraded corrects the instances an earlier version left at
+`resized`; without reconciliation, such an instance keeps `resized` until its
+next event. A `resized` state modifier in a pricing model rates only the
+intervals an earlier version booked.
 
 `fixedState` reads nothing. The notification type already says what the state
 became, so the entry names the value in the table itself.
@@ -154,6 +166,29 @@ from the first.
 The state of the octavia create and update is fixed at `active` rather than read
 from the payload, because both are sent by the task that follows the one marking
 the load balancer active. The delete carries no state, as every delete does.
+
+## The resize sequence
+
+The table books two notifications of every resize or cold migration: the
+destination's `compute.instance.finish_resize.end`, and the
+`compute.instance.resize.confirm.end` or `compute.instance.resize.revert.end`
+that ends it.
+
+`compute.instance.resize.end` comes from the source host before the destination
+applies the new flavor, so it carries the flavor the instance is leaving. The
+table has no entry for it, and the collector counts it under
+`tally_collector_skipped_total`.
+
+`compute.instance.finish_resize.end` carries the new flavor and `vm_state`
+`resized`. It is booked as `compute.instance.resize.end` with the state
+`active`.
+
+`compute.instance.resize.confirm.end` repeats the new flavor, and
+`compute.instance.resize.revert.end` carries the flavor the instance went back
+to. Each is booked under its own name with the state nova set, `active` or
+`stopped`, which `vmState` records as `active` or `shutoff`. Nova confirms a
+resize on its own only when `resize_confirm_window` is set; its default of 0
+leaves the instance in `resized` until the user confirms or reverts.
 
 ## See also
 
