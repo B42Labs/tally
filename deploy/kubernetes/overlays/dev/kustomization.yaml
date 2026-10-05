@@ -292,6 +292,13 @@ patches:
   # TALLY_REPORTING_SYNC_ALLOW_AT lets a sync request name the instant it
   # reconciles at. The simulated cloud runs on a generated month rather than on
   # the wall clock, so a sync at wall time would observe it outside its period.
+  #
+  # TALLY_REPORTING_SYNC_SETTLE_S turns the settle window off. The window is
+  # measured against the told instant, and the simulated month passes 60
+  # virtual seconds in 0.08 wall seconds, so it covers none of the collector's
+  # real delay. A sync loop that holds the told instant at period_to once the
+  # month is over would defer a resource that changed in the month's last
+  # virtual minute on every run.
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -309,6 +316,8 @@ patches:
                     value: /etc/tally/clouds/clouds.yaml
                   - name: TALLY_REPORTING_SYNC_ALLOW_AT
                     value: "true"
+                  - name: TALLY_REPORTING_SYNC_SETTLE_S
+                    value: "0"
                 volumeMounts:
                   - name: clouds
                     mountPath: /etc/tally/clouds
