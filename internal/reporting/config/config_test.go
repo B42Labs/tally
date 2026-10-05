@@ -93,6 +93,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.SyncBudgetSeconds != 45 {
 		t.Errorf("SyncBudgetSeconds = %d, want 45", cfg.SyncBudgetSeconds)
 	}
+	if cfg.SyncSettleSeconds != 60 {
+		t.Errorf("SyncSettleSeconds = %d, want 60", cfg.SyncSettleSeconds)
+	}
 	if !cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = false, want true")
 	}
@@ -117,6 +120,7 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 		"TALLY_REPORTING_CLOUDS_CONFIG":              "/etc/tally/clouds.yaml",
 		"TALLY_REPORTING_SYNC_ALLOW_AT":              "true",
 		"TALLY_REPORTING_SYNC_BUDGET_S":              "600",
+		"TALLY_REPORTING_SYNC_SETTLE_S":              "600",
 		"TALLY_METRICS_ENABLED":                      "false",
 		"TALLY_REPORTING_METRICS_REFRESH_S":          "15",
 	})
@@ -156,6 +160,9 @@ func TestLoadReadsExplicitValues(t *testing.T) {
 	}
 	if cfg.SyncBudgetSeconds != 600 {
 		t.Errorf("SyncBudgetSeconds = %d, want 600", cfg.SyncBudgetSeconds)
+	}
+	if cfg.SyncSettleSeconds != 600 {
+		t.Errorf("SyncSettleSeconds = %d, want 600", cfg.SyncSettleSeconds)
 	}
 	if cfg.MetricsEnabled {
 		t.Error("MetricsEnabled = true, want false")
@@ -228,6 +235,21 @@ func TestLoadRejectsUnparsableSyncAllowAt(t *testing.T) {
 func TestLoadRejectsUnparsableSyncBudget(t *testing.T) {
 	setEnv(t, map[string]string{
 		"TALLY_REPORTING_SYNC_BUDGET_S": "45s",
+		"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+	})
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if prefix := "parsing the environment:"; !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("Load() error = %q, want it to start with %q", err, prefix)
+	}
+}
+
+func TestLoadRejectsUnparsableSyncSettle(t *testing.T) {
+	setEnv(t, map[string]string{
+		"TALLY_REPORTING_SYNC_SETTLE_S": "abc",
 		"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
 	})
 
@@ -389,6 +411,67 @@ func TestLoadBoundsTheSyncBudget(t *testing.T) {
 			t.Errorf("SyncBudgetSeconds = %d, want the default 45", cfg.SyncBudgetSeconds)
 		}
 	})
+}
+
+func TestLoadBoundsTheSyncSettle(t *testing.T) {
+	loads := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "zero turns the window off", value: "0", want: 0},
+		{name: "the largest window loads", value: "3600", want: 3600},
+		{name: "an empty value is the default", value: "", want: 60},
+	}
+	for _, tc := range loads {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+				"TALLY_REPORTING_SYNC_SETTLE_S": tc.value,
+			})
+
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+			if cfg.SyncSettleSeconds != tc.want {
+				t.Errorf("SyncSettleSeconds = %d, want %d", cfg.SyncSettleSeconds, tc.want)
+			}
+		})
+	}
+
+	refusals := []struct {
+		name     string
+		value    string
+		wantText string
+	}{
+		{
+			name:     "a negative window is refused",
+			value:    "-1",
+			wantText: "TALLY_REPORTING_SYNC_SETTLE_S: -1 must not be negative",
+		},
+		{
+			name:     "a window of more than an hour is refused",
+			value:    "3601",
+			wantText: "TALLY_REPORTING_SYNC_SETTLE_S: 3601 must be at most 3600",
+		},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"TALLY_REPORTING_DB_URL":        "postgres://tally@localhost/tally",
+				"TALLY_REPORTING_SYNC_SETTLE_S": tc.value,
+			})
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load() error = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("Load() error = %q, want it to carry %q", err, tc.wantText)
+			}
+		})
+	}
 }
 
 func TestLoadReadsAttributingRelationTypes(t *testing.T) {

@@ -38,6 +38,7 @@ const (
 	envCloudsConfig       = "TALLY_REPORTING_CLOUDS_CONFIG"
 	envSyncAllowAt        = "TALLY_REPORTING_SYNC_ALLOW_AT"
 	envSyncBudget         = "TALLY_REPORTING_SYNC_BUDGET_S"
+	envSyncSettle         = "TALLY_REPORTING_SYNC_SETTLE_S"
 	envMetricsEnabled     = "TALLY_METRICS_ENABLED"
 	envMetricsRefresh     = "TALLY_REPORTING_METRICS_REFRESH_S"
 )
@@ -61,6 +62,7 @@ var EnvNames = []string{
 	envCloudsConfig,
 	envSyncAllowAt,
 	envSyncBudget,
+	envSyncSettle,
 	envMetricsEnabled,
 	envMetricsRefresh,
 }
@@ -75,6 +77,11 @@ const (
 // needs more, and the cap keeps the conversion to time.Duration far from
 // overflow.
 const maxSyncBudgetSeconds = 86400
+
+// maxSyncSettleSeconds caps TALLY_REPORTING_SYNC_SETTLE_S at one hour. A larger
+// window would hold every correction of a recent change back for longer than
+// any sync schedule runs apart.
+const maxSyncSettleSeconds = 3600
 
 // logLevels maps the accepted values of TALLY_LOG_LEVEL to their slog level.
 // The match is exact: a lower-case "info" is a typo, and silently accepting it
@@ -154,6 +161,15 @@ type Config struct {
 	// connection per cloud synced at the same time on top of what the API's other
 	// routes need.
 	SyncBudgetSeconds int `env:"TALLY_REPORTING_SYNC_BUDGET_S" envDefault:"45"`
+	// SyncSettleSeconds is how long before a sync run a change must lie for the
+	// run to correct it. A run books no correction for a resource the platform
+	// changed, or the projection recorded an event for, within this many seconds
+	// before the run: the notification of that change may still be on its way.
+	// The next run books the correction if the difference is still there. 0 turns
+	// the window off. A resource the platform reports as in transition is
+	// deferred whatever this is set to. Keep it below the interval the sync is
+	// scheduled at.
+	SyncSettleSeconds int `env:"TALLY_REPORTING_SYNC_SETTLE_S" envDefault:"60"`
 	// MetricsEnabled exposes the instrumentation: false makes GET /metrics answer
 	// 404 and stops the gauge refresher. The instruments still exist and keep
 	// counting either way, so turning the flag back on costs nothing and loses
@@ -208,6 +224,12 @@ func Load() (Config, error) {
 	}
 	if cfg.SyncBudgetSeconds > maxSyncBudgetSeconds {
 		return Config{}, fmt.Errorf("%s: %d must be at most %d", envSyncBudget, cfg.SyncBudgetSeconds, maxSyncBudgetSeconds)
+	}
+	if cfg.SyncSettleSeconds < 0 {
+		return Config{}, fmt.Errorf("%s: %d must not be negative", envSyncSettle, cfg.SyncSettleSeconds)
+	}
+	if cfg.SyncSettleSeconds > maxSyncSettleSeconds {
+		return Config{}, fmt.Errorf("%s: %d must be at most %d", envSyncSettle, cfg.SyncSettleSeconds, maxSyncSettleSeconds)
 	}
 	// env applies the default to a variable set to the empty string, the same as
 	// to an unset one, so the raw value is what tells the two apart. Only the
