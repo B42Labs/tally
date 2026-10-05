@@ -41,7 +41,9 @@ import (
 // because rating.Rate skips it, so its resources are counted per type instead
 // of being reported as missing. An export of another cloud, another month or
 // another pricing model is refused rather than compared: each of the three
-// would otherwise report the engine for a month it never billed.
+// would otherwise report the engine for a month it never billed. A load
+// balancer the model prices is counted on a line of its own for another
+// reason: its size is one the bus never states.
 
 // platformOpenStack is the platform a simulated month is booked under. A rated
 // record of another platform belongs to another collector, and one of another
@@ -120,12 +122,17 @@ type UnpricedType struct {
 // Report is what one comparison found.
 type Report struct {
 	// Compared counts every resource examined: the oracle's resources of a
-	// priced type, and the resources the export books that the oracle does not
-	// hold.
+	// priced type whose size a notification states, and the resources the
+	// export books that the oracle does not hold.
 	Compared int
 	// Unpriced counts the oracle's resources per type the model does not price,
 	// sorted by type.
 	Unpriced []UnpricedType
+	// Reconciled counts the oracle's load balancers when the model prices
+	// them. They are counted rather than compared: the oracle states the size
+	// the cloud holds, the engine bills what the create and the syncs booked,
+	// and the two part ways at instants a drill does not control.
+	Reconciled int
 	// Skipped counts the rated records of another cloud or another platform,
 	// which an export of a deployment that bills more than the simulated cloud
 	// carries beside the ones this oracle is about.
@@ -150,7 +157,7 @@ type Report struct {
 // difference and counts as one: whether it is the one the switch was turned on
 // for is what the drill's write-up decides.
 func (r Report) Lines() []string {
-	lines := make([]string, 0, len(r.Differences)+len(r.Unpriced)+3)
+	lines := make([]string, 0, len(r.Differences)+len(r.Unpriced)+4)
 	for _, difference := range r.Differences {
 		line := fmt.Sprintf("%s %s: %s", difference.ResourceType, difference.ResourceID, difference.Detail)
 		if difference.More > 0 {
@@ -165,6 +172,10 @@ func (r Report) Lines() []string {
 		lines = append(lines, fmt.Sprintf(
 			"%s: %d resources are not priced by pricing model %s and were not compared",
 			entry.ResourceType, entry.Resources, r.PricingVersion))
+	}
+	if r.Reconciled > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %d resources are sized by reconciliation and were not compared",
+			typeLoadBalancer, r.Reconciled))
 	}
 	if r.Skipped > 0 {
 		lines = append(lines, fmt.Sprintf("skipped %d rated records of other clouds or platforms", r.Skipped))
@@ -493,6 +504,10 @@ func compare(oracle Oracle, rows []ratedRow, model pricing.Model) (Report, error
 		entry, ok := entries[resource.ResourceType]
 		if !ok {
 			unpriced[resource.ResourceType]++
+			continue
+		}
+		if sizedByReconciliation(resource.ResourceType) {
+			report.Reconciled++
 			continue
 		}
 		report.Compared++

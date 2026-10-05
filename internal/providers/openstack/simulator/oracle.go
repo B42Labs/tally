@@ -148,6 +148,10 @@ func loadBalancerSizeOf(listeners, pools int) map[string]any {
 // for as long as it lives, and the counts the ledger states reach Tally through
 // a sync against the cloud's API. Whatever holds the oracle against what the
 // bus alone booked asks this first.
+//
+// It names the load balancer alone, and Report.Reconciled, Report.Lines and
+// asTheBusBooksIt rely on that: a second type needs Reconciled counted per
+// type, the way Unpriced is, and its own zero size in asTheBusBooksIt.
 func sizedByReconciliation(resourceType string) bool {
 	return resourceType == typeLoadBalancer
 }
