@@ -78,16 +78,11 @@ var mappings = map[string]mappingEntry{
 		resourceIDPath: []string{"instance_id"},
 		projectIDPath:  []string{"tenant_id"},
 	},
-	"compute.instance.resize.end": {
-		eventType:      "compute.instance.resize.end",
-		resourceType:   "instance",
-		state:          vmState,
-		size:           instanceSize,
-		resourceIDPath: []string{"instance_id"},
-		projectIDPath:  []string{"tenant_id"},
-	},
-	// A resize is finished under a second name, and both carry the new size, so
-	// both are booked as the same Tally event.
+	// Nova finishes a resize on the destination host, where the server takes on
+	// the new flavor and nova sets vm_state resized. The resize.end the source
+	// host sends before it still carries the flavor the server is leaving, so
+	// the table has no entry for it, and this event keeps the Tally type a
+	// resize was always booked under.
 	"compute.instance.finish_resize.end": {
 		eventType:      "compute.instance.resize.end",
 		resourceType:   "instance",

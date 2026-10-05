@@ -222,7 +222,9 @@ type image struct {
 }
 
 // instance is one nova server. Its flavor is the current one: a resize
-// replaces it, and every notification after that reports the new one.
+// replaces it once the source host reported the old one, a revert puts the old
+// one back, and every notification reports the flavor the instance holds when
+// it is rendered.
 type instance struct {
 	id        string
 	name      string

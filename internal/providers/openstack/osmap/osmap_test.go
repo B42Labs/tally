@@ -18,6 +18,11 @@ func TestVMStateNormalizesWhatNovaReports(t *testing.T) {
 			reported: "shelved_offloaded",
 			want:     "shelved",
 		},
+		{
+			name:     "a server waiting for its resize to be confirmed is active",
+			reported: "resized",
+			want:     "active",
+		},
 		{name: "a state the table has no entry for passes through", reported: "rescued", want: "rescued"},
 		{name: "an absent state stays absent", reported: "", want: ""},
 	}

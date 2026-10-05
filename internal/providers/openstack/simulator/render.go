@@ -201,10 +201,10 @@ func instanceDeletePayload(p *project, inst *instance, at time.Time) map[string]
 	}
 }
 
-// instanceResizePayload describes a server that changed flavor. Both halves of
-// a resize carry the same members and differ in the state alone, which is why
-// one builder serves them: nova announces the new size twice, and the mapping
-// books both under one event type.
+// instanceResizePayload describes a server in a resize. Every notification of
+// a resize carries the same members, with the flavor the instance holds when it
+// is rendered: the old one for resize.start and resize.end, the new one from
+// finish_resize.start on, and the old one again on a revert's .end.
 func instanceResizePayload(p *project, inst *instance, state string) map[string]any {
 	return map[string]any{
 		"instance_id":       inst.id,

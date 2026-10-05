@@ -158,8 +158,9 @@ func TestRenderedPayloadsCarryTheRecordedMembers(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join(sampleDir, sampleFile(transition.EventType)))
 		if err != nil {
 			// The fixtures are the collector's, and the noise types of the
-			// catalogue have none: the collector maps none of them, so a real
-			// deployment never had one recorded here.
+			// catalogue have none but compute.instance.resize.end, the 2025.1
+			// shape the collector skips: the collector maps none of them, so a
+			// real deployment never had the others recorded here.
 			// TestNoisePayloadsCarryTheirMembers pins those instead.
 			if errors.Is(err, fs.ErrNotExist) && !transition.Billable {
 				t.Logf("no recorded sample for %s, the mapping skips it", transition.EventType)
@@ -181,7 +182,7 @@ func TestRenderedPayloadsCarryTheRecordedMembers(t *testing.T) {
 // repeats them: nova sends the same server description before a create that it
 // sends with one, and cinder the same volume on an attach that it sends on a
 // resize, so the noise is pinned against these sets rather than against
-// sixty-two lists written out one by one.
+// sixty-five lists written out one by one.
 var (
 	createMembers = []string{
 		"availability_zone", "created_at", "disk_gb", "display_name", "ephemeral_gb", "host",
@@ -282,9 +283,10 @@ var (
 )
 
 // noiseMembers is the payload of every type of the catalogue, by the members it
-// carries. The collector maps none of these types, so none of them was ever
-// recorded from a real deployment and
-// TestRenderedPayloadsCarryTheRecordedMembers has no fixture to hold them
+// carries. The collector maps none of these types, so none of them but
+// compute.instance.resize.end, the 2025.1 shape the collector skips, was
+// recorded from a real deployment, and
+// TestRenderedPayloadsCarryTheRecordedMembers has no fixture to hold the others
 // against. This table is that fixture: a builder that drops a member or renames
 // one changes a payload nothing else in the package reads.
 var noiseMembers = map[string][]string{
@@ -302,6 +304,9 @@ var noiseMembers = map[string][]string{
 	"compute.instance.power_on.start":       powerMembers,
 	"compute.instance.resize.start":         resizeMembers,
 	"compute.instance.finish_resize.start":  resizeMembers,
+	"compute.instance.resize.end":           resizeMembers,
+	"compute.instance.resize.confirm.start": resizeMembers,
+	"compute.instance.resize.revert.start":  resizeMembers,
 	"keypair.import.start":                  keypairMembers,
 	"keypair.import.end":                    keypairMembers,
 	"keypair.delete.start":                  keypairMembers,

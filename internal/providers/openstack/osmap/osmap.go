@@ -34,9 +34,15 @@ var vmStates = map[string]string{
 	"active":            "active",
 	"stopped":           "shutoff",
 	"shelved_offloaded": "shelved",
-	"paused":            "paused",
-	"suspended":         "suspended",
-	"error":             "error",
+	// A server waiting for its resize to be confirmed or reverted runs on the
+	// new flavor. Nova reports a server it resized while stopped as resized as
+	// well and keeps it off, and neither the payload nor this table can tell
+	// the two apart, so such a server is booked active until the confirm or the
+	// revert reports it stopped.
+	"resized":   "active",
+	"paused":    "paused",
+	"suspended": "suspended",
+	"error":     "error",
 }
 
 // VMState normalizes the vm_state nova reported. A state outside the table

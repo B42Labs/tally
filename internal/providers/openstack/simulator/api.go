@@ -132,7 +132,7 @@ const (
 // normalizes with, written out here because the fake serves what nova would say
 // while the oracle says what the collector books.
 //
-// The four are the states a generated month leaves an instance in. What keeps
+// The three are the states a generated month leaves an instance in. What keeps
 // the two tables from drifting apart is
 // TestFakeAPINamesTheStatesTheMappingNormalizes, which holds every row here
 // against osmap.VMState.
@@ -140,7 +140,6 @@ var novaVMStates = map[string]string{
 	stateActive:  "active",
 	stateShutoff: "stopped",
 	stateShelved: "shelved_offloaded",
-	stateResized: "resized",
 }
 
 // catalogEntry is one service the simulated keystone publishes: the type and

@@ -202,7 +202,7 @@ func TestTrafficCountersNeverDecreaseAndStartAtZero(t *testing.T) {
 
 func TestTrafficAccruesOnlyWhileActive(t *testing.T) {
 	instance := spanInstance("srv-states", workloadClassic, cloudDay(1).Add(8*time.Hour),
-		stateActive, stateShutoff, stateShelved, stateResized, stateActive)
+		stateActive, stateShutoff, stateShelved, stateActive)
 	samples, _ := trafficOf(t, testOracle(instance), 7, testMetricsInterval)
 
 	series := seriesOf(samples, egressSeries, instance.ResourceID)
