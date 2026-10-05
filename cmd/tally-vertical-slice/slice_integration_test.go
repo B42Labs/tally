@@ -70,7 +70,7 @@ func newSliceAPI(t *testing.T) sliceAPI {
 		Pipeline:                 ingest.New(registry.New(), false, nil, nil),
 		AttributingRelationTypes: []string{"infrastructure_tenant"},
 		Syncer: reconciliation.New(db.Store, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, 0, nil),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)

@@ -397,7 +397,7 @@ func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 	}}}
 	return reconciliation.New(db.Store, pipeline, cfg,
 		map[string]reconciliation.Adapter{adapterName: adapters.NewOpenStack(discardLogs)},
-		func() time.Time { return pollTime }, nil)
+		func() time.Time { return pollTime }, 0, nil)
 }
 
 // mustSync runs one sync and fails the test unless it finished clean.
