@@ -69,6 +69,52 @@
       ],
       "pools": [],
       "tags": []
+    },
+    {
+      "id": "7d8e9012-3456-4789-a012-3e4f5a6b7c89",
+      "name": "build-lb",
+      "description": "",
+      "provisioning_status": "PENDING_CREATE",
+      "operating_status": "OFFLINE",
+      "admin_state_up": true,
+      "project_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "vip_address": "203.0.113.71",
+      "vip_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "vip_subnet_id": "c8e4d2b0-6f39-4a71-8d25-9b4c6e8a1f30",
+      "vip_port_id": "a1c3e5f7-9b2d-4f60-8e17-4c6a8d0b2e39",
+      "provider": "amphora",
+      "availability_zone": null,
+      "flavor_id": null,
+      "created_at": "2026-08-19T08:30:12",
+      "updated_at": null,
+      "listeners": [],
+      "pools": [],
+      "tags": []
+    },
+    {
+      "id": "8e901234-5678-4890-b123-4f5a6b7c8d90",
+      "name": "api-lb",
+      "description": "",
+      "provisioning_status": "PENDING_UPDATE",
+      "operating_status": "ONLINE",
+      "admin_state_up": true,
+      "project_id": "8a1b7c6d5e4f40398271a6b5c4d3e2f1",
+      "vip_address": "203.0.113.84",
+      "vip_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "vip_subnet_id": "c8e4d2b0-6f39-4a71-8d25-9b4c6e8a1f30",
+      "vip_port_id": "b2d4f608-1a3c-4e57-9f28-5d7b9e1c3f40",
+      "provider": "amphora",
+      "availability_zone": null,
+      "flavor_id": null,
+      "created_at": "2026-03-12T08:40:27",
+      "updated_at": "2026-08-19T11:25:40",
+      "listeners": [
+        {"id": "d5f7b923-8e46-4a01-9c32-4f6d8b0a2e57"}
+      ],
+      "pools": [
+        {"id": "e6a8c034-9f57-4b12-8d43-5a7e9c1b3f68"}
+      ],
+      "tags": []
     }
   ]
 }

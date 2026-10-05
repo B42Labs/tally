@@ -359,6 +359,37 @@ func TestOpenStackSync(t *testing.T) {
 		})
 	})
 
+	t.Run("defers an instance nova is still building and books it once it is active", func(t *testing.T) {
+		const cloud = "os-openstack-building"
+		openstack := newCloud(t)
+		openstack.serve(t, serversPath, "servers_building.json")
+		openstack.serveDeleted(t, "servers_empty.json")
+		writeCloudsYAML(t, openstack.URL)
+		syncer := newSyncer(t, db, pipeline, cloud, map[string]any{"os_cloud": testCloud})
+
+		// Nova lists the instance while it spawns, seconds before it sends
+		// create.end: the run leaves it to the collector.
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1}
+		assertStats(t, res.Stats, want)
+		assertRun(t, db, res, statusCompleted)
+		assertCorrections(t, db, cloud, "sync.create", nil)
+		assertRows(t, db, cloud, nil)
+
+		// The instance is active and the collector's event never came, so the
+		// next run books it at nova's own creation instant.
+		openstack.reload(t, serversPath, "servers_built.json")
+		res = mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+		assertCorrections(t, db, cloud, "sync.create", []correction{{
+			resourceType: "instance", resourceID: "d4f7a123-5e80-4b69-a14d-7fa23e6091c5",
+			projectID: projectA, at: "2026-08-20T11:58:07Z", state: "active", size: sizeOfSmall,
+		}})
+	})
+
 	t.Run("creates a load balancer the seeded schema accepts", func(t *testing.T) {
 		const cloud = "os-openstack-octavia"
 		openstack := newCloud(t)
@@ -372,8 +403,11 @@ func TestOpenStackSync(t *testing.T) {
 		// The strict pipeline refuses a size for a pair no schema registers, so a
 		// clean run over a load balancer is what says migration 0006 reached this
 		// database: without it the correction would be dead-lettered and the run
-		// would end failed.
-		assertStats(t, res.Stats, tally(1, 0, 0))
+		// would end failed. The three balancers octavia holds in pending_* are in
+		// transition and left to a later run.
+		want := tally(1, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 3}
+		assertStats(t, res.Stats, want)
 		assertRun(t, db, res, statusCompleted)
 		assertRows(t, db, cloud, []projectionRow{{
 			resourceType: "loadbalancer", resourceID: "4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23",
