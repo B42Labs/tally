@@ -126,8 +126,9 @@ it, and compares that against the entries the mapping table carries.
 
    A member printed as `null` is one the release names differently, and the
    other resource types read `volume_id`, `size`, `volume_type`,
-   `floatingip.id`, `owner`, `loadbalancer_id`, `id`, `project_id`, `listeners`
-   and `pools`.
+   `floatingip.id`, `owner`, `loadbalancer_id`, `id` and `project_id`. An
+   octavia payload names no `listeners` and no `pools` on any release, so
+   neither is a member to look for.
 
 3. Compare the deliveries against the recorded samples under
    [`internal/providers/openstack/testdata/golden/`](https://github.com/B42Labs/tally/tree/main/internal/providers/openstack/testdata/golden/),

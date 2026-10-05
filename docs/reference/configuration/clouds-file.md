@@ -71,7 +71,9 @@ reason is read back.
 of the entry above.
 
 `include_octavia` is optional, is a boolean, and is false by default. True adds
-`loadbalancer` to the resource types the adapter enumerates.
+`loadbalancer` to the resource types the adapter enumerates. It is also what
+gives a load balancer its listener and pool counts, which octavia's
+notifications leave out.
 
 Any other key is refused with `unknown setting` and the key named. A key whose
 value is of the wrong type is refused with the type it holds.

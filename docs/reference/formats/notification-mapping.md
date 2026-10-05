@@ -141,10 +141,11 @@ unreadable counts as version 4, which is what a deployment allocates unless it
 says otherwise, and a skipped event would cost the address its whole billing
 record.
 
-`loadBalancerSize` counts the elements of the `listeners` and the `pools`
-arrays. An absent member and a null one both count as zero, because a service
-with none of something leaves the member out rather than sending an empty array.
-A member that is not an array is left out.
+`loadBalancerSize` serves the create alone. It counts the elements of the
+`listeners` and the `pools` arrays, and an absent member and a null one both
+count as zero. The dictionary octavia's worker publishes names neither, whatever
+the load balancer holds, so a create books `{"listeners": 0, "pools": 0}`. A
+member that is not an array is left out.
 
 ## Skipped notifications
 
@@ -166,6 +167,42 @@ from the first.
 The state of the octavia create and update is fixed at `active` rather than read
 from the payload, because both are sent by the task that follows the one marking
 the load balancer active. The delete carries no state, as every delete does.
+
+## The size of a load balancer
+
+Octavia publishes a load balancer without its collections. The create, the
+update and the delete carry the dictionary of the flow that finished
+([`notification_tasks.py`](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/controller/worker/v2/tasks/notification_tasks.py#L31-L40)),
+and octavia-lib's `to_dict` leaves out every member that is a list
+([`data_models.py`](https://github.com/openstack/octavia-lib/blob/0444975bf3cf6c5eca7d191d5c672df75ba4970f/octavia_lib/api/drivers/data_models.py#L60-L68)),
+so neither `listeners` nor `pools` is in any of the three, whatever the load
+balancer holds. The same holds on 2025.1, 2026.2 and master. The update
+therefore states no size, and the create states zero of both. Octavia sends
+nothing at all when a listener or a pool is added or removed.
+
+The counts reach Tally through reconciliation alone. A sync of a cloud whose
+entry sets `include_octavia` reads them off the API and books them as a
+`sync.update` dated at the sync's own instant, so the time between the change
+and that sync is booked at the earlier counts. Without such a sync every load
+balancer stays at zero of both. Each correction counts in
+`tally_sync_resources_reconciled_total` under `action="updated"`.
+[How reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud)
+explains the sync, and [reconcile a cloud](/how-to/openstack/reconcile-a-cloud)
+sets it up.
+
+A sync can run ahead of the collector, while the collector works off a backlog
+or restarts. It then books a load balancer the collector has not delivered yet
+as a `sync.create` with the counts it reads, dated at the `created_at` the API
+reports. The collector's create follows it: octavia dates the create at the end
+of its flow, no earlier than `created_at`, and the fold orders the events of
+one instant by when they were received. The create's zero counts are then the
+current ones, and the load balancer is booked at zero of both from the create's
+instant until the next sync books a `sync.update`.
+
+A collector up to v0.5.0 books `{"listeners": 0, "pools": 0}` on every
+`octavia.loadbalancer.update.end`, which resets a count a sync booked until the
+next sync books it again. Upgrading the collector ends that, and the intervals
+already booked at zero stay as they are.
 
 ## The resize sequence
 
