@@ -96,6 +96,28 @@ var mappings = map[string]mappingEntry{
 		resourceIDPath: []string{"instance_id"},
 		projectIDPath:  []string{"tenant_id"},
 	},
+	// A confirm ends the wait for the user's decision. Nova sets the state from
+	// the power state it finds, active or stopped, and the payload repeats the
+	// new flavor, which books the size once more should the finish_resize.end
+	// have been lost.
+	"compute.instance.resize.confirm.end": {
+		eventType:      "compute.instance.resize.confirm.end",
+		resourceType:   "instance",
+		state:          vmState,
+		size:           instanceSize,
+		resourceIDPath: []string{"instance_id"},
+		projectIDPath:  []string{"tenant_id"},
+	},
+	// A revert puts the server back on the flavor it left, and the payload
+	// carries that flavor.
+	"compute.instance.resize.revert.end": {
+		eventType:      "compute.instance.resize.revert.end",
+		resourceType:   "instance",
+		state:          vmState,
+		size:           instanceSize,
+		resourceIDPath: []string{"instance_id"},
+		projectIDPath:  []string{"tenant_id"},
+	},
 	"compute.instance.shelve_offload.end": {
 		eventType:      "compute.instance.shelve",
 		resourceType:   "instance",

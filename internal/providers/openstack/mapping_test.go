@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,86 @@ func TestMapNotificationRenamesFinishResize(t *testing.T) {
 	}
 	if want := "compute.instance.finish_resize.end"; got.Payload.Provider["oslo_event_type"] != want {
 		t.Errorf("provider.oslo_event_type = %v, want %q", got.Payload.Provider["oslo_event_type"], want)
+	}
+}
+
+// TestMapNotificationEndsTheResize covers the confirm and the revert that end
+// nova's wait for the user's decision. Both are booked under their oslo names,
+// with the state nova set and the flavor the payload carries, and a payload the
+// mapping cannot read still becomes an event the Reporting API dead-letters.
+func TestMapNotificationEndsTheResize(t *testing.T) {
+	tiny := func(state any) map[string]any {
+		return map[string]any{
+			"instance_id":   "instance-1",
+			"tenant_id":     "project-1",
+			"state":         state,
+			"vcpus":         json.Number("1"),
+			"memory_mb":     json.Number("512"),
+			"root_gb":       json.Number("1"),
+			"ephemeral_gb":  json.Number("0"),
+			"instance_type": "m1.tiny",
+		}
+	}
+	tests := []struct {
+		name      string
+		payload   map[string]any
+		wantState string
+		wantSize  map[string]any
+	}{
+		{
+			name:      "a running server is active on the flavor the payload carries",
+			payload:   tiny("active"),
+			wantState: "active",
+			wantSize: map[string]any{
+				"vcpus":   json.Number("1"),
+				"ram_gb":  json.Number("0.5"),
+				"disk_gb": json.Number("1"),
+				"flavor":  "m1.tiny",
+			},
+		},
+		{
+			name:      "a stopped server is shutoff",
+			payload:   tiny("stopped"),
+			wantState: "shutoff",
+			wantSize: map[string]any{
+				"vcpus":   json.Number("1"),
+				"ram_gb":  json.Number("0.5"),
+				"disk_gb": json.Number("1"),
+				"flavor":  "m1.tiny",
+			},
+		},
+		{
+			name:      "a state that is not a string yields an empty one",
+			payload:   map[string]any{"state": json.Number("1")},
+			wantState: "",
+			wantSize:  map[string]any{},
+		},
+		{name: "an empty payload yields an empty state and size", payload: map[string]any{}, wantSize: map[string]any{}},
+		{name: "a nil payload yields an empty state and size", payload: nil, wantSize: map[string]any{}},
+	}
+
+	for _, eventType := range []string{"compute.instance.resize.confirm.end", "compute.instance.resize.revert.end"} {
+		for _, tc := range tests {
+			t.Run(eventType+": "+tc.name, func(t *testing.T) {
+				got, ok := MapNotification(notify(eventType, tc.payload), goldenCloud)
+				if !ok {
+					t.Fatal("MapNotification() ok = false, want true")
+				}
+
+				if got.EventType != eventType {
+					t.Errorf("EventType = %q, want %q", got.EventType, eventType)
+				}
+				if got.Payload.Provider["oslo_event_type"] != eventType {
+					t.Errorf("provider.oslo_event_type = %v, want %q", got.Payload.Provider["oslo_event_type"], eventType)
+				}
+				if got.Payload.State == nil || *got.Payload.State != tc.wantState {
+					t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, tc.wantState)
+				}
+				if got.Payload.Size == nil || !reflect.DeepEqual(got.Payload.Size, tc.wantSize) {
+					t.Errorf("payload.size = %#v, want %#v", got.Payload.Size, tc.wantSize)
+				}
+			})
+		}
 	}
 }
 
