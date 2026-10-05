@@ -45,6 +45,13 @@ const (
 	kindDelete = "delete"
 )
 
+// The reasons a run defers a correction. Each is a key of Deferred in the
+// stored stats and the reason label of the deferred counter.
+const (
+	reasonTransitional = "transitional"
+	reasonRecent       = "recent"
+)
+
 // correctionBatchSize is how many corrections one transaction carries. The
 // ingest pipeline takes a transaction-scoped advisory lock per resource, so a
 // batch is also how many of the shared lock table's slots the run holds at
@@ -84,6 +91,10 @@ type Stats struct {
 	Created int `json:"created"`
 	Updated int `json:"updated"`
 	Deleted int `json:"deleted"`
+	// Deferred counts the corrections the run found and left to a later run. It
+	// is set before the first batch is ingested, so a run that fails while
+	// ingesting still records it.
+	Deferred Deferred `json:"deferred"`
 	// Errors is what went wrong: a type the adapter could not enumerate, an
 	// observation it reported incompletely, a correction the pipeline refused,
 	// or the error that ended the run. A run with an error here is 'failed'. It
@@ -94,6 +105,24 @@ type Stats struct {
 	// included. It is what says that Errors is a sample rather than the whole
 	// record.
 	ErrorCount int `json:"error_count"`
+}
+
+// Deferred counts the corrections a run did not book, by the reason it waited.
+// A resource deferred in five runs counts in each of the five: the counts are
+// of corrections a run did not book, not of distinct resources.
+type Deferred struct {
+	Transitional int `json:"transitional"`
+	Recent       int `json:"recent"`
+}
+
+// add counts one correction deferred for reason.
+func (d *Deferred) add(reason string) {
+	switch reason {
+	case reasonTransitional:
+		d.Transitional++
+	case reasonRecent:
+		d.Recent++
+	}
 }
 
 // Result is what a sync run reports back.
@@ -115,6 +144,7 @@ type Syncer struct {
 	clouds   map[string]CloudConfig
 	adapters map[string]Adapter
 	now      func() time.Time
+	settle   time.Duration
 	metrics  *metrics.Metrics
 }
 
@@ -126,16 +156,22 @@ type Syncer struct {
 // read from the clock, so that a test can state which instant a correction the
 // platform gave no timestamp for is dated at.
 //
+// settle is the window before a run inside which a change is left to the
+// collector: a run books no correction for a resource the platform changed, or
+// the projection recorded an event for, within it. 0 turns the window off; a
+// resource the platform reports as in transition is deferred either way.
+//
 // m counts the runs and what they reconciled. A nil m records nothing.
 func New(db *store.Store, pipeline *ingest.Pipeline, cfg Config, adapters map[string]Adapter,
-	now func() time.Time, m *metrics.Metrics,
+	now func() time.Time, settle time.Duration, m *metrics.Metrics,
 ) *Syncer {
 	clouds := make(map[string]CloudConfig, len(cfg.Clouds))
 	for _, cloud := range cfg.Clouds {
 		clouds[cloud.Cloud] = cloud
 	}
 	return &Syncer{
-		db: db, pipeline: pipeline, clouds: clouds, adapters: adapters, now: now, metrics: m,
+		db: db, pipeline: pipeline, clouds: clouds, adapters: adapters, now: now, settle: settle,
+		metrics: m,
 	}
 }
 
@@ -237,9 +273,19 @@ func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result,
 	if err != nil {
 		return abort(err)
 	}
+	// A deletion a run deferred happened before that run started, so the deleted
+	// listing reaches back by the settle window to name it again. One the last
+	// run booked is named again as well and corrects nothing.
+	if since != nil && s.settle > 0 {
+		reach := since.Add(-s.settle)
+		since = &reach
+	}
 
-	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, now().UTC(),
-		&stats)
+	// The instant the run looks at the platform. The adapter measures its deleted
+	// listing from it and the diff its settle window, so both place the run at
+	// the same instant.
+	runAt := now().UTC()
+	observed, incomplete, err := collect(ctx, adapter, entry.AdapterConfig, since, runAt, &stats)
 	if err != nil {
 		return abort(fmt.Errorf("listing the resources of %s: %w", cloud, err))
 	}
@@ -277,10 +323,11 @@ func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result,
 		return abort(fmt.Errorf("loading the projection of %s: %w", cloud, err))
 	}
 
-	events, err := diff(runID, entry, observed, rows, enumerated, now)
+	events, deferred, err := diff(runID, entry, observed, rows, enumerated, now, runAt, s.settle)
 	if err != nil {
 		return abort(err)
 	}
+	stats.Deferred = deferred
 	// The corrections go in one transaction per batch rather than one for the
 	// whole run, the way projection.Rebuild replays in batches and for the same
 	// reason: the pipeline takes an advisory lock per resource that the
@@ -349,12 +396,14 @@ func (s *Syncer) finish(ctx context.Context, id uuid.UUID, cloud string, stats S
 		return err
 	}
 	s.metrics.SyncRunFinished(cloud, runStatus(stats))
-	// One call per action, the zero counts included: a finished run makes all
-	// three series appear, so a run that deleted nothing reports a delete count
-	// of zero rather than no series at all.
+	// One call per action and per reason, the zero counts included: a finished
+	// run makes every series appear, so a run that deleted nothing reports a
+	// delete count of zero rather than no series at all.
 	s.metrics.ResourcesReconciled(cloud, "created", stats.Created)
 	s.metrics.ResourcesReconciled(cloud, "updated", stats.Updated)
 	s.metrics.ResourcesReconciled(cloud, "deleted", stats.Deleted)
+	s.metrics.ResourcesDeferred(cloud, reasonTransitional, stats.Deferred.Transitional)
+	s.metrics.ResourcesDeferred(cloud, reasonRecent, stats.Deferred.Recent)
 	s.metrics.SyncErrorsRecorded(cloud, stats.ErrorCount)
 	return nil
 }
@@ -599,28 +648,47 @@ type resourceKey struct {
 //
 // now is the run's clock, which is where a correction the platform gave no
 // instant for is dated.
+//
+// at is the instant the run looked at the platform, and settle the window
+// before it. A difference on a resource the platform reports as in transition,
+// or one whose change the platform or the projection dates inside the window,
+// is no correction this run books: the collector's notification of it may still
+// be on its way. The second result counts those, by the reason deferral gives.
+// The projection's own instant counts because the rows are read after the
+// listing: a resource created after the platform answered and booked by the
+// collector before the rows were read is a live row the observation does not
+// name.
 func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedResource,
 	rows []sqlcgen.ListCurrentResourcesByCloudRow, enumerated map[string]bool,
-	now func() time.Time,
-) ([]event.Event, error) {
+	now func() time.Time, at time.Time, settle time.Duration,
+) ([]event.Event, Deferred, error) {
 	stored := make(map[resourceKey]sqlcgen.ListCurrentResourcesByCloudRow, len(rows))
 	for _, row := range rows {
 		stored[resourceKey{ResourceType: row.ResourceType, ResourceID: row.ResourceID}] = row
 	}
 
 	var events []event.Event
+	var deferred Deferred
 	// Both passes walk their keys in one order, so that a run over one
 	// observation always emits the same batch in the same sequence.
 	for _, key := range slices.SortedFunc(maps.Keys(observed), compareResourceKey) {
 		obs := observed[key]
 		row, known := stored[key]
 		state := obs.State
+		var lastEvent *time.Time
+		if known {
+			lastEvent = &row.LastEventAt.Time
+		}
 
 		if obs.DeletedAt != nil {
 			// A deletion the projection already holds, or one of a resource it
 			// never held at all, corrects nothing. The owner is the row's: the
 			// resource is gone, so who it belonged to is settled history.
 			if known && row.State != stateDeleted {
+				if reason := deferral(false, at, settle, obs.DeletedAt, lastEvent); reason != "" {
+					deferred.add(reason)
+					continue
+				}
 				events = append(events,
 					syntheticEvent(runID, entry, key, kindDelete,
 						correctedAt(*obs.DeletedAt, row), row.ProjectID))
@@ -629,6 +697,10 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 		}
 
 		if !known || row.State == stateDeleted {
+			if reason := deferral(obs.Transitional, at, settle, obs.ChangedAt, lastEvent); reason != "" {
+				deferred.add(reason)
+				continue
+			}
 			// A resource the projection does not hold live starts a life here,
 			// whether the run missed its creation or the resource has come back.
 			// The platform's own instant is used when it exposes one; poll time is
@@ -662,10 +734,14 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 
 		same, err := sameSize(obs.Size, row.Size)
 		if err != nil {
-			return nil, fmt.Errorf("comparing the size of %s %s: %w",
+			return nil, Deferred{}, fmt.Errorf("comparing the size of %s %s: %w",
 				key.ResourceType, key.ResourceID, err)
 		}
 		if row.State == obs.State && row.ProjectID == obs.ProjectID && same {
+			continue
+		}
+		if reason := deferral(obs.Transitional, at, settle, obs.ChangedAt, lastEvent); reason != "" {
+			deferred.add(reason)
 			continue
 		}
 		// A resource that changed hands drifted like one that changed size, so
@@ -690,10 +766,37 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 		if _, seen := observed[key]; seen {
 			continue
 		}
+		// The platform gives no instant for a resource it no longer lists, so the
+		// projection's is the only evidence of a change in flight.
+		if reason := deferral(false, at, settle, &row.LastEventAt.Time); reason != "" {
+			deferred.add(reason)
+			continue
+		}
 		events = append(events,
 			syntheticEvent(runID, entry, key, kindDelete, correctedAt(now().UTC(), row), row.ProjectID))
 	}
-	return events, nil
+	return events, deferred, nil
+}
+
+// deferral is why a run leaves a correction to a later run, and the empty
+// string for one it books. Transitional is checked first, so one correction
+// counts once. An instant is recent when it lies inside the settle window
+// before at, or after at: a platform clock ahead of this host, or a told
+// instant behind the cloud's present, dates a change the run cannot place
+// before itself. A nil instant is never recent.
+func deferral(transitional bool, at time.Time, settle time.Duration, instants ...*time.Time) string {
+	if transitional {
+		return reasonTransitional
+	}
+	if settle <= 0 {
+		return ""
+	}
+	for _, instant := range instants {
+		if instant != nil && instant.After(at.Add(-settle)) {
+			return reasonRecent
+		}
+	}
+	return ""
 }
 
 // correctedAt is when a correction of row is dated. It starts from the instant

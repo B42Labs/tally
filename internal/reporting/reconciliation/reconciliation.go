@@ -14,6 +14,15 @@
 // the pass needs the positive set of attempted types rather than the set of
 // failures, which is what ResourceTypes reports.
 //
+// A run compares the platform at the instant it looks with the events the
+// collector delivered up to then, and the notification of a change the
+// platform is still making, or has only just made, may still be on its way. A
+// run therefore books no correction for a resource the platform reports as in
+// transition, or one that changed inside the settle window before the run: the
+// collector books that change, and the next run books the correction if the
+// difference is still there. A deferred correction is counted, by why it
+// waited, in the run's stats.
+//
 // A run abandoned by a process crash keeps status='running' in sync_runs
 // forever, because nothing is left to rewrite the row. The advisory lock that
 // guards the cloud is session-scoped, so the database drops it when the
@@ -60,6 +69,13 @@ type ObservedResource struct {
 	Size         map[string]any
 	CreatedAt    *time.Time // real creation time if the API exposes it
 	DeletedAt    *time.Time // set only for resources reported as deleted
+	// Transitional reports that the platform is in the middle of changing the
+	// resource. The framework books no correction for it in this run.
+	Transitional bool
+	// ChangedAt is the instant the platform last changed the resource, if the
+	// API exposes one. The framework defers a correction of a resource that
+	// changed inside the settle window.
+	ChangedAt *time.Time
 }
 
 // Adapter is the platform-specific half of a sync, and the only half. What the
@@ -78,7 +94,10 @@ type Adapter interface {
 	// ListResources streams the full live inventory; it MAY also yield
 	// recently deleted resources (DeletedAt set) when the platform exposes
 	// them. since bounds only that optional deleted listing, never the live
-	// one: the diff treats the live stream as complete.
+	// one: the diff treats the live stream as complete. It is the start of the
+	// last completed run of the cloud less the settle window, so a deletion the
+	// last run deferred is listed again, and nil for a cloud that never
+	// completed one.
 	//
 	// at is the instant the run is at. The framework passes the run-local now
 	// it dates everything else by, so at is never zero, and how far back the

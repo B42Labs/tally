@@ -548,7 +548,7 @@ func syncerOver(s *store.Store, cloud string, fake *syncFake) *reconciliation.Sy
 		Cloud: cloud, Platform: fixturePlatform, Adapter: syncAdapterName,
 	}}}
 	return reconciliation.New(s, ingest.New(registry.New(), false, nil, nil), cfg,
-		map[string]reconciliation.Adapter{syncAdapterName: fake}, time.Now, nil)
+		map[string]reconciliation.Adapter{syncAdapterName: fake}, time.Now, 0, nil)
 }
 
 // newSyncAPI builds the full router over s with authentication enforced and
