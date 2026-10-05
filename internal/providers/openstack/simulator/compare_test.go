@@ -82,6 +82,28 @@ pricing:
           price_per_unit_hour: "0.0001"
 `
 
+// balancerModel prices the volumes and the load balancers of a month. A load
+// balancer is priced by its listeners, a count no notification states, so a
+// comparison under this model counts the balancers instead of comparing them.
+const balancerModel = `
+version: "balancers"
+valid_from: "2026-01-01T00:00:00Z"
+currency: "EUR"
+
+pricing:
+  openstack:
+    volume:
+      dimensions:
+        - metric: "size_gb"
+          type: "time_gauge"
+          price_per_unit_hour: "0.0001"
+    loadbalancer:
+      dimensions:
+        - metric: "listeners"
+          type: "time_gauge"
+          price_per_unit_hour: "0.01"
+`
+
 // wideVolumeModel prices a volume by a dimension beside the one volumeModel
 // prices it by. It is a model of another run than the one that wrote the
 // export: an export rendered under volumeModel rates no volume by disk_gb, and
@@ -966,6 +988,102 @@ func TestCompareReportsWhatIsNotPriced(t *testing.T) {
 			t.Errorf("Lines() = %v, want a line %q", lines, line)
 		}
 	}
+}
+
+// TestCompareLeavesAPricedLoadBalancerToReconciliation runs a model that prices
+// a load balancer by its listeners. The oracle states the listeners the cloud
+// holds and the engine bills what the create and the syncs booked, so the two
+// part ways at instants a drill does not control. The export below books the
+// balancers the way the bus alone does, which parts ways with the oracle in
+// both the bounds and the quantities, and a comparison counts them on a line of
+// their own instead; one whose every row is missing from the export is not a
+// difference either.
+func TestCompareLeavesAPricedLoadBalancerToReconciliation(t *testing.T) {
+	const reconciledText = "sized by reconciliation"
+
+	oracle := oracleOf(t)
+	model := parseModel(t, balancerModel)
+
+	var balancers, volumes []string
+	split := false
+	booked := oracle
+	booked.Resources = make([]OracleResource, 0, len(oracle.Resources))
+	for _, resource := range oracle.Resources {
+		asBooked := asTheBusBooksIt(resource)
+		booked.Resources = append(booked.Resources, asBooked)
+		switch resource.ResourceType {
+		case typeLoadBalancer:
+			// The rows of the first balancer are dropped below, so the split has
+			// to be on another one.
+			if len(balancers) > 0 && len(asBooked.Intervals) < len(resource.Intervals) {
+				split = true
+			}
+			balancers = append(balancers, resource.ResourceID)
+		case typeVolume:
+			volumes = append(volumes, resource.ResourceID)
+		}
+	}
+	if len(balancers) == 0 {
+		t.Fatal("seed 1 holds no load balancer, want the ones its shoots publish services on")
+	}
+	if !split {
+		t.Fatal("seed 1 holds no load balancer beside the first whose counts split its life, want one " +
+			"the export books over other bounds and quantities than the oracle states")
+	}
+
+	rows := dropRows(ratedOf(t, booked, model), rowsOf(balancers[0]))
+	report := compareRows(t, oracle, rows, balancerModel)
+	if len(report.Differences) != 0 {
+		t.Errorf("Compare() differences = %d, want none:\n%s", len(report.Differences), reported(report))
+	}
+	if report.Reconciled != len(balancers) {
+		t.Errorf("Compare() reconciled = %d, want the %d load balancers of the oracle",
+			report.Reconciled, len(balancers))
+	}
+	if report.Compared != len(volumes) {
+		t.Errorf("Compare() compared = %d, want the %d volumes of the oracle", report.Compared, len(volumes))
+	}
+	for _, entry := range report.Unpriced {
+		if entry.ResourceType == typeLoadBalancer {
+			t.Errorf("Compare() unpriced = %v, want no load balancer: the model prices it", report.Unpriced)
+		}
+	}
+	line := fmt.Sprintf("loadbalancer: %d resources are sized by reconciliation and were not compared",
+		len(balancers))
+	if lines := report.Lines(); !slices.Contains(lines, line) {
+		t.Errorf("Lines() = %v, want a line %q", lines, line)
+	}
+
+	t.Run("a month without a load balancer", func(t *testing.T) {
+		without := oracle
+		without.Resources = slices.DeleteFunc(slices.Clone(oracle.Resources), func(resource OracleResource) bool {
+			return resource.ResourceType == typeLoadBalancer
+		})
+
+		report := compareRows(t, without, ratedOf(t, without, model), balancerModel)
+		if report.Reconciled != 0 {
+			t.Errorf("Compare() reconciled = %d, want none", report.Reconciled)
+		}
+		for _, line := range report.Lines() {
+			if strings.Contains(line, reconciledText) {
+				t.Errorf("Lines() holds %q, want no line about a type sized by reconciliation", line)
+			}
+		}
+	})
+
+	// A model that prices no load balancer leaves it unpriced, which the
+	// rating pass decides before anything asks how its size is booked.
+	t.Run("a model that prices no load balancer", func(t *testing.T) {
+		report := compareRows(t, oracle, ratedOf(t, oracle, parseModel(t, volumeModel)), volumeModel)
+		if report.Reconciled != 0 {
+			t.Errorf("Compare() reconciled = %d, want none", report.Reconciled)
+		}
+		for _, line := range report.Lines() {
+			if strings.Contains(line, reconciledText) {
+				t.Errorf("Lines() holds %q, want no line about a type sized by reconciliation", line)
+			}
+		}
+	})
 }
 
 // TestCompareRefusesAModelTheRunDidNotRateWith holds the gate that keeps a
