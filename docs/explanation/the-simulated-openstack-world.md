@@ -140,15 +140,18 @@ A shoot's life renders:
   and the infrastructure underneath them.
 
 A load balancer renders three notifications. `octavia.loadbalancer.create.end`
-carries no listeners and no pools, a `floatingip.create.end` gives its VIP port
-an address, and an `octavia.loadbalancer.update.end` one to five minutes later
-carries the listeners and the pools, which is what the balancer's size is
-booked from. The address of a balancer is associated from the moment it is
-allocated: it names its `port_id`, its `fixed_ip_address`, and its `router_id`,
-and its status is `ACTIVE`. The classic tenants' addresses are allocated
-unassociated instead, with the three members `null` and the status `DOWN`.
-Every octavia notification carries a `publisher_id` of `null`, the way the
-recorded samples do.
+is followed by a `floatingip.create.end` that gives its VIP port an address
+and, one to five minutes later, by an `octavia.loadbalancer.update.end`, the
+cloud controller's update of the balancer once the service's listeners and
+pools are attached. None of the three names a listener or a pool, because
+octavia publishes the dictionary its worker carries without the balancer's
+collections. The balancer holds them from the instant of that update, and the
+fake API reports them. The address of a balancer is associated from the moment
+it is allocated: it names its `port_id`, its `fixed_ip_address`, and its
+`router_id`, and its status is `ACTIVE`. The classic tenants' addresses are
+allocated unassociated instead, with the three members `null` and the status
+`DOWN`. Every octavia notification carries a `publisher_id` of `null`, the way
+the recorded samples do.
 
 The names are the shapes Gardener's OpenStack extension and the
 machine-controller-manager give the resources they create: the technical id
@@ -326,9 +329,10 @@ publishes `*.ingress.<shoot>.<project>.<cloud>.example.` with the balancer's
 floating address. The balancer with the `https` listener terminates TLS, and its
 certificate goes into barbican as four audit records from +20 to +23, an
 `audit.http.request` and an `audit.http.response` for `POST /v1/secrets` and for
-`POST /v1/containers`. All of it lies before the update the balancer's size is
-booked from. A torn-down balancer is followed by the delete of its port at +1
-and +2, and by four `DELETE` records from +3 to +6 when it held a certificate.
+`POST /v1/containers`. All of it lies before the update that follows the
+attachment of the service's ports. A torn-down balancer is followed by the
+delete of its port at +1 and +2, and by four `DELETE` records from +3 to +6 when
+it held a certificate.
 
 ### The tenants and the CADF records
 
@@ -470,9 +474,11 @@ skips.
 
 `image.create` is rendered in the unsized form glance emits before an upload,
 and the mapping skips it on purpose: the `image.upload` that follows is the
-first notification with a size to bill. A load balancer is billed from its
-update: the create carries no listeners and no pools, and the mapping counts
-both as 0 there.
+first notification with a size to bill. A load balancer is booked at zero
+listeners and zero pools from its create, its update books no size, and a sync
+against the fake API books the counts, as
+[reconcile the simulated cloud](/how-to/simulator/reconcile-the-simulated-cloud)
+describes.
 
 Billable here means the collector books the notification as an event, not that
 the engine prices it. `pricing/2026-03.yaml`, the model
@@ -604,8 +610,10 @@ in MiB over 1024), `disk_gb` (the root disk plus the ephemeral one), and
 `flavor`; a volume `size_gb` and `type`; an image `size_gb`, its bytes over
 2^30, which is exact because every image size is a whole number of quarter
 gibibytes; a floating IP `ip_version` 4. A load balancer holds `listeners` and
-`pools`: 0 and 0 on its create, which is rendered without either list and whose
-absent members the mapping counts as zero, and the two lengths on its update.
+`pools`: 0 and 0 from its create and, from its update on, the counts the cloud
+holds, which no notification states. It is the one resource type whose oracle
+says more than the bus does: `TestOracleAgreesWithTheEngineFold` holds it to the
+zero counts of its create, and `compare` leaves one a model prices uncompared.
 
 The fold splits an interval where the state, the size, or the project changes,
 closes it on a delete, keeps two consecutive facts of equal state, size, and

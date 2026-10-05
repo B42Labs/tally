@@ -95,7 +95,12 @@ the generator built, which is described in
    correction is a `sync.create` dated at the platform's instant, which is the
    instant the collector's own create carries, a `sync.update` dated at the told
    instant, or a `sync.delete` found by absence and dated there as well.
-   `0, 0, 0` is what a sync answers when the outbox was empty at its instant.
+   A load balancer needs no lost notification to be corrected: the first sync
+   after a balancer's `octavia.loadbalancer.update.end` books a `sync.update`
+   with its listener and pool counts, and the sync after the day `api-prod`
+   gets its third listener books one more. `0, 0, 0` is what a sync answers
+   when the outbox was empty at its instant and no balancer changed since the
+   sync before.
 
 2. Read a `409` with `a sync for this cloud is already running` as the previous
    iteration's run still holding the cloud. The next iteration waits it out.
