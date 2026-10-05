@@ -35,6 +35,8 @@ value with, which is what to look up in the same file.
 | `compute.instance.delete.end` | `compute.instance.delete.end` | `instance` | none | none | `instance_id` | `tenant_id` | none |
 | `compute.instance.resize.end` | `compute.instance.resize.end` | `instance` | `vmState` | `instanceSize` | `instance_id` | `tenant_id` | none |
 | `compute.instance.finish_resize.end` | `compute.instance.resize.end` | `instance` | `vmState` | `instanceSize` | `instance_id` | `tenant_id` | none |
+| `compute.instance.resize.confirm.end` | `compute.instance.resize.confirm.end` | `instance` | `vmState` | `instanceSize` | `instance_id` | `tenant_id` | none |
+| `compute.instance.resize.revert.end` | `compute.instance.resize.revert.end` | `instance` | `vmState` | `instanceSize` | `instance_id` | `tenant_id` | none |
 | `compute.instance.shelve_offload.end` | `compute.instance.shelve` | `instance` | `fixedState("shelved")` | none | `instance_id` | `tenant_id` | none |
 | `compute.instance.unshelve.end` | `compute.instance.unshelve` | `instance` | `fixedState("active")` | none | `instance_id` | `tenant_id` | none |
 | `compute.instance.power_off.end` | `compute.instance.power_off` | `instance` | `fixedState("shutoff")` | none | `instance_id` | `tenant_id` | none |
