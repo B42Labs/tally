@@ -95,7 +95,7 @@ track again from lesson 1.
 
 Every lesson works on the same generated month: seed 1, July 2026, the cloud
 `os-sim`, six tenants, of which three are classic projects, two are Gardener
-tenants and one is a CI tenant. That month renders 15727 notifications, 1812 of
+tenants and one is a CI tenant. That month renders 15741 notifications, 1812 of
 them billable, and 84 of those stay held back by the switch the second lesson
 turns on, so the counts a lesson shows are the counts every machine gets. The
 two Gardener projects are `alpha` and `beta`, and the billing track registers
