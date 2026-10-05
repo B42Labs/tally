@@ -4,7 +4,7 @@ description: Start the simulator stack beside the dev cluster, publish one gener
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Simulate a month of OpenStack
 
@@ -123,7 +123,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-01T07:24:26Z","factor":744,"published":430,"total":15727,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-01T01:45:55Z","factor":744,"published":43,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    A minute later the same call answers:
@@ -133,10 +133,10 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-01T19:48:56Z","factor":744,"published":902,"total":15727,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-01T14:10:23Z","factor":744,"published":649,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `factor` 744, `total` 15727, `held` 84, `period_from` `2026-07-01T00:00:00Z`
+   `factor` 744, `total` 15741, `held` 84, `period_from` `2026-07-01T00:00:00Z`
    and `period_to` `2026-08-01T00:00:00Z` have to match. `virtual_now` and
    `published` are your own and grow between the two reads, which lie twelve
    virtual hours apart. `holding` is false while the month publishes.
@@ -199,7 +199,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T13:14:44Z","factor":0,"published":1174,"total":15727,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":946,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    The route rebases the clock on the virtual instant it has reached and
@@ -214,14 +214,14 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    curl -s http://127.0.0.1:8091/clock
    ```
 
-   On the run the answer below came 15 seconds after the factor changed. A
+   On the run the answer below came 10 seconds after the factor changed. A
    slower machine takes a few minutes.
 
    ```json
-   {"virtual_now":"2026-07-02T13:14:44Z","factor":0,"published":15643,"total":15727,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `published` 15643, `held` 84, `holding` true and `total` 15727 have to
+   `published` 15657, `held` 84, `holding` true and `total` 15741 have to
    match. `virtual_now` is your own: at factor 0 the clock no longer advances,
    so it stays at the instant the factor became 0 while the rest of the month
    goes out at once. The simulator now waits for a release the billing track
@@ -241,12 +241,12 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```text
-   consumed 1728 skipped 13915 unparseable 0 depth 0
+   consumed 1728 skipped 13929 unparseable 0 depth 0
    ```
 
    Repeat the read until `depth` reads 0, about three minutes after the month
    went out. The four numbers have to match. 1728 is the month's 1812 billable
-   notifications minus the 84 held ones, 13915 is the notifications the mapping
+   notifications minus the 84 held ones, 13929 is the notifications the mapping
    claims nothing for, and the depth is the outbox the collector drains into
    the Reporting API.
 

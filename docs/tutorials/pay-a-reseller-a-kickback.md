@@ -4,7 +4,7 @@ description: Register the CI tenant of the simulated cloud, create a partner, pu
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 01d2aff with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Pay a reseller a kickback
 
@@ -77,9 +77,9 @@ the same. Both are cured by
    ```json
    {
      "cloud": "os-sim",
-     "created_at": "2026-09-07T21:27:25.758052Z",
+     "created_at": "2026-10-05T08:21:35.13925Z",
      "external_id": "10e287d5788957a2a331cabd1b5dccdf",
-     "id": "d4fed605-70b4-4350-9d9e-1b8b58e1dbae",
+     "id": "2b3bcd7a-94c4-4f92-8414-c48baabab266",
      "metadata": {},
      "name": "ci",
      "platform": "openstack"
@@ -110,7 +110,7 @@ the same. Both are cured by
    ```
 
    ```text
-   d4fed605-70b4-4350-9d9e-1b8b58e1dbae
+   2b3bcd7a-94c4-4f92-8414-c48baabab266
    ```
 
    The id is your own, and it is the id the registration printed. This read is
@@ -130,7 +130,7 @@ the same. Both are cured by
 
    ```text
    registered partner cloudhouse
-   764c13ba-f5e1-4d3a-8253-2d0813016aee
+   1b262c17-ad69-4471-9ef3-77de15f507ba
    ```
 
    `registered partner cloudhouse` is the CLI's notice on stderr. The id went
@@ -173,8 +173,8 @@ the same. Both are cured by
 
    ```json
    {
-     "created_at": "2026-09-07T21:27:26.302705Z",
-     "id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+     "created_at": "2026-10-05T08:21:35.316925Z",
+     "id": "04489747-96ab-45c1-9654-1d02f8f3152f",
      "metadata": {
        "pricing_adjustments": [
          {
@@ -192,8 +192,8 @@ the same. Both are cured by
        ]
      },
      "relation_type": "managed_by",
-     "source_id": "d4fed605-70b4-4350-9d9e-1b8b58e1dbae",
-     "target_id": "764c13ba-f5e1-4d3a-8253-2d0813016aee",
+     "source_id": "2b3bcd7a-94c4-4f92-8414-c48baabab266",
+     "target_id": "1b262c17-ad69-4471-9ef3-77de15f507ba",
      "valid_from": "2026-07-01T00:00:00Z",
      "valid_to": null
    }
@@ -232,10 +232,10 @@ the same. Both are cured by
    ```
 
    ```text
-   run 72584a66-9bb2-4d5b-9cf2-fa43fcb6e886 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 945 usage records, 3101 rated records and 6 project statements
+   run d49e7469-4052-45e2-a44d-0936e29b0906 completed for 2026-07 with pricing model 2026-03
+   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
    applied 5 pricing adjustments
-   superseded run ee0b363e-2449-4085-bca4-218150d1e546
+   superseded run 3935cd7f-204e-411a-baee-c8fa395abdd9
    warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 2 unregistered projects
    ```
 
@@ -252,7 +252,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=72584a66-9bb2-4d5b-9cf2-fa43fcb6e886
+   export RUN_ID=d49e7469-4052-45e2-a44d-0936e29b0906
    ```
 
    Every command below reads `RUN_ID`.
@@ -292,7 +292,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run 72584a66-9bb2-4d5b-9cf2-fa43fcb6e886 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-reseller
+   run d49e7469-4052-45e2-a44d-0936e29b0906 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-reseller
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    ```
@@ -317,7 +317,7 @@ the same. Both are cured by
          "type": "discount",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
          "scope": "all",
          "description": "Cloudhouse end-customer discount",
          "rate": 0.150000,
@@ -328,7 +328,7 @@ the same. Both are cured by
          "type": "kickback",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
          "scope": "all",
          "description": "Cloudhouse commission",
          "rate": 0.100000,
@@ -384,7 +384,7 @@ the same. Both are cured by
 
    ```json
    {
-     "run_id": "72584a66-9bb2-4d5b-9cf2-fa43fcb6e886",
+     "run_id": "d49e7469-4052-45e2-a44d-0936e29b0906",
      "kind": "regular",
      "corrects_run_id": null,
      "period_from": "2026-07-01T00:00:00Z",
@@ -399,7 +399,7 @@ the same. Both are cured by
            {
              "cloud": "os-sim",
              "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-             "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+             "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
              "scope": "all",
              "rate": 0.100000,
              "base": 593.55,
@@ -429,7 +429,7 @@ the same. Both are cured by
 
    ```text
    run_id,kind,corrects_run_id,period_from,period_to,beneficiary,cloud,project_id,relation_id,scope,rate,base,amount,currency
-   72584a66-9bb2-4d5b-9cf2-fa43fcb6e886,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,2ccfc925-6f65-41e5-a180-4d12d25e283a,all,0.100000,593.55,59.36,EUR
+   d49e7469-4052-45e2-a44d-0936e29b0906,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,04489747-96ab-45c1-9654-1d02f8f3152f,all,0.100000,593.55,59.36,EUR
    ```
 
    The header has to match. There is one row per kickback record, and the ids
@@ -452,7 +452,7 @@ the same. Both are cured by
          {
            "cloud": "os-sim",
            "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-           "relation_id": "2ccfc925-6f65-41e5-a180-4d12d25e283a",
+           "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
            "scope": "all",
            "rate": 0.100000,
            "base": 593.55,
