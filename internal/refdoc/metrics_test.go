@@ -14,7 +14,7 @@ import (
 // The number of series each of the two services of this repository owns. A
 // series added without a row on the page is noticed here.
 const (
-	reportingSeries = 9
+	reportingSeries = 10
 	collectorSeries = 7
 )
 
@@ -117,6 +117,7 @@ func TestMetricsRendersTheReportingInstruments(t *testing.T) {
 	m.ProjectionReplayed("os-prod-eu1")
 	m.SyncRunFinished("os-prod-eu1", "completed")
 	m.ResourcesReconciled("os-prod-eu1", "created", 1)
+	m.ResourcesDeferred("os-prod-eu1", "transitional", 1)
 	m.SyncErrorsRecorded("os-prod-eu1", 1)
 
 	got, err := Metrics(reg)

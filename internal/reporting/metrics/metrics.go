@@ -1,7 +1,9 @@
 // Package metrics instruments the Reporting API. One Metrics value owns the
 // nine series WP 1.11 defines: eight counters over the ingest, projection, and
 // reconciliation paths, and the tally_current_resources gauge that reports the
-// fleet the projection holds. It registers them together with the Go runtime and
+// fleet the projection holds. A tenth series is this package's own:
+// tally_sync_resources_deferred_total counts the corrections a reconciliation
+// run left to a later one. It registers them together with the Go runtime and
 // process collectors on a registry of its own, which Handler then serves.
 //
 // Every recording method tolerates a nil receiver, so a component built without
@@ -54,6 +56,7 @@ type Metrics struct {
 	projectionReplays   *prometheus.CounterVec
 	syncRuns            *prometheus.CounterVec
 	resourcesReconciled *prometheus.CounterVec
+	resourcesDeferred   *prometheus.CounterVec
 	syncErrors          *prometheus.CounterVec
 
 	// currentResources is written by the refresher, which reads the counts off the
@@ -98,6 +101,10 @@ func New(reg *prometheus.Registry) *Metrics {
 			Name: "tally_sync_resources_reconciled_total",
 			Help: "Resources a reconciliation run created, updated, or deleted.",
 		}, []string{"cloud", "action"}),
+		resourcesDeferred: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tally_sync_resources_deferred_total",
+			Help: "Corrections a reconciliation run deferred to a later run, by reason.",
+		}, []string{"cloud", "reason"}),
 		syncErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tally_sync_errors_total",
 			Help: "Errors reconciliation runs reported.",
@@ -116,6 +123,7 @@ func New(reg *prometheus.Registry) *Metrics {
 		m.projectionReplays,
 		m.syncRuns,
 		m.resourcesReconciled,
+		m.resourcesDeferred,
 		m.syncErrors,
 		m.currentResources,
 		collectors.NewGoCollector(),
@@ -214,6 +222,15 @@ func (m *Metrics) ResourcesReconciled(cloud, action string, n int) {
 		return
 	}
 	m.resourcesReconciled.WithLabelValues(cloud, action).Add(float64(n))
+}
+
+// ResourcesDeferred counts n corrections a reconciliation run left to a later
+// run. reason is transitional or recent.
+func (m *Metrics) ResourcesDeferred(cloud, reason string, n int) {
+	if m == nil {
+		return
+	}
+	m.resourcesDeferred.WithLabelValues(cloud, reason).Add(float64(n))
 }
 
 // SyncErrorsRecorded counts the n errors a reconciliation run reported.
