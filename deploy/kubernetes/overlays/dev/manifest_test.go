@@ -9,8 +9,11 @@
 // simulator's alias in the compose stack is one no pod resolves. A counter
 // sources file the engine refuses to load fails every hourly tick before it
 // opens a database, and a patch whose variable and mount path disagree does the
-// same on a file the pod never carried. The tests read the YAML from disk and
-// need neither a cluster nor kustomize.
+// same on a file the pod never carried. A Reporting API without the settle
+// window set to 0 keeps the default of 60 seconds, measured against the instant
+// a sync of the simulated month is told, and defers the month's last minute on
+// every run. The tests read the YAML from disk and need neither a cluster nor
+// kustomize.
 package dev_test
 
 import (
@@ -61,6 +64,11 @@ const (
 
 	// What points the engine at the mounted sources file.
 	sourcesVariable = "TALLY_ENGINE_COUNTER_SOURCES"
+
+	// The Reporting API Deployment, which carries a container of the same name,
+	// and the variable that sets its settle window.
+	reportingDeployment = "reporting-api"
+	settleVariable      = "TALLY_REPORTING_SYNC_SETTLE_S"
 
 	// The kustomize component that declares what the stack needs Envoy Gateway
 	// for, as the overlay lists it.
@@ -119,6 +127,21 @@ type cronJobPatch struct {
 				} `yaml:"template"`
 			} `yaml:"spec"`
 		} `yaml:"jobTemplate"`
+	} `yaml:"spec"`
+}
+
+// deploymentPatch is one strategic merge patch against a Deployment.
+type deploymentPatch struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers []container `yaml:"containers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
 	} `yaml:"spec"`
 }
 
@@ -380,6 +403,21 @@ func TestKustomizationWiresTheTwoConfigMaps(t *testing.T) {
 	}
 }
 
+func TestTheSettleWindowIsOffOnTheReportingAPI(t *testing.T) {
+	patch := deploymentPatchOf(t, kustomizationOf(t), reportingDeployment)
+	containers := patch.Spec.Template.Spec.Containers
+	i := slices.IndexFunc(containers, func(c container) bool { return c.Name == reportingDeployment })
+	if i < 0 {
+		t.Fatalf("the patch against Deployment %s carries no container %q", reportingDeployment, reportingDeployment)
+	}
+
+	value, set := envValue(containers[i], settleVariable)
+	if !set || value != "0" {
+		t.Errorf("%s = %q (set: %t), want \"0\": the default of 60 seconds is measured against the instant a sync of the simulated month is told, and a loop holding that instant at period_to defers the month's last minute on every run",
+			settleVariable, value, set)
+	}
+}
+
 func TestTheEnvoyGatewayComponentIsListed(t *testing.T) {
 	// The base is plain Gateway API and names no implementation. The
 	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
@@ -528,6 +566,37 @@ func cronJobPatchOf(t *testing.T, k kustomization) cronJobPatch {
 	if len(found) != 1 {
 		t.Fatalf("%s holds %d strategic merge patches against CronJob %s, want one: two of them would leave which env list is merged to the order of the file",
 			kustomizationFile, len(found), cronJob)
+	}
+	return found[0]
+}
+
+// deploymentPatchOf returns the one strategic merge patch against the named
+// Deployment, skipping the JSON patches by their shape the way cronJobPatchOf
+// does.
+func deploymentPatchOf(t *testing.T, k kustomization, name string) deploymentPatch {
+	t.Helper()
+
+	var found []deploymentPatch
+	for i, p := range k.Patches {
+		var shape any
+		if err := yaml.Unmarshal([]byte(p.Patch), &shape); err != nil {
+			t.Fatalf("parsing patches[%d]: %v", i, err)
+		}
+		if _, isDocument := shape.(map[string]any); !isDocument {
+			continue
+		}
+		var doc deploymentPatch
+		if err := yaml.Unmarshal([]byte(p.Patch), &doc); err != nil {
+			t.Fatalf("parsing patches[%d]: %v", i, err)
+		}
+		if doc.Kind == "Deployment" && doc.Metadata.Name == name {
+			found = append(found, doc)
+		}
+	}
+
+	if len(found) != 1 {
+		t.Fatalf("%s holds %d strategic merge patches against Deployment %s, want one: two of them would leave which env list is merged to the order of the file",
+			kustomizationFile, len(found), name)
 	}
 	return found[0]
 }
