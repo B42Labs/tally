@@ -855,10 +855,10 @@ being one request per step.
 
 ## What a month renders
 
-Seed 1 over `2026-07` renders 15727 notifications, 1812 of them billable. Nine
-of the other 13915 are the unsized `image.create`, one per image: two per
+Seed 1 over `2026-07` renders 15741 notifications, 1812 of them billable. Nine
+of the other 13929 are the unsized `image.create`, one per image: two per
 classic project, one per Gardener tenant, and one for the CI tenant. The
-remaining 13906 are the noise catalogue. The month carries 83 distinct
+remaining 13920 are the noise catalogue. The month carries 87 distinct
 `event_type` values. The shape of a month is the seed's alone, so the counts
 below hold on every cloud. They are those of a run with every fault switch off.
 What each switch changes about them is on
@@ -903,6 +903,8 @@ sends before a delete.
 | `audit.http.response` | 8 |
 | `compute.instance.resize.start` | 7 |
 | `compute.instance.finish_resize.start` | 7 |
+| `compute.instance.resize.end` | 7 |
+| `compute.instance.resize.confirm.start` | 6 |
 | `dns.recordset.create` | 6 |
 | `security_group_rule.create.start` | 6 |
 | `security_group_rule.create.end` | 6 |
@@ -922,6 +924,7 @@ sends before a delete.
 | `volume.transfer.accept.start` | 3 |
 | `dns.zone.create` | 2 |
 | `dns.recordset.delete` | 2 |
+| `compute.instance.resize.revert.start` | 1 |
 | `keypair.delete.start` | 1 |
 | `keypair.delete.end` | 1 |
 | `security_group.delete.start` | 1 |
