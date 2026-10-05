@@ -50,10 +50,15 @@ not know.
 Octavia notifies on a load balancer's create, update, and delete, and on nothing
 below it: a listener, a pool, a member, or a health monitor changes without a
 notification, and so does a failover. Reconciliation is what books those. The
-notifications are on by default, since `[controller_worker] event_notifications`
-defaults to `True`, but octavia sends none until the `messagingv2` driver is
-set, because oslo's own default for that setting is the empty string. A service
-left on `noop` sends nothing, and the collector has nothing to consume for it.
+three notifications octavia does send name neither the listeners nor the pools
+of the load balancer, so the counts it is sized by reach Tally through
+reconciliation alone, as
+[the size of a load balancer](/reference/formats/notification-mapping#the-size-of-a-load-balancer)
+describes. The notifications are on by default, since
+`[controller_worker] event_notifications` defaults to `True`, but octavia sends
+none until the `messagingv2` driver is set, because oslo's own default for that
+setting is the empty string. A service left on `noop` sends nothing, and the
+collector has nothing to consume for it.
 
 A load balancer of the amphora provider also reaches the bus as the nova and
 cinder notifications for its amphorae, and those name octavia's service project

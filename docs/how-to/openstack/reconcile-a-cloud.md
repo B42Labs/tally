@@ -94,8 +94,9 @@ password, called `os-prod-eu1-password` in the steps.
 
    The `service` of a rule is the `service_type` of step 1, not the name a
    client calls the API by. The `load-balancer` rule belongs to a cloud whose
-   entry sets `include_octavia`; leave it out otherwise. Keystone shows the
-   secret once.
+   entry sets `include_octavia`; leave it out otherwise. `include_octavia` is
+   also what gives a load balancer its listener and pool counts, which
+   octavia's notifications leave out. Keystone shows the secret once.
 
    Keystone cannot change the rules of an existing credential. A credential
    created with seven rules, without the `types` one, ends every run `failed`

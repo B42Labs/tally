@@ -242,10 +242,12 @@ The steps are in
 `include_octavia` adds `loadbalancer` to the enumerated types, and it is off by
 default because a deployment that runs no octavia would otherwise fail to
 enumerate a type it does not have, on every sync, forever. A load balancer is
-reported with its listener and pool counts, and migration
-`0006_seed_loadbalancer_type.sql` registers the size schema those two are
-validated against, so on a database the chain seeded the corrections land
-whatever `TALLY_INGEST_REQUIRE_SIZE_SCHEMA` is set to.
+reported with its listener and pool counts. No octavia notification carries
+them, so the sync is their only source: the collector books a load balancer at
+zero of both on its create, and the first sync after it books the counts as a
+`sync.update`. Migration `0006_seed_loadbalancer_type.sql` registers the size
+schema those two are validated against, so on a database the chain seeded the
+corrections land whatever `TALLY_INGEST_REQUIRE_SIZE_SCHEMA` is set to.
 
 A database that already registered `openstack/loadbalancer` keeps its own
 document: the migration leaves an operator's row alone rather than fail the

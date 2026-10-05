@@ -118,7 +118,7 @@ listed to show that the shape holds across platforms.
 | `volume` | OpenStack | `{"size_gb": 100, "type": "ssd"}` | resize (size change), retype (SSD to HDD) |
 | `floating_ip` | OpenStack | `{"ip_version": 4}` | create and delete only |
 | `image` | OpenStack | `{"size_gb": 2.5}` | create and delete only |
-| `loadbalancer` | OpenStack | `{"listeners": 2, "pools": 1}` | listener or pool added or removed |
+| `loadbalancer` | OpenStack | `{"listeners": 2, "pools": 1}` | listener or pool added or removed, which reconciliation books |
 | `server` | Hetzner (Phase 4 design) | `{"vcpus": 4, "ram_gb": 16, "disk_gb": 80, "server_type": "cx41"}` | upgrade and downgrade, power on and off |
 | `server` | STACKIT (Phase 4 design) | `{"vcpus": 8, "ram_gb": 32, "disk_gb": 160, "machine_type": "c1.8"}` | resize, power on and off |
 | `server` | IONOS (Phase 4 design) | `{"cores": 4, "ram_gb": 16, "type": "ENTERPRISE"}` | resize, power on and off |
