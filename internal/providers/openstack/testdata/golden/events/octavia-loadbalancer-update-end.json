@@ -10,10 +10,6 @@
   "source": "collector",
   "payload": {
     "state": "active",
-    "size": {
-      "listeners": 2,
-      "pools": 1
-    },
     "provider": {
       "oslo_event_type": "octavia.loadbalancer.update.end"
     }

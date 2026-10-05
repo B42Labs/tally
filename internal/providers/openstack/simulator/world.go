@@ -388,8 +388,10 @@ type shoot struct {
 }
 
 // loadBalancer is one octavia load balancer. The id slices hold every listener
-// and every pool the balancer has, so their lengths are the counts an update
-// reports.
+// and every pool the balancer has, so their lengths are the counts the cloud
+// holds, which the ledger states and no notification reports. No payload names
+// the ids themselves; they are drawn from the identifier stream all the same,
+// because dropping a draw would renumber every billable resource after it.
 type loadBalancer struct {
 	id, name, vipPortID, vipAddress string
 	listenerIDs, poolIDs            []string

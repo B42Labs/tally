@@ -224,7 +224,10 @@ var mappings = map[string]mappingEntry{
 	// exist. The one the worker passes between its tasks names the load balancer
 	// loadbalancer_id and carries no status at all; the one octavia's own admin
 	// guide records names it id and repeats provisioning_status. Both are read,
-	// and both are recorded under testdata/golden/notifications.
+	// and both are recorded under testdata/golden/notifications. The dictionary
+	// the worker passes also names none of the load balancer's collections,
+	// because octavia-lib's to_dict leaves out every list, so neither listeners
+	// nor pools is in it.
 	//
 	// The state is fixed rather than read because these notifications are sent
 	// by the task that follows MarkLBActiveInDB, so the load balancer is active
@@ -234,7 +237,9 @@ var mappings = map[string]mappingEntry{
 	//
 	// Octavia notifies on the load balancer alone: a listener, pool, member, or
 	// health monitor changes without a notification, and a failover sends none
-	// either, so those changes reach Tally through reconciliation.
+	// either, so those changes reach Tally through reconciliation. The listener
+	// and pool counts themselves reach Tally through reconciliation too, because
+	// no notification carries them.
 	"octavia.loadbalancer.create.end": {
 		eventType:              "octavia.loadbalancer.create.end",
 		resourceType:           "loadbalancer",
@@ -244,15 +249,15 @@ var mappings = map[string]mappingEntry{
 		resourceIDFallbackPath: []string{"id"},
 		projectIDPath:          []string{"project_id"},
 	},
-	// The update carries the load balancer as it stood when the update was
-	// requested: the flow reloads nothing before it notifies. Its listener and
-	// pool counts are therefore the ones of that moment, which is what the size
-	// records.
+	// The update is sent when the load balancer itself was changed, its name or
+	// its admin state for instance, and it carries the dictionary the create
+	// carries: no listeners and no pools. It states no size, which leaves the
+	// projection the counts the last sync booked. Counting the absent members
+	// here would reset them to zero on every rename.
 	"octavia.loadbalancer.update.end": {
 		eventType:              "octavia.loadbalancer.update.end",
 		resourceType:           "loadbalancer",
 		state:                  fixedState("active"),
-		size:                   loadBalancerSize,
 		resourceIDPath:         []string{"loadbalancer_id"},
 		resourceIDFallbackPath: []string{"id"},
 		projectIDPath:          []string{"project_id"},
@@ -437,11 +442,13 @@ func floatingIPSize(payload map[string]any) map[string]any {
 	return map[string]any{"ip_version": version}
 }
 
-// loadBalancerSize describes a load balancer by the two counts the registered
-// size schema requires, which migrations/reporting/0006_seed_loadbalancer_type.sql
-// seeds: how many listeners and how many pools it carries. The reconciliation
-// adapter reports the same two, so a sync over a load balancer this mapping
-// already booked finds no drift.
+// loadBalancerSize states the size of a load balancer on its create, the one
+// octavia event that has to state one, by the two counts the schema of
+// migrations/reporting/0006_seed_loadbalancer_type.sql requires. The dictionary
+// octavia publishes names neither collection, so a create books zero of both,
+// and the reconciliation adapter, which reads the counts off the API, books the
+// first correction. The shape of octavia's admin guide names both as arrays,
+// and those are counted.
 func loadBalancerSize(payload map[string]any) map[string]any {
 	size := make(map[string]any, 2)
 	for _, member := range []string{"listeners", "pools"} {
@@ -475,9 +482,10 @@ func stringAt(payload map[string]any, path ...string) string {
 }
 
 // countAt counts the elements of the array at a payload path. An absent member
-// and a null one both count as zero, because a service with none of something
-// leaves the member out or nulls it rather than sending an empty array, and a
-// load balancer without listeners is a load balancer with zero of them.
+// and a null one both count as zero. Octavia's worker leaves both collections
+// out of every notification, whatever the load balancer holds, and a create has
+// to state a size the registered schema accepts, so zero is what a create can
+// say.
 //
 // A value that is not an array is reported as uncountable, the way every other
 // unusable value in this file is: the member is left out of the size object, and

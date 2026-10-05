@@ -251,6 +251,10 @@ func holdMemberAgainst(t *testing.T, eventType, member string, booked, want any,
 // puts an event before the month on the bus. The engine receives that history
 // whole and cuts it at the month's first instant, which is where the oracle's
 // clip puts a resource the month inherited too.
+//
+// A load balancer is the exception: the bus books the zero counts of its create
+// over its whole life, because no notification names its listeners and pools,
+// so it is held against the engine the way asTheBusBooksIt states it.
 func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 	to := july2026.AddDate(0, 1, 0)
 
@@ -298,8 +302,16 @@ func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 				}
 
 				stated := make(map[resourceKey]OracleResource, len(month.Oracle.Resources))
+				split := false
 				for _, resource := range month.Oracle.Resources {
 					stated[resourceKey{resourceType: resource.ResourceType, resourceID: resource.ResourceID}] = resource
+					if sizedByReconciliation(resource.ResourceType) && len(resource.Intervals) > 1 {
+						split = true
+					}
+				}
+				if !split {
+					t.Fatalf("the oracle states no load balancer over more than one interval, want one " +
+						"its listeners split: asTheBusBooksIt would otherwise pass by merging nothing")
 				}
 
 				for key, drafts := range metered {
@@ -309,7 +321,7 @@ func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 							key.resourceType, key.resourceID, len(drafts))
 						continue
 					}
-					holdIntervalsAgainstDrafts(t, resource, drafts)
+					holdIntervalsAgainstDrafts(t, asTheBusBooksIt(resource), drafts)
 				}
 				for key := range stated {
 					if _, ok := metered[key]; !ok {
@@ -320,6 +332,32 @@ func TestOracleAgreesWithTheEngineFold(t *testing.T) {
 			})
 		}
 	}
+}
+
+// asTheBusBooksIt returns a resource the way the bus alone books it. A type
+// sizedByReconciliation names is booked at the zero counts of its create for as
+// long as it lives, so the intervals the oracle splits at a change of its counts
+// are one interval to the engine. Every other resource comes back unchanged, and
+// the oracle's own intervals are never written to.
+func asTheBusBooksIt(resource OracleResource) OracleResource {
+	if !sizedByReconciliation(resource.ResourceType) {
+		return resource
+	}
+
+	intervals := make([]OracleInterval, 0, len(resource.Intervals))
+	for _, interval := range resource.Intervals {
+		interval.Size = loadBalancerSizeOf(0, 0)
+		if n := len(intervals); n > 0 {
+			last := &intervals[n-1]
+			if last.State == interval.State && last.ProjectID == interval.ProjectID && last.To.Equal(interval.From) {
+				last.To = interval.To
+				continue
+			}
+		}
+		intervals = append(intervals, interval)
+	}
+	resource.Intervals = intervals
+	return resource
 }
 
 // holdIntervalsAgainstDrafts holds one resource's oracle intervals against the

@@ -676,9 +676,10 @@ func TestMapNotificationDerivesAnEventIDWithoutMessageID(t *testing.T) {
 }
 
 // TestMapNotificationCountsListenersAndPools covers the size of a load balancer.
-// Octavia leaves an empty collection out of the dictionary it publishes, so an
-// absent member is a load balancer with none of them rather than a size the
-// mapping could not read. A member of another shape is left out instead, and the
+// Octavia's worker leaves both collections out of the dictionary it publishes,
+// whatever the load balancer holds, so an absent member counts as zero rather
+// than as a size the mapping could not read. A member of another shape is left
+// out instead, and the
 // Reporting API then refuses the event against the schema
 // migrations/reporting/0006_seed_loadbalancer_type.sql seeds, which requires
 // both counts.
@@ -753,6 +754,106 @@ func TestMapNotificationCountsListenersAndPools(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMapNotificationBooksNoSizeOnAnOctaviaUpdate covers the update of a load
+// balancer. Octavia's worker publishes it without the balancer's listeners and
+// pools, so the update states no size whatever its payload holds, and the
+// projection keeps the counts the last sync booked. Counting the members here
+// would book zero over them on every rename.
+func TestMapNotificationBooksNoSizeOnAnOctaviaUpdate(t *testing.T) {
+	const loadBalancerID = "5e6f7081-92a3-4b4c-8d5e-6f708192a3b4"
+
+	mapUpdate := func(t *testing.T, payload map[string]any) event.Event {
+		t.Helper()
+
+		got, ok := MapNotification(notify("octavia.loadbalancer.update.end", payload), goldenCloud)
+		if !ok {
+			t.Fatal("MapNotification() ok = false, want true")
+		}
+		if got.Payload.Size != nil {
+			t.Errorf("payload.size = %v, want none", got.Payload.Size)
+		}
+		if got.Payload.State == nil || *got.Payload.State != "active" {
+			t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, "active")
+		}
+		return got
+	}
+
+	tests := []struct {
+		name       string
+		collection map[string]any
+	}{
+		{
+			name:       "a payload naming neither collection",
+			collection: map[string]any{},
+		},
+		{
+			name:       "collections that are null",
+			collection: map[string]any{"listeners": nil, "pools": nil},
+		},
+		{
+			name:       "collections that are empty arrays",
+			collection: map[string]any{"listeners": []any{}, "pools": []any{}},
+		},
+		{
+			name: "two listeners and one pool are not read",
+			collection: map[string]any{
+				"listeners": []any{map[string]any{}, map[string]any{}},
+				"pools":     []any{map[string]any{}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"loadbalancer_id": loadBalancerID,
+				"project_id":      "project-1",
+			}
+			for key, value := range tc.collection {
+				payload[key] = value
+			}
+
+			got := mapUpdate(t, payload)
+			if got.ResourceID != loadBalancerID {
+				t.Errorf("ResourceID = %q, want %q", got.ResourceID, loadBalancerID)
+			}
+
+			raw, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("encoding the event: %v", err)
+			}
+			var encoded struct {
+				Payload map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &encoded); err != nil {
+				t.Fatalf("decoding the event: %v", err)
+			}
+			if size, ok := encoded.Payload["size"]; ok {
+				t.Errorf("encoded payload.size = %v, want no such member", size)
+			}
+			testkit.AssertValidEvent(t, raw)
+		})
+	}
+
+	// An update the mapping understands nothing in is still an event, and the
+	// Reporting API dead-letters it for the id it lacks, as it did when the
+	// update stated a size. Nothing the update states is a reason of its own.
+	t.Run("an empty payload", func(t *testing.T) {
+		got := mapUpdate(t, map[string]any{})
+		if got.ResourceID != "" {
+			t.Errorf("ResourceID = %q, want the empty string", got.ResourceID)
+		}
+
+		err := got.Validate()
+		if err == nil || !strings.Contains(err.Error(), "resource_id: must not be empty") {
+			t.Fatalf("Validate() = %v, want an error naming the empty resource_id", err)
+		}
+		if strings.Contains(err.Error(), "payload.") {
+			t.Errorf("Validate() = %v, want no reason about the payload", err)
+		}
+	})
 }
 
 // TestMapNotificationFallsBackToTheAdminGuideID covers the two spellings octavia

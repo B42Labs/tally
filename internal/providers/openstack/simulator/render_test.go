@@ -3,7 +3,6 @@ package simulator
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -540,54 +539,52 @@ func TestFloatingIPCreateReportsWhatTheAddressPointsAt(t *testing.T) {
 	}
 }
 
-// TestLoadBalancerPayloadDescribesEveryListener covers a balancer that carries
-// more listeners than the catalog names. The catalog is read from the front
-// again rather than past its end, because a shoot that publishes another port
-// is a change in gardener.go and the renderer is where it would otherwise end
-// the run.
-func TestLoadBalancerPayloadDescribesEveryListener(t *testing.T) {
-	lb := &loadBalancer{
-		id:        "6f708192-a3b4-45c6-d7e8-f9a0b1c2d3e4",
-		name:      "kube_service_shoot--alpha--api-prod_ingress_nginx-ingress-controller",
-		vipPortID: "708192a3-b4c5-46d7-e8f9-a0b1c2d3e4f5",
-		poolIDs:   []string{"8192a3b4-c5d6-47e8-f9a0-b1c2d3e4f506"},
-	}
-	for index := range len(listenerSpecs) + 1 {
-		lb.listenerIDs = append(lb.listenerIDs, fmt.Sprintf("92a3b4c5-d6e7-48f9-a0b1-c2d3e4f5061%d", index))
-	}
-
-	payload := loadBalancerPayload(&project{id: "5a7c9e1b3d5f7091a2b4c6d8e0f2a4b6"}, &shoot{}, lb, true)
-
-	listeners, _ := payload["listeners"].([]any)
-	if len(listeners) != len(lb.listenerIDs) {
-		t.Fatalf("the update of a balancer with %d listeners describes %d of them, want all of them: "+
-			"the mapping books the count the array carries", len(lb.listenerIDs), len(listeners))
-	}
-}
-
-// TestLoadBalancerPayloadWithoutAPool covers a balancer that carries a listener
-// and no pool, the way a headless or UDP-only service publishes one. The
-// listener points at nothing rather than at a pool the balancer never had, and
-// the renderer does not end the run over it.
-func TestLoadBalancerPayloadWithoutAPool(t *testing.T) {
-	lb := &loadBalancer{
-		id:          "6f708192-a3b4-45c6-d7e8-f9a0b1c2d3e4",
-		name:        "kube_service_shoot--alpha--api-prod_default_api",
-		vipPortID:   "708192a3-b4c5-46d7-e8f9-a0b1c2d3e4f5",
-		listenerIDs: []string{"92a3b4c5-d6e7-48f9-a0b1-c2d3e4f50610"},
+// TestLoadBalancerPayloadNamesNoCollection covers the dictionary octavia's
+// worker publishes on a create, an update and a delete. octavia-lib leaves out
+// every list of a load balancer, so the payload names neither the listeners nor
+// the pools, whatever the balancer holds. The counts reach Tally through the
+// fake API a sync reads.
+func TestLoadBalancerPayloadNamesNoCollection(t *testing.T) {
+	tests := []struct {
+		name        string
+		listenerIDs []string
+		poolIDs     []string
+	}{
+		{
+			name: "a balancer with two listeners and one pool",
+			listenerIDs: []string{
+				"92a3b4c5-d6e7-48f9-a0b1-c2d3e4f50610",
+				"92a3b4c5-d6e7-48f9-a0b1-c2d3e4f50611",
+			},
+			poolIDs: []string{"8192a3b4-c5d6-47e8-f9a0-b1c2d3e4f506"},
+		},
+		{
+			name: "a balancer with neither",
+		},
 	}
 
-	payload := loadBalancerPayload(&project{id: "5a7c9e1b3d5f7091a2b4c6d8e0f2a4b6"}, &shoot{}, lb, true)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lb := &loadBalancer{
+				id:          "6f708192-a3b4-45c6-d7e8-f9a0b1c2d3e4",
+				name:        "kube_service_shoot--alpha--api-prod_ingress_nginx-ingress-controller",
+				vipPortID:   "708192a3-b4c5-46d7-e8f9-a0b1c2d3e4f5",
+				listenerIDs: test.listenerIDs,
+				poolIDs:     test.poolIDs,
+			}
 
-	listeners, _ := payload["listeners"].([]any)
-	if len(listeners) != 1 {
-		t.Fatalf("the update of a balancer with one listener describes %d of them, want one: "+
-			"the mapping books the count the array carries", len(listeners))
-	}
-	listener, _ := listeners[0].(map[string]any)
-	if got := listener["default_pool_id"]; got != nil {
-		t.Errorf("listener.default_pool_id = %v, want nil: a balancer with no pool has no pool "+
-			"to point its listener at", got)
+			payload := loadBalancerPayload(&project{id: "5a7c9e1b3d5f7091a2b4c6d8e0f2a4b6"}, &shoot{}, lb)
+
+			for _, member := range []string{"listeners", "pools"} {
+				if got, ok := payload[member]; ok {
+					t.Errorf("payload.%s = %v, want no such member: octavia publishes a load "+
+						"balancer without its collections", member, got)
+				}
+			}
+			if got := payload["loadbalancer_id"]; got != lb.id {
+				t.Errorf("payload.loadbalancer_id = %v, want %s", got, lb.id)
+			}
+		})
 	}
 }
 

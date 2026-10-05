@@ -51,7 +51,7 @@ value with, which is what to look up in the same file.
 | `image.create` | `image.create` | `image` | `fixedState("active")` | `imageSize` | `id` | `owner` | `unsizedImage` |
 | `image.delete` | `image.delete` | `image` | none | none | `id` | `owner` | none |
 | `octavia.loadbalancer.create.end` | `octavia.loadbalancer.create.end` | `loadbalancer` | `fixedState("active")` | `loadBalancerSize` | `loadbalancer_id` or `id` | `project_id` | none |
-| `octavia.loadbalancer.update.end` | `octavia.loadbalancer.update.end` | `loadbalancer` | `fixedState("active")` | `loadBalancerSize` | `loadbalancer_id` or `id` | `project_id` | none |
+| `octavia.loadbalancer.update.end` | `octavia.loadbalancer.update.end` | `loadbalancer` | `fixedState("active")` | none | `loadbalancer_id` or `id` | `project_id` | none |
 | `octavia.loadbalancer.delete.end` | `octavia.loadbalancer.delete.end` | `loadbalancer` | none | none | `loadbalancer_id` or `id` | `project_id` | none |
 <!-- refdoc:end mapping -->
 
