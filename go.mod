@@ -19,7 +19,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rabbitmq/amqp091-go v1.15.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
-	github.com/shopspring/decimal v1.4.0
+	github.com/shopspring/decimal v1.5.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/testcontainers/testcontainers-go v0.44.0
