@@ -1,0 +1,38 @@
+{
+  "servers": [
+    {
+      "id": "d4f7a123-5e80-4b69-a14d-7fa23e6091c5",
+      "name": "web-10",
+      "status": "BUILD",
+      "tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "user_id": "8f1e4b2c9a744d1e9c0b5a6d3e7f8091",
+      "created": "2026-08-20T11:58:07Z",
+      "updated": "2026-08-20T11:58:09Z",
+      "hostId": "5c1f9a3b7d2e4680a9c3b5d7e1f2a4c6",
+      "OS-EXT-STS:task_state": "spawning",
+      "OS-EXT-STS:vm_state": "building",
+      "OS-EXT-STS:power_state": 0,
+      "OS-EXT-AZ:availability_zone": "nova",
+      "OS-SRV-USG:launched_at": null,
+      "OS-SRV-USG:terminated_at": null,
+      "flavor": {
+        "id": "d9a5c3e1-7b64-4f28-9c05-8e2a1d6b3f74",
+        "original_name": "m1.small",
+        "vcpus": 1,
+        "ram": 512,
+        "disk": 20,
+        "ephemeral": 10,
+        "swap": 0,
+        "disabled": false,
+        "is_public": true,
+        "extra_specs": {}
+      },
+      "image": {"id": "0b1c2d3e4f50461783940516273849ab"},
+      "addresses": {
+        "private": [{"addr": "192.0.2.54", "version": 4, "OS-EXT-IPS:type": "fixed"}]
+      },
+      "security_groups": [{"name": "default"}],
+      "metadata": {}
+    }
+  ]
+}

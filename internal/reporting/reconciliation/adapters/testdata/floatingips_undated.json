@@ -1,0 +1,18 @@
+{
+  "floatingips": [
+    {
+      "id": "c56d0f28-3b79-4e14-a208-7d9f1c4b6e03",
+      "status": "DOWN",
+      "floating_ip_address": "203.0.113.77",
+      "floating_network_id": "b7d3c1a9-5e28-4f60-9c14-8a3b5d7e2f91",
+      "fixed_ip_address": null,
+      "port_id": null,
+      "router_id": null,
+      "project_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "tenant_id": "4c9d2f6b81e34a7f9b3c5d8e0a1f2b34",
+      "revision_number": 1,
+      "description": "",
+      "tags": []
+    }
+  ]
+}
