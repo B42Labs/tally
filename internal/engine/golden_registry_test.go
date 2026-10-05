@@ -52,7 +52,7 @@ func newRegistryAPI(t *testing.T, dbs caseDBs) registryAPI {
 		Pipeline:                 ingest.New(registry.New(), false, nil, nil),
 		AttributingRelationTypes: attributingRelationTypes,
 		Syncer: reconciliation.New(dbs.reportingStore, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, 0, nil),
 	})
 	if err != nil {
 		t.Fatalf("httpapi.NewRouter: %v", err)

@@ -330,7 +330,7 @@ func startReportingAPI(t *testing.T, db storetest.DB, q *sqlcgen.Queries) *httpt
 		Pipeline:                 ingest.New(registry.New(), false, nil, nil),
 		AttributingRelationTypes: []string{relationInfrastructureTenant},
 		Syncer: reconciliation.New(db.Store, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, 0, nil),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)

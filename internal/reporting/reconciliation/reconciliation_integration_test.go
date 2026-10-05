@@ -892,7 +892,7 @@ func TestSync(t *testing.T) {
 			Cloud: cloud, Platform: platform, Adapter: "absent",
 		}}}
 		syncer := reconciliation.New(db.Store, pipeline, cfg,
-			map[string]reconciliation.Adapter{}, func() time.Time { return pollTime }, nil)
+			map[string]reconciliation.Adapter{}, func() time.Time { return pollTime }, 0, nil)
 
 		res, err := syncer.Sync(t.Context(), cloud, nil)
 
@@ -1059,6 +1059,483 @@ func TestSync(t *testing.T) {
 			t.Errorf("the instant handed to the adapter = %s, want the told %s",
 				rfc(fake.at), rfc(second))
 		}
+	})
+
+	t.Run("defers a create while the platform is still changing the resource", func(t *testing.T) {
+		const cloud = "os-sync-defer-transitional-create"
+		building := seen(typeShare, "share-building", projectA, "creating", map[string]any{"size_gb": 10})
+		building.CreatedAt = &createTime
+		building.Transitional = true
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(building)}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1}
+		assertStats(t, res.Stats, want)
+		assertRun(t, db, res, statusCompleted)
+		if got := corrections(t, db, cloud); len(got) != 0 {
+			t.Errorf("stored corrections = %+v, want none for a resource in transition", got)
+		}
+		if got := rows(t, db, cloud); len(got) != 0 {
+			t.Errorf("projection rows = %+v, want none for a resource in transition", got)
+		}
+
+		// The platform finished the change and the collector's event never came,
+		// so the next run books the create at the platform's own instant.
+		built := seen(typeShare, "share-building", projectA, "available", map[string]any{"size_gb": 10})
+		built.CreatedAt = &createTime
+		fake.steps = stream(built)
+		res = mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+		assertCorrections(t, db, cloud, []correction{{
+			eventType: "sync.create", resourceType: typeShare, resourceID: "share-building",
+			projectID: projectA, at: rfc(createTime), state: "available",
+			size: map[string]any{"size_gb": 10.0},
+		}})
+	})
+
+	t.Run("defers an update of a resource in transition", func(t *testing.T) {
+		const cloud = "os-sync-defer-transitional-update"
+		fake, syncer := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10}))
+
+		attaching := seen(typeShare, "share-1", projectA, "attaching", map[string]any{"size_gb": 10})
+		attaching.Transitional = true
+		fake.steps = stream(attaching)
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1}
+		assertStats(t, res.Stats, want)
+		for _, got := range corrections(t, db, cloud) {
+			if got.eventType == "sync.update" {
+				t.Errorf("stored correction = %+v, want no update of a resource in transition", got)
+			}
+		}
+		if row := rowOf(t, db, cloud, typeShare, "share-1"); row.state != "available" {
+			t.Errorf("state = %q, want the row's %q kept", row.state, "available")
+		}
+	})
+
+	t.Run("counts nothing for a resource in transition that matches its row", func(t *testing.T) {
+		const cloud = "os-sync-defer-transitional-same"
+		fake, syncer := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10}))
+
+		// A transitional observation is still an observation, so the absence pass
+		// does not read its row as gone either.
+		busy := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		busy.Transitional = true
+		fake.steps = stream(busy)
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(0, 0, 0))
+		for _, got := range corrections(t, db, cloud) {
+			if got.eventType == "sync.delete" {
+				t.Errorf("stored correction = %+v, want no delete of a resource the platform lists", got)
+			}
+		}
+	})
+
+	t.Run("defers a create the platform dated inside the settle window", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-create"
+		fresh := seen(typeShare, "share-fresh", projectA, "available", map[string]any{"size_gb": 10})
+		changed := toldTime.Add(-30 * time.Second)
+		fresh.ChangedAt = &changed
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(fresh)}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		if got := corrections(t, db, cloud); len(got) != 0 {
+			t.Errorf("stored corrections = %+v, want none for a change inside the window", got)
+		}
+
+		// The same observation a sync interval later lies outside the window.
+		later := toldTime.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+		assertCorrections(t, db, cloud, []correction{{
+			eventType: "sync.create", resourceType: typeShare, resourceID: "share-fresh",
+			projectID: projectA, at: rfc(later), state: "available",
+			size: map[string]any{"size_gb": 10.0},
+		}})
+	})
+
+	t.Run("defers a resurrection of a row a delete just reached", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-resurrection"
+		alive := seen(typeShare, "share-gone", projectA, "available", map[string]any{"size_gb": 10})
+		fake, seeder := seedFleet(t, db, pipeline, cloud, alive)
+
+		// The delete lands at pollTime, inside the window of the run below.
+		fake.steps = stream(vanished(typeShare, "share-gone", pollTime))
+		mustSync(t, seeder, cloud)
+
+		// The listing still names the resource, as one taken before the delete
+		// landed would, and gives no instant of its own.
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+		fake.steps = stream(alive)
+		told := pollTime.Add(10 * time.Second)
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		if row := rowOf(t, db, cloud, typeShare, "share-gone"); row.state != "deleted" {
+			t.Errorf("state = %q, want the row kept deleted while the delete settles", row.state)
+		}
+
+		later := told.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+	})
+
+	t.Run("defers a delete the platform reported inside the settle window", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-reported-delete"
+		doomed := seen(typeShare, "share-doomed", projectA, "available", map[string]any{"size_gb": 10})
+		doomed.CreatedAt = &createTime
+		fake, _ := seedFleet(t, db, pipeline, cloud, doomed)
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		deletedAt := toldTime.Add(-10 * time.Second)
+		fake.steps = stream(vanished(typeShare, "share-doomed", deletedAt))
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		if row := rowOf(t, db, cloud, typeShare, "share-doomed"); row.state != "available" {
+			t.Errorf("state = %q, want the row kept live while the delete settles", row.state)
+		}
+
+		later := toldTime.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(0, 0, 1))
+		assertCorrection(t, db, cloud, "sync.delete", correction{
+			eventType: "sync.delete", resourceType: typeShare, resourceID: "share-doomed",
+			projectID: projectA, at: rfc(deletedAt),
+		})
+	})
+
+	t.Run("defers a reported delete of a row an event just reached", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-reported-delete-row"
+		fake, _ := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-doomed", projectA, "available", map[string]any{"size_gb": 10}))
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		// The platform dates the deletion a month before the window: the row's
+		// newest event, at pollTime, is the only evidence of a change in flight.
+		fake.steps = stream(vanished(typeShare, "share-doomed", deleteTime))
+		told := pollTime.Add(10 * time.Second)
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		if row := rowOf(t, db, cloud, typeShare, "share-doomed"); row.state != "available" {
+			t.Errorf("state = %q, want the row kept live while the delete settles", row.state)
+		}
+
+		later := told.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(0, 0, 1))
+	})
+
+	t.Run("defers a delete by absence of a row an event just reached", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-absence"
+		// The seeding run dates both creates at pollTime, so a run told ten
+		// seconds later finds both rows changed inside its window.
+		fake, _ := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10}),
+			seen(typeShare, "share-2", projectB, "available", map[string]any{"size_gb": 20}))
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		fake.steps = nil
+		told := pollTime.Add(10 * time.Second)
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 2}
+		assertStats(t, res.Stats, want)
+		for _, got := range corrections(t, db, cloud) {
+			if got.eventType == "sync.delete" {
+				t.Errorf("stored correction = %+v, want no delete of a row an event just reached", got)
+			}
+		}
+
+		later := told.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(0, 0, 2))
+		var deletes []correction
+		for _, got := range corrections(t, db, cloud) {
+			if got.eventType == "sync.delete" {
+				deletes = append(deletes, got)
+			}
+		}
+		if !reflect.DeepEqual(deletes, []correction{
+			{
+				eventType: "sync.delete", resourceType: typeShare, resourceID: "share-1",
+				projectID: projectA, at: rfc(later),
+			},
+			{
+				eventType: "sync.delete", resourceType: typeShare, resourceID: "share-2",
+				projectID: projectB, at: rfc(later),
+			},
+		}) {
+			t.Errorf("stored deletes = %+v, want both dated at the later run, %s", deletes, rfc(later))
+		}
+	})
+
+	t.Run("defers an update of a row an event just reached", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-update"
+		fake, _ := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10}))
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		// No instant from the platform: the row's newest event is the evidence.
+		fake.steps = stream(seen(typeShare, "share-1", projectA, "in-use", map[string]any{"size_gb": 10}))
+		told := pollTime.Add(10 * time.Second)
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		for _, got := range corrections(t, db, cloud) {
+			if got.eventType == "sync.update" {
+				t.Errorf("stored correction = %+v, want no update of a row an event just reached", got)
+			}
+		}
+	})
+
+	t.Run("defers an update the platform dated inside the settle window", func(t *testing.T) {
+		const cloud = "os-sync-defer-recent-platform-update"
+		fake, _ := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10}))
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		// The row's newest event is the seeding run's, a month before the window:
+		// the platform's instant is the only evidence of the change.
+		grown := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 20})
+		changed := toldTime.Add(-30 * time.Second)
+		grown.ChangedAt = &changed
+		fake.steps = stream(grown)
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+
+		later := toldTime.Add(15 * time.Minute)
+		res = mustSyncAt(t, syncer, cloud, &later)
+
+		assertStats(t, res.Stats, tally(0, 1, 0))
+	})
+
+	t.Run("defers a resource the platform dates after the run", func(t *testing.T) {
+		const cloud = "os-sync-defer-future"
+		ahead := seen(typeShare, "share-ahead", projectA, "available", map[string]any{"size_gb": 10})
+		changed := toldTime.Add(5 * time.Second)
+		ahead.ChangedAt = &changed
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(ahead)}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Recent: 1}
+		assertStats(t, res.Stats, want)
+		if got := corrections(t, db, cloud); len(got) != 0 {
+			t.Errorf("stored corrections = %+v, want none for a change dated after the run", got)
+		}
+	})
+
+	t.Run("books a resource the platform gave no change instant for", func(t *testing.T) {
+		const cloud = "os-sync-defer-no-evidence"
+		fresh := seen(typeShare, "share-fresh", projectA, "available", map[string]any{"size_gb": 10})
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(fresh)}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+		assertCorrection(t, db, cloud, "sync.create", correction{
+			eventType: "sync.create", resourceType: typeShare, resourceID: "share-fresh",
+			projectID: projectA, at: rfc(pollTime), state: "available",
+			size: map[string]any{"size_gb": 10.0},
+		})
+	})
+
+	t.Run("keeps deferring a resource in transition with the window off", func(t *testing.T) {
+		const cloud = "os-sync-defer-window-off"
+		dated := seen(typeShare, "share-now", projectA, "available", map[string]any{"size_gb": 10})
+		changed := toldTime
+		dated.ChangedAt = &changed
+		busy := seen(typeShare, "share-busy", projectA, "creating", map[string]any{"size_gb": 20})
+		busy.Transitional = true
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(dated, busy)}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(1, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1}
+		assertStats(t, res.Stats, want)
+		assertCorrections(t, db, cloud, []correction{{
+			eventType: "sync.create", resourceType: typeShare, resourceID: "share-now",
+			projectID: projectA, at: rfc(told), state: "available",
+			size: map[string]any{"size_gb": 10.0},
+		}})
+	})
+
+	t.Run("counts a resource in transition that changed inside the window once", func(t *testing.T) {
+		const cloud = "os-sync-defer-both-reasons"
+		busy := seen(typeShare, "share-busy", projectA, "creating", map[string]any{"size_gb": 10})
+		busy.Transitional = true
+		changed := toldTime.Add(-30 * time.Second)
+		busy.ChangedAt = &changed
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(busy)}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1}
+		assertStats(t, res.Stats, want)
+	})
+
+	t.Run("reaches back by the settle window for the deleted listing", func(t *testing.T) {
+		const cloud = "os-sync-defer-window-reach"
+		share := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10})
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(share)}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		first := mustSync(t, syncer, cloud)
+		if fake.since != nil {
+			t.Errorf("since = %s, want none for the first run of a cloud", fake.since)
+		}
+
+		mustSync(t, syncer, cloud)
+		want := runRow(t, db, first.RunID).StartedAt.Time.Add(-time.Minute)
+		if fake.since == nil || !fake.since.Equal(want) {
+			t.Errorf("since = %v, want the completed run's start less the window, %s", fake.since, want)
+		}
+	})
+
+	t.Run("stores the deferred counts of a run that deferred nothing", func(t *testing.T) {
+		const cloud = "os-sync-defer-nothing"
+		fake := &fakeAdapter{types: []string{typeShare}}
+		syncer, _ := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(0, 0, 0))
+		assertStoredDeferred(t, db, res, 0, 0)
+	})
+
+	t.Run("records no deferral for a run the stream ended", func(t *testing.T) {
+		const cloud = "os-sync-defer-stream-error"
+		busy := seen(typeShare, "share-busy", projectA, "creating", nil)
+		busy.Transitional = true
+		fake := &fakeAdapter{types: []string{typeShare}, steps: []step{
+			{resource: busy},
+			{err: errManilaDown},
+		}}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		res, err := syncer.Sync(t.Context(), cloud, nil)
+
+		if want := "listing the resources of " + cloud + ": connection refused"; err == nil ||
+			err.Error() != want {
+			t.Fatalf("Sync() error = %v, want %q", err, want)
+		}
+		assertRun(t, db, res, statusFailed)
+		if res.Stats.Deferred != (reconciliation.Deferred{}) {
+			t.Errorf("deferred = %+v, want none for a run that never reached the diff", res.Stats.Deferred)
+		}
+		assertStoredDeferred(t, db, res, 0, 0)
+		if got := corrections(t, db, cloud); len(got) != 0 {
+			t.Errorf("stored corrections = %+v, want none", got)
+		}
+	})
+
+	t.Run("keeps the deferred count of a run that could not enumerate a type", func(t *testing.T) {
+		const cloud = "os-sync-defer-enumeration-error"
+		busy := seen(typeRouter, "router-busy", projectA, "build", nil)
+		busy.Transitional = true
+		fake := &fakeAdapter{types: []string{typeShare, typeRouter}, steps: []step{
+			{err: &reconciliation.EnumerationError{ResourceType: typeShare, Err: errManilaDown}},
+			{resource: busy},
+		}}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		res, err := syncer.Sync(t.Context(), cloud, nil)
+
+		if err == nil {
+			t.Fatal("Sync() error = nil, want the run reporting the enumeration failure")
+		}
+		assertRun(t, db, res, statusFailed)
+		if res.Stats.Deferred != (reconciliation.Deferred{Transitional: 1}) {
+			t.Errorf("deferred = %+v, want the router in transition", res.Stats.Deferred)
+		}
+		if want := []string{"enumerating share: connection refused"}; !slices.Equal(res.Stats.Errors, want) {
+			t.Errorf("stats errors = %q, want %q", res.Stats.Errors, want)
+		}
+		assertStoredDeferred(t, db, res, 1, 0)
+	})
+
+	t.Run("keeps the deferred count of a run whose ingest failed", func(t *testing.T) {
+		const cloud = "os-sync-defer-ingest-error"
+		// The database refuses every event of this cloud, so the run ends inside
+		// the ingest loop, after the diff counted what it deferred.
+		if _, err := db.Store.Pool().Exec(t.Context(), `
+			CREATE FUNCTION refuse_event() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'refusing the event of %', NEW.resource_id;
+			END $$;
+			CREATE TRIGGER refuse_event BEFORE INSERT ON events FOR EACH ROW
+			WHEN (NEW.cloud = '`+cloud+`') EXECUTE FUNCTION refuse_event();`); err != nil {
+			t.Fatalf("creating the refusing trigger: %v", err)
+		}
+		t.Cleanup(func() {
+			if _, err := db.Store.Pool().Exec(context.Background(),
+				`DROP TRIGGER refuse_event ON events; DROP FUNCTION refuse_event();`); err != nil {
+				t.Errorf("dropping the refusing trigger: %v", err)
+			}
+		})
+		busy := seen(typeShare, "share-busy", projectA, "creating", nil)
+		busy.Transitional = true
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(
+			busy, seen(typeShare, "share-refused", projectA, "available", nil))}
+		syncer := newSyncer(t, db, pipeline, cloud, fake)
+
+		res, err := syncer.Sync(t.Context(), cloud, nil)
+
+		if prefix := "ingesting the corrections of " + cloud + ": "; err == nil ||
+			!strings.HasPrefix(err.Error(), prefix) {
+			t.Fatalf("Sync() error = %v, want one prefixed %q", err, prefix)
+		}
+		assertRun(t, db, res, statusFailed)
+		if res.Stats.Deferred != (reconciliation.Deferred{Transitional: 1}) {
+			t.Errorf("deferred = %+v, want the share in transition", res.Stats.Deferred)
+		}
+		assertStoredDeferred(t, db, res, 1, 0)
 	})
 
 	t.Run("refuses a second sync of a cloud a run is holding", func(t *testing.T) {
@@ -1407,12 +1884,13 @@ func TestSyncStoresSizeNames(t *testing.T) {
 const (
 	runsSeries       = "tally_sync_runs_total"
 	reconciledSeries = "tally_sync_resources_reconciled_total"
+	deferredSeries   = "tally_sync_resources_deferred_total"
 	errorsSeries     = "tally_sync_errors_total"
 )
 
-// syncSeries is all three of them, which the assertions over a sync that
+// syncSeries is all four of them, which the assertions over a sync that
 // counted nothing read at once.
-var syncSeries = []string{runsSeries, reconciledSeries, errorsSeries}
+var syncSeries = []string{runsSeries, reconciledSeries, deferredSeries, errorsSeries}
 
 // TestSyncCounts holds the framework to what it reports about a run: one count
 // per finished run under the status its row carries, the corrections it
@@ -1453,6 +1931,40 @@ func TestSyncCounts(t *testing.T) {
 		// out, so a rate over it reads no errors instead of no data.
 		assertSamples(t, reg, errorsSeries, map[string]float64{
 			fmt.Sprintf("cloud=%q", cloud): 0,
+		})
+		assertSamples(t, reg, deferredSeries, map[string]float64{
+			deferredLabels(cloud, "transitional"): 0,
+			deferredLabels(cloud, "recent"):       0,
+		})
+	})
+
+	t.Run("counts what a run deferred by reason", func(t *testing.T) {
+		const cloud = "os-sync-count-deferred"
+		busy := seen(typeShare, "share-busy", projectA, "creating", nil)
+		busy.Transitional = true
+		changed := toldTime.Add(-10 * time.Second)
+		fresh := seen(typeShare, "share-fresh", projectA, "available", nil)
+		fresh.ChangedAt = &changed
+		other := seen(typeShare, "share-other", projectB, "available", nil)
+		other.ChangedAt = &changed
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(busy, fresh, other)}
+		syncer, reg := settlingSyncer(t, db, pipeline, cloud, fake, time.Minute)
+
+		told := toldTime
+		res := mustSyncAt(t, syncer, cloud, &told)
+
+		want := tally(0, 0, 0)
+		want.Deferred = reconciliation.Deferred{Transitional: 1, Recent: 2}
+		assertStats(t, res.Stats, want)
+		assertSamples(t, reg, deferredSeries, map[string]float64{
+			deferredLabels(cloud, "transitional"): 1,
+			deferredLabels(cloud, "recent"):       2,
+		})
+		// A deferred correction is no correction: the drift series stay at zero.
+		assertSamples(t, reg, reconciledSeries, map[string]float64{
+			reconciledLabels(cloud, "created"): 0,
+			reconciledLabels(cloud, "updated"): 0,
+			reconciledLabels(cloud, "deleted"): 0,
 		})
 	})
 
@@ -1679,7 +2191,7 @@ func newSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud s
 	}}}
 	return reconciliation.New(db.Store, pipeline, cfg,
 		map[string]reconciliation.Adapter{adapterName: fake},
-		func() time.Time { return pollTime }, nil)
+		func() time.Time { return pollTime }, 0, nil)
 }
 
 // meteredSyncer builds a Syncer like newSyncer does, recording into a registry
@@ -1689,13 +2201,23 @@ func meteredSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, clo
 ) (*reconciliation.Syncer, *prometheus.Registry) {
 	t.Helper()
 
+	return settlingSyncer(t, db, pipeline, cloud, fake, 0)
+}
+
+// settlingSyncer builds a metered Syncer that leaves a change inside the settle
+// window before a run to the collector.
+func settlingSyncer(t *testing.T, db storetest.DB, pipeline *ingest.Pipeline, cloud string,
+	fake *fakeAdapter, settle time.Duration,
+) (*reconciliation.Syncer, *prometheus.Registry) {
+	t.Helper()
+
 	cfg := reconciliation.Config{Clouds: []reconciliation.CloudConfig{{
 		Cloud: cloud, Platform: platform, Adapter: adapterName,
 	}}}
 	reg := prometheus.NewRegistry()
 	return reconciliation.New(db.Store, pipeline, cfg,
 		map[string]reconciliation.Adapter{adapterName: fake},
-		func() time.Time { return pollTime }, metrics.New(reg)), reg
+		func() time.Time { return pollTime }, settle, metrics.New(reg)), reg
 }
 
 // seedFleet puts resources into the projection by running one sync over them,
@@ -1791,10 +2313,33 @@ func assertRun(t *testing.T, db storetest.DB, res reconciliation.Result, status 
 	}
 }
 
+// assertStoredDeferred fails the test unless the stored stats document of the
+// run carries the deferred counts under the keys an operator reads them by.
+func assertStoredDeferred(t *testing.T, db storetest.DB, res reconciliation.Result,
+	transitional, recent int,
+) {
+	t.Helper()
+
+	var raw map[string]any
+	if err := json.Unmarshal(runRow(t, db, res.RunID).Stats, &raw); err != nil {
+		t.Fatalf("decoding the stored stats: %v", err)
+	}
+	want := map[string]any{"transitional": float64(transitional), "recent": float64(recent)}
+	if !reflect.DeepEqual(raw["deferred"], want) {
+		t.Errorf("stored deferred = %v, want %v", raw["deferred"], want)
+	}
+}
+
 // reconciledLabels is the label set tally_sync_resources_reconciled_total
 // carries for one action of cloud, as the exposition format spells it.
 func reconciledLabels(cloud, action string) string {
 	return fmt.Sprintf("action=%q,cloud=%q", action, cloud)
+}
+
+// deferredLabels is the label set tally_sync_resources_deferred_total carries
+// for one reason of cloud, as the exposition format spells it.
+func deferredLabels(cloud, reason string) string {
+	return fmt.Sprintf("cloud=%q,reason=%q", cloud, reason)
 }
 
 // assertSamples fails the test unless the registry exports exactly want for the

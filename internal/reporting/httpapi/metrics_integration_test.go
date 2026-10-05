@@ -259,7 +259,7 @@ func newMeteredAPI(t *testing.T, s *store.Store, cloud string, fake *syncFake) a
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           pipeline,
 		Syncer: reconciliation.New(s, pipeline, cfg,
-			map[string]reconciliation.Adapter{syncAdapterName: fake}, time.Now, m),
+			map[string]reconciliation.Adapter{syncAdapterName: fake}, time.Now, 0, m),
 		Metrics:        m,
 		MetricsEnabled: true,
 	})
@@ -346,7 +346,7 @@ func newMetricsAPI(t *testing.T, s *store.Store, m *metrics.Metrics, enabled boo
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, 0, nil),
 		Metrics:        m,
 		MetricsEnabled: enabled,
 	})

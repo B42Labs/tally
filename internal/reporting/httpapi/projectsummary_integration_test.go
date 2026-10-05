@@ -393,7 +393,7 @@ func newAPIAtInstant(t *testing.T, s *store.Store, now time.Time) api {
 		Authenticator:      auth.NewStaticTokenAuthenticator(q),
 		Pipeline:           ingest.New(registry.New(), false, nil, nil),
 		Syncer: reconciliation.New(s, ingest.New(registry.New(), false, nil, nil),
-			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, nil),
+			reconciliation.Config{}, map[string]reconciliation.Adapter{}, time.Now, 0, nil),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v, want nil", err)
