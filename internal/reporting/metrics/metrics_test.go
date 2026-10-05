@@ -24,6 +24,7 @@ var tallySeries = []string{
 	"tally_projection_replays_total",
 	"tally_sync_runs_total",
 	"tally_sync_resources_reconciled_total",
+	"tally_sync_resources_deferred_total",
 	"tally_sync_errors_total",
 	"tally_current_resources",
 }
@@ -39,6 +40,7 @@ func TestNilMetrics(t *testing.T) {
 		m.ProjectionReplayed("prod")
 		m.SyncRunFinished("prod", "completed")
 		m.ResourcesReconciled("prod", "created", 3)
+		m.ResourcesDeferred("prod", "transitional", 1)
 		m.SyncErrorsRecorded("prod", 1)
 	})
 }
@@ -128,6 +130,35 @@ func TestResourcesReconciled(t *testing.T) {
 		for action, want := range map[string]float64{"created": 3, "deleted": 1} {
 			if got := testutil.ToFloat64(m.resourcesReconciled.WithLabelValues("prod", action)); got != want {
 				t.Errorf(`tally_sync_resources_reconciled_total{action=%q} = %v, want %v`, action, got, want)
+			}
+		}
+	})
+}
+
+func TestResourcesDeferred(t *testing.T) {
+	t.Run("adds up what several runs deferred", func(t *testing.T) {
+		m := fresh(t)
+
+		m.ResourcesDeferred("prod", "recent", 3)
+		m.ResourcesDeferred("prod", "recent", 2)
+
+		if got := testutil.ToFloat64(m.resourcesDeferred); got != 5 {
+			t.Errorf("tally_sync_resources_deferred_total = %v, want 5", got)
+		}
+	})
+
+	t.Run("counts every reason on its own series", func(t *testing.T) {
+		m := fresh(t)
+
+		m.ResourcesDeferred("prod", "transitional", 1)
+		m.ResourcesDeferred("prod", "recent", 0)
+
+		if got := testutil.CollectAndCount(m.resourcesDeferred); got != 2 {
+			t.Fatalf("tally_sync_resources_deferred_total has %d series, want one per reason", got)
+		}
+		for reason, want := range map[string]float64{"transitional": 1, "recent": 0} {
+			if got := testutil.ToFloat64(m.resourcesDeferred.WithLabelValues("prod", reason)); got != want {
+				t.Errorf(`tally_sync_resources_deferred_total{reason=%q} = %v, want %v`, reason, got, want)
 			}
 		}
 	})

@@ -40,6 +40,7 @@ is answered 503. A scrape that outlives the budget of 10 seconds is cut off.
 | `tally_ingest_unvalidated_size_total` | counter | `platform`, `resource_type` | Events stored with a size no registered schema validated. |
 | `tally_projection_replays_total` | counter | `cloud` | Projection rows folded again from a resource's whole event history. |
 | `tally_sync_errors_total` | counter | `cloud` | Errors reconciliation runs reported. |
+| `tally_sync_resources_deferred_total` | counter | `cloud`, `reason` | Corrections a reconciliation run deferred to a later run, by reason. |
 | `tally_sync_resources_reconciled_total` | counter | `cloud`, `action` | Resources a reconciliation run created, updated, or deleted. |
 | `tally_sync_runs_total` | counter | `cloud`, `status` | Reconciliation runs that finished, by status. |
 <!-- refdoc:end reporting-api -->
@@ -55,6 +56,9 @@ characters is recorded under `other` too.
 `reason` on `tally_events_rejected_total` is the check that refused the event,
 which is the text of the pipeline's reason before its first colon: `schema`,
 `size_schema` or `scope`.
+
+`reason` on `tally_sync_resources_deferred_total` is `transitional` or
+`recent`.
 
 `tally_current_resources` is written by the refresher rather than by the ingest
 path. The refresher counts the projection rows per platform, cloud, resource

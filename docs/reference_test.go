@@ -352,7 +352,7 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 // every instrument a recording method writes. A vector without a child is
 // gathered as nothing, so the exposition would state the type of none of them
 // and the rendering would fall back to the name throughout; recording once
-// leaves the type of the eight counters read off the exposition, which is what
+// leaves the type of the nine counters read off the exposition, which is what
 // makes a counter misnamed as a gauge fail here. tally_current_resources is
 // written by the refresher rather than by a recording method and stays on the
 // name.
@@ -367,6 +367,7 @@ func recordedReportingRegistry() *prometheus.Registry {
 	m.ProjectionReplayed("os-prod-eu1")
 	m.SyncRunFinished("os-prod-eu1", "completed")
 	m.ResourcesReconciled("os-prod-eu1", "created", 1)
+	m.ResourcesDeferred("os-prod-eu1", "transitional", 1)
 	m.SyncErrorsRecorded("os-prod-eu1", 1)
 	return reg
 }
