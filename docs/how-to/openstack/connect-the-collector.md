@@ -39,7 +39,7 @@ Reporting API. What the collector guarantees between those two ends is in
   it as a systemd service instead. The third way is the `openstack-collector`
   kustomize component the prod overlay lists, which runs the collector in the
   cluster of the Reporting API;
-  [deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+  [deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
   sets it up.
 
 ## Configure the OpenStack services

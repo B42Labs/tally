@@ -23,10 +23,11 @@ Tally sit together.
 
 ### Cluster
 
-- [Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+- [Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
   puts the Reporting API, the OTLP endpoint, Grafana and the OpenStack
   collector on a dedicated cluster behind Let's Encrypt certificates, with the
-  secrets kept out of the repository.
+  secrets kept out of the repository. The cluster migrates both databases,
+  rates every month and reconciles the cloud by itself.
 - [Use another Gateway API implementation](/how-to/cluster/use-another-gateway-api-implementation)
   deploys the prod overlay behind Traefik or another Gateway API
   implementation, without the component that holds the Envoy Gateway objects.

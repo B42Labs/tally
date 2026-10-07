@@ -29,23 +29,24 @@ certificate issuance through the listener, OTLP traffic or a LoadBalancer.
   `config.gatewayAPI.enabled=true` in its Helm chart. Install it after the
   Gateway API resource types exist, because it looks for them at startup.
 - Everything else
-  [Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#before-you-start)
+  [Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#before-you-start)
   asks for, apart from `helm` for `make prod-addons`.
 - The sections "Cut the release that publishes the images", "Set the domain",
-  "Name the cloud" and "Write the secrets" of that guide, done.
-  `kubectl apply -k` reads the `.env` files and `collector.env`, and
-  `make prod-migrate` refuses to run from a checkout that is not at the tag
-  both `newTag` values name.
+  "Name the cloud", "Configure reconciliation" and "Write the secrets" of that
+  guide, done. `kubectl apply -k` reads the `.env` files, `collector.env`,
+  `secrets/clouds.yaml` and `reconciliation/clouds-config.yaml`.
 
 ## Take the component out of the overlay
 
 1. In `deploy/kubernetes/overlays/prod/kustomization.yaml`, remove the
-   `envoy-gateway` line of the `components` entry and keep the
-   `openstack-collector` line, which is the collector:
+   `envoy-gateway` line of the `components` entry and keep the other three:
+   the collector, the migration Job and the sync:
 
    ```yaml
    components:
      - ../../components/openstack-collector
+     - ../../components/migrations
+     - ../../components/reconciliation
    ```
 
 2. In the same file, remove the patch that deletes
@@ -144,62 +145,116 @@ Nothing else on this page fails without the two steps. Checks 4 to 6 under
 Envoy Gateway, and the second waits on the LoadBalancer Service Envoy Gateway
 creates.
 
-1. Check that no value in the six `.env` files is empty or still a
-   placeholder. `make prod-up` refuses such a file, and `kubectl apply -k`
-   applies it: with an empty `admin-password` Grafana keeps its default admin
-   password. The command prints the file and the key of every such value:
+1. Check that each of the six `.env` files carries every key of its example,
+   and that no value is empty or still a placeholder. `make prod-up` refuses
+   such a file, and `kubectl apply -k` applies it: the pod that mounts a key
+   the Secret lacks does not start, and with an empty `admin-password` Grafana
+   keeps its default admin password. The loop prints the file and the key of
+   every key a file lacks, and the `grep` those of every value to fill in:
 
    ```sh
+   for example in deploy/kubernetes/overlays/prod/secrets/*.env.example; do
+     for key in $(sed -n 's/^\([^#=][^=]*\)=.*/\1/p' "$example"); do
+       grep -q "^$key=" "${example%.example}" || echo "${example%.example}:$key"
+     done
+   done
    grep -EH '^[^#=]+=([[:space:]]*$|.*<[a-z-]+>)' \
      deploy/kubernetes/overlays/prod/secrets/*.env | cut -d= -f1
    ```
 
-   It prints nothing when every value is filled in. A line such as this one
-   names a value to fill in before the next step:
+   Both print nothing when every key is there and every value is filled in. A
+   line such as this one names a key to copy from the example, or a value to
+   fill in, before the next step:
 
    ```text
    deploy/kubernetes/overlays/prod/secrets/tally-grafana.env:admin-password
    ```
 
 2. Check that `collector.env` names the cloud. `make prod-up` refuses an empty
-   `TALLY_OSC_CLOUD`, and `kubectl apply -k` applies it: the collector then
-   exits with `checking the configuration: TALLY_OSC_CLOUD: must be set`. The
-   command counts the lines that set a value:
+   `TALLY_OSC_CLOUD` and one with whitespace around it, and `kubectl apply -k`
+   applies both: the collector exits with `checking the configuration:
+   TALLY_OSC_CLOUD: must be set` on the first, and the ConfigMap keeps the
+   whitespace of the second, so the sync asks for a cloud the clouds config
+   does not name. The command counts the lines that set a value without
+   whitespace around it:
 
    ```sh
-   grep -Ec '^TALLY_OSC_CLOUD=[[:space:]]*[^[:space:]]' deploy/kubernetes/overlays/prod/collector.env
+   grep -Ec '^TALLY_OSC_CLOUD=[^[:space:]]+$' deploy/kubernetes/overlays/prod/collector.env
    ```
 
    ```text
    1
    ```
 
-3. Apply the certificate issuer and the overlay:
+3. Check the input of reconciliation. `make prod-up` refuses each of the
+   three, and `kubectl apply -k` applies them: a placeholder fails every sync
+   with a 500, a cloud other than the one of `collector.env` is answered 404,
+   and an empty `cloud` ends the Reporting API at startup. The first command
+   counts the placeholders left in `secrets/clouds.yaml`, the second the
+   `cloud` lines that name the cloud of `collector.env`, and the third the
+   `os_cloud` lines that name an entry:
+
+   ```sh
+   grep -Ec '<[a-z-]+>' deploy/kubernetes/overlays/prod/secrets/clouds.yaml
+   grep -cxF "  - cloud: $(sed -n 's/^TALLY_OSC_CLOUD=//p' deploy/kubernetes/overlays/prod/collector.env)" \
+     deploy/kubernetes/overlays/prod/reconciliation/clouds-config.yaml
+   grep -Ec '^      os_cloud: [^[:space:]]+$' deploy/kubernetes/overlays/prod/reconciliation/clouds-config.yaml
+   ```
+
+   ```text
+   0
+   1
+   1
+   ```
+
+4. Delete the migration Job of the previous deploy once it has finished. A
+   Job's pod template is immutable, so the apply of a new tag fails on the old
+   Job. The block is the one of
+   [deploy from a pipeline](/how-to/cluster/deploy-the-collecting-stack#deploy-from-a-pipeline):
+   it leaves a Job that is still running alone, because a migration that is
+   killed can leave a half-built index, and stops on it:
+
+   ```sh
+   (
+     state="$(kubectl --context <ctx> -n tally get job tally-migrate --ignore-not-found \
+       -o jsonpath='{.metadata.name}:{.status.conditions[?(@.status=="True")].type}')" \
+       || { echo "cluster read failed; not deleting" >&2; exit 1; }
+     case "$state" in
+       ''|*Complete*|*Failed*)
+         kubectl --context <ctx> -n tally delete job tally-migrate --ignore-not-found ;;
+       *)
+         echo "tally-migrate has not finished; wait for it before deploying" >&2
+         exit 1 ;;
+     esac
+   )
+   ```
+
+5. Apply the certificate issuer and the overlay:
 
    ```sh
    kubectl --context <ctx> apply -f deploy/kubernetes/overlays/prod/issuers.yaml
    kubectl --context <ctx> apply -k deploy/kubernetes/overlays/prod
    ```
 
-4. Wait for the database, apply the reporting migration chain and wait for the
-   Reporting API:
+6. Wait for the migration Job, which applies both chains in the cluster, and
+   then for the Reporting API:
 
    ```sh
-   kubectl --context <ctx> -n tally rollout status statefulset/timescaledb
-   make prod-migrate PROD_CONTEXT=<ctx>
+   kubectl --context <ctx> -n tally wait --for=condition=complete job/tally-migrate --timeout=30m
    kubectl --context <ctx> -n tally rollout status deployment/reporting-api
    ```
 
-   `make prod-migrate` reaches the database through a port-forward and reads
-   nothing of the Gateway.
+   The Job reads nothing of the Gateway. When it fails,
+   `kubectl --context <ctx> -n tally logs -l batch.kubernetes.io/job-name=tally-migrate --all-containers --prefix --tail=-1`
+   prints why.
 
-5. Issue the ingest credential into the Secret the collector waits for, as
+7. Issue the ingest credential into the Secret the collector waits for, as
    [issue an ingest credential](/how-to/cluster/deploy-the-collecting-stack#issue-an-ingest-credential)
    shows. The collector pod stays in `ContainerCreating` until then. The
    credential needs the migrated database of the step before, and nothing of
    the Gateway.
 
-6. Point the domain at the address your implementation publishes the Gateway
+8. Point the domain at the address your implementation publishes the Gateway
    on, and wait for the certificate, as
    [point the domain at the cluster](/how-to/cluster/deploy-the-collecting-stack#point-the-domain-at-the-cluster)
    shows.
@@ -223,7 +278,7 @@ creates.
    ```
 
 3. Run the checks of
-   [Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#check-the-result).
+   [Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#check-the-result).
    Its last check runs `make prod-up`, so leave that one out.
 
 4. Each OTLP hostname answers a burst from one address with 429. Each command

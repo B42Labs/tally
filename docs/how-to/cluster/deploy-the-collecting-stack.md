@@ -1,22 +1,27 @@
 ---
-title: Deploy the collecting stack to a cluster
-description: "Put the Reporting API, the OTLP endpoint, Grafana and the OpenStack collector on a dedicated cluster from a laptop, behind Let's Encrypt certificates, with the secrets kept out of the repository."
+title: Deploy the stack to a cluster
+description: "Put the Reporting API, the OTLP endpoint, Grafana, the OpenStack collector, the scheduler and the sync on a dedicated cluster that migrates, rates and reconciles by itself, behind Let's Encrypt certificates, with the secrets kept out of the repository."
 quadrant: how-to
 audience: operator
 ---
 
-# Deploy the collecting stack to a cluster
+# Deploy the stack to a cluster
 
-This guide deploys the collecting half of Tally to a dedicated Kubernetes
-cluster: the Reporting API with TimescaleDB, VictoriaMetrics, the OTel
-Collector, Grafana, vmalert and Alertmanager, and the OpenStack collector. The
-collector consumes the notifications of one cloud from a broker outside the
-cluster and posts them to the Reporting API. The Gateway publishes `api.`,
-`otlp.`, `otlp-grpc.` and `grafana.` over HTTPS, behind a certificate Let's
-Encrypt signs. The metering scheduler does not run there, and the store,
-vmalert and Alertmanager are reached through port-forwards. Every step runs
-from a checkout on your machine with three make targets, and no CI job touches
-the cluster. What the prod overlay changes against the dev overlay is in
+This guide deploys Tally to a dedicated Kubernetes cluster: the Reporting API
+with TimescaleDB, VictoriaMetrics, the OTel Collector, Grafana, vmalert and
+Alertmanager, the OpenStack collector, the metering scheduler and the sync of
+the cloud. The collector consumes the notifications of one cloud from a broker
+outside the cluster and posts them to the Reporting API. The cluster migrates,
+rates and reconciles by itself: Job `tally-migrate` applies both migration
+chains on every deploy, the hourly CronJob `tally-engine` rates a month once a
+pricing catalog prices it, and CronJob `tally-sync` reconciles the cloud every
+10 minutes. The Gateway publishes `api.`, `otlp.`, `otlp-grpc.` and `grafana.`
+over HTTPS, behind a certificate Let's Encrypt signs, and the store, vmalert
+and Alertmanager are reached through port-forwards. The deploy runs from a
+checkout on your machine with two make targets, `make prod-addons` and
+`make prod-up`, and no CI job touches the cluster;
+[deploy from a pipeline](#deploy-from-a-pipeline) says what a pipeline runs in
+their place. What the prod overlay changes against the dev overlay is in
 [where the dev stack ends](/contributing/dev-stack#where-the-dev-stack-ends).
 The guide installs Envoy Gateway. On a cluster that runs another Gateway API
 implementation,
@@ -32,9 +37,9 @@ replaces the add-on and the deploy steps.
   connection: the OTLP endpoint limits requests per client address, and behind
   a proxying LoadBalancer every publisher shares one limit.
 - `helm`, which `make prod-addons` installs the add-ons with.
-- Go at the version `go.mod` states, because the migration and the admin CLI
-  run with `go run` from the checkout.
-- `nc`, which `make prod-up` probes its port-forward to the database with.
+- Go at the version `go.mod` states, because the ingest credential and the
+  pricing catalog are written with `go run` from the checkout.
+- `nc`, for the check of the database port at the end.
 - `openssl` from OpenSSL 3 and `htpasswd`, for the secrets and the certificate
   check. The LibreSSL that macOS ships has no `x509 -ext`.
 - Docker and `curl`, for the checks.
@@ -45,11 +50,17 @@ replaces the add-on and the deploy steps.
 - The OpenStack services of that cloud, configured as
   [configure the OpenStack services](/how-to/openstack/connect-the-collector#configure-the-openstack-services)
   says.
+- An account on that cloud that lists the resources of every project, as
+  [reconcile a cloud](/how-to/openstack/reconcile-a-cloud#check-the-account)
+  checks it. The Reporting API reconciles the cloud with it.
+- A pricing model file for the cloud, as
+  [import a pricing model](/how-to/engine/import-a-pricing-model) describes it.
 - A release tag whose images are in the registry, or a commit whose `ci` run is
   green to cut one from.
-- A checkout of the repository at that tag. `go run` migrates with the chain of
-  the checkout, which has to match the image the cluster runs, so
-  `make prod-up` and `make prod-migrate` refuse to run from any other commit.
+- A checkout of the repository at that tag. The checkout supplies the
+  manifests the images run under, and the CLIs of the checkout write the
+  credential and the catalog into the schema of the image, so `make prod-up`
+  refuses to run from any other commit.
 
 ## Cut the release that publishes the images
 
@@ -66,13 +77,15 @@ replaces the add-on and the deploy steps.
    Wait until the run of the tag has finished on the repository's Actions tab.
    [Releases](/contributing/toolchain#releases) describes what the run builds.
 
-2. Check that the two images the overlay deploys pull without a login, which
+2. Check that the four images the overlay deploys pull without a login, which
    is how the cluster's nodes pull them:
 
    ```sh
    docker logout ghcr.io
    docker pull ghcr.io/b42labs/tally-reporting:<tag>
    docker pull ghcr.io/b42labs/tally-openstack-collector:<tag>
+   docker pull ghcr.io/b42labs/tally-engine:<tag>
+   docker pull ghcr.io/b42labs/tally-reporting-admin:<tag>
    ```
 
 3. When a pull is denied, the package is still private: the first push of an
@@ -83,7 +96,7 @@ replaces the add-on and the deploy steps.
    `tally-reporting-admin`. A public package cannot be made private again. Run
    the pulls of step 2 again afterwards.
 
-4. Check out the tag, and set both `newTag` values in
+4. Check out the tag, and set the four `newTag` values in
    `deploy/kubernetes/overlays/prod/kustomization.yaml` to it when they name
    another one:
 
@@ -98,6 +111,12 @@ replaces the add-on and the deploy steps.
        newTag: <tag>
      - name: tally-openstack-collector
        newName: ghcr.io/b42labs/tally-openstack-collector
+       newTag: <tag>
+     - name: tally-engine
+       newName: ghcr.io/b42labs/tally-engine
+       newTag: <tag>
+     - name: tally-reporting-admin
+       newName: ghcr.io/b42labs/tally-reporting-admin
        newTag: <tag>
    ```
 
@@ -135,9 +154,9 @@ replaces the add-on and the deploy steps.
    TALLY_OSC_CLOUD=<cloud>
    ```
 
-   Every event the collector emits is attributed to that cloud, and the ingest
-   credential of a later section is issued for it. The file ships with an
-   empty value, which `make prod-up` refuses.
+   Every event the collector emits is attributed to that cloud, the ingest
+   credential of a later section is issued for it, and CronJob `tally-sync`
+   syncs it. The file ships with an empty value, which `make prod-up` refuses.
 
 2. Add the other settings the deployment needs to the same file, one
    `KEY=VALUE` per line. `TALLY_OSC_EXCHANGES` lists the exchanges of a cloud
@@ -152,6 +171,35 @@ replaces the add-on and the deploy steps.
    page lists every variable. The broker URL and the ingest token are not
    among the lines of this file: both are Secrets, and the header of the file
    names the six variables the deployment fixes.
+
+## Configure reconciliation
+
+1. Name the cloud the Reporting API reconciles in
+   `deploy/kubernetes/overlays/prod/reconciliation/clouds-config.yaml`:
+
+   ```yaml
+   clouds:
+     - cloud: <cloud>
+       platform: openstack
+       adapter: openstack
+       adapter_config:
+         os_cloud: <os-cloud>
+         include_octavia: false
+   ```
+
+   `cloud` is the value of `TALLY_OSC_CLOUD` in `collector.env`. CronJob
+   `tally-sync` takes its cloud from there, and a sync of a cloud this file
+   does not name is answered 404. `os_cloud` is the name of the entry in
+   `secrets/clouds.yaml` that the Reporting API authenticates with, which
+   [write the secrets](#write-the-secrets) fills. Set `include_octavia: true`
+   when `TALLY_OSC_EXCHANGES` lists `octavia`, so the sync lists the load
+   balancers the events book.
+
+2. Keep the `cloud` and the `os_cloud` line at their indentation, unquoted and
+   with no comment after the value, because `make prod-up` reads the two lines
+   as text. The file ships with both names empty, which `make prod-up`
+   refuses. The [clouds file](/reference/configuration/clouds-file) reference
+   lists every key.
 
 ## Install the add-ons
 
@@ -205,16 +253,16 @@ replaces the add-on and the deploy steps.
    | `tally-db.env` | `password` | `openssl rand -hex 32` |
    | `tally-db.env` | `engine-password` | `openssl rand -hex 32`, a value of its own |
    | `tally-db.env` | `db-url` | the example URL with the value of `password` in place of `<password>` |
+   | `tally-db.env` | `engine-db-url` | the example URL with the value of `password` in place of `<password>` |
+   | `tally-db.env` | `engine-reporting-db-url` | the example URL with the value of `engine-password` in place of `<engine-password>` |
    | `tally-internal-token.env` | `token` | `openssl rand -hex 32` |
    | `tally-grafana.env` | `admin-password` | `openssl rand -hex 32` |
    | `tally-vm-admin.env` | `delete-auth-key` | `openssl rand -hex 32` |
    | `tally-otlp-auth.env` | `htpasswd` | the line of step 3 |
    | `tally-collector-amqp.env` | `amqp-url` | the example URL with the broker account, its password and the broker's host in place of the placeholders |
 
-   A hex value needs no encoding in `db-url`. `engine-password` is required
-   although the cluster runs no engine, because the initdb script that creates
-   the engine's reader role fails on an empty one. Grafana's `admin` user signs
-   in with `admin-password`.
+   A hex value needs no encoding in the three URLs. Grafana's `admin` user
+   signs in with `admin-password`.
 
 3. Hash the OTLP password. `htpasswd` prompts for it, so it stays out of the
    shell's history:
@@ -234,6 +282,21 @@ replaces the add-on and the deploy steps.
    end of this guide send the password. Why the line has this form is in
    [set the credential](/how-to/observability/publish-metrics-over-otlp#set-the-credential).
 
+4. Copy the example of the credential the Reporting API reconciles the cloud
+   with, make the copy readable by you alone, and fill in every `<...>` value:
+
+   ```sh
+   cp deploy/kubernetes/overlays/prod/secrets/clouds.yaml.example deploy/kubernetes/overlays/prod/secrets/clouds.yaml
+   chmod 600 deploy/kubernetes/overlays/prod/secrets/clouds.yaml
+   ```
+
+   The entry name is the `os_cloud` of
+   [configure reconciliation](#configure-reconciliation). The example
+   authenticates with an application credential, and
+   [restrict the account to read requests](/how-to/openstack/reconcile-a-cloud#restrict-the-account-to-read-requests)
+   creates one that every API answers for the requests of a sync alone. Git
+   ignores the file, and `make prod-up` refuses it while a placeholder is left.
+
 ## Deploy the overlay
 
 1. Deploy the overlay:
@@ -242,15 +305,37 @@ replaces the add-on and the deploy steps.
    make prod-up PROD_CONTEXT=<ctx>
    ```
 
-   It checks that every `.env` file exists with each value filled in, that
-   `collector.env` names a cloud and that the checkout is at the tag both
-   `newTag` values name. Then it applies the `letsencrypt` ClusterIssuer and
-   the overlay, and waits for every rollout but the collector's and for the
-   LoadBalancer address of the Gateway. Then it applies the reporting
-   migration chain through a port-forward to TimescaleDB, waits for the
-   Reporting API and prints where the Gateway answers:
+   It checks that every `.env` file exists with each key of its example and
+   each value filled in, that `collector.env` names a cloud, that
+   `secrets/clouds.yaml` carries no placeholder, that `clouds-config.yaml`
+   names the cloud of `collector.env` and an `os_cloud`, and that the checkout
+   is at the tag every `newTag` value names. Then it applies the `letsencrypt`
+   ClusterIssuer, deletes the migration Job `tally-migrate` of the previous
+   deploy and applies the overlay, which creates the Job again. It waits for
+   every rollout but the collector's and for the LoadBalancer address of the
+   Gateway, then for the Job, whose log it prints. The reporting chain is
+   applied first, in an init container, and the engine chain after it. Then it
+   waits for the Reporting API and prints where the Gateway answers. On the
+   first deploy the output ends with these lines:
 
    ```text
+   ==> waiting for the migration Job
+   [pod/tally-migrate-twtkd/reporting] applied migration 1
+   [pod/tally-migrate-twtkd/reporting] applied migration 2
+   [pod/tally-migrate-twtkd/reporting] applied migration 3
+   [pod/tally-migrate-twtkd/reporting] applied migration 4
+   [pod/tally-migrate-twtkd/reporting] applied migration 5
+   [pod/tally-migrate-twtkd/reporting] applied migration 6
+   [pod/tally-migrate-twtkd/reporting] applied migration 7
+   [pod/tally-migrate-twtkd/reporting] applied migration 8
+   [pod/tally-migrate-twtkd/reporting] applied migration 9
+   [pod/tally-migrate-twtkd/reporting] applied migration 10
+   [pod/tally-migrate-twtkd/reporting] applied migration 11
+   [pod/tally-migrate-twtkd/reporting] applied migration 12
+   [pod/tally-migrate-twtkd/engine] applied migration 1
+   [pod/tally-migrate-twtkd/engine] applied migration 2
+   deployment "reporting-api" successfully rolled out
+
    ==> the Gateway answers on 203.0.113.10
        the hostnames of hosts.yaml:
          api.tally.demo.b42labs.com  (api)
@@ -269,6 +354,9 @@ replaces the add-on and the deploy steps.
 
    ==> the collector starts once the Secret tally-collector-token exists, and is Ready once it holds its broker session:
        kubectl --context <ctx> -n tally rollout status deployment/openstack-collector
+
+   ==> the scheduler rates a month once a pricing catalog prices it; until then its hourly Job fails:
+       kubectl --context <ctx> -n tally get cronjob tally-engine tally-sync
    ```
 
    The address is a hostname when the LoadBalancer hands out one. The
@@ -279,13 +367,20 @@ replaces the add-on and the deploy steps.
 2. When a wait runs out, `make prod-up` stops there and names the command that
    shows why. It is safe to run again.
 
-3. When the migration fails, `make prod-up` stops with the error of
-   `tally-reporting-admin migrate`.
+3. When the migration Job fails, `make prod-up` prints its log and stops with
+   `the migration Job tally-migrate failed`. The Job tries four times, each
+   time in a pod of its own, so the log carries the error of every attempt
+   under the name of its pod and container.
    [When an apply fails](/how-to/engine/migrate-both-databases#when-an-apply-fails)
    says how to recover. Reach the database for it through the port-forward of
-   [issue an ingest credential](#issue-an-ingest-credential), and stop that
-   forward before you run `make prod-up` again: it refuses a port something
-   already listens on.
+   [issue an ingest credential](#issue-an-ingest-credential), then run
+   `make prod-up` again: it replaces the failed Job.
+
+4. When the Job has not finished after 30 minutes, `make prod-up` stops and
+   leaves it running, because a migration that is killed can leave a
+   half-built index. `PROD_MIGRATE_WAIT_S` sets the wait in seconds. A later
+   `make prod-up` refuses to replace the Job until it has finished, and names
+   the command that waits for it.
 
 ## Point the domain at the cluster
 
@@ -399,7 +494,8 @@ replaces the add-on and the deploy steps.
    the reason: a line `the AMQP session ended, reconnecting` carries the error
    of the broker.
 
-4. Stop the port-forward with Ctrl-C.
+4. Leave the port-forward running for
+   [import a pricing catalog](#import-a-pricing-catalog).
 
 To replace the token, forward the database as in step 1, delete the Secret
 with `kubectl --context <ctx> -n tally delete secret tally-collector-token` and
@@ -410,6 +506,31 @@ The collector reads the file at its start only, so the running pod keeps the
 old token until the restart. Revoke the old credential afterwards, as
 [issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials#revoke-a-credential)
 shows.
+
+## Import a pricing catalog
+
+The scheduler rates a month once its grace window of 72 hours has passed and a
+pricing catalog prices it. Until a catalog does, its hourly Job fails on that
+month with `no pricing model is valid for this period`, which is the signal
+that the catalog is missing.
+
+1. Import the catalog through the port-forward of
+   [issue an ingest credential](#issue-an-ingest-credential). The connection
+   string reads the password out of `tally-db.env`:
+
+   ```sh
+   TALLY_ENGINE_DB_URL="postgres://tally:$(sed -n 's/^password=//p' deploy/kubernetes/overlays/prod/secrets/tally-db.env)@127.0.0.1:15432/tally_engine?sslmode=disable" \
+     go run ./cmd/tally-engine pricing import <file>
+   ```
+
+   ```text
+   imported pricing model 2026-03 valid from 2026-03-01T00:00:00Z
+   ```
+
+   [Import a pricing model](/how-to/engine/import-a-pricing-model) says what
+   the file declares and how to read the imported versions back.
+
+2. Stop the port-forward with Ctrl-C.
 
 ## Reach the unpublished services
 
@@ -526,17 +647,127 @@ shows.
    `"connected":true` is what counts. `delivered` rises once the cloud sends
    notifications, and `buffered` stays at 0 while the Reporting API takes them.
 
-8. A second deploy changes nothing. The filter keeps the lines of
-   `kubectl apply` that report a change and the migration's answer:
+8. The migration Job has completed:
 
    ```sh
-   make prod-up PROD_CONTEXT=<ctx> | grep -E ' (created|configured)$|^nothing to apply$'
+   kubectl --context <ctx> -n tally get job tally-migrate
    ```
 
    ```text
-   nothing to apply
+   NAME            STATUS     COMPLETIONS   DURATION   AGE
+   tally-migrate   Complete   1/1           6s         6s
    ```
 
-   Every object is reported `unchanged`, so no pod rolls:
-   `kubectl --context <ctx> -n tally get pods` lists the same pods before and
-   after the run.
+9. A sync of the cloud completes. Create a Job from the CronJob, wait for it,
+   read its log and delete it:
+
+   ```sh
+   kubectl --context <ctx> -n tally create job --from=cronjob/tally-sync sync-check
+   kubectl --context <ctx> -n tally wait --for=condition=complete job/sync-check --timeout=2m
+   kubectl --context <ctx> -n tally logs job/sync-check
+   kubectl --context <ctx> -n tally delete job sync-check
+   ```
+
+   ```text
+   job.batch/sync-check created
+   job.batch/sync-check condition met
+   {"stats":{"created":0,"deleted":0,"updated":2},"sync_run_id":"2c0b7e07-197b-4d53-af19-dce55400e216"}
+   job.batch "sync-check" deleted from tally namespace
+   ```
+
+   The log is the answer of the Reporting API, and `sync_run_id` names the row
+   of `sync_runs` the run left. A Job that fails logs one line starting with
+   `wget:`. `404 Not Found` is a cloud `clouds-config.yaml` does not name,
+   `500 Internal Server Error` a run that failed, whose reasons
+   [check the result](/how-to/openstack/reconcile-a-cloud#check-the-result)
+   reads, `409 Conflict` a scheduled run that held the cloud at the same
+   moment, and `download timed out` a Reporting API that does not answer.
+
+10. Both CronJobs are scheduled:
+
+    ```sh
+    kubectl --context <ctx> -n tally get cronjob tally-engine tally-sync
+    ```
+
+    ```text
+    NAME           SCHEDULE       TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+    tally-engine   0 * * * *      <none>     False     0        <none>          8m57s
+    tally-sync     */10 * * * *   <none>     False     0        3s              8m15s
+    ```
+
+    `LAST SCHEDULE` reads `<none>` until the first schedule after the deploy:
+    the next multiple of 10 minutes for `tally-sync` and the next full hour
+    for `tally-engine`.
+
+11. A second deploy changes nothing but the migration Job. The filter keeps
+    the lines of `kubectl apply` that report a change and the answers of the
+    two chains:
+
+    ```sh
+    make prod-up PROD_CONTEXT=<ctx> | grep -E ' (created|configured)$|nothing to apply$'
+    ```
+
+    ```text
+    job.batch/tally-migrate created
+    [pod/tally-migrate-b5qkd/reporting] nothing to apply
+    [pod/tally-migrate-b5qkd/engine] nothing to apply
+    ```
+
+    The Job is created again, and both chains at their head apply nothing.
+    Every other object is reported `unchanged`, so no Deployment or
+    StatefulSet rolls.
+
+## Deploy from a pipeline
+
+`make prod-up` checks its input and then runs two applies and a wait, and a
+pipeline that deploys a release runs those three steps itself:
+
+1. Delete the migration Job of the previous deploy once it has finished. A
+   Job's pod template is immutable, so the apply of a new tag fails on the old
+   Job with `field is immutable`. A Job that is still running is left alone
+   and stops the pipeline: a migration that is killed can leave a half-built
+   index. The read prints nothing for no Job, the name alone for one that has
+   not finished, and `Complete` or `Failed` beside it for one that has. A read
+   that fails stops the pipeline as well, rather than reading as no Job:
+
+   ```sh
+   (
+     state="$(kubectl --context <ctx> -n tally get job tally-migrate --ignore-not-found \
+       -o jsonpath='{.metadata.name}:{.status.conditions[?(@.status=="True")].type}')" \
+       || { echo "cluster read failed; not deleting" >&2; exit 1; }
+     case "$state" in
+       ''|*Complete*|*Failed*)
+         kubectl --context <ctx> -n tally delete job tally-migrate --ignore-not-found ;;
+       *)
+         echo "tally-migrate has not finished; wait for it before deploying" >&2
+         exit 1 ;;
+     esac
+   )
+   ```
+
+2. Apply the certificate issuer and the overlay:
+
+   ```sh
+   kubectl --context <ctx> apply -f deploy/kubernetes/overlays/prod/issuers.yaml
+   kubectl --context <ctx> apply -k deploy/kubernetes/overlays/prod
+   ```
+
+3. Gate the pipeline on the migration Job:
+
+   ```sh
+   kubectl --context <ctx> -n tally wait --for=condition=complete job/tally-migrate --timeout=30m
+   ```
+
+   A failed Job runs the wait out, and
+   `kubectl --context <ctx> -n tally logs -l batch.kubernetes.io/job-name=tally-migrate --all-containers --prefix --tail=-1`
+   prints why it failed.
+
+The overlay reads the untracked secret files and `secrets/clouds.yaml` from the
+checkout the pipeline applies from; what supplies them there is the pipeline's
+tooling. `kubectl apply -k` applies an empty value as it applies any other,
+and the shipped clouds config ends the Reporting API at startup with
+`clouds[0]: cloud must be set`. The checks `make prod-up` runs first are the
+commands
+[use another Gateway API implementation](/how-to/cluster/use-another-gateway-api-implementation#deploy)
+prints, and a pipeline runs them before it applies. The ingest credential and
+the pricing catalog stay one-time steps from a checkout.
