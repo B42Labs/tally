@@ -1,8 +1,11 @@
 // This file runs the prod targets of the Makefile up to the refusal of each
 // guard, and every guard stands in front of a failure that is quiet otherwise.
 // An empty secret value applies like any other, and Grafana comes up on its
-// default admin password. An empty cloud applies too, and the collector exits
-// in a pod no step of the target waits on. A migration chain that does not
+// default admin password. A secret file without a key of its example applies
+// too, and the pod that mounts the Secret does not start. An empty cloud
+// applies, and the collector exits in a pod no step of the target waits on. A
+// clouds config that names another cloud than the collector applies as well,
+// and every sync is answered 404. A migration chain that does not
 // match the image leaves the old pod Ready on a schema it does not know, and
 // two images at two tags leave one of them on another release than the chain.
 // A listener already on the forwarded port answers the probe, and the
@@ -83,8 +86,18 @@ func TestProdUpRefusesASecretThatIsNotFilledIn(t *testing.T) {
 		{"a value of blanks", "tally-vm-admin.env", "delete-auth-key=  \n", "tally-vm-admin.env leaves delete-auth-key empty or on a placeholder"},
 		{
 			"a placeholder", "tally-db.env",
-			"password=0a1b\nengine-password=0a1b\ndb-url=postgres://tally:<password>@timescaledb:5432/tally_reporting?sslmode=disable\n",
+			"password=0a1b\nengine-password=0a1b\n" +
+				"db-url=postgres://tally:<password>@timescaledb:5432/tally_reporting?sslmode=disable\n" +
+				"engine-db-url=postgres://tally:0a1b@timescaledb:5432/tally_engine?sslmode=disable\n" +
+				"engine-reporting-db-url=postgres://tally_engine:0a1b@timescaledb:5432/tally_reporting?sslmode=disable\n",
 			"tally-db.env leaves db-url empty or on a placeholder",
+		},
+		// The file of a deployment from before the scheduler ran here carries
+		// three keys, and the two engine keys are what the upgrade adds.
+		{
+			"three of five keys", "tally-db.env",
+			"password=0a1b\nengine-password=0a1b\ndb-url=postgres://tally:0a1b@timescaledb:5432/tally_reporting?sslmode=disable\n",
+			"tally-db.env lacks engine-db-url engine-reporting-db-url; copy the lines from",
 		},
 	}
 	for _, tc := range cases {
@@ -131,11 +144,66 @@ func TestProdUpRefusesACollectorWithoutACloud(t *testing.T) {
 		{"a value of blanks", "TALLY_OSC_CLOUD=  \n", "collector.env leaves TALLY_OSC_CLOUD empty"},
 		{"a commented-out line", "# TALLY_OSC_CLOUD=os-test\n", "collector.env leaves TALLY_OSC_CLOUD empty"},
 		{"no line for the cloud", "TALLY_OSC_EXCHANGES=nova\n", "collector.env leaves TALLY_OSC_CLOUD empty"},
+		// kustomize keeps the blanks around a value, and the clouds config,
+		// which is YAML, drops them, so the sync asks for a cloud the Reporting
+		// API does not reconcile.
+		{"a blank after the cloud", "TALLY_OSC_CLOUD=os-test \n", "collector.env leaves TALLY_OSC_CLOUD empty or with whitespace around it"},
+		{"a blank before the cloud", "TALLY_OSC_CLOUD= os-test\n", "collector.env leaves TALLY_OSC_CLOUD empty or with whitespace around it"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			overlay := prodOverlay(t, release)
 			file := filepath.Join(overlay, collectorSettingsFile)
+			var err error
+			if tc.content == "" {
+				err = os.Remove(file)
+			} else {
+				err = os.WriteFile(file, []byte(tc.content), 0o600)
+			}
+			if err != nil {
+				t.Fatalf("preparing %s: %v", file, err)
+			}
+
+			out, code := runMake(t, checkout(t, release), "prod-up", overlay)
+			if code == 0 || !strings.Contains(out, tc.want) {
+				t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, tc.want, out)
+			}
+			if strings.Contains(out, prodUpPassed) {
+				t.Errorf("make prod-up went on to the cluster after the refusal:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestProdUpRefusesAReconciliationThatIsNotConfigured(t *testing.T) {
+	// The Secret and the ConfigMap render from whatever the files hold. A
+	// clouds.yaml left on its placeholders fails every sync with a 500, a
+	// clouds config that names another cloud than collector.env runs a sync
+	// that is answered 404 every ten minutes, and the shipped config with its
+	// empty names ends the Reporting API at startup. make prod-up reads the
+	// cloud line as text, so a quoted name is refused as well. The content ""
+	// removes the file.
+	const auth, config = "secrets/clouds.yaml", "reconciliation/clouds-config.yaml"
+
+	cases := []struct {
+		name, file, content, want string
+	}{
+		{"a missing clouds.yaml", auth, "", auth + " is missing; copy "},
+		{
+			"a clouds.yaml on a placeholder", auth,
+			"clouds:\n  os-test:\n    auth_type: v3applicationcredential\n    auth:\n      auth_url: <auth-url>\n",
+			auth + " still carries a placeholder",
+		},
+		{"a missing clouds config", config, "", config + " does not name the cloud os-test of collector.env"},
+		{"the shipped clouds config", config, shippedCloudsConfig(t), config + " does not name the cloud os-test of collector.env"},
+		{"another cloud", config, cloudsConfig(t, "os-other", "os-test"), config + " does not name the cloud os-test of collector.env"},
+		{"a quoted cloud", config, cloudsConfig(t, `"os-test"`, "os-test"), config + " does not name the cloud os-test of collector.env"},
+		{"an empty os_cloud", config, cloudsConfig(t, "os-test", ""), config + " leaves os_cloud empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := prodOverlay(t, release)
+			file := filepath.Join(overlay, tc.file)
 			var err error
 			if tc.content == "" {
 				err = os.Remove(file)
@@ -342,8 +410,9 @@ func imagesAt(reportingTag, collectorTag string) string {
 
 // prodOverlay returns a directory standing in for the prod overlay: a
 // kustomization.yaml deploying both images at tag, a collector.env that names
-// a cloud, and every example secret file of the real overlay beside a copy
-// with each empty value and placeholder filled in.
+// a cloud, a clouds config that names it too, and every example secret file of
+// the real overlay beside a copy with each empty value and placeholder filled
+// in.
 func prodOverlay(t *testing.T, tag string) string {
 	t.Helper()
 
@@ -351,13 +420,17 @@ func prodOverlay(t *testing.T, tag string) string {
 	if err != nil || len(examples) == 0 {
 		t.Fatalf("finding the example secret files: %d found, error %v", len(examples), err)
 	}
+	examples = append(examples, cloudsSecretFile+".example")
 	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "secrets"), 0o700); err != nil {
-		t.Fatal(err)
+	for _, sub := range []string{"secrets", filepath.Dir(cloudsConfigFile)} {
+		if err := os.Mkdir(filepath.Join(dir, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	files := map[string]string{
 		kustomizationFile:     imagesAt(tag, tag),
 		collectorSettingsFile: "TALLY_OSC_CLOUD=os-test\n",
+		cloudsConfigFile:      cloudsConfig(t, "os-test", "os-test"),
 	}
 	for _, example := range examples {
 		raw, err := os.ReadFile(example)
@@ -374,6 +447,33 @@ func prodOverlay(t *testing.T, tag string) string {
 		}
 	}
 	return dir
+}
+
+// shippedCloudsConfig returns the clouds config of the real overlay.
+func shippedCloudsConfig(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(cloudsConfigFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", cloudsConfigFile, err)
+	}
+	return string(raw)
+}
+
+// cloudsConfig returns the clouds config of the real overlay with its cloud
+// and os_cloud lines set to the two values.
+func cloudsConfig(t *testing.T, cloud, osCloud string) string {
+	t.Helper()
+
+	lines := strings.Split(shippedCloudsConfig(t), "\n")
+	for line, value := range map[string]string{"  - cloud:": cloud, "      os_cloud:": osCloud} {
+		i := slices.Index(lines, line)
+		if i < 0 {
+			t.Fatalf("%s carries no line %q to fill", cloudsConfigFile, line)
+		}
+		lines[i] = strings.TrimRight(line+" "+value, " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // freePort returns the assignment of a port nothing listens on to PROD_DB_PORT.
