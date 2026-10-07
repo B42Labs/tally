@@ -52,8 +52,9 @@ IMAGES := $(SERVICES) tally-openstack-collector tally-openstack-simulator
 # What a release pushes to the registry, which the push loop of
 # .github/workflows/release.yaml names one by one and packaging/release_test.go
 # compares with this line. The collector image is what the openstack-collector
-# kustomize component runs. tally-reporting-admin is in no other list, because
-# the dev stack runs it with `go run`.
+# kustomize component runs, and the admin image is what the migrations
+# component runs beside the engine image. tally-reporting-admin is in no other
+# list, because the dev stack runs it with `go run`.
 RELEASE_IMAGES := $(SERVICES) tally-openstack-collector tally-reporting-admin
 
 # The images the stack runs, which is what `simulator-up` builds. It is not
@@ -110,15 +111,24 @@ KUBECTL := kubectl --context $(KUBE_CONTEXT)
 # The prod targets act on a real cluster, and PROD_CONTEXT is the kubectl
 # context that names it. It has no default, so no prod target runs against
 # whatever context is current: each of them refuses to start while it is empty.
-# PROD_OVERLAY is the overlay they deploy, and PROD_DB_PORT is the port on
-# 127.0.0.1 `prod-migrate` forwards TimescaleDB to.
+# PROD_OVERLAY is the overlay they deploy, and PROD_MIGRATE_WAIT_S is how many
+# seconds `prod-up` waits for the migration Job tally-migrate to finish.
 PROD_OVERLAY := deploy/kubernetes/overlays/prod
 PROD_CONTEXT ?=
-PROD_DB_PORT ?= 15432
+PROD_MIGRATE_WAIT_S ?= 1800
 PROD_KUBECTL := kubectl --context $(PROD_CONTEXT)
 # A comma in a $(call) argument splits the argument, and a comma in the value of
 # a variable the argument references does not, so the selector is a variable.
 PROD_GATEWAY_SELECTOR := gateway.envoyproxy.io/owning-gateway-name=tally,gateway.envoyproxy.io/owning-gateway-namespace=tally
+# The state of the migration Job as `prod-up` reads it: the name and the types
+# of its true conditions, which is nothing for no Job and "tally-migrate:" for
+# one that has not finished.
+PROD_MIGRATE_STATE := {.metadata.name}:{.status.conditions[?(@.status=="True")].type}
+# The migration Job, the command that reads its state and the one that prints
+# the log of every pod it ran.
+PROD_MIGRATE_JOB := tally-migrate
+PROD_MIGRATE_GET := $(PROD_KUBECTL) -n $(NAMESPACE) get job $(PROD_MIGRATE_JOB) --ignore-not-found -o jsonpath='$(PROD_MIGRATE_STATE)'
+PROD_MIGRATE_LOGS := $(PROD_KUBECTL) -n $(NAMESPACE) logs -l batch.kubernetes.io/job-name=$(PROD_MIGRATE_JOB) --all-containers --prefix --tail=-1
 
 # How long one readiness wait may take, and how many of them a rollout gets. The
 # product is the budget. A first `make up` on a fresh node pulls every image the
@@ -183,16 +193,12 @@ define prod_context_guard
 endef
 
 # prod_release_guard stops a prod target unless the checkout is the release the
-# overlay deploys. `go run` migrates with the chain of the checkout, and the
-# Reporting API's readiness refuses only a schema behind its build: a chain
-# ahead of the image leaves the old pod Ready on a schema it does not know, and
-# one behind it leaves the new pod unready with nothing naming why. go:embed
-# takes every .sql file there, while git status leaves out an ignored one, and
-# every untracked one once status.showUntrackedFiles is no; git ls-files
-# --others lists them whatever the ignore rules and that setting say. The
-# overlay deploys one release, so every newTag of it is the same tag: with two
-# the checkout is at one of them at most, and the image at the other runs
-# against a chain that is not its own.
+# overlay deploys. The migrations run in the cluster with the images, but the
+# checkout still supplies the manifests the images run under, and the
+# credential and catalog steps of the how-to run the CLIs of the checkout
+# against the schema of the image. The overlay deploys one release, so every
+# newTag of it is the same tag: with two the checkout is at one of them at
+# most, and the image at the other runs under manifests that are not its own.
 define prod_release_guard
 	@tag="$$(sed -n 's/^ *newTag: *//p' '$(PROD_OVERLAY)/kustomization.yaml' | sort -u)"; \
 	if [ "$$(printf '%s\n' "$$tag" | wc -l)" -gt 1 ]; then \
@@ -200,11 +206,7 @@ define prod_release_guard
 		exit 1; \
 	fi; \
 	if [ -z "$$tag" ] || ! git tag --points-at HEAD | grep -qxF "$$tag"; then \
-		echo "ERROR: the prod overlay deploys $${tag:-no tag}, but the checkout is at $$(git describe --tags --always HEAD); check out $${tag:-the release tag}, so the migration chain matches the image" >&2; \
-		exit 1; \
-	fi; \
-	if [ -n "$$(git status --porcelain -- migrations/reporting; git ls-files --others -- 'migrations/reporting/*.sql')" ]; then \
-		echo 'ERROR: migrations/reporting differs from the tag, so the migration chain does not match the image' >&2; \
+		echo "ERROR: the prod overlay deploys $${tag:-no tag}, but the checkout is at $$(git describe --tags --always HEAD); check out $${tag:-the release tag}, so the manifests match the images" >&2; \
 		exit 1; \
 	fi
 endef
@@ -317,7 +319,7 @@ ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deplo
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
 	images deb sbom simulator-up simulator-down console demo demo-drain demo-registry \
-	demo-bill demo-correct docs docs-build prod-addons prod-up prod-migrate
+	demo-bill demo-correct docs docs-build prod-addons prod-up
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
 # stack, and an engine given less than this spends the readiness waits of `up`
@@ -994,7 +996,17 @@ prod-addons:
 # collector's rollout is not waited on. Its readiness depends on a broker
 # outside the cluster and on a Secret the operator creates after this run, so
 # the target prints the command that shows it instead.
-## prod-up: deploy the prod overlay to the cluster PROD_CONTEXT names and migrate the reporting database
+#
+# The migrations run in Job tally-migrate, which the apply creates. A Job's pod
+# template is immutable, so the finished Job of the previous run is deleted
+# before the apply. One that has not finished is left alone and ends the run,
+# because a migration that is killed can leave a half-built index. The state is
+# the Job's true conditions, which kubectl prints as nothing for no Job and as
+# Complete or Failed for a finished one. The wait polls that state rather than
+# running `kubectl wait` on one condition, so a failed Job ends the run at once
+# with its log instead of at the end of the wait. Each `|| exit 1` is there for
+# make 3.81, which ignores .SHELLFLAGS and runs the recipe without errexit.
+## prod-up: deploy the prod overlay to the cluster PROD_CONTEXT names and wait for its migration Job
 prod-up:
 	$(call prod_context_guard)
 	@for example in $(PROD_OVERLAY)/secrets/*.env.example; do \
@@ -1021,6 +1033,13 @@ prod-up:
 	$(call prod_release_guard)
 	@echo '==> installing the certificate issuer'
 	$(PROD_KUBECTL) apply -f $(PROD_OVERLAY)/issuers.yaml
+	@echo '==> replacing the migration Job'
+	@state="$$($(PROD_MIGRATE_GET))" || exit 1; \
+	case "$$state" in \
+		''|*Complete*|*Failed*) ;; \
+		*) echo 'ERROR: the migration Job $(PROD_MIGRATE_JOB) of an earlier run has not finished. A migration that is killed can leave a half-built index, so wait for it: kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) wait --for=condition=complete job/$(PROD_MIGRATE_JOB) --timeout=$(PROD_MIGRATE_WAIT_S)s' >&2; exit 1 ;; \
+	esac; \
+	$(PROD_KUBECTL) -n $(NAMESPACE) delete job $(PROD_MIGRATE_JOB) --ignore-not-found
 	@echo '==> applying the prod overlay'
 	$(PROD_KUBECTL) apply -k $(PROD_OVERLAY)
 	$(call prod_await,-n $(NAMESPACE) rollout status statefulset/timescaledb,TimescaleDB)
@@ -1030,8 +1049,26 @@ prod-up:
 	$(call prod_await,-n $(NAMESPACE) rollout status statefulset/alertmanager,Alertmanager)
 	$(call prod_await,-n $(NAMESPACE) rollout status deployment/vmalert,vmalert)
 	$(call prod_await,-n envoy-gateway-system wait svc -l $(PROD_GATEWAY_SELECTOR) --for=jsonpath='{.status.loadBalancer.ingress}',the LoadBalancer address of the Gateway)
-	@echo '==> applying the reporting migration chain'
-	$(MAKE) prod-migrate
+	@echo '==> waiting for the migration Job'
+	@waited=0; \
+	while :; do \
+		state="$$($(PROD_MIGRATE_GET))" || exit 1; \
+		case "$$state" in \
+			*Complete*) \
+				$(PROD_MIGRATE_LOGS) || exit 1; \
+				break ;; \
+			*Failed*) \
+				$(PROD_MIGRATE_LOGS) >&2 || true; \
+				echo 'ERROR: the migration Job $(PROD_MIGRATE_JOB) failed; its log is above. docs/how-to/engine/migrate-both-databases.md says how to recover, and make prod-up is safe to run again' >&2; \
+				exit 1 ;; \
+		esac; \
+		if [ "$$waited" -ge '$(PROD_MIGRATE_WAIT_S)' ]; then \
+			echo 'ERROR: the migration Job $(PROD_MIGRATE_JOB) did not finish in $(PROD_MIGRATE_WAIT_S)s. It is left running, and make prod-up replaces it only once it has finished: kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) logs -f job/$(PROD_MIGRATE_JOB)' >&2; \
+			exit 1; \
+		fi; \
+		sleep 5; \
+		waited=$$((waited + 5)); \
+	done
 	$(call prod_await,-n $(NAMESPACE) rollout status deployment/reporting-api,the Reporting API)
 	@address="$$($(PROD_KUBECTL) -n envoy-gateway-system get svc -l '$(PROD_GATEWAY_SELECTOR)' -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')"; \
 	if [ -z "$$address" ]; then \
@@ -1051,44 +1088,10 @@ prod-up:
 	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) port-forward svc/alertmanager 9093:9093'; \
 	echo; \
 	echo '==> the collector starts once the Secret tally-collector-token exists, and is Ready once it holds its broker session:'; \
-	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) rollout status deployment/openstack-collector'
-
-# prod-migrate applies the reporting chain alone, because this cluster runs no
-# engine. The prod overlay has no postgres listener, so the database is reached
-# through a port-forward. The URL is an environment value of the one process
-# that migrates and lands in no file. The password is a hex value from
-# `openssl rand -hex 32`, so the URL needs no encoding. A listener already on
-# PROD_DB_PORT is refused, because the probe below would take it for the forward
-# and migrate whatever database answers there.
-## prod-migrate: apply the reporting migration chain through a port-forward to the cluster PROD_CONTEXT names
-prod-migrate:
-	$(call prod_context_guard)
-	$(call prod_release_guard)
-	@password="$$(sed -n 's/^password=//p' '$(PROD_OVERLAY)/secrets/tally-db.env' 2>/dev/null || true)"; \
-	if [ -z "$$password" ]; then \
-		echo 'ERROR: $(PROD_OVERLAY)/secrets/tally-db.env carries no password' >&2; \
-		exit 1; \
-	fi; \
-	if nc -z 127.0.0.1 '$(PROD_DB_PORT)' >/dev/null 2>&1; then \
-		echo 'ERROR: something already listens on 127.0.0.1:$(PROD_DB_PORT), such as a port-forward left running; stop it or set PROD_DB_PORT' >&2; \
-		exit 1; \
-	fi; \
-	log="$$(mktemp)"; \
-	$(PROD_KUBECTL) -n $(NAMESPACE) port-forward svc/timescaledb '$(PROD_DB_PORT):5432' >"$$log" 2>&1 & \
-	forward=$$!; \
-	trap 'kill $$forward 2>/dev/null || true; rm -f "$$log"' EXIT; \
-	ready=; \
-	for attempt in $$(seq 30); do \
-		kill -0 "$$forward" 2>/dev/null || break; \
-		if nc -z 127.0.0.1 '$(PROD_DB_PORT)' >/dev/null 2>&1; then ready=yes; break; fi; \
-		sleep 1; \
-	done; \
-	if [ -z "$$ready" ]; then \
-		echo 'ERROR: the port-forward to TimescaleDB never answered on 127.0.0.1:$(PROD_DB_PORT); kubectl said:' >&2; \
-		cat "$$log" >&2; \
-		exit 1; \
-	fi; \
-	TALLY_REPORTING_DB_URL="postgres://tally:$$password@127.0.0.1:$(PROD_DB_PORT)/tally_reporting?sslmode=disable" go run ./cmd/tally-reporting-admin migrate
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) rollout status deployment/openstack-collector'; \
+	echo; \
+	echo '==> the scheduler rates a month once a pricing catalog prices it; until then its hourly Job fails:'; \
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) get cronjob tally-engine tally-sync'
 
 ## generate: run the code generators and refresh the generated blocks of the reference pages and the handbook
 generate:

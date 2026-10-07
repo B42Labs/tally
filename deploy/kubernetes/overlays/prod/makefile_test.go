@@ -5,25 +5,27 @@
 // too, and the pod that mounts the Secret does not start. An empty cloud
 // applies, and the collector exits in a pod no step of the target waits on. A
 // clouds config that names another cloud than the collector applies as well,
-// and every sync is answered 404. A migration chain that does not
-// match the image leaves the old pod Ready on a schema it does not know, and
-// two images at two tags leave one of them on another release than the chain.
-// A listener already on the forwarded port answers the probe, and the
-// migration reaches whatever database is behind it. The targets run in a
-// throwaway Git repository with an empty kubeconfig and a context nothing
-// names, so a guard that lets one through fails at kubectl rather than at a
-// cluster.
+// and every sync is answered 404. Two images at two tags leave one of them
+// under the manifests of another release. The targets run in a throwaway Git
+// repository with an empty kubeconfig and a context nothing names, so a guard
+// that lets one through fails at kubectl rather than at a cluster.
+//
+// What prod-up does with the migration Job runs against a stand-in for
+// kubectl: a shell script that logs every call and answers a get of the Job
+// with a state the test chooses, one before the apply and one for each poll
+// after it. A Job that has not finished and is deleted anyway is a migration
+// killed in the middle, which can leave a half-built index, and a failed Job
+// that is not read is a Reporting API that stays unready with nothing naming
+// why.
 package prod_test
 
 import (
 	"errors"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -36,10 +38,54 @@ const (
 	noContext = "tally-test-no-such-context"
 	release   = "v0.0.1"
 
-	// What the targets print once every guard let them through.
-	prodUpPassed      = "==> installing the certificate issuer"
-	prodMigratePassed = "ERROR: the port-forward to TimescaleDB never answered"
+	// What prod-up prints once every guard let it through.
+	prodUpPassed = "==> installing the certificate issuer"
+
+	// The states of the migration Job the stand-in for kubectl answers with,
+	// as the get prod-up runs prints them: nothing for no Job, the name alone
+	// for one that has not finished, and the types of its true conditions
+	// beside it for one that has.
+	jobAbsent   = ""
+	jobRunning  = "tally-migrate:"
+	jobComplete = "tally-migrate:SuccessCriteriaMet Complete"
+	jobFailed   = "tally-migrate:FailureTarget Failed"
+
+	// The calls prod-up makes, as the stand-in logs them, that the tests look
+	// for and order.
+	deleteJobArg = "delete job tally-migrate --ignore-not-found"
+	applyArg     = "apply -k "
+	jobLogsArg   = "logs -l batch.kubernetes.io/job-name=tally-migrate"
+	reportingArg = "rollout status deployment/reporting-api"
 )
+
+// kubectlStub stands in for kubectl. It logs its arguments to the file log
+// beside it and answers a get of a Job: with the content of before until it
+// has logged an apply -k, and from then on with line n of after for the nth
+// get, or with its last line once n is past it. A get fails while a file fail
+// lies beside it, and so does a get past the 20th after the apply, which ends
+// a wait that would otherwise poll forever. Every other call prints nothing
+// and exits 0.
+const kubectlStub = `#!/bin/sh
+dir="$(dirname "$0")"
+echo "$*" >> "$dir/log"
+case " $* " in
+*" get job "*)
+	[ ! -f "$dir/fail" ] || exit 1
+	if grep -q '^apply -k ' "$dir/log"; then
+		n=$(sed -n '/^apply -k /,$p' "$dir/log" | grep -c ' get job ')
+		[ "$n" -le 20 ] || exit 1
+		awk -v n="$n" 'NR <= n { state = $0 } END { print state }' "$dir/after"
+	else
+		cat "$dir/before"
+	fi
+	;;
+esac
+exit 0
+`
+
+// sleepStub stands in for sleep and returns at once, so a test of the wait
+// polls without waiting between the polls.
+const sleepStub = "#!/bin/sh\nexit 0\n"
 
 // prodTargetRe matches the rule of a prod target and the first line of its
 // recipe.
@@ -225,119 +271,158 @@ func TestProdUpRefusesAReconciliationThatIsNotConfigured(t *testing.T) {
 	}
 }
 
-func TestProdTargetsRefuseACheckoutThatIsNotTheDeployedRelease(t *testing.T) {
-	// go run migrates with the chain of the checkout, and the Reporting API's
-	// readiness refuses only a schema behind its build. A chain ahead of the
-	// image leaves the old pod Ready on a schema it does not know, and one
-	// behind it leaves the new pod unready with nothing naming why.
-	passed := map[string]string{"prod-up": prodUpPassed, "prod-migrate": prodMigratePassed}
-
-	// go:embed takes every .sql file in the directory whatever Git makes of it,
-	// so a migration git status leaves out is refused all the same: one an
-	// excludes file ignores, and one status.showUntrackedFiles=no hides.
-	excludes := filepath.Join(t.TempDir(), "excludes")
-	if err := os.WriteFile(excludes, []byte("*.sql\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	hidden := map[string][]string{
-		"":                         nil,
-		", ignored":                {"core.excludesFile", excludes},
-		", hidden from git status": {"status.showUntrackedFiles", "no"},
-	}
-
-	for target, next := range passed {
-		t.Run(target+" at another tag", func(t *testing.T) {
-			out, code := runMake(t, checkout(t, "v0.0.2"), target, prodOverlay(t, release), freePort(t))
-			want := "ERROR: the prod overlay deploys " + release + ", but the checkout is at v0.0.2"
-			if code == 0 || !strings.Contains(out, want) {
-				t.Errorf("make %s exited %d, want a refusal carrying %q:\n%s", target, code, want, out)
-			}
-		})
-
-		// The overlay deploys one release. With two tags the checkout can be at
-		// one of them only, and the image at the other runs against a chain
-		// that is not its own.
-		t.Run(target+" with two images at two tags", func(t *testing.T) {
-			overlay := prodOverlay(t, release)
-			file := filepath.Join(overlay, kustomizationFile)
-			if err := os.WriteFile(file, []byte(imagesAt(release, "v0.0.2")), 0o600); err != nil {
-				t.Fatalf("preparing %s: %v", file, err)
-			}
-
-			out, code := runMake(t, checkout(t, release), target, overlay, freePort(t))
-			want := "ERROR: the prod overlay names more than one tag (" + release + " v0.0.2)"
-			if code == 0 || !strings.Contains(out, want) {
-				t.Errorf("make %s exited %d, want a refusal carrying %q:\n%s", target, code, want, out)
-			}
-			if strings.Contains(out, next) {
-				t.Errorf("make %s went on after the refusal:\n%s", target, out)
-			}
-		})
-
-		for how, config := range hidden {
-			t.Run(target+" with a migration the tag does not carry"+how, func(t *testing.T) {
-				dir := checkout(t, release)
-				if config != nil {
-					cmd := exec.Command("git", append([]string{"config"}, config...)...)
-					cmd.Dir = dir
-					cmd.Env = testEnv()
-					if out, err := cmd.CombinedOutput(); err != nil {
-						t.Fatalf("git config %s: %v\n%s", strings.Join(config, " "), err, out)
-					}
-				}
-				migrations := filepath.Join(dir, "migrations", "reporting")
-				if err := os.MkdirAll(migrations, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(migrations, "0099_drop.sql"), []byte("-- +goose Up\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-
-				out, code := runMake(t, dir, target, prodOverlay(t, release), freePort(t))
-				if want := "ERROR: migrations/reporting differs from the tag"; code == 0 || !strings.Contains(out, want) {
-					t.Errorf("make %s exited %d, want a refusal carrying %q:\n%s", target, code, want, out)
-				}
-			})
-		}
-
-		t.Run(target+" at the tag", func(t *testing.T) {
-			if out, _ := runMake(t, checkout(t, release), target, prodOverlay(t, release), freePort(t)); !strings.Contains(out, next) {
-				t.Errorf("make %s did not get past its checks to %q:\n%s", target, next, out)
-			}
-		})
-	}
-}
-
-func TestProdMigrateRefusesAPortSomethingListensOn(t *testing.T) {
-	// A port-forward left running from the credential step, or any other
-	// listener, answers the probe as if it were the forward, and the migration
-	// runs against whatever database is behind it.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening on a port: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := listener.Close(); err != nil {
-			t.Errorf("closing the listener: %v", err)
+func TestProdUpRefusesACheckoutThatIsNotTheDeployedRelease(t *testing.T) {
+	// The checkout supplies the manifests the images run under, and the
+	// credential and catalog steps of the how-to run the CLIs of the checkout
+	// against the schema of the image.
+	t.Run("at another tag", func(t *testing.T) {
+		out, code := runMake(t, checkout(t, "v0.0.2"), "prod-up", prodOverlay(t, release))
+		want := "ERROR: the prod overlay deploys " + release + ", but the checkout is at v0.0.2; check out " + release + ", so the manifests match the images"
+		if code == 0 || !strings.Contains(out, want) {
+			t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, want, out)
 		}
 	})
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
-	out, code := runMake(t, checkout(t, release), "prod-migrate", prodOverlay(t, release), "PROD_DB_PORT="+port)
-	if want := "ERROR: something already listens on 127.0.0.1:" + port; code == 0 || !strings.Contains(out, want) {
-		t.Errorf("make prod-migrate exited %d, want a refusal carrying %q:\n%s", code, want, out)
+	// The overlay deploys one release. With two tags the checkout can be at
+	// one of them only, and the image at the other runs under manifests that
+	// are not its own.
+	t.Run("with two images at two tags", func(t *testing.T) {
+		overlay := prodOverlay(t, release)
+		file := filepath.Join(overlay, kustomizationFile)
+		if err := os.WriteFile(file, []byte(imagesAt(release, "v0.0.2")), 0o600); err != nil {
+			t.Fatalf("preparing %s: %v", file, err)
+		}
+
+		out, code := runMake(t, checkout(t, release), "prod-up", overlay)
+		want := "ERROR: the prod overlay names more than one tag (" + release + " v0.0.2)"
+		if code == 0 || !strings.Contains(out, want) {
+			t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, want, out)
+		}
+		if strings.Contains(out, prodUpPassed) {
+			t.Errorf("make prod-up went on after the refusal:\n%s", out)
+		}
+	})
+
+	t.Run("at the tag", func(t *testing.T) {
+		if out, _ := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release)); !strings.Contains(out, prodUpPassed) {
+			t.Errorf("make prod-up did not get past its checks to %q:\n%s", prodUpPassed, out)
+		}
+	})
+}
+
+func TestProdUpLeavesAMigrationThatHasNotFinished(t *testing.T) {
+	// A Job's pod template is immutable, so prod-up deletes the Job of the
+	// previous run before it applies. Deleting one that is still running kills
+	// its migration, and migration 9 of the reporting chain builds an index
+	// outside a transaction that a kill leaves half built.
+	stub := newKubectlStub(t, jobRunning, jobComplete)
+
+	out, code := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub)
+	if want := "the migration Job tally-migrate of an earlier run has not finished"; code == 0 || !strings.Contains(out, want) {
+		t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, want, out)
+	}
+	calls := stubCalls(t, stub)
+	for _, arg := range []string{deleteJobArg, applyArg} {
+		if i := callIndex(calls, arg); i >= 0 {
+			t.Errorf("make prod-up called kubectl %s with a Job that has not finished; its calls were:\n%s", calls[i], strings.Join(calls, "\n"))
+		}
 	}
 }
 
-func TestProdMigrateSaysWhyThePortForwardFailed(t *testing.T) {
-	// A forward fails at once for a context kubectl does not know, a Service
-	// that is not there or a port-forward RBAC denies, and what kubectl said is
-	// the only account of which it was.
-	out, code := runMake(t, checkout(t, release), "prod-migrate", prodOverlay(t, release), freePort(t))
-	_, said, found := strings.Cut(out, "kubectl said:\n")
-	first, _, _ := strings.Cut(said, "\n")
-	if code == 0 || !found || first == "" || strings.HasPrefix(first, "make: ") {
-		t.Errorf("make prod-migrate exited %d, want the failure of the forward followed by what kubectl said:\n%s", code, out)
+func TestProdUpReplacesTheMigrationJobBeforeItApplies(t *testing.T) {
+	// No Job, a completed one and a failed one are each deleted before the
+	// apply, which would otherwise fail on the immutable pod template of the
+	// old Job. A failed Job of an earlier run is what an operator reruns
+	// prod-up on. The wait for the new Job comes before the wait for the
+	// Reporting API, whose readiness needs the migrated schema, and the Job's
+	// log is printed once it has completed. The exit status is not asserted:
+	// the stand-in overlay has no hosts.yaml for the lines after the waits.
+	for name, before := range map[string]string{"no Job": jobAbsent, "a completed Job": jobComplete, "a failed Job": jobFailed} {
+		t.Run(name, func(t *testing.T) {
+			stub := newKubectlStub(t, before, jobComplete)
+
+			out, _ := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub)
+			calls := stubCalls(t, stub)
+			order := []int{callIndex(calls, deleteJobArg), callIndex(calls, applyArg), callIndex(calls, jobLogsArg), callIndex(calls, reportingArg)}
+			if slices.Contains(order, -1) || !slices.IsSorted(order) {
+				t.Errorf("make prod-up called kubectl %s, then apply -k, then %s, then %s at the calls %v of:\n%s\nit printed:\n%s",
+					deleteJobArg, jobLogsArg, reportingArg, order, strings.Join(calls, "\n"), out)
+			}
+		})
+	}
+}
+
+func TestProdUpStopsOnAFailedMigration(t *testing.T) {
+	// The Reporting API answers its readiness probe with 503 until the schema
+	// is at the version its build expects, so waiting for it after a failed
+	// migration spends the whole wait on a pod that cannot become ready. The
+	// Job's log is what says why it failed.
+	stub := newKubectlStub(t, jobAbsent, jobFailed)
+
+	out, code := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub)
+	if want := "the migration Job tally-migrate failed; its log is above"; code == 0 || !strings.Contains(out, want) {
+		t.Errorf("make prod-up exited %d, want a failure carrying %q:\n%s", code, want, out)
+	}
+	calls := stubCalls(t, stub)
+	if callIndex(calls, jobLogsArg) < 0 {
+		t.Errorf("make prod-up did not print the log of the failed Job; its calls were:\n%s", strings.Join(calls, "\n"))
+	}
+	if callIndex(calls, reportingArg) >= 0 {
+		t.Errorf("make prod-up waited for the Reporting API after a failed migration; its calls were:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestProdUpWaitsForAMigrationThatFinishesLater(t *testing.T) {
+	// On a cluster the new Job is still running when prod-up first reads it,
+	// so the wait polls until it has completed, and only then prints its log
+	// and waits for the Reporting API. The exit status is not asserted: the
+	// stand-in overlay has no hosts.yaml for the lines after the waits.
+	stub := newKubectlStub(t, jobAbsent, jobRunning, jobRunning, jobComplete)
+
+	out, _ := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub, noSleep(stub))
+	calls := stubCalls(t, stub)
+	order := []int{callIndex(calls, applyArg), callIndex(calls, jobLogsArg), callIndex(calls, reportingArg)}
+	if slices.Contains(order, -1) || !slices.IsSorted(order) {
+		t.Errorf("make prod-up called kubectl apply -k, then %s, then %s at the calls %v of:\n%s\nit printed:\n%s",
+			jobLogsArg, reportingArg, order, strings.Join(calls, "\n"), out)
+	}
+}
+
+func TestProdUpStopsWhenItCannotReadTheMigrationJob(t *testing.T) {
+	// A read that fails prints nothing, which is also what kubectl prints for
+	// no Job. Taken for one, it deletes a Job whose migration may still be
+	// running.
+	stub := newKubectlStub(t, jobRunning, jobComplete)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(stub), "fail"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, code := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub)
+	calls := stubCalls(t, stub)
+	if code == 0 || callIndex(calls, deleteJobArg) >= 0 || callIndex(calls, applyArg) >= 0 {
+		t.Errorf("make prod-up exited %d and went on after a failed read of the Job; its calls were:\n%s", code, strings.Join(calls, "\n"))
+	}
+}
+
+func TestProdUpGivesUpOnAMigrationThatDoesNotFinish(t *testing.T) {
+	// The wait has an end, and the Job is left running at it: deleting it
+	// would kill the migration. A Job that never finishes is replaced by no
+	// later step either.
+	stub := newKubectlStub(t, jobAbsent, jobRunning)
+
+	out, code := runMake(t, checkout(t, release), "prod-up", prodOverlay(t, release), "PROD_KUBECTL="+stub, "PROD_MIGRATE_WAIT_S=5", noSleep(stub))
+	if want := "the migration Job tally-migrate did not finish in 5s"; code == 0 || !strings.Contains(out, want) {
+		t.Errorf("make prod-up exited %d, want a failure carrying %q:\n%s", code, want, out)
+	}
+	calls := stubCalls(t, stub)
+	var deletes int
+	for _, call := range calls {
+		if strings.Contains(call, "delete job") {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("make prod-up deleted a Job %d times, want once, before the apply; its calls were:\n%s", deletes, strings.Join(calls, "\n"))
 	}
 }
 
@@ -476,17 +561,48 @@ func cloudsConfig(t *testing.T, cloud, osCloud string) string {
 	return strings.Join(lines, "\n")
 }
 
-// freePort returns the assignment of a port nothing listens on to PROD_DB_PORT.
-func freePort(t *testing.T) string {
+// newKubectlStub writes the stand-in for kubectl into a directory of its own,
+// with the state it answers a get of the Job with before the apply and the one
+// for each poll after it, and returns its path. The stand-in for sleep goes
+// beside it.
+func newKubectlStub(t *testing.T, before string, after ...string) string {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "kubectl")
+	for name, content := range map[string]string{"before": before, "after": strings.Join(after, "\n") + "\n", "log": ""} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, content := range map[string]string{"kubectl": kubectlStub, "sleep": sleepStub} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stub
+}
+
+// noSleep returns the make variable that puts the directory of the stand-in
+// for kubectl first on PATH, so the recipe runs the stand-in for sleep beside
+// it.
+func noSleep(stub string) string {
+	return "PATH=" + filepath.Dir(stub) + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// stubCalls returns the arguments of every call the stand-in for kubectl
+// logged, one call per entry, in order.
+func stubCalls(t *testing.T, stub string) []string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(stub), "log"))
 	if err != nil {
-		t.Fatalf("finding a free port: %v", err)
+		t.Fatalf("reading the calls of the stand-in for kubectl: %v", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing the listener on port %d: %v", port, err)
-	}
-	return "PROD_DB_PORT=" + strconv.Itoa(port)
+	return strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+}
+
+// callIndex returns the index of the first call that carries arg, or -1.
+func callIndex(calls []string, arg string) int {
+	return slices.IndexFunc(calls, func(call string) bool { return strings.Contains(call, arg) })
 }

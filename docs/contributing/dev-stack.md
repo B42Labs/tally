@@ -396,8 +396,7 @@ The table below is rendered from the `## target: description` comments of the
 | `check-alerting` | validate the alert rules and the Alertmanager config |
 | `migrate` | apply the reporting and the engine migration chains |
 | `prod-addons` | install Envoy Gateway and cert-manager on the cluster PROD_CONTEXT names |
-| `prod-up` | deploy the prod overlay to the cluster PROD_CONTEXT names and migrate the reporting database |
-| `prod-migrate` | apply the reporting migration chain through a port-forward to the cluster PROD_CONTEXT names |
+| `prod-up` | deploy the prod overlay to the cluster PROD_CONTEXT names and wait for its migration Job |
 | `generate` | run the code generators and refresh the generated blocks of the reference pages and the handbook |
 | `docs` | serve the documentation site locally with live reload |
 | `docs-build` | build the documentation site; a dead internal link fails the build |
