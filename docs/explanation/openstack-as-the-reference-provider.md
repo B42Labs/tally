@@ -111,9 +111,10 @@ collector lost becomes a synthetic delete carrying the real deletion time rather
 than the time the sync happened to look (see
 [dual ingestion and reconciliation](/explanation/dual-ingestion-and-reconciliation)).
 
-The repository ships no CronJob for the sync. What drives the schedule belongs
-to the deployment, which is also what decides how much overbilling a lost delete
-can cost. What one run establishes, and what it refuses to conclude, is on
+The `reconciliation` kustomize component ships CronJob `tally-sync`, which
+syncs the cloud every 10 minutes, and the prod overlay lists it. A deployment
+that drives the schedule itself chooses the interval, and with it how much
+overbilling a lost delete can cost. What one run establishes, and what it refuses to conclude, is on
 [how reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud).
 
 ## How the pieces fit together

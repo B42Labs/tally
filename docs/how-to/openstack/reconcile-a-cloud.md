@@ -134,6 +134,10 @@ Continue with the sections below, using the new `os-prod-eu1` entry.
 
 ## Mount the clouds file
 
+The prod overlay does this from `secrets/clouds.yaml`, as
+[deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#write-the-secrets)
+shows, and step 2 checks it there as well.
+
 1. Mount the Secret at `/etc/openstack/`, the directory a Kubernetes Secret
    volume mounts at, and set `OS_CLIENT_CONFIG_FILE` to the file it carries.
    The variable makes that file the only location searched:
@@ -144,17 +148,23 @@ Continue with the sections below, using the new `os-prod-eu1` entry.
        value: /etc/openstack/clouds.yaml
    ```
 
-2. Check that the pod reads the file you meant. Without the variable the search
-   starts in the process working directory and reaches `/etc/openstack/` last:
+2. Check that the pod runs with the mount. The image carries the binary alone,
+   so no `kubectl exec` can list the directory, and the pod spec says what the
+   container mounts:
 
    ```sh
-   kubectl exec deployment/reporting-api -- ls /etc/openstack/
+   kubectl get pod -l app.kubernetes.io/name=reporting-api \
+     -o jsonpath='{range .items[*]}{.status.phase}{" "}{.spec.containers[0].volumeMounts[*].mountPath}{"\n"}{end}'
    ```
 
    ```text
-   clouds.yaml
-   secure.yaml
+   Running /etc/tally/reconciliation /etc/openstack /run/secrets/tally /run/secrets/tally-internal /var/run/secrets/kubernetes.io/serviceaccount
    ```
+
+   The kubelet starts the container only after it has projected every item
+   its volumes name, so a `Running` pod that lists `/etc/openstack` has the
+   file. Whether the file authenticates is what
+   [check the account](#check-the-account) and the first sync show.
 
 ## Check the account
 
@@ -200,6 +210,10 @@ Continue with the sections below, using the new `os-prod-eu1` entry.
    [restrict the account to read requests](#restrict-the-account-to-read-requests).
 
 ## Name the cloud
+
+The prod overlay does this from `reconciliation/clouds-config.yaml`, as
+[configure reconciliation](/how-to/cluster/deploy-the-collecting-stack#configure-reconciliation)
+shows.
 
 1. Add one entry per cloud to the file `TALLY_REPORTING_CLOUDS_CONFIG` names:
 
@@ -251,6 +265,21 @@ Continue with the sections below, using the new `os-prod-eu1` entry.
    `TALLY_REPORTING_INTERNAL_TOKEN_FILE` names, presented as a bearer token,
    and it takes no other credential. Whatever drives the sync schedule calls
    it, one call per configured cloud.
+
+2. In the prod overlay, CronJob `tally-sync` of the `reconciliation` component
+   is that caller: it posts for the cloud of `collector.env` every 10 minutes,
+   and the answer is its Job's log. Run it once by hand with a Job of your
+   own, and delete that Job afterwards:
+
+   ```sh
+   kubectl create job --from=cronjob/tally-sync sync-now
+   kubectl wait --for=condition=complete job/sync-now --timeout=2m
+   kubectl logs job/sync-now
+   kubectl delete job sync-now
+   ```
+
+   A Job created while a scheduled run holds the cloud is answered 409 and
+   fails, and the next scheduled run is not affected.
 
 ## Tell a sync the instant it runs at (development only)
 
@@ -413,11 +442,20 @@ raise it.
    ```
 
    A client that gives up earlier closes the connection, which cancels the run
-   and records it `failed`.
+   and records it `failed`. CronJob `tally-sync` takes its timeout from
+   `SYNC_TIMEOUT_S`, 65 seconds by default:
+
+   ```sh
+   kubectl set env cronjob/tally-sync SYNC_TIMEOUT_S=320
+   ```
+
+   The next apply of the overlay sets the value back to 65, so a deployment
+   that keeps the longer budget patches the CronJob in its overlay as well.
 
 4. Keep the budget under the interval of the sync schedule. A call that arrives
    while a run holds the cloud is answered 409, and `TallySyncStale` fires when
-   no run completes within 30 minutes.
+   no run completes within 30 minutes. CronJob `tally-sync` ends a Job after
+   540 seconds, so a budget above 520 is cut off there.
 
 5. Size the connection pool for the clouds you sync at the same time. A running
    sync keeps one connection of `TALLY_REPORTING_DB_MAX_CONNS` checked out for
