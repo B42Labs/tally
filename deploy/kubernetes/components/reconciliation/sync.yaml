@@ -1,0 +1,107 @@
+# The sync schedule. Every ten minutes a Job asks the Reporting API to
+# reconcile the cloud the collector reports under, which books what the
+# collector lost: a delete it never saw stops being billed within one interval,
+# and TallySyncStale fires when 30 minutes pass without a completed run. The
+# response body, {"sync_run_id": ..., "stats": ...}, is the Job's log.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tally-sync
+  labels:
+    app.kubernetes.io/name: tally-sync
+spec:
+  schedule: "*/10 * * * *"
+  # A run takes the cloud for its length, and a call that arrives while one
+  # holds it is answered 409, so a call that outlasts its interval would make
+  # the next one fail.
+  concurrencyPolicy: Forbid
+  # Without a deadline the controller counts the missed schedules forever and
+  # refuses to start the Job at all past a hundred of them, which deleting a
+  # stuck Job does not undo.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Forbid needs an end to the call it is holding the next one behind, and
+      # 540 seconds stays under the interval of 600. The call is given its
+      # budget plus 20 seconds, so this caps TALLY_REPORTING_SYNC_BUDGET_S at
+      # 520.
+      activeDeadlineSeconds: 540
+      # A failed call is retried by the next run rather than at once. A 409 from
+      # a sync an operator started by hand fails this one Job and nothing else.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: tally-sync
+        spec:
+          restartPolicy: Never
+          # The call goes to the Reporting API and to no Kubernetes API, so the
+          # token of the default ServiceAccount would be an exposure and nothing
+          # else.
+          automountServiceAccountToken: false
+          # busybox runs as root unless told otherwise. 65532 is the user the
+          # Tally images run as, distroless nonroot.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          containers:
+            # busybox is the image the base waits for TimescaleDB with, so the
+            # cluster pulls no new one. Its wget prints the response body and
+            # exits 0 on a 200, and exits 1 with a line starting "wget:" on any
+            # other status, on a timeout and on a refused connection. busybox
+            # wget takes a header from no file, so the token is an argument of
+            # wget, inside a container that runs nothing else.
+            - name: sync
+              image: busybox:1.37
+              command:
+                - sh
+                - -c
+                - 'exec wget -q -O- -T "$SYNC_TIMEOUT_S" --header "Authorization: Bearer $(cat /run/secrets/tally-internal/token)" --post-data "" "http://reporting-api/internal/sync/$TALLY_OSC_CLOUD"'
+              # What the block above does not reach. These four are
+              # per-container and every one of them defaults the permissive way.
+              # The call needs none of it: it dials one Service and writes to
+              # neither the filesystem nor a port. The internal token is mounted
+              # into this container, which is what the confinement is worth.
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+                seccompProfile:
+                  type: RuntimeDefault
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  memory: 32Mi
+              env:
+                # The cloud is read from the collector's settings, so the events
+                # and the sync name one cloud from one line of collector.env. A
+                # sync under another name would book a second set of resources.
+                - name: TALLY_OSC_CLOUD
+                  valueFrom:
+                    configMapKeyRef:
+                      name: tally-openstack-collector
+                      key: TALLY_OSC_CLOUD
+                # The default TALLY_REPORTING_SYNC_BUDGET_S of 45 plus the 20
+                # seconds docs/how-to/openstack/reconcile-a-cloud.md asks a caller
+                # to add. A client that gives up earlier cancels the run. This is
+                # a variable of this container and of no Tally binary, and a
+                # deployment that raises the budget raises it with it.
+                - name: SYNC_TIMEOUT_S
+                  value: "65"
+              volumeMounts:
+                - name: internal-token
+                  mountPath: /run/secrets/tally-internal
+                  readOnly: true
+          volumes:
+            - name: internal-token
+              secret:
+                secretName: tally-internal-token
+                items:
+                  - key: token
+                    path: token

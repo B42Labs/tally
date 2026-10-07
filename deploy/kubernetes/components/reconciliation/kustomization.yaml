@@ -1,0 +1,30 @@
+# Reconciliation in a cluster: a CronJob that syncs one cloud every ten
+# minutes, and a patch that mounts the two files the Reporting API reconciles
+# with. A sync compares what the cloud lists with what the events booked, and
+# corrects what the collector lost.
+#
+# An overlay that lists this component has four things to supply:
+#
+#   - a ConfigMap tally-reconciliation with the key clouds-config.yaml, the
+#     clouds the Reporting API reconciles
+#     (docs/reference/configuration/clouds-file.md)
+#   - a Secret tally-reconciliation-auth with the key clouds.yaml, the
+#     credential of the cloud the adapter authenticates with
+#   - the ConfigMap tally-openstack-collector with the key TALLY_OSC_CLOUD,
+#     which the openstack-collector component asks for as well: the sync names
+#     the cloud the collector reports under
+#   - the base's Secret tally-internal-token, which the sync authenticates with
+#
+# The prod overlay does. The names of the first two are the dev overlay's on
+# purpose, so the component renders on top of it as well, which is how its
+# objects are checked on a dev cluster. The dev overlay does not list the
+# component: its cloud runs on a simulated month, and a sync at wall time
+# observes it outside its period.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - sync.yaml
+
+patches:
+  - path: reporting-api.yaml
