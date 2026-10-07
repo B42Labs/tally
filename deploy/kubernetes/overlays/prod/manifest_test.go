@@ -8,8 +8,10 @@
 // the operator a Secret that fails a pod on its first start rather than the
 // apply. The collector fails the same way: two images at two tags render, a
 // settings file without TALLY_OSC_CLOUD renders, and so does one that sets a
-// variable the component fixes, which the pod never sees. The tests read the
-// YAML from disk and need neither a cluster nor kustomize.
+// variable the component fixes, which the pod never sees. A clouds config the
+// Makefile cannot read renders as well, and make prod-up then refuses a cloud
+// that is set. The tests read the YAML from disk and need neither a cluster nor
+// kustomize.
 package prod_test
 
 import (
@@ -47,6 +49,10 @@ const (
 	collectorComponentDir = "../../components/openstack-collector"
 	collectorSettingsFile = "collector.env"
 
+	// The components that declare the migration Job and the sync.
+	migrationsComponentDir     = "../../components/migrations"
+	reconciliationComponentDir = "../../components/reconciliation"
+
 	// The ConfigMap every hostname is read from, and the objects the overlay
 	// points at the real ones.
 	hostsConfigMap = "tally-hosts"
@@ -72,8 +78,23 @@ const (
 	collectorConfigMap   = "tally-openstack-collector"
 	collectorTokenSecret = "tally-collector-token"
 
-	// The line that keeps the filled-in secret files out of the repository.
+	// The images of the scheduler and the migration Job the same way.
+	engineImage    = "tally-engine"
+	engineRegistry = "ghcr.io/b42labs/tally-engine"
+	adminImage     = "tally-reporting-admin"
+	adminRegistry  = "ghcr.io/b42labs/tally-reporting-admin"
+
+	// The Secret the Reporting API authenticates against the cloud with and
+	// the one file it is generated from, and the ConfigMap of the cloud it
+	// reconciles with the file that one is generated from.
+	cloudsSecret     = "tally-reconciliation-auth"
+	cloudsSecretFile = "secrets/clouds.yaml"
+	cloudsConfigMap  = "tally-reconciliation"
+	cloudsConfigFile = "reconciliation/clouds-config.yaml"
+
+	// The lines that keep the filled-in secret files out of the repository.
 	secretsIgnoreLine = "deploy/kubernetes/overlays/prod/secrets/*.env"
+	cloudsIgnoreLine  = "deploy/kubernetes/overlays/prod/secrets/clouds.yaml"
 )
 
 // releaseTag is the shape packaging/release-version.sh accepts, with the
@@ -94,8 +115,9 @@ type kustomization struct {
 		NewTag  string `yaml:"newTag"`
 	} `yaml:"images"`
 	SecretGenerator []struct {
-		Name string   `yaml:"name"`
-		Envs []string `yaml:"envs"`
+		Name  string   `yaml:"name"`
+		Envs  []string `yaml:"envs"`
+		Files []string `yaml:"files"`
 	} `yaml:"secretGenerator"`
 	ConfigMapGenerator []generator `yaml:"configMapGenerator"`
 	Patches            []struct {
@@ -401,13 +423,12 @@ func TestTheCertificateNamesThePublishedHostsAndTheAcmeIssuer(t *testing.T) {
 func TestNothingUnauthenticatedIsPublished(t *testing.T) {
 	// The UIs of the store, vmalert and Alertmanager answer without a
 	// credential, and a TCPRoute on a LoadBalancer is the database on the
-	// internet. The CronJob is in the list because this cluster runs no
-	// scheduler. A delete patch dropped in an edit renders a valid overlay that
-	// publishes the object again.
+	// internet. A delete patch dropped in an edit renders a valid overlay that
+	// publishes the object again. One added in an edit takes away what the
+	// cluster runs, such as the scheduler, and renders just as well.
 	k := kustomizationOf(t)
 
 	want := []string{
-		"CronJob/tally-engine",
 		"HTTPRoute/alertmanager",
 		"HTTPRoute/victoriametrics",
 		"HTTPRoute/vmalert",
@@ -450,17 +471,21 @@ func TestNothingUnauthenticatedIsPublished(t *testing.T) {
 	}
 }
 
-func TestBothComponentsAreListed(t *testing.T) {
+func TestEveryComponentIsListed(t *testing.T) {
 	// The base is plain Gateway API and names no implementation. The
 	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
 	// OTLP routes and the 403 on Grafana's datasource proxy are the first
 	// component's, and this cluster runs Envoy Gateway. The second declares the
-	// collector, without which the stack stores what nothing sends. An entry
-	// lost in an edit of this file alone is not an error to kustomize.
+	// collector, without which the stack stores what nothing sends. The third
+	// migrates both databases, without which the Reporting API stays unready
+	// and every tick fails on the schema. The fourth syncs the cloud, without
+	// which a delete the collector lost is billed until somebody notices. An
+	// entry lost in an edit of this file alone is not an error to kustomize.
 	k := kustomizationOf(t)
 
-	if want := []string{componentDir, collectorComponentDir}; !slices.Equal(k.Components, want) {
-		t.Errorf("%s lists the components %v, want %v; without the first the cluster has no GatewayClass and no rate limit, without the second no collector, and the overlay still renders",
+	want := []string{componentDir, collectorComponentDir, migrationsComponentDir, reconciliationComponentDir}
+	if !slices.Equal(k.Components, want) {
+		t.Errorf("%s lists the components %v, want %v; without one of them the overlay still renders",
 			kustomizationFile, k.Components, want)
 	}
 }
@@ -518,19 +543,21 @@ func TestGrafanaServesNoMetrics(t *testing.T) {
 }
 
 func TestImagesComeFromTheRegistry(t *testing.T) {
-	// The base and the collector component name locally built images, which a
-	// real cluster cannot pull. The tag has to be one the release workflow
-	// publishes under; any other tag names an image that is not in the
-	// registry, and the pod sits in ImagePullBackOff. The overlay deploys one
-	// release, so the two tags are one: make prod-up migrates with the chain of
-	// the checkout, and a collector of another release is one it never ran
-	// against.
+	// The base and the components name locally built images, which a real
+	// cluster cannot pull. The tag has to be one the release workflow publishes
+	// under; any other tag names an image that is not in the registry, and the
+	// pod sits in ImagePullBackOff. The overlay deploys one release, so the
+	// four tags are one: the migration Job applies the chains of its images,
+	// and a Reporting API or a scheduler of another release refuses or misreads
+	// that schema.
 	k := kustomizationOf(t)
 
 	var tags []string
 	for _, want := range []struct{ name, registry string }{
 		{reportingImage, reportingRegistry},
 		{collectorImage, collectorRegistry},
+		{engineImage, engineRegistry},
+		{adminImage, adminRegistry},
 	} {
 		var found int
 		for _, image := range k.Images {
@@ -560,16 +587,13 @@ func TestImagesComeFromTheRegistry(t *testing.T) {
 	// no container carries matches nothing, the overlay renders, and the pod
 	// pulls a :dev tag no registry holds. A locally built image without an
 	// entry fails the same way.
-	deleted := deletedObjects(t, k)
 	var local []string
-	for _, o := range append(baseObjects(t), objectsIn(t, collectorComponentDir)...) {
-		if !slices.Contains(deleted, o.Kind+"/"+o.Metadata.Name) {
-			local = devImages(o.raw, local)
-		}
+	for _, o := range keptObjects(t, k) {
+		local = devImages(o.raw, local)
 	}
 	slices.Sort(local)
 	local = slices.Compact(local)
-	if want := []string{collectorImage, reportingImage}; !slices.Equal(local, want) {
+	if want := []string{engineImage, collectorImage, reportingImage, adminImage}; !slices.Equal(local, want) {
 		t.Errorf("the objects this overlay keeps run the locally built images %v, want exactly %v, the names %s maps to the registry",
 			local, want, kustomizationFile)
 	}
@@ -579,22 +603,17 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	// The operator fills the untracked files from the examples. A key missing
 	// from an example is a key missing from the Secret, which the pod that
 	// mounts it fails on at its first start, after the apply succeeded. The
-	// keys are read from the base and from the collector component, less the
-	// objects this overlay deletes, so a key either starts to mount is one the
-	// example has to carry. engine-password is among them although no engine
-	// runs here: TimescaleDB reads it for the initdb script that creates the
-	// engine's reader role.
+	// keys are read from the base and from the three components that declare
+	// objects, less the objects this overlay deletes, so a key one of them
+	// starts to mount is one the example has to carry.
 	k := kustomizationOf(t)
 
-	deleted := deletedObjects(t, k)
 	want := map[string][]string{}
-	for _, o := range append(baseObjects(t), objectsIn(t, collectorComponentDir)...) {
-		if !slices.Contains(deleted, o.Kind+"/"+o.Metadata.Name) {
-			mountedSecretKeys(t, o.raw, want)
-		}
+	for _, o := range keptObjects(t, k) {
+		mountedSecretKeys(t, o.raw, want)
 	}
 	if len(want) == 0 {
-		t.Fatalf("%s and %s mount no secret key, so this test would assert over nothing", baseDir, collectorComponentDir)
+		t.Fatalf("%s and the components mount no secret key, so this test would assert over nothing", baseDir)
 	}
 	// The ingest token is the one mounted Secret without a file. It can be
 	// issued only once make prod-up has migrated the database, and make prod-up
@@ -618,8 +637,25 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 		}
 		keys, known := want[g.Name]
 		if !known {
-			t.Errorf("%s generates secret %s, which neither the base nor the collector component mounts", kustomizationFile, g.Name)
+			t.Errorf("%s generates secret %s, which neither the base nor a component mounts", kustomizationFile, g.Name)
 			continue
+		}
+		// The clouds.yaml of the cloud is a YAML file, not an env file. The
+		// generator makes its one key the file's base name, which is the key
+		// the reconciliation component mounts.
+		if g.Name == cloudsSecret {
+			if len(g.Envs) != 0 || !slices.Equal(g.Files, []string{cloudsSecretFile}) {
+				t.Errorf("secret %s reads the env files %v and the files %v, want exactly the file [%s]", g.Name, g.Envs, g.Files, cloudsSecretFile)
+				continue
+			}
+			if base := filepath.Base(cloudsSecretFile); !slices.Equal(keys, []string{base}) {
+				t.Errorf("secret %s is mounted with the keys %v, want [%s], the key its file is generated under", g.Name, keys, base)
+			}
+			checkCloudsExample(t, cloudsSecretFile+".example")
+			continue
+		}
+		if len(g.Files) != 0 {
+			t.Errorf("secret %s reads the files %v, which make prod-up checks no key of; only %s is generated from a file", g.Name, g.Files, cloudsSecret)
 		}
 		file := "secrets/" + g.Name + ".env"
 		if !slices.Equal(g.Envs, []string{file}) {
@@ -643,14 +679,101 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 		}
 	}
 
-	// Without the ignore line a filled-in file is one `git add` away from the
+	// Without the ignore lines a filled-in file is one `git add` away from the
 	// repository.
 	raw, err := os.ReadFile(gitignoreFile)
 	if err != nil {
 		t.Fatalf("reading %s: %v", gitignoreFile, err)
 	}
-	if !slices.Contains(strings.Split(string(raw), "\n"), secretsIgnoreLine) {
-		t.Errorf("%s has no line %s, so the filled-in secret files are not ignored", gitignoreFile, secretsIgnoreLine)
+	for _, line := range []string{secretsIgnoreLine, cloudsIgnoreLine} {
+		if !slices.Contains(strings.Split(string(raw), "\n"), line) {
+			t.Errorf("%s has no line %s, so the filled-in secret files are not ignored", gitignoreFile, line)
+		}
+	}
+}
+
+// checkCloudsExample holds the example of the clouds.yaml to what the operator
+// copies: one entry under clouds, whose values are placeholders make prod-up
+// refuses until they are filled.
+func checkCloudsExample(t *testing.T, example string) {
+	t.Helper()
+
+	raw, err := os.ReadFile(example)
+	if err != nil {
+		t.Errorf("secret %s has no usable example to copy %s from: %v", cloudsSecret, cloudsSecretFile, err)
+		return
+	}
+	var clouds struct {
+		Clouds map[string]any `yaml:"clouds"`
+	}
+	if err := yaml.Unmarshal(raw, &clouds); err != nil {
+		t.Errorf("parsing %s: %v", example, err)
+		return
+	}
+	if len(clouds.Clouds) != 1 {
+		t.Errorf("%s carries %d entries under clouds, want one, the entry os_cloud in %s names", example, len(clouds.Clouds), cloudsConfigFile)
+	}
+	if !regexp.MustCompile(`<[a-z-]+>`).Match(raw) {
+		t.Errorf("%s carries no <...> placeholder, so make prod-up cannot tell a copy that was never filled in", example)
+	}
+}
+
+func TestTheCloudsConfigShipsEmptyAndAsTheMakefileReadsIt(t *testing.T) {
+	// The Reporting API reconciles the clouds this file names, and the sync
+	// asks for the cloud of collector.env. A guessed name syncs a cloud nothing
+	// reports under, so the file ships with both names empty, which the
+	// Reporting API refuses at startup and make prod-up before that. make
+	// prod-up reads the two lines with grep, so a quoted value, a comment after
+	// one or another indentation is still YAML kustomize renders, and is
+	// refused as naming no cloud once the operator has filled it.
+	k := kustomizationOf(t)
+
+	i := slices.IndexFunc(k.ConfigMapGenerator, func(g generator) bool { return g.Name == cloudsConfigMap })
+	if i < 0 {
+		t.Fatalf("%s generates no ConfigMap %s, which the Reporting API reads its clouds from", kustomizationFile, cloudsConfigMap)
+	}
+	if g := k.ConfigMapGenerator[i]; !slices.Equal(g.Files, []string{cloudsConfigFile}) || len(g.Envs) != 0 {
+		t.Errorf("the %s generator reads the files %v and the env files %v, want exactly the file [%s]", cloudsConfigMap, g.Files, g.Envs, cloudsConfigFile)
+	}
+
+	raw, err := os.ReadFile(cloudsConfigFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", cloudsConfigFile, err)
+	}
+	var config struct {
+		Clouds []struct {
+			Cloud         string `yaml:"cloud"`
+			Platform      string `yaml:"platform"`
+			Adapter       string `yaml:"adapter"`
+			AdapterConfig struct {
+				OSCloud string `yaml:"os_cloud"`
+			} `yaml:"adapter_config"`
+		} `yaml:"clouds"`
+	}
+	if err := yaml.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("parsing %s, which the Reporting API refuses at startup: %v", cloudsConfigFile, err)
+	}
+	if len(config.Clouds) != 1 {
+		t.Fatalf("%s names %d clouds, want one, the cloud of the one collector", cloudsConfigFile, len(config.Clouds))
+	}
+	entry := config.Clouds[0]
+	if entry.Platform != "openstack" || entry.Adapter != "openstack" {
+		t.Errorf("the entry has platform %q and adapter %q, want openstack for both", entry.Platform, entry.Adapter)
+	}
+	if entry.Cloud != "" {
+		t.Errorf("the entry ships with cloud %q, want it empty, which make prod-up refuses", entry.Cloud)
+	}
+	if entry.AdapterConfig.OSCloud != "" {
+		t.Errorf("the entry ships with os_cloud %q, want it empty, which make prod-up refuses", entry.AdapterConfig.OSCloud)
+	}
+
+	// The two lines carry the keys the operator fills: an empty value and a
+	// missing key read alike above.
+	lines := strings.Split(string(raw), "\n")
+	for _, want := range []string{"  - cloud:", "      os_cloud:"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("%s carries no line %q, which is the line make prod-up reads once the operator has filled it", cloudsConfigFile, want)
+		}
 	}
 }
 
@@ -930,6 +1053,21 @@ type object struct {
 func baseObjects(t *testing.T) []object {
 	t.Helper()
 	return objectsIn(t, baseDir)
+}
+
+// keptObjects decodes every object the base and the three components that
+// declare objects carry, less the objects the overlay deletes, which is what
+// it renders before its other patches. The patch the reconciliation component
+// carries is among them, so what it mounts counts as well.
+func keptObjects(t *testing.T, k kustomization) []object {
+	t.Helper()
+
+	objects := baseObjects(t)
+	for _, dir := range []string{collectorComponentDir, migrationsComponentDir, reconciliationComponentDir} {
+		objects = append(objects, objectsIn(t, dir)...)
+	}
+	deleted := deletedObjects(t, k)
+	return slices.DeleteFunc(objects, func(o object) bool { return slices.Contains(deleted, o.Kind+"/"+o.Metadata.Name) })
 }
 
 // objectsIn decodes every object the YAML files under one directory declare. A

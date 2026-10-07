@@ -19,6 +19,7 @@ tilt_modules/
 
 # The secrets of the prod overlay; the .example files beside them stay tracked
 deploy/kubernetes/overlays/prod/secrets/*.env
+deploy/kubernetes/overlays/prod/secrets/clouds.yaml
 
 # Editors
 .idea/
