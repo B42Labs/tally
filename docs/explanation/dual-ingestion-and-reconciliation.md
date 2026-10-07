@@ -94,9 +94,10 @@ run. The next run books the correction if the difference is still there.
 lists the rules.
 
 A sync is started per cloud through `POST /internal/sync/{cloud}` and recorded
-in `sync_runs`. The repository ships no CronJob for it: what drives the schedule
-belongs to the deployment. The concept suggested short intervals, and the first two
-limitations below say why.
+in `sync_runs`. The `reconciliation` kustomize component ships CronJob
+`tally-sync`, which calls it every 10 minutes, and the prod overlay lists it; a
+deployment that drives the schedule itself chooses the interval. The concept
+suggested short intervals, and the first two limitations below say why.
 
 A platform API that stops answering must read as "no information" and never as
 "everything was deleted". An adapter that cannot enumerate a resource type says

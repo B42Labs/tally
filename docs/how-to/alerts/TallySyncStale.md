@@ -26,7 +26,11 @@ as long as this holds, because a completed run is what books it.
 
 1. The Reporting API log for the sync runs of the cloud, and whatever calls
    `POST /internal/sync/{cloud}` on the schedule. A run that never starts and a
-   run that starts and fails both leave this counter flat.
+   run that starts and fails both leave this counter flat. In the prod overlay
+   the caller is CronJob `tally-sync`: `kubectl -n tally get cronjob tally-sync`
+   shows its last schedule, and
+   `kubectl -n tally logs -l app.kubernetes.io/name=tally-sync --tail=20` the
+   answers of its recent Jobs.
 2. `tally_sync_errors_total` for the cloud and the `sync_runs` row of the last
    run. A run that recorded any error at all ends `failed`, is answered 500,
    and holds the reasons in that row.

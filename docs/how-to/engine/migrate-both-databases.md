@@ -12,6 +12,14 @@ one chain back again. `tally-reporting-admin` owns the reporting chain,
 `tally-engine` owns the engine chain, and no other subcommand of either binary
 runs DDL.
 
+The prod overlay applies both chains on every deploy with Job `tally-migrate`
+of the `migrations` kustomize component: an init container runs
+`tally-reporting-admin migrate` and the Job's container `tally-engine migrate`
+after it, as
+[deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#deploy-the-overlay)
+shows. The commands below are what the two containers run, and what an
+operator runs by hand for a rollback or a repair.
+
 ## Before you start
 
 - Both databases reachable from the machine you run the CLIs on, with a

@@ -96,8 +96,9 @@ into kind, `tally-reporting` and `tally-engine`;
 `tally-openstack-simulator`, which the dev stack runs in compose beside a
 broker. `RELEASE_IMAGES` is what a release pushes to GHCR: the two `SERVICES`
 images, `tally-openstack-collector`, which the `openstack-collector` kustomize
-component runs in a cluster, and `tally-reporting-admin`. The admin CLI is in
-no other list, because the dev stack runs it with `go run`.
+component runs in a cluster, and `tally-reporting-admin`, which the
+`migrations` component runs beside `tally-engine`. The admin CLI is in no other
+list, because the dev stack runs it with `go run`.
 [Releases](#releases) says how the push works. `SIM_IMAGES` is what
 `make simulator-up` builds, the collector and the simulator alone;
 [The simulator stack](/contributing/dev-stack#the-simulator-stack) says why.
@@ -157,8 +158,9 @@ what builds, installs, verifies and purges the package on a runner, and
 updates as pull requests: Go modules, npm packages, `.nvmrc` and the GitHub
 Actions the workflows use. Its configuration, `renovate.json`, extends
 `config:recommended` and adds one rule: the `ghcr.io/b42labs` images move in
-one pull request. The prod overlay names two of them at one tag, and a pull
-request that moved one alone would fail the test that holds the two tags equal.
+one pull request. The prod overlay names four of them at one tag, and a pull
+request that moved one alone would fail the test that holds the four tags
+equal.
 
 The site carries a Node toolchain beside that. `package.json` pins `vitepress`
 exactly, at `1.6.4`, and its `engines` field asks for Node 24 or newer.

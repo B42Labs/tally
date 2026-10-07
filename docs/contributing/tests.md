@@ -228,17 +228,33 @@ mismatch that would otherwise fail quietly.
   first sign is a wrong hostname or an unauthenticated service on a public
   address. The same goes for a `components` entry lost in an edit, which
   leaves the cluster without a GatewayClass and without the OTLP rate limit,
-  or without a collector. It holds both images to one release tag and to the
-  names the containers carry, the token Secret of the collector out of every
-  generator, and `collector.env` to one `TALLY_OSC_CLOUD` line and to no
-  variable the component fixes.
-- `deploy/kubernetes/overlays/prod/makefile_test.go` runs the prod targets of
-  the Makefile up to the refusal of each guard, in a throwaway Git repository
-  and against a kubeconfig that names no cluster. Without the guards an empty
-  secret value applies, an empty `TALLY_OSC_CLOUD` ends the collector in a pod
-  nothing waits on, a migration chain that does not match the image leaves the
-  old pod Ready, two images at two tags deploy two releases, and a listener
-  already on the forwarded port is migrated through.
+  without a collector, without migrations or without a sync. It holds the four
+  images to one release tag and to the names the containers carry, every
+  mounted Secret key to an example, the token Secret of the collector out of
+  every generator, `collector.env` to one `TALLY_OSC_CLOUD` line and to no
+  variable the component fixes, and `reconciliation/clouds-config.yaml` to
+  empty names on the lines `make prod-up` reads.
+- `deploy/kubernetes/overlays/prod/makefile_test.go` runs `make prod-up` up to
+  the refusal of each guard, in a throwaway Git repository and against a
+  kubeconfig that names no cluster. Without the guards an empty secret value
+  or a missing key applies, an empty `TALLY_OSC_CLOUD` ends the collector in a
+  pod nothing waits on, a clouds config naming another cloud syncs nothing,
+  and two images at two tags deploy two releases. A shell script it writes
+  stands in for kubectl and answers the state of the migration Job, which pins
+  that a Job still running is never deleted, that a finished one is deleted
+  before the apply, and that a failed one stops the run with its log.
+- `deploy/kubernetes/components/migrations/manifest_test.go` pins the
+  migration Job's contract with the two binaries and with Secret `tally-db`.
+  The engine chain applied before the reporting chain, a `*_FILE` path that
+  stopped matching its mount, or a deadline that kills migration 9 inside its
+  index build all render and apply.
+- `deploy/kubernetes/components/reconciliation/manifest_test.go` pins the sync
+  CronJob's contract with the Reporting API, with the collector's settings and
+  with the internal token, and the patch's contract with the clouds files. A
+  schedule past 30 minutes keeps `TallySyncStale` firing, a URL naming a route
+  or a Service that is not there fails every run in a Job history nobody
+  reads, and a cloud named apart from the collector's books a second set of
+  resources.
 - `deploy/kubernetes/base/grafana/dashboards_test.go` pins the JSON contract
   of the provisioned dashboards. Grafana loads these files at startup and
   reports a broken one only in its own log, so a truncated file or a renamed

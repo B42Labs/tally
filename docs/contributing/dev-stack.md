@@ -439,10 +439,10 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   [the demo](#the-demo).
 - `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
   127.0.0.1, and the port of the URL it prints.
-- `PROD_CONTEXT` (no default) is the kubectl context `prod-addons`, `prod-up`
-  and `prod-migrate` act on; each of them refuses to run while it is empty.
-- `PROD_DB_PORT` (`15432`) is the port on 127.0.0.1 `prod-migrate` forwards
-  TimescaleDB to.
+- `PROD_CONTEXT` (no default) is the kubectl context `prod-addons` and
+  `prod-up` act on; each of them refuses to run while it is empty.
+- `PROD_MIGRATE_WAIT_S` (`1800`) is how many seconds `prod-up` waits for the
+  migration Job `tally-migrate` to finish.
 
 ## Where the dev stack ends
 
@@ -451,21 +451,28 @@ section 2 of
 [`roadmap/00-conventions.md`](https://github.com/B42Labs/tally/blob/main/roadmap/00-conventions.md)
 reserves it for the first deployment to a real cluster.
 
-Against the dev overlay, the prod overlay takes the Reporting API image from
-`ghcr.io` at a release tag instead of `kind load`. It lists the
-`openstack-collector` component as well and pulls the collector image at the
-same tag, so the collector runs in the cluster; the dev stack keeps its
-collector in compose, beside its broker. Its certificate is signed by
-a Let's Encrypt ClusterIssuer over HTTP-01 and names the four published
-hostnames instead of a wildcard from the dev CA. Every hostname comes from
-`hosts.yaml` through kustomize replacements, and the secrets come from
-untracked `.env` files instead of literals. The Gateway keeps the default
-LoadBalancer Service of Envoy Gateway instead of `envoyproxy.yaml`, and it has
-no `postgres` listener, so `make prod-migrate` reaches the database through a
-port-forward. The routes of VictoriaMetrics, vmalert and Alertmanager are
-deleted, and so is the engine CronJob. Grafana serves no `/metrics`.
-VictoriaMetrics scrapes the two in-cluster jobs only.
-[Deploy the collecting stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
+Against the dev overlay, the prod overlay takes its four images from `ghcr.io`
+at one release tag instead of `kind load`: the Reporting API, the engine, the
+collector and the admin CLI. It lists three components beside
+`envoy-gateway`. `openstack-collector` runs the collector in the cluster; the
+dev stack keeps its collector in compose, beside its broker. `migrations` runs
+Job `tally-migrate`, which applies both migration chains on every deploy with
+the two CLIs of the release, where the dev stack runs `make migrate` with
+`go run`. `reconciliation` runs CronJob `tally-sync` and mounts the clouds
+files of the Reporting API; the dev stack syncs its simulated cloud from the
+loop of
+[reconcile the simulated cloud](/how-to/simulator/reconcile-the-simulated-cloud),
+which tells each sync the instant of the simulated month. The engine CronJob
+is kept as the base declares it. The certificate is signed by a Let's Encrypt
+ClusterIssuer over HTTP-01 and names the four published hostnames instead of a
+wildcard from the dev CA. Every hostname comes from `hosts.yaml` through
+kustomize replacements, and the secrets come from untracked files instead of
+literals. The Gateway keeps the default LoadBalancer Service of Envoy Gateway
+instead of `envoyproxy.yaml`, and it has no `postgres` listener, so the admin
+CLI and the engine CLI reach the database through a port-forward. The routes
+of VictoriaMetrics, vmalert and Alertmanager are deleted. Grafana serves no
+`/metrics`. VictoriaMetrics scrapes the two in-cluster jobs only.
+[Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
 walks the deployment through.
 
 kind is never used in CI either, as
