@@ -978,24 +978,46 @@ prod-addons:
 # every value filled in, and -e with pipefail would end the recipe there
 # without a word, so only a status above 1 stops it.
 #
+# A secret file that lacks a key of its example is refused as well. The Secret
+# then lacks the key, and the pod that mounts it does not start; that is what
+# an upgrade that adds a key to an example meets.
+#
 # The cloud of the collector is checked the same way, because an empty one
 # applies quietly too: the pod exits with "checking the configuration:
-# TALLY_OSC_CLOUD: must be set", and nothing in the run says so. The collector's
-# rollout is not waited on. Its readiness depends on a broker outside the
-# cluster and on a Secret the operator creates after this run, so the target
-# prints the command that shows it instead.
+# TALLY_OSC_CLOUD: must be set", and nothing in the run says so. So is the
+# input of reconciliation, and a cloud with whitespace around it is refused
+# with it: the ConfigMap keeps the whitespace, and the clouds config, which is
+# YAML, does not. A clouds config that names another cloud than
+# collector.env applies and runs, and every sync is answered 404; one that
+# leaves os_cloud empty fails every sync with a 500. The two lines are read as
+# text, which is what the header of clouds-config.yaml asks of them. The
+# collector's rollout is not waited on. Its readiness depends on a broker
+# outside the cluster and on a Secret the operator creates after this run, so
+# the target prints the command that shows it instead.
 ## prod-up: deploy the prod overlay to the cluster PROD_CONTEXT names and migrate the reporting database
 prod-up:
 	$(call prod_context_guard)
 	@for example in $(PROD_OVERLAY)/secrets/*.env.example; do \
 		file="$${example%.example}"; \
 		[ -f "$$file" ] || { echo "ERROR: $$file is missing; copy $$example and fill it" >&2; exit 1; }; \
+		lacks=; \
+		for key in $$(sed -n 's/^\([^#=][^=]*\)=.*/\1/p' "$$example"); do \
+			grep -q "^$$key=" "$$file" || lacks="$$lacks $$key"; \
+		done; \
+		[ -z "$$lacks" ] || { echo "ERROR: $$file lacks$$lacks; copy the lines from $$example and fill them" >&2; exit 1; }; \
 		keys="$$({ grep -E '^[^#=]+=([[:space:]]*$$|.*<[a-z-]+>)' "$$file" || [ $$? -eq 1 ]; } | cut -d= -f1 | tr '\n' ' ')"; \
 		[ -z "$$keys" ] || { echo "ERROR: $$file leaves $${keys% } empty or on a placeholder; fill every value" >&2; exit 1; }; \
 	done
 	@settings='$(PROD_OVERLAY)/collector.env'; \
 	[ -f "$$settings" ] || { echo "ERROR: $$settings is missing; it names the cloud the collector reports under" >&2; exit 1; }; \
-	grep -Eq '^TALLY_OSC_CLOUD=[[:space:]]*[^[:space:]]' "$$settings" || { echo "ERROR: $$settings leaves TALLY_OSC_CLOUD empty; set it to the cloud the ingest credential is issued for" >&2; exit 1; }
+	grep -Eq '^TALLY_OSC_CLOUD=[^[:space:]]+$$' "$$settings" || { echo "ERROR: $$settings leaves TALLY_OSC_CLOUD empty or with whitespace around it; set it to the cloud the ingest credential is issued for" >&2; exit 1; }
+	@cloud="$$(awk 'sub(/^TALLY_OSC_CLOUD=/, "") { print; exit }' '$(PROD_OVERLAY)/collector.env')"; \
+	auth='$(PROD_OVERLAY)/secrets/clouds.yaml'; \
+	config='$(PROD_OVERLAY)/reconciliation/clouds-config.yaml'; \
+	[ -f "$$auth" ] || { echo "ERROR: $$auth is missing; copy $$auth.example and fill it" >&2; exit 1; }; \
+	if grep -Eq '<[a-z-]+>' "$$auth"; then echo "ERROR: $$auth still carries a placeholder; fill every <...> value" >&2; exit 1; fi; \
+	{ [ -f "$$config" ] && grep -qxF "  - cloud: $$cloud" "$$config"; } || { echo "ERROR: $$config does not name the cloud $$cloud of collector.env; set its cloud: line to it" >&2; exit 1; }; \
+	grep -Eq '^      os_cloud: [^[:space:]]+$$' "$$config" || { echo "ERROR: $$config leaves os_cloud empty; set it to the entry of secrets/clouds.yaml the Reporting API authenticates with" >&2; exit 1; }
 	$(call prod_release_guard)
 	@echo '==> installing the certificate issuer'
 	$(PROD_KUBECTL) apply -f $(PROD_OVERLAY)/issuers.yaml
