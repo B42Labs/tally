@@ -1,0 +1,23 @@
+# The migrations of both databases in a cluster: one Job that applies the
+# reporting chain and then the engine chain, with the CLIs of the release the
+# overlay deploys. Every apply of an overlay that lists this component creates
+# the Job, and a chain already at its head applies nothing.
+#
+# An overlay that lists this component has three things to supply:
+#
+#   - an images entry that maps tally-reporting-admin to a registry
+#   - an images entry that maps tally-engine to a registry
+#   - a Secret tally-db with the keys db-url and engine-db-url, the connection
+#     strings of the two databases with the password of their owner
+#
+# The prod overlay does. The dev overlay does not list the component: `make
+# migrate` applies both chains there with `go run`.
+#
+# A Job's pod template is immutable, so the apply of a new release fails on the
+# Job of the previous one. Whoever applies deletes the finished Job first, which
+# `make prod-up` does (docs/how-to/cluster/deploy-the-collecting-stack.md).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - migrations.yaml

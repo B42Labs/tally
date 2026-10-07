@@ -1,0 +1,140 @@
+# The migrations of both databases. The Reporting API answers its readiness
+# probe with 503 until the reporting chain is at the version its build expects,
+# and `tally-engine tick` refuses an older engine schema, so a deploy is done
+# once this Job has completed. Neither binary runs DDL on its own: the two
+# migrate subcommands below are the only thing that does.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tally-migrate
+  labels:
+    app.kubernetes.io/name: tally-migrate
+spec:
+  # A database that restarts under the Job fails it, which is what happens on
+  # the deploy that changes the tally-db Secret: its generated name changes and
+  # the StatefulSet rolls. A retry runs the same command an operator would, and
+  # it is idempotent: a chain already at its head prints "nothing to apply".
+  #
+  # There is no activeDeadlineSeconds. Migration 9 of the reporting chain builds
+  # an index outside a transaction, and a build that is killed leaves the state
+  # docs/how-to/engine/migrate-both-databases.md repairs by hand. There is no
+  # ttlSecondsAfterFinished either: the finished Job keeps its log until the
+  # next deploy replaces it.
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tally-migrate
+      # The cluster autoscaler and Karpenter evict a Job's pod to scale down or
+      # consolidate its node, and an eviction in the middle of migration 9
+      # leaves the index the how-to drops by hand. Each reads its own key.
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      restartPolicy: Never
+      # The migrations call no Kubernetes API, so the token of the default
+      # ServiceAccount would be an exposure and nothing else.
+      automountServiceAccountToken: false
+      # The images end in distroless nonroot with USER nonroot:nonroot, which
+      # names an identity and nothing more; this is what asks the kubelet to
+      # hold the pod to it. 65532 is that user, and busybox runs as it as well.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      # Init containers run one after the other and the main container after
+      # them, which is what orders the two chains in one pod. The reporting
+      # chain goes first, in the order of `make migrate`.
+      initContainers:
+        # The wait the Reporting API uses. The Postgres entrypoint listens on
+        # TCP only after its initdb scripts ran, so an open port means the
+        # database tally_engine and the reader roles exist.
+        - name: wait-for-timescaledb
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - "until nc -z timescaledb 5432; do echo waiting for timescaledb; sleep 2; done"
+          # What the block above does not reach. These four are per-container
+          # and every one of them defaults the permissive way. None of the
+          # three containers needs any of it: each opens a connection and
+          # writes to neither the filesystem nor a port. Both connection
+          # strings carry the password of a database owner, which is what the
+          # confinement is worth.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          # Without a request the pod is BestEffort and first in line for
+          # eviction, and an eviction in the middle of migration 9 leaves the
+          # index the how-to drops by hand.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+        - name: reporting
+          image: tally-reporting-admin:dev
+          # The image's entrypoint is the admin binary (see the Dockerfile), so
+          # the subcommand is what the arguments carry.
+          args: ["migrate"]
+          env:
+            # Secrets follow the *_FILE convention so they arrive as a mounted
+            # file rather than an environment value.
+            - name: TALLY_REPORTING_DB_URL_FILE
+              value: /run/secrets/tally/db-url
+          volumeMounts:
+            - name: db-credentials
+              mountPath: /run/secrets/tally
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      containers:
+        - name: engine
+          image: tally-engine:dev
+          args: ["migrate"]
+          env:
+            - name: TALLY_ENGINE_DB_URL_FILE
+              value: /run/secrets/tally/engine-db-url
+          volumeMounts:
+            - name: db-credentials
+              mountPath: /run/secrets/tally
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: db-credentials
+          secret:
+            secretName: tally-db
+            items:
+              - key: db-url
+                path: db-url
+              - key: engine-db-url
+                path: engine-db-url
