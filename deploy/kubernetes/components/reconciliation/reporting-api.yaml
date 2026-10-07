@@ -1,0 +1,43 @@
+# What the Reporting API reconciles, and how it authenticates against the
+# cloud. It reads the clouds config once at startup and exits when it cannot
+# read the file or the file names no cloud. The adapter reads clouds.yaml on
+# every sync, so a credential that does not authenticate fails the sync with a
+# 500 and leaves the pod running.
+#
+# Two plain volumes rather than one projected volume: a secret volume with
+# items names each key it mounts, which is what the prod overlay's tests check
+# every example file against. The ConfigMap's key is the base name of the file
+# the overlay generates it from.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reporting-api
+spec:
+  template:
+    spec:
+      containers:
+        - name: reporting-api
+          env:
+            - name: TALLY_REPORTING_CLOUDS_CONFIG
+              value: /etc/tally/reconciliation/clouds-config.yaml
+            - name: OS_CLIENT_CONFIG_FILE
+              value: /etc/openstack/clouds.yaml
+          volumeMounts:
+            - name: clouds-config
+              mountPath: /etc/tally/reconciliation
+              readOnly: true
+            - name: clouds-auth
+              mountPath: /etc/openstack
+              readOnly: true
+      volumes:
+        - name: clouds-config
+          configMap:
+            name: tally-reconciliation
+        # The credential of the cloud, kept out of the ConfigMap: a ConfigMap
+        # is readable by everything the built-in view role is bound to.
+        - name: clouds-auth
+          secret:
+            secretName: tally-reconciliation-auth
+            items:
+              - key: clouds.yaml
+                path: clouds.yaml
