@@ -1,12 +1,14 @@
-# The dedicated cluster: the collecting half of the stack on a public domain.
+# The dedicated cluster: the stack on a public domain.
 #
 # The Reporting API, the OTLP collector, the store, the alerting pair and
 # Grafana run here, under the hostnames hosts.yaml names and behind a
 # certificate Let's Encrypt signs. The OpenStack collector runs here too: it
 # consumes the notifications of the cloud collector.env names from a broker
-# outside the cluster and posts them to the Reporting API. The metering
-# scheduler does not run here, and nothing that answers without a credential is
-# published.
+# outside the cluster and posts them to the Reporting API. The cluster migrates,
+# rates and reconciles by itself: Job tally-migrate applies both migration
+# chains on every apply, the hourly CronJob tally-engine rates a month once a
+# pricing catalog prices it, and CronJob tally-sync reconciles the cloud every
+# ten minutes. Nothing that answers without a credential is published.
 #
 # issuers.yaml is deliberately not listed here; see the comment in that file.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -32,21 +34,27 @@ resources:
 # a filter the component declares.
 #
 # The second component is the collector: a Deployment with its outbox on a
-# claim. Its kustomization.yaml states what an overlay has to supply, which the
+# claim. The third is Job tally-migrate, which applies both migration chains
+# with the CLIs of the release, and the fourth is CronJob tally-sync with the
+# mount of the two files the Reporting API reconciles with. The
+# kustomization.yaml of each states what an overlay has to supply, which the
 # images, secretGenerator and configMapGenerator entries below do, all but the
 # Secret of the ingest token.
 components:
   - ../../components/envoy-gateway
   - ../../components/openstack-collector
+  - ../../components/migrations
+  - ../../components/reconciliation
 
-# The Reporting API and the collector image the release workflow publishes. The
-# overlay deploys one release, so both entries carry one tag: the operator
-# moves both on every release, `make prod-up` refuses two different ones, and
-# the tag has to exist in the registry before it runs. The release workflow
-# publishes the collector image from the first release after v0.3.0 on: at
-# v0.3.0 itself no registry holds it, and a deployment moves both tags to a
-# later release. The engine image has no entry because its CronJob is deleted
-# below.
+# The four images the release workflow publishes: the Reporting API, the
+# collector, the engine the scheduler and the migration Job run, and the admin
+# CLI the migration Job applies the reporting chain with. The overlay deploys
+# one release, so every entry carries one tag: the operator moves all four on
+# every release, `make prod-up` refuses two different ones, and the tag has to
+# exist in the registry before it runs. The release workflow publishes the
+# collector and the admin image from the first release after v0.3.0 on: at
+# v0.3.0 itself no registry holds them, and a deployment moves every tag to a
+# later release.
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
@@ -54,10 +62,21 @@ images:
   - name: tally-openstack-collector
     newName: ghcr.io/b42labs/tally-openstack-collector
     newTag: v0.5.0
+  - name: tally-engine
+    newName: ghcr.io/b42labs/tally-engine
+    newTag: v0.5.0
+  - name: tally-reporting-admin
+    newName: ghcr.io/b42labs/tally-reporting-admin
+    newTag: v0.5.0
 
 # The credentials of this cluster. Each file is untracked and copied from the
 # .example beside it, which says how to fill every key. `make prod-up` checks
-# that each exists with every value filled in before it applies anything.
+# that each exists with every key of its example and every value filled in
+# before it applies anything.
+#
+# tally-reconciliation-auth is the clouds.yaml the Reporting API authenticates
+# against the cloud with, generated as one file under its own name, which is
+# the key the reconciliation component mounts.
 #
 # tally-collector-token, the Secret of the collector's ingest token, is in no
 # generator. A credential can be issued only against the migrated database, so
@@ -83,6 +102,9 @@ secretGenerator:
   - name: tally-collector-amqp
     envs:
       - secrets/tally-collector-amqp.env
+  - name: tally-reconciliation-auth
+    files:
+      - secrets/clouds.yaml
 
 # The scrape config of this cluster, in place of the base's. What the file
 # keeps, and why, is written in its own header.
@@ -90,6 +112,10 @@ secretGenerator:
 # The second entry is the non-secret settings of the collector, one variable
 # per line of collector.env. The file is tracked and ships with an empty
 # TALLY_OSC_CLOUD, which `make prod-up` refuses.
+#
+# The third is the cloud the Reporting API reconciles, which the sync names
+# through the collector's TALLY_OSC_CLOUD. The file is tracked, edited in place
+# like collector.env, and ships with empty names, which `make prod-up` refuses.
 configMapGenerator:
   - name: victoriametrics-scrape
     behavior: replace
@@ -98,6 +124,9 @@ configMapGenerator:
   - name: tally-openstack-collector
     envs:
       - collector.env
+  - name: tally-reconciliation
+    files:
+      - reconciliation/clouds-config.yaml
 
 patches:
   # The UIs of the store, vmalert and Alertmanager answer without a credential,
@@ -151,9 +180,10 @@ patches:
                     value: "false"
 
   # Behind a LoadBalancer the postgres listener would put the database on the
-  # internet, so neither it nor its route exists here. Migrations and the admin
-  # CLI reach the database through a port-forward. Index 2 is the listener
-  # named postgres in the base's gateway.yaml, which manifest_test.go checks.
+  # internet, so neither it nor its route exists here. The migrations run in
+  # Job tally-migrate, and the admin CLI and the engine CLI reach the database
+  # through a port-forward. Index 2 is the listener named postgres in the
+  # base's gateway.yaml, which manifest_test.go checks.
   - patch: |
       apiVersion: gateway.networking.k8s.io/v1alpha2
       kind: TCPRoute
@@ -168,17 +198,6 @@ patches:
     patch: |
       - op: remove
         path: /spec/listeners/2
-
-  # The scheduler does not run on this cluster. TimescaleDB's initdb still
-  # creates the engine's database and reader roles on the first start of an
-  # empty volume, so running it later means removing this patch, adding the two
-  # engine keys to secrets/tally-db.env and applying the engine chain.
-  - patch: |
-      apiVersion: batch/v1
-      kind: CronJob
-      metadata:
-        name: tally-engine
-      $patch: delete
 
   # Let's Encrypt issues a wildcard only over DNS-01, so the certificate names
   # the four published hostnames instead. The entries are the keys of

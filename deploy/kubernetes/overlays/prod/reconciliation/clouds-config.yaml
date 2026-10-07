@@ -1,0 +1,21 @@
+# The cloud the Reporting API reconciles, which CronJob tally-sync syncs every
+# ten minutes. The prod overlay generates the ConfigMap tally-reconciliation
+# from this file. It ships with both names empty, which `make prod-up` refuses,
+# because a guessed name syncs a cloud nothing reports under.
+#
+# cloud is the value of TALLY_OSC_CLOUD in collector.env: the sync takes its
+# cloud from there. os_cloud is the entry name in secrets/clouds.yaml the
+# adapter authenticates with. include_octavia: true belongs to a cloud whose
+# TALLY_OSC_EXCHANGES lists octavia, so the load balancers the events book are
+# the ones the sync lists. docs/reference/configuration/clouds-file.md lists
+# every key.
+#
+# The Makefile reads the cloud and os_cloud lines as text: keep each at its
+# indentation, unquoted, with no comment after the value.
+clouds:
+  - cloud:
+    platform: openstack
+    adapter: openstack
+    adapter_config:
+      os_cloud:
+      include_octavia: false
