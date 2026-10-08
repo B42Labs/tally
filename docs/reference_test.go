@@ -378,7 +378,7 @@ func recordedReportingRegistry() *prometheus.Registry {
 // they hold, so the fixture reports an empty outbox.
 func recordedCollectorRegistry() *prometheus.Registry {
 	reg := prometheus.NewRegistry()
-	c := openstack.NewMetrics(reg, func() float64 { return 0 }, func() float64 { return 0 })
+	c := openstack.NewMetrics(reg, "os-prod-eu1", func() float64 { return 0 }, func() float64 { return 0 })
 
 	c.Consumed("compute.instance.create.end")
 	c.Skipped("compute.instance.reboot.end")

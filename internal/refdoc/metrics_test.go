@@ -153,7 +153,7 @@ func TestMetricsRendersTheReportingInstruments(t *testing.T) {
 func TestMetricsRendersTheCollectorInstruments(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	zero := func() float64 { return 0 }
-	m := openstack.NewMetrics(reg, zero, zero)
+	m := openstack.NewMetrics(reg, "os-prod-eu1", zero, zero)
 	m.Consumed("compute.instance.create.end")
 	m.Skipped("compute.instance.unknown")
 	m.Unparseable()
@@ -168,8 +168,8 @@ func TestMetricsRendersTheCollectorInstruments(t *testing.T) {
 		t.Errorf("the collector rendered %d series, want %d:\n%s", n, collectorSeries, got)
 	}
 	for _, want := range []string{
-		"| `tally_collector_consumed_total` | counter | `event_type` |",
-		"| `tally_collector_oldest_buffered_seconds` | gauge | none |",
+		"| `tally_collector_consumed_total` | counter | `cloud`, `platform`, `event_type` |",
+		"| `tally_collector_oldest_buffered_seconds` | gauge | `cloud`, `platform` |",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the rendering does not carry %q:\n%s", want, got)

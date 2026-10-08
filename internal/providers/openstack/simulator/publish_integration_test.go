@@ -131,7 +131,7 @@ func startCollector(t *testing.T, url string, exchanges []string) (*openstack.Ou
 	}
 
 	reg := prometheus.NewRegistry()
-	m := openstack.NewMetrics(reg,
+	m := openstack.NewMetrics(reg, testCloud,
 		func() float64 { return float64(outbox.Depth()) },
 		outbox.OldestBufferedSeconds)
 	consumer := openstack.NewConsumer(openstack.Config{
@@ -323,7 +323,8 @@ func depthStaysAt(t *testing.T, outbox *openstack.Outbox, depth int64) {
 // exposition rather than through the instrument, since the instruments belong to
 // the collector package. A family or a child that was never touched reads 0,
 // which is what a test asserting that nothing was skipped needs. An empty
-// labelName addresses the unlabeled counter.
+// labelName addresses a counter without a variable label, whose one child
+// carries only the collector's constant platform and cloud.
 func counterValue(t *testing.T, reg *prometheus.Registry, name, labelName, labelValue string) float64 {
 	t.Helper()
 
@@ -336,7 +337,7 @@ func counterValue(t *testing.T, reg *prometheus.Registry, name, labelName, label
 			continue
 		}
 		for _, metric := range family.GetMetric() {
-			if labelName == "" && len(metric.GetLabel()) == 0 {
+			if labelName == "" {
 				return metric.GetCounter().GetValue()
 			}
 			for _, label := range metric.GetLabel() {

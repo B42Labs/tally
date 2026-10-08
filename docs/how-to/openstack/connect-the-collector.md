@@ -524,8 +524,8 @@ the other collector.
    ```
 
    ```text
-   tally_collector_consumed_total{event_type="compute.instance.create.end"} 14
-   tally_collector_delivered_total 12
+   tally_collector_consumed_total{cloud="os-prod-eu1",event_type="compute.instance.create.end",platform="openstack"} 14
+   tally_collector_delivered_total{cloud="os-prod-eu1",platform="openstack"} 12
    ```
 
 3. Count the two failures that keep delivered events at zero. An `x509` error
