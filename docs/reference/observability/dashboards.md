@@ -24,7 +24,8 @@ to the store and refuses everything else.
 [`dashboards_test.go`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/grafana/dashboards_test.go)
 pins the file set the ConfigMap ships, that every file parses, the uids and the
 titles, the datasource uid on every query target, the variables the expressions
-read, and the drift note of the reconciliation dashboard.
+read, the refresh of the `project_id` list, the `unlimited` reading of the quota
+gauges, and the drift note of the reconciliation dashboard.
 
 ## Dashboards
 
@@ -76,7 +77,7 @@ Title `Tally / Project Drilldown`, uid `tally-project-drilldown`.
 | `platform` | yes | `label_values(tally_current_resources, platform)` |
 | `cloud` | yes | `label_values(tally_current_resources{platform=~"$platform"}, cloud)` |
 | `project_id` | no | `label_values(openstack_nova_limits_instances_used, tenant_id)` |
-| `api_base` | no | `https://api.tally.127-0-0-1.nip.io:8443` |
+| `api_base` | no | `https://api.tally.example.com` |
 
 | Panel | Type | Expression |
 | --- | --- | --- |
@@ -87,9 +88,9 @@ Title `Tally / Project Drilldown`, uid `tally-project-drilldown`.
 | Resources by type | `timeseries` | `count(openstack_glance_image_bytes{cloud=~"$cloud", tenant_id=~"$project_id"})` |
 | Resources by type | `timeseries` | `count(openstack_loadbalancer_loadbalancer_status{cloud=~"$cloud", project_id=~"$project_id"})` |
 | Volume capacity | `timeseries` | `sum(openstack_cinder_volume_gb{cloud=~"$cloud", tenant_id=~"$project_id"})` |
-| Quota usage | `gauge` | `sum(openstack_nova_limits_instances_used{cloud=~"$cloud", tenant_id=~"$project_id"}) / sum(openstack_nova_limits_instances_max{cloud=~"$cloud", tenant_id=~"$project_id"})` |
-| Quota usage | `gauge` | `sum(openstack_nova_limits_vcpus_used{cloud=~"$cloud", tenant_id=~"$project_id"}) / sum(openstack_nova_limits_vcpus_max{cloud=~"$cloud", tenant_id=~"$project_id"})` |
-| Quota usage | `gauge` | `sum(openstack_nova_limits_memory_used{cloud=~"$cloud", tenant_id=~"$project_id"}) / sum(openstack_nova_limits_memory_max{cloud=~"$cloud", tenant_id=~"$project_id"})` |
+| Quota usage | `gauge` | `sum(openstack_nova_limits_instances_used{cloud=~"$cloud", tenant_id=~"$project_id"} and (openstack_nova_limits_instances_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0)) / (sum(openstack_nova_limits_instances_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0) > 0) or (max(openstack_nova_limits_instances_max{cloud=~"$cloud", tenant_id=~"$project_id"}) == -1)` |
+| Quota usage | `gauge` | `sum(openstack_nova_limits_vcpus_used{cloud=~"$cloud", tenant_id=~"$project_id"} and (openstack_nova_limits_vcpus_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0)) / (sum(openstack_nova_limits_vcpus_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0) > 0) or (max(openstack_nova_limits_vcpus_max{cloud=~"$cloud", tenant_id=~"$project_id"}) == -1)` |
+| Quota usage | `gauge` | `sum(openstack_nova_limits_memory_used{cloud=~"$cloud", tenant_id=~"$project_id"} and (openstack_nova_limits_memory_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0)) / (sum(openstack_nova_limits_memory_max{cloud=~"$cloud", tenant_id=~"$project_id"} >= 0) > 0) or (max(openstack_nova_limits_memory_max{cloud=~"$cloud", tenant_id=~"$project_id"}) == -1)` |
 | Recent lifecycle activity | `timeseries` | `sum by (event_type) (rate(tally_events_ingested_total{cloud=~"$cloud"}[5m]))` |
 
 ### `reconciliation-drift.json`
@@ -109,6 +110,24 @@ Title `Tally / Reconciliation Drift`, uid `tally-reconciliation-drift`.
 | Drift interpretation | `text` | none |
 <!-- refdoc:end dashboards -->
 
+## What each panel needs
+
+Each panel reads the series of one source, and a source reaches the store
+through one scrape job or push.
+
+| Source | Scrape job or push | Panels |
+| --- | --- | --- |
+| The Reporting API's `tally_` series | `reporting-api` | Fleet Overview: Resources by type and state, Resource count trend, Clouds reporting. Ingestion Health: Event ingest rate, Dedup rate, Rejected events, Projection replays. Project Drilldown: Recent lifecycle activity. Reconciliation Drift: Reconciled resources by action, Sync errors, Sync runs by status, and Drift interpretation, a text panel that reads no series. The `platform` and `cloud` variables of every dashboard. |
+| The OpenStack collector's `tally_collector_*` series | `openstack-collector` | Ingestion Health: Collector buffer depth, Oldest buffered event age. |
+| The database exporter's `openstack_*` series | `openstack-db-exporter`, or the simulator on a dev cluster | Fleet Overview: Projects (OpenStack), Top 10 projects by instance count. Project Drilldown: Resources by type, Volume capacity, Quota usage. The `project_id` variable. |
+| The store's own `up` series | every scrape job | Ingestion Health: Scrape health. |
+
+A deployment that runs notifications and reconciliation without the database
+exporter has every panel of the third row empty and an empty `project_id` list.
+On a dev cluster,
+[fill the dashboards](/how-to/observability/fill-the-dashboards) pushes those
+series.
+
 ## Variables
 
 Every dashboard carries `platform` and `cloud`. Both are read off
@@ -117,9 +136,14 @@ and both are multi-select with an `All` option whose value is `.*`.
 
 `project-drilldown.json` carries two more. `project_id` is read off the
 `tenant_id` label of `openstack_nova_limits_instances_used`, which the exporter
-reports once per project. `api_base` is a textbox rather than a query, and the
-panel link of `Recent lifecycle activity` is built from it: it opens
-`GET /api/v1/events` for the selected project.
+reports once per project, and it is read again on every change of the time
+range (`refresh: 2`). `api_base` is a textbox rather than a query, and the panel
+link of `Recent lifecycle activity` is built from it: it opens
+`GET /api/v1/events` for the selected project. Its default is
+`https://api.tally.example.com`, the base's placeholder hostname. A reader sets
+it to the hostname the overlay publishes the Reporting API under, with the port
+where the Gateway is not on 443; on the dev overlay that is
+`https://api.tally.127-0-0-1.nip.io:8443`.
 
 ## See also
 

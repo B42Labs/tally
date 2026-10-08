@@ -1,7 +1,8 @@
 // Package grafana_test pins the JSON contract of the provisioned dashboards:
 // the file set the ConfigMap ships, that every file parses, the fixed uids and
 // titles, the datasource each query target names, the template variables the
-// expressions read, and the drift note. Grafana loads these files at startup
+// expressions read, the quota gauges' reading of an unlimited quota, and the
+// drift note. Grafana loads these files at startup
 // and reports a broken one only in its own log, so without this test a
 // truncated file or a renamed datasource reaches a cluster before anyone sees
 // it. The test reads the files from disk and needs no Grafana and no cluster.
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -54,24 +56,39 @@ type dashboard struct {
 }
 
 type templateVar struct {
-	Name  string `json:"name"`
-	Multi bool   `json:"multi"`
-	Query string `json:"query"`
+	Name    string `json:"name"`
+	Multi   bool   `json:"multi"`
+	Query   string `json:"query"`
+	Refresh int    `json:"refresh"`
 }
 
 // panel carries a nested panel list of its own: a row panel holds the panels
 // below it once the row is collapsed.
 type panel struct {
-	Title   string   `json:"title"`
-	Panels  []panel  `json:"panels"`
-	Targets []target `json:"targets"`
+	Title       string   `json:"title"`
+	Panels      []panel  `json:"panels"`
+	Targets     []target `json:"targets"`
+	FieldConfig struct {
+		Defaults struct {
+			Mappings []valueMapping `json:"mappings"`
+		} `json:"defaults"`
+	} `json:"fieldConfig"`
 }
 
 type target struct {
 	RefID      string `json:"refId"`
+	Expr       string `json:"expr"`
 	Datasource struct {
 		UID string `json:"uid"`
 	} `json:"datasource"`
+}
+
+// valueMapping is one mapping of a panel's field config. Its options stay raw,
+// because a value mapping keys them by value and a range mapping carries one
+// object of another shape.
+type valueMapping struct {
+	Type    string                     `json:"type"`
+	Options map[string]json.RawMessage `json:"options"`
 }
 
 func TestDashboardDirectory(t *testing.T) {
@@ -172,8 +189,8 @@ func TestDashboards(t *testing.T) {
 
 func TestProjectDrilldown(t *testing.T) {
 	t.Run("reads the project list from a per-project series", func(t *testing.T) {
-		// label_values scans every series its matcher selects, and refresh 1
-		// re-runs it on every dashboard load. The per-resource series are the
+		// label_values scans every series its matcher selects, and refresh 2
+		// re-runs it on every time range change. The per-resource series are the
 		// wrong thing to scan: openstack_nova_server_status carries one series
 		// per instance and openstack_cinder_volume_status one per volume, and
 		// four of the nova labels change on reboot, migration and address
@@ -191,10 +208,83 @@ func TestProjectDrilldown(t *testing.T) {
 			if v.Query != want {
 				t.Errorf("project_id query = %q, want %q", v.Query, want)
 			}
+			// Refresh 1 re-reads the list on dashboard load alone, so a project
+			// that first appears in another time range stays out of the list
+			// until the page is reloaded.
+			if v.Refresh != 2 {
+				t.Errorf("project_id refresh = %d, want 2, which re-reads the list when the time range changes", v.Refresh)
+			}
 			return
 		}
 		t.Error("project-drilldown.json declares no project_id variable")
 	})
+}
+
+func TestQuotaUsageReadsUnlimitedQuotas(t *testing.T) {
+	// The nova limits collector reports an unlimited quota as -1, and used
+	// over -1 is a negative ratio the gauge renders as -7200%. Each target
+	// keeps the ratio where the max is positive and returns the max itself
+	// where it is -1, and the mapping turns that -1 into text.
+	panels := flatten(load(t, "project-drilldown.json").Panels)
+	i := slices.IndexFunc(panels, func(p panel) bool { return p.Title == "Quota usage" })
+	if i < 0 {
+		t.Fatal("project-drilldown.json carries no Quota usage panel")
+	}
+	quota := panels[i]
+
+	if len(quota.Targets) != 3 {
+		t.Errorf("Quota usage carries %d targets, want the three of instances, vcpus and memory", len(quota.Targets))
+	}
+	for _, tgt := range quota.Targets {
+		// Without the guard on a positive max the ratio over -1 is a result of
+		// its own, and the or never reaches the clause that returns -1.
+		for _, want := range []string{"> 0)", "== -1)"} {
+			if !strings.Contains(tgt.Expr, want) {
+				t.Errorf("Quota usage target %q carries no %q, so an unlimited quota renders as a negative percentage:\n%s",
+					tgt.RefID, want, tgt.Expr)
+			}
+		}
+		// A project unlimited in two regions that share a Keystone, or scraped
+		// by two exporter targets, reports -1 twice, and summed that is -2,
+		// which neither clause returns. max is -1 only where every series is.
+		if !strings.Contains(tgt.Expr, "or (max(") {
+			t.Errorf("Quota usage target %q compares no max() to -1, so a project that reports -1 in two series sums to -2 and reads No data:\n%s",
+				tgt.RefID, tgt.Expr)
+		}
+		// The cloud variable defaults to All, so a project unlimited in one cloud
+		// and limited in another reaches the ratio on the default view. Summed,
+		// a max of -1 and one of 20 are 19, and 45 used over that reads 237 %.
+		// The ratio keeps the series whose max is not -1, in the used sum and
+		// in the max sum alike. The and pairs each used series with the max of
+		// its own target: two exporter targets of one installation carry the
+		// same cloud label, so a match on cloud and tenant_id alone keeps the
+		// 45 used of an unlimited target next to the 5 of a limited one, and
+		// 50 over 20 reads 250 %.
+		for _, want := range []string{"} and (openstack_nova_limits_", "} >= 0)) / (sum(", "} >= 0) > 0)"} {
+			if !strings.Contains(tgt.Expr, want) {
+				t.Errorf("Quota usage target %q carries no %q, so an unlimited quota is summed into the ratio of a limited one:\n%s",
+					tgt.RefID, want, tgt.Expr)
+			}
+		}
+	}
+
+	var text string
+	for _, m := range quota.FieldConfig.Defaults.Mappings {
+		raw, ok := m.Options["-1"]
+		if m.Type != "value" || !ok {
+			continue
+		}
+		var option struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &option); err != nil {
+			t.Fatalf("parsing the mapping of -1: %v", err)
+		}
+		text = option.Text
+	}
+	if text != "unlimited" {
+		t.Errorf("Quota usage maps -1 to %q, want \"unlimited\"", text)
+	}
 }
 
 func TestReconciliationDrift(t *testing.T) {
