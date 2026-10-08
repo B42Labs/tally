@@ -102,13 +102,17 @@ This lesson takes about 5 minutes.
    split across the two, so you set one range, read the panels that fit it,
    then set the other.
 
-   The absolute range `2026-07-01 00:00:00` to `2026-08-01 00:00:00` fits every
+   The absolute range `2026-07-01 00:00:00` to `2026-07-31 23:59:59` fits every
    panel that reads an `openstack_*` or a `ceilometer_*` series, because the
-   simulator pushed those at simulated time, inside July 2026. `Last 3 hours`
-   fits every panel that reads a `tally_` series, because those were scraped
-   off the Reporting API at the wall clock while the month went out, in the few
-   minutes lesson 2 took. The dashboards open on `Last 6 hours` refreshing
-   every minute. The next step names which panels are which per dashboard.
+   simulator pushed those at simulated time, inside July 2026. It ends a second
+   before August because the inventory is pushed every five minutes, so its
+   last sample of the month is at 23:55:00, and an instant panel reads the last
+   sample within the five minutes before the range's end, a window that for an
+   end at 00:00:00 opens just after that sample. `Last 3 hours` fits every
+   panel that reads a `tally_` series, because those were scraped off the
+   Reporting API at the wall clock while the month went out, in the few minutes
+   lesson 2 took. The dashboards open on `Last 6 hours` refreshing every
+   minute. The next step names which panels are which per dashboard.
 
    Every dashboard file carries `"timezone": "utc"`, so both ranges are read in
    UTC and no time zone setting is needed.
@@ -192,7 +196,11 @@ steps below say, and each of them names the time range its panels need.
    runs that loop against this same stack.
 
 A panel reading `No data` where a value is named above has the wrong one of the
-two time ranges, or the `cloud` variable is not on `os-sim`.
+two time ranges, or the `cloud` variable is not on `os-sim`, or the July range
+ends at `2026-08-01 00:00:00` instead of `2026-07-31 23:59:59`. That end empties
+the five panels of the July range that read one instant, `Projects (OpenStack)`,
+`Top 10 projects by instance count` and the three `Quota usage` gauges, because
+their last sample lies five minutes before it.
 
 ## Find the alerts
 
