@@ -149,7 +149,7 @@ sum by (cloud) (increase(tally_sync_resources_reconciled_total[6h])) > 50
 Summary:
 
 ```text
-Oldest buffered collector event is {{ $value | printf "%.0f" }}s old; the Reporting API is unreachable from the provider side
+Oldest buffered collector event of {{ $labels.cloud }} is {{ $value | printf "%.0f" }}s old; the Reporting API is unreachable from the provider side
 ```
 
 Expression:
