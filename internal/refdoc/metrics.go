@@ -36,7 +36,11 @@ const quotedString = `"(?:[^"\\]|\\.)*"`
 // this parses.
 var descPattern = regexp.MustCompile(
 	`^Desc\{fqName: (` + quotedString + `), help: (` + quotedString +
-		`), unit: (?:` + quotedString + `), constLabels: \{.*\}, variableLabels: \{(.*)\}\}$`)
+		`), unit: (?:` + quotedString + `), constLabels: \{(.*)\}, variableLabels: \{(.*)\}\}$`)
+
+// constLabelPair is how a descriptor writes a constant label: its name, an
+// equals sign and its value quoted.
+var constLabelPair = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)=` + quotedString)
 
 // constrainedLabel is how a descriptor writes a label whose values its
 // collector bounds. A page names the label; the bound is the collector's
@@ -156,7 +160,19 @@ func parseDescriptor(descriptor *prometheus.Desc) (instrument, error) {
 	if nameErr != nil || helpErr != nil {
 		return instrument{}, fmt.Errorf("refdoc: cannot parse descriptor %q", text)
 	}
-	return instrument{name: name, help: help, labels: labelNames(match[3])}, nil
+	labels := slices.Concat(constLabelNames(match[3]), labelNames(match[4]))
+	return instrument{name: name, help: help, labels: labels}, nil
+}
+
+// constLabelNames are the constant labels of a descriptor, in the name order
+// the descriptor writes them in. A row lists them before the variable labels:
+// every series of the instrument carries them, whatever it is broken down by.
+func constLabelNames(list string) []string {
+	var names []string
+	for _, match := range constLabelPair.FindAllStringSubmatch(list, -1) {
+		names = append(names, match[1])
+	}
+	return names
 }
 
 // labelNames are the variable labels of a descriptor.
