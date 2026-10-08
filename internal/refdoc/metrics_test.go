@@ -21,9 +21,10 @@ const (
 // newFixtureRegistry builds a registry carrying every shape a row is rendered
 // from: a vector without a child, whose type only its name states; a vector
 // whose collector bounds the values of a label, which the descriptor writes
-// differently; an unlabelled counter the registry holds a value for; a gauge
-// read at scrape time; a help text naming a placeholder; and the Go collector,
-// which reports the process rather than the product.
+// differently; a vector whose every series carries constant labels; an
+// unlabelled counter the registry holds a value for; a gauge read at scrape
+// time; a help text naming a placeholder; and the Go collector, which reports
+// the process rather than the product.
 func newFixtureRegistry(t *testing.T) *prometheus.Registry {
 	t.Helper()
 
@@ -45,6 +46,11 @@ func newFixtureRegistry(t *testing.T) *prometheus.Registry {
 				},
 			},
 		}),
+		prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "tally_fixture_consumed_total",
+			Help:        "Notifications the fixture consumed.",
+			ConstLabels: prometheus.Labels{"platform": "fixture", "cloud": "os-fixture"},
+		}, []string{"event_type"}),
 		prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "tally_fixture_deliveries_total",
 			Help: "Batches the fixture delivered.",
@@ -86,6 +92,9 @@ func TestMetricsRendersEachInstrumentShape(t *testing.T) {
 		// A label whose values its collector bounds is written c(cloud) by the
 		// descriptor, and the bound is the collector's business, not a page's.
 		"| `tally_fixture_bounded_total` | counter | `cloud` |",
+		// The constant labels come first, in name order, because every series
+		// of the instrument carries them.
+		"| `tally_fixture_consumed_total` | counter | `cloud`, `platform`, `event_type` |",
 		// A placeholder in a help text is a code span rather than markup.
 		"Resources the fixture holds, by `<state>` as the projection reports it.",
 	} {
@@ -97,6 +106,7 @@ func TestMetricsRendersEachInstrumentShape(t *testing.T) {
 	assertOrder(t, got, []string{
 		"`tally_fixture_bounded_total`",
 		"`tally_fixture_buffer_depth`",
+		"`tally_fixture_consumed_total`",
 		"`tally_fixture_deliveries_total`",
 		"`tally_fixture_events_total`",
 		"`tally_fixture_resources`",
