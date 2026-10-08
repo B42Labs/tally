@@ -148,7 +148,7 @@ func serve(ctx context.Context, cfg openstack.Config, logger *slog.Logger) error
 	// counts land in the instruments one scrape reads. The two gauges are read
 	// off the outbox at scrape time rather than recorded.
 	promReg := prometheus.NewRegistry()
-	m := openstack.NewMetrics(promReg,
+	m := openstack.NewMetrics(promReg, cfg.Cloud,
 		func() float64 { return float64(outbox.Depth()) },
 		outbox.OldestBufferedSeconds)
 

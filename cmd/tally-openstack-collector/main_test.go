@@ -269,9 +269,12 @@ func TestRunServesTheScrapeRoute(t *testing.T) {
 				if !strings.Contains(body, "go_goroutines") {
 					t.Errorf("the body carries no go_goroutines series, want the exposition:\n%s", body)
 				}
-				if !strings.Contains(body, "tally_collector_delivered_total") {
-					t.Errorf("the body carries no tally_collector_delivered_total series, "+
-						"want the collector's own instruments:\n%s", body)
+				// The cloud label is what tells the collectors of two clouds apart
+				// in the store, so the series names the cloud of TALLY_OSC_CLOUD.
+				want := fmt.Sprintf(`tally_collector_delivered_total{cloud=%q,platform="openstack"}`, env["TALLY_OSC_CLOUD"])
+				if !strings.Contains(body, want) {
+					t.Errorf("the body carries no %s series, "+
+						"want the collector's own instruments labelled with TALLY_OSC_CLOUD:\n%s", want, body)
 				}
 			}
 

@@ -72,17 +72,20 @@ the gauge without series.
 <!-- refdoc:begin collector -->
 | Metric | Type | Labels | Help |
 | --- | --- | --- | --- |
-| `tally_collector_buffer_depth` | gauge | none | Events waiting in the outbox. |
-| `tally_collector_consumed_total` | counter | `event_type` | Notifications mapped to an event and buffered. |
-| `tally_collector_delivered_total` | counter | none | Events the Reporting API accepted. |
-| `tally_collector_delivery_errors_total` | counter | none | Delivery attempts the Reporting API did not accept. |
-| `tally_collector_oldest_buffered_seconds` | gauge | none | Age of the oldest event waiting in the outbox, 0 when it is empty, and NaN when the buffer cannot be read. |
-| `tally_collector_skipped_total` | counter | `event_type` | Notifications the mapping table produced no event for. |
-| `tally_collector_unparseable_total` | counter | none | AMQP deliveries whose body could not be parsed. |
+| `tally_collector_buffer_depth` | gauge | `cloud`, `platform` | Events waiting in the outbox. |
+| `tally_collector_consumed_total` | counter | `cloud`, `platform`, `event_type` | Notifications mapped to an event and buffered. |
+| `tally_collector_delivered_total` | counter | `cloud`, `platform` | Events the Reporting API accepted. |
+| `tally_collector_delivery_errors_total` | counter | `cloud`, `platform` | Delivery attempts the Reporting API did not accept. |
+| `tally_collector_oldest_buffered_seconds` | gauge | `cloud`, `platform` | Age of the oldest event waiting in the outbox, 0 when it is empty, and NaN when the buffer cannot be read. |
+| `tally_collector_skipped_total` | counter | `cloud`, `platform`, `event_type` | Notifications the mapping table produced no event for. |
+| `tally_collector_unparseable_total` | counter | `cloud`, `platform` | AMQP deliveries whose body could not be parsed. |
 <!-- refdoc:end collector -->
 
 The instruments are declared in
 [`internal/providers/openstack/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/metrics.go).
+
+`cloud` and `platform` are constant labels on every series the collector owns.
+`cloud` is the cloud `TALLY_OSC_CLOUD` names and `platform` is `openstack`.
 
 `event_type` carries the oslo type off the wire. It admits 100 distinct values
 and records everything past that under `other`. The bound is the collector's

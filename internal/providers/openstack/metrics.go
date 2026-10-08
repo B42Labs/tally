@@ -32,6 +32,14 @@ import (
 // The totals mirror the five counters as plain numbers for the summary line,
 // which Totals reads.
 //
+// Every one of the seven series carries the constant labels platform and cloud,
+// the cloud being the one TALLY_OSC_CLOUD names. One process serves one cloud
+// and only the process knows which: the store finds an in-cluster collector
+// through a discovered scrape job, which cannot stamp a label per cloud, so the
+// series name their cloud themselves and two collectors stay apart. The Go
+// runtime and process collectors carry neither, because they report the
+// process rather than the product.
+//
 // The normative specification is roadmap/01-phase-1-core-platform-openstack.md,
 // WP 1.12.
 type Metrics struct {
@@ -64,37 +72,49 @@ type Metrics struct {
 // runtime and process collectors. reg is also what Handler gathers from. It
 // panics if reg already carries one of these collectors, which makes a second
 // NewMetrics over the same registry a programming error rather than a silent
-// half-registration.
+// half-registration. It panics on an empty cloud too: the binary refuses an
+// empty TALLY_OSC_CLOUD before it builds the metrics, so an empty cloud here is
+// a caller's mistake rather than a state the process runs into.
 //
 // depth and oldestSeconds back the two gauges and are read at scrape time, not
 // here. The binary wires them to the outbox's Depth and OldestBufferedSeconds,
 // which is why the buffer needs no recording method of its own: what a gauge
 // reports is a state the outbox already knows, not a sum of events.
-func NewMetrics(reg *prometheus.Registry, depth, oldestSeconds func() float64) *Metrics {
+func NewMetrics(reg *prometheus.Registry, cloud string, depth, oldestSeconds func() float64) *Metrics {
+	if cloud == "" {
+		panic("openstack: NewMetrics needs the cloud of TALLY_OSC_CLOUD")
+	}
+	labels := prometheus.Labels{"platform": platform, "cloud": cloud}
+
 	m := &Metrics{
 		reg:     reg,
 		limiter: cardinality.New(LabelValueLimit),
 		consumed: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tally_collector_consumed_total",
-			Help: "Notifications mapped to an event and buffered.",
+			Name:        "tally_collector_consumed_total",
+			Help:        "Notifications mapped to an event and buffered.",
+			ConstLabels: labels,
 		}, []string{labelEventType}),
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tally_collector_skipped_total",
-			Help: "Notifications the mapping table produced no event for.",
+			Name:        "tally_collector_skipped_total",
+			Help:        "Notifications the mapping table produced no event for.",
+			ConstLabels: labels,
 		}, []string{labelEventType}),
 		// This one is unlabeled where the two above carry an event type: a body
 		// that did not parse holds no event type worth labeling a count with.
 		unparseable: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tally_collector_unparseable_total",
-			Help: "AMQP deliveries whose body could not be parsed.",
+			Name:        "tally_collector_unparseable_total",
+			Help:        "AMQP deliveries whose body could not be parsed.",
+			ConstLabels: labels,
 		}),
 		delivered: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tally_collector_delivered_total",
-			Help: "Events the Reporting API accepted.",
+			Name:        "tally_collector_delivered_total",
+			Help:        "Events the Reporting API accepted.",
+			ConstLabels: labels,
 		}),
 		deliveryErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tally_collector_delivery_errors_total",
-			Help: "Delivery attempts the Reporting API did not accept.",
+			Name:        "tally_collector_delivery_errors_total",
+			Help:        "Delivery attempts the Reporting API did not accept.",
+			ConstLabels: labels,
 		}),
 	}
 
@@ -105,13 +125,15 @@ func NewMetrics(reg *prometheus.Registry, depth, oldestSeconds func() float64) *
 		m.delivered,
 		m.deliveryErrors,
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "tally_collector_buffer_depth",
-			Help: "Events waiting in the outbox.",
+			Name:        "tally_collector_buffer_depth",
+			Help:        "Events waiting in the outbox.",
+			ConstLabels: labels,
 		}, depth),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "tally_collector_oldest_buffered_seconds",
 			Help: "Age of the oldest event waiting in the outbox, 0 when it is empty, " +
 				"and NaN when the buffer cannot be read.",
+			ConstLabels: labels,
 		}, oldestSeconds),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),

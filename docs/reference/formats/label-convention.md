@@ -49,11 +49,16 @@ provider is asked to produce or derive.
 Every series Tally exposes is named `tally_` and then the subsystem it belongs
 to, such as `tally_events_ingested_total` and `tally_collector_consumed_total`.
 
-`platform` and `cloud` are variable labels on the series they apply to. A
-reporting series that counts per installation carries `cloud`, and one that
-counts per platform and resource type carries `platform`. The collector's own
-series carry neither: one collector process serves one cloud, so the pair is a
-static label of its scrape job instead.
+`platform` and `cloud` are variable labels on the reporting series they apply
+to. A reporting series that counts per installation carries `cloud`, and one
+that counts per platform and resource type carries `platform`.
+
+The collector's own series carry both as constant labels. One collector process
+serves one cloud, and the process knows which from `TALLY_OSC_CLOUD`. The scrape
+job of a collector therefore sets no static `platform` or `cloud`. A job that
+does keeps its own pair on the series and leaves the exposed pair beside it,
+renamed `exported_platform` and `exported_cloud`: the store renames a scraped
+label that collides with a target label unless the job sets `honor_labels`.
 
 A third-party exporter is labelled the same way from the outside. The job that
 scrapes it sets `platform` and `cloud` statically, which is what puts its

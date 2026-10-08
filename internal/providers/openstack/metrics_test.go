@@ -1,6 +1,7 @@
 package openstack
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -33,6 +34,7 @@ func freshMetrics(t *testing.T) *Metrics {
 
 	return NewMetrics(
 		prometheus.NewRegistry(),
+		"os-test",
 		func() float64 { return 7 },
 		func() float64 { return 42.5 },
 	)
@@ -107,13 +109,67 @@ func TestNewMetricsReadsTheGaugesFromTheInjectedClosures(t *testing.T) {
 
 	body := scrapeMetrics(t, m)
 	for _, want := range []string{
-		"tally_collector_buffer_depth 7",
-		"tally_collector_oldest_buffered_seconds 42.5",
+		`tally_collector_buffer_depth{cloud="os-test",platform="openstack"} 7`,
+		`tally_collector_oldest_buffered_seconds{cloud="os-test",platform="openstack"} 42.5`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the scraped body carries no %q:\n%s", want, body)
 		}
 	}
+}
+
+func TestEveryInstrumentCarriesThePlatformAndTheCloud(t *testing.T) {
+	// The store discovers the collector through a scrape job that cannot stamp
+	// a label per cloud, so the series name their cloud themselves.
+	m := freshMetrics(t)
+
+	m.Consumed("compute.instance.create.end")
+	m.Skipped("compute.instance.reboot.start")
+	m.Unparseable()
+	m.Delivered(5)
+	m.DeliveryError()
+
+	seen := make(map[string]bool, len(collectorSeries))
+	for line := range strings.Lines(scrapeMetrics(t, m)) {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if (strings.HasPrefix(line, "go_") || strings.HasPrefix(line, "process_")) &&
+			strings.Contains(line, "cloud=") {
+			t.Errorf("a runtime series carries the cloud, which names the product rather than the process: %s", line)
+		}
+		for _, name := range collectorSeries {
+			if !strings.HasPrefix(line, name+"{") && !strings.HasPrefix(line, name+" ") {
+				continue
+			}
+			seen[name] = true
+			for _, want := range []string{`cloud="os-test"`, `platform="openstack"`} {
+				if !strings.Contains(line, want) {
+					t.Errorf("a %s line carries no %s: %s", name, want, line)
+				}
+			}
+		}
+	}
+	for _, name := range collectorSeries {
+		if !seen[name] {
+			t.Errorf("the scraped body carries no %s line", name)
+		}
+	}
+}
+
+func TestNewMetricsRefusesAnEmptyCloud(t *testing.T) {
+	const want = "openstack: NewMetrics needs the cloud of TALLY_OSC_CLOUD"
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewMetrics() with an empty cloud returned, want a panic")
+		}
+		if got := fmt.Sprint(r); got != want {
+			t.Errorf("NewMetrics() panicked with %q, want %q", got, want)
+		}
+	}()
+
+	NewMetrics(prometheus.NewRegistry(), "", func() float64 { return 0 }, func() float64 { return 0 })
 }
 
 func TestConsumedCountsEveryNotificationOfATypeOnOneSeries(t *testing.T) {
