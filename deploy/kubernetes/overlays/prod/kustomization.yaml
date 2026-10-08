@@ -58,16 +58,16 @@ components:
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
-    newTag: v0.5.0
+    newTag: v0.6.0
   - name: tally-openstack-collector
     newName: ghcr.io/b42labs/tally-openstack-collector
-    newTag: v0.5.0
+    newTag: v0.6.0
   - name: tally-engine
     newName: ghcr.io/b42labs/tally-engine
-    newTag: v0.5.0
+    newTag: v0.6.0
   - name: tally-reporting-admin
     newName: ghcr.io/b42labs/tally-reporting-admin
-    newTag: v0.5.0
+    newTag: v0.6.0
 
 # The credentials of this cluster. Each file is untracked and copied from the
 # .example beside it, which says how to fill every key. `make prod-up` checks
