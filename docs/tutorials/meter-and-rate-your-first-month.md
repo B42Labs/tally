@@ -375,7 +375,7 @@ both. Lesson 4 needs neither.
    The six totals have to match: they are the seed's usage rated at the model's
    prices. The largest is `3661.32` for `005be5adeef3d87e280d03d9d57c38b4`, one
    of the two Gardener tenants, and the reads below open that statement. `jq`
-   1.8.1 prints the amounts as the file carries them, while an older `jq`
+   1.7 and later print the amounts as the file carries them, while `jq` 1.6
    re-renders `905.10` as `905.1`.
 
 2. Count its line items:
