@@ -22,9 +22,10 @@ Two lines of `go.mod` name a Go version, and they say different things. The
 `go 1.26.0` line is the language version the module is written against and the
 minimum a toolchain has to satisfy. The `toolchain go1.27.1` line is the
 toolchain the module is built and tested with. A host with Go 1.26 downloads
-go1.27.1 on its first `go run` or `go build` in the repository; the tutorial
-[Set up your local Tally](/tutorials/set-up-your-local-tally) shows that
-download. The `Dockerfile` builds with `golang:1.27.1-alpine`, the same
+go1.27.1 on the first Go command it runs in the repository. In the tutorial
+[Set up your local Tally](/tutorials/set-up-your-local-tally) that command is
+the Go probe of `make check-tools`, and the tutorial says what the download
+prints there. The `Dockerfile` builds with `golang:1.27.1-alpine`, the same
 version.
 
 Three places name that version and move together: the `toolchain` line of

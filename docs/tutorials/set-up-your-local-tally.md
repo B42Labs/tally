@@ -33,8 +33,8 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
   an hour into `make up`.
 - The Go on the path has to satisfy the `go` line of `go.mod`, which is what
   `make check-tools` compares it against. That Go downloads the toolchain the
-  `toolchain` line names on its first `go run` inside the repository, a
-  download this lesson shows.
+  `toolchain` line names on its first call inside the clone, which is the
+  `make check-tools` of the next section.
 - No kind cluster named `tally` on the machine. `kind get clusters` prints
   `No kind clusters found.` when there is none. If it prints `tally`, tear that
   cluster down with the `make down` of
@@ -79,6 +79,14 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    both are to be settled before the next section: `make up` reaches the same
    tool minutes in and stops with a half-created cluster behind it. A `warn`
    line for the Docker engine costs time rather than the run.
+
+   On a machine whose Go is older than the `toolchain` line of `go.mod`, the
+   `go` probe is the first Go command inside the clone, and that Go downloads
+   the toolchain there. `go: downloading go1.27.1 (<os>/<arch>)` then stands on
+   a line of its own immediately above
+   `ok       go              go1.27.1, at or above the go 1.26.0 of go.mod`,
+   with your own platform in place of `<os>/<arch>`. The download is where that
+   probe's time goes. A Go already at go1.27.1 prints no such line.
 
 ## Create the cluster and bring the stack up
 
@@ -301,9 +309,9 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
    The two lines are the CLI's notices on stderr. The token itself went to
    stdout and from there into the variable, and it is printed this one time.
-   The id is your own. The first `go run` compiles the binary and, on a machine
-   with Go 1.26, downloads the go1.27.1 toolchain before that, which is why it
-   takes a while.
+   The id is your own. `go run` builds the binary before it runs it, and
+   `make up` already built this one for the migration chain, so the call is
+   quick.
 
    The token carries the role `admin`, the role that every operation of this
    API accepts; the other two roles and how a token is revoked are in
