@@ -127,26 +127,40 @@ This lesson takes about 5 minutes.
 
 ## Remove what the lessons wrote
 
-1. Remove the CA file, the export directory, the seven variables of the core
-   track and the eleven of the billing track:
+1. Remove the CA file, the eight export directories, the seven variables of
+   the core track and the eleven of the billing track:
 
    ```sh
    rm tally-ca.crt
-   rm -r ~/tally-tutorial
+   rm -rf ~/tally-tutorial/2026-07 ~/tally-tutorial/2026-07-group ~/tally-tutorial/2026-07-reseller ~/tally-tutorial/2026-07-attributed ~/tally-tutorial/2026-07-final ~/tally-tutorial/2026-07-final-again ~/tally-tutorial/2026-07-final-csv ~/tally-tutorial/2026-07-notes
+   rmdir ~/tally-tutorial
    unset TALLY_REPORTING_DB_URL TALLY_API_TOKEN TALLY_ENGINE_DB_URL TALLY_ENGINE_REPORTING_DB_URL TALLY_ENGINE_COUNTER_SOURCES TALLY_ENGINE_VM_URL RUN_ID ACME_1_ID ACME_2_ID ACME_3_ID ACME_ID CI_ID PARTNER_ID ALPHA_TENANT_ID BETA_TENANT_ID ALPHA_ID BETA_ID CORRECTION_ID
    ```
 
-   The three commands print nothing. `tally-ca.crt` is stale from here on: the
+   The four commands print nothing. `tally-ca.crt` is stale from here on: the
    next `make up` creates a new certificate authority, and `make -s ca` writes
-   the file again for it. `~/tally-tutorial` held the export of lesson 3, the
-   six statements with `run.json` and `kickbacks.json` beside them. After the
-   billing track it also held that track's seven export directories,
-   `2026-07-group`, `2026-07-reseller`, `2026-07-attributed`, `2026-07-final`,
-   `2026-07-final-again`, `2026-07-final-csv` and `2026-07-notes`. The seven
-   variables are the shell state lessons 1 to 3 built, and `unset` leaves this
-   shell without them. The eleven after `RUN_ID` are the billing track's, and
-   `unset` skips a variable that is not set without a word, so the line is the
-   same on a machine where the billing track never ran.
+   the file again for it. The `rm -rf` names the eight directories the lessons
+   export into and nothing else. `2026-07` held the export of lesson 3, the six
+   statements with `run.json` and `kickbacks.json` beside them. The seven after
+   it are the billing track's, `2026-07-group`, `2026-07-reseller`,
+   `2026-07-attributed`, `2026-07-final`, `2026-07-final-again`,
+   `2026-07-final-csv` and `2026-07-notes`, and `-f` is what skips them without
+   a word on a machine where that track never ran.
+
+   `rmdir` removes `~/tally-tutorial` only when it is empty.
+   `rmdir: /Users/you/tally-tutorial: Directory not empty`, which GNU `rmdir`
+   words `rmdir: failed to remove '/home/you/tally-tutorial': Directory not empty`,
+   means something the lessons did not write lives there, and this step leaves
+   it alone. `rmdir: /Users/you/tally-tutorial: No such file or directory`, in
+   GNU's words
+   `rmdir: failed to remove '/home/you/tally-tutorial': No such file or directory`,
+   means lesson 3 never ran, which is fine. The home directory in these lines
+   is your own.
+
+   The seven variables are the shell state lessons 1 to 3 built, and `unset`
+   leaves this shell without them. The eleven after `RUN_ID` are the billing
+   track's, and `unset` skips a variable that is not set without a word, so the
+   line is the same on a machine where the billing track never ran.
    `rm: tally-ca.crt: No such file or directory` means the file was already
    gone, which is fine.
 
