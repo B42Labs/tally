@@ -20,9 +20,10 @@ The targets on this page are driven by tools on the host: `git`, `docker` with
 its `compose` plugin, `kind`, `kubectl`, Go, `jq` and `curl`. `make check-tools`
 probes each of them and prints one line per tool, `ok` with what the tool
 answered, `missing` when it is not on the path, or `broken` with the error it
-answered instead. It exits non-zero when any of them failed, which is the cheap
-way to find a tool that is not there: `make up` reaches the same tool minutes
-in and stops with a half-created cluster behind it.
+answered instead. Go's error stands on the lines above its `broken` line. It
+exits non-zero when any of them failed, which is the cheap way to find a tool
+that is not there: `make up` reaches the same tool minutes in and stops with a
+half-created cluster behind it.
 
 No version is asserted. The pins that decide anything live where the thing they
 pin does, in `deploy/kind/kind.yaml`, in the manifests and in `go.mod`, and a
