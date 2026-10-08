@@ -283,7 +283,10 @@ store any invoice is derived from puts invented usage into the billing record.
    `openstack_nova_limits_instances_used` series above supplies. Every panel on
    all four dashboards then carries a value. The panels built on `rate()` and
    `increase()` show this as one spike over their window rather than a level,
-   because each series was pushed once. The three Quota usage gauges read 30 %,
+   because each series was pushed once. On Tally / Ingestion Health,
+   `Collector buffer depth` reads 12 and `Oldest buffered event age` 4 s, under
+   the legend `os-prod-eu1`: a push carries no `instance` label, so the second
+   half of the legend stays empty. The three Quota usage gauges read 30 %,
    30 % and 30 %. With `unlimited-project` in the Project variable they read
    `unlimited`, because its quotas report a max of `-1`.
 

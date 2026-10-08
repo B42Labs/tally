@@ -4,7 +4,7 @@ description: Open the dev cluster's Grafana as an anonymous viewer, point its fo
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-08 from commit 4941c0e with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-08 from commit 2d936cb with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Watch the month in Grafana
 
@@ -165,29 +165,37 @@ steps below say, and each of them names the time range its panels need.
    `Dedup rate` and `Rejected events` draw nothing, because the month carried
    no duplicate and no item was rejected, so those counters were never written.
    A panel over a counter that does not exist shows `No data`, which here reads
-   as 0. `Collector buffer depth` and `Oldest buffered event age` show
-   `No data` too: the collector runs in the compose stack on your machine and
-   the cluster's store scrapes no target for it, so these two panels stay empty
-   on the dev stack, and lesson 2 read those gauges off the collector directly.
-   `Projection replays` draws nothing.
+   as 0. `Collector buffer depth` and `Oldest buffered event age` read the
+   collector of the compose stack, which the `openstack-collector` job scrapes
+   by its alias on the `kind` network while the stack runs. Both carry the
+   legend `os-sim tally-openstack-collector:8080`. They rose while the month
+   went out, by one event and about one second on the run, and both read 0
+   once the outbox has drained. `Projection replays` draws nothing.
 
-   `Scrape health` shows `reporting-api` and `otel-collector` up (1) and
-   `ceilometer` down (0), which is the designed dev state, a placeholder target
-   for an exporter that runs beside a real control plane.
-   `openstack-db-exporter` is up (1), because the holding simulator still
-   serves its inventory, which that job scrapes over the `kind` network.
-   Between simulator runs it reads 0.
+   `Scrape health` lists five targets. `reporting-api`, `otel-collector` and
+   `openstack-collector` are up (1), and `ceilometer` is down (0), which is the
+   designed dev state, a placeholder target for an exporter that runs beside a
+   real control plane. `openstack-db-exporter` is up (1), because the holding
+   simulator still serves its inventory, which that job scrapes over the
+   `kind` network. Between simulator runs it and `openstack-collector` read 0.
 
-3. `Tally / Project Drilldown`. Pick `005be5adeef3d87e280d03d9d57c38b4` in the
-   `project_id` variable, one of the six ids and the Gardener tenant with the
-   largest statement of lesson 3.
+3. `Tally / Project Drilldown`. Set the `Reporting API` textbox to
+   `https://api.tally.127-0-0-1.nip.io:8443`, the hostname and port the dev
+   overlay publishes the API under. The dashboard ships with the base's
+   placeholder `https://api.tally.example.com`, a host that answers nothing.
+   Pick `005be5adeef3d87e280d03d9d57c38b4` in the `project_id` variable, one of
+   the six ids and the Gardener tenant with the largest statement of lesson 3.
 
    With the July range, at the end of July, `Resources by type` shows 3
    servers, 8 volumes, 4 floating IPs, 2 routers, 1 image and 4 load balancers,
    `Volume capacity` reads 480 GB, and the three `Quota usage` gauges read 3 %
    of the instance quota, 6 % of the vCPU quota and 6 % of the memory quota.
    With `Last 3 hours`, `Recent lifecycle activity` shows the ingest spike
-   split by event type.
+   split by event type. Its link `Event content (Reporting API)` opens
+   `https://api.tally.127-0-0-1.nip.io:8443/api/v1/events?project_id=005be5adeef3d87e280d03d9d57c38b4`
+   in a new tab, and the API answers it with the 401 problem document of
+   lesson 1, because a link carries no bearer token. `curl` with the token of
+   lesson 1 reads the project's events from the same URL.
 
 4. `Tally / Reconciliation Drift`. Every query panel is empty (`No data`),
    because no sync ran in this track, and the `Drift interpretation` text panel
@@ -277,8 +285,9 @@ their last sample lies five minutes before it.
    a fault to chase:
    [TallyScrapeTargetDown](/how-to/alerts/TallyScrapeTargetDown) is its runbook
    and [alert rules](/reference/observability/alert-rules) states every rule.
-   `openstack-db-exporter` does not fire because the holding simulator serves
-   its inventory.
+   `openstack-db-exporter` and `openstack-collector` do not fire because the
+   holding simulator serves its inventory and the collector keeps running
+   beside it.
 
    `TallyCloudEventsSilent` fires for `os-sim` once no event has been ingested
    for over an hour from a cloud that reported in the last 24 hours, so a
@@ -327,13 +336,15 @@ their last sample lies five minutes before it.
    {"name":"TallyResourceCountAnomaly","state":"inactive","lastError":""}
    {"name":"TallyRecordedSeriesMissing","state":"inactive","lastError":""}
    {"name":"TallyScrapeTargetDown","state":"firing","lastError":""}
-   {"name":"TallyScrapeJobMissing","state":"inactive","lastError":""}
    {"name":"TallyExporterServiceSilent","state":"inactive","lastError":""}
+   {"name":"TallyScrapeJobMissing","state":"inactive","lastError":""}
    ```
 
    Every `lastError` is empty. A non-empty one names the query that failed, and
    `state` tells `firing` from `inactive`. `tally:current_resources:sum` is a
-   recording rule and carries no state.
+   recording rule and carries no state. `TallyScrapeJobMissing` comes last
+   because it is the one rule of the second group, `tally-scrape`, which
+   vmalert evaluates from `scrape-rules.yaml`.
 
 ## What you learned
 
