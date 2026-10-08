@@ -9,7 +9,7 @@ import (
 // number of jobs a page states. A job added without a row is noticed here.
 const (
 	realScrape     = "../../deploy/kubernetes/base/victoriametrics/scrape.yaml"
-	realScrapeJobs = 4
+	realScrapeJobs = 5
 )
 
 func TestScrapeJobs(t *testing.T) {

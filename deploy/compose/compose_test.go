@@ -54,6 +54,7 @@ const (
 	kindNetwork    = "kind"
 	nodeAddress    = "${TALLY_KIND_NODE_IP}"
 	simulatorAlias = "tally-openstack-simulator"
+	collectorAlias = "tally-openstack-collector"
 
 	// The dev overlay's EnvoyProxy, which pins the node ports of the Gateway's
 	// listeners.
@@ -292,12 +293,12 @@ func TestSimulatorEnvironmentIsWhatTheSimulatorReads(t *testing.T) {
 
 func TestCollectorAndSimulatorJoinTheKindNetwork(t *testing.T) {
 	// The collector and the simulator reach the Gateway at the kind node's
-	// address, and the cluster reaches the simulator by its alias, both on the
+	// address, and the cluster reaches both by their aliases, all on the
 	// network kind creates for its node. A network compose does not take as
 	// external is one it creates under the project's name, with no node on it.
 	// A service that leaves default loses the broker, and a broker on kind puts
 	// the guest password in reach of every pod. A renamed alias is a name no pod
-	// resolves, so the scrape job and the reconciliation reach nothing.
+	// resolves, so the scrape jobs and the reconciliation reach nothing.
 	file := loadCompose(t)
 
 	if kind, ok := file.Networks[kindNetwork]; !ok || !kind.External {
@@ -320,8 +321,9 @@ func TestCollectorAndSimulatorJoinTheKindNetwork(t *testing.T) {
 		t.Errorf("%s answers on %s to the aliases %v, want [%s], the name the scrape job and the reconciliation reach it by",
 			simulatorService, kindNetwork, got, simulatorAlias)
 	}
-	if got := serviceNamed(t, file, collectorService).Networks[kindNetwork].Aliases; len(got) != 0 {
-		t.Errorf("%s answers on %s to the aliases %v, want none; nothing in the cluster addresses it", collectorService, kindNetwork, got)
+	if got := serviceNamed(t, file, collectorService).Networks[kindNetwork].Aliases; !slices.Equal(got, []string{collectorAlias}) {
+		t.Errorf("%s answers on %s to the aliases %v, want [%s], the name the openstack-collector scrape job reaches it by",
+			collectorService, kindNetwork, got, collectorAlias)
 	}
 }
 

@@ -87,10 +87,13 @@ services:
     extra_hosts:
       - "api.tally.127-0-0-1.nip.io:${TALLY_KIND_NODE_IP}"
     # default carries the broker, and kind, the network kind creates for its
-    # node, carries the cluster.
+    # node, carries the cluster. The alias is the name the openstack-collector
+    # scrape job of the dev overlay reaches the collector by.
     networks:
       default: {}
-      kind: {}
+      kind:
+        aliases:
+          - tally-openstack-collector
     volumes:
       - "../../tally-ca.crt:/etc/tally/tally-ca.crt:ro"
       # The outbox sits under /home/nonroot because the image runs as nonroot
@@ -100,7 +103,8 @@ services:
       # is root-owned, and the collector cannot open its outbox in it.
       - "outbox:/home/nonroot"
     ports:
-      # /metrics, /readyz, /healthz
+      # /metrics, /readyz, /healthz. The cluster reads the same listener by the
+      # alias above.
       - "127.0.0.1:8090:8080"
 
   # The producing side. It generates the month from the seed and the period and

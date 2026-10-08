@@ -31,6 +31,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/b42labs/tally/internal/engine/counters"
+	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
 )
 
@@ -49,6 +50,13 @@ const (
 	// copies over untouched.
 	exporterJob   = "openstack-db-exporter"
 	ceilometerJob = "ceilometer"
+
+	// The collector job, which this overlay points at the compose collector by
+	// its alias on the kind network and its container port, and the compose
+	// service that runs it.
+	collectorJob     = "openstack-collector"
+	collectorTarget  = "tally-openstack-collector:8080"
+	collectorService = "collector"
 
 	// The simulator as a pod in the kind node reaches it, by its alias on the
 	// kind network and its container port, and the cloud the simulated month is
@@ -366,6 +374,73 @@ func TestSimulatorAddressIsTheComposeAlias(t *testing.T) {
 	}
 }
 
+func TestCollectorJobScrapesTheComposeCollector(t *testing.T) {
+	// The dev collector is a compose container rather than a pod, so this
+	// overlay scrapes it as a static target where the base discovers it. The
+	// target is its alias on the kind network and the port it listens on in
+	// its container: any other name is one no pod resolves, and any other port
+	// is one nothing listens on, and the job stays down, which is what it shows
+	// between two drills too. A label on the target would land beside the
+	// platform and cloud the collector stamps on its own series and rename
+	// those exported_platform and exported_cloud.
+	overlay := jobNamed(t, scrapeConfigOf(t, scrapeFile), scrapeFile, collectorJob)
+	base := jobNamed(t, scrapeConfigOf(t, baseScrapeFile), baseScrapeFile, collectorJob)
+
+	want := []staticConfig{{Targets: []string{collectorTarget}}}
+	if !sameStaticConfigs(overlay.StaticConfigs, want) || len(overlay.KubernetesSD) != 0 {
+		t.Errorf("job %s scrapes %+v and discovers %v, want the one static target %s without labels",
+			collectorJob, overlay.StaticConfigs, overlay.KubernetesSD, collectorTarget)
+	}
+	if len(base.KubernetesSD) == 0 {
+		t.Errorf("%s declares job %s without discovery, want the discovered job this overlay replaces with a static target",
+			baseScrapeFile, collectorJob)
+	}
+	if overlay.ScrapeInterval != base.ScrapeInterval {
+		t.Errorf("job %s is scraped every %q, want the base's %q", collectorJob, overlay.ScrapeInterval, base.ScrapeInterval)
+	}
+
+	var stack struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+			Networks    map[string]struct {
+				Aliases []string `yaml:"aliases"`
+			} `yaml:"networks"`
+			Ports []string `yaml:"ports"`
+		} `yaml:"services"`
+	}
+	decodeFile(t, composeFile, &stack)
+
+	svc, ok := stack.Services[collectorService]
+	if !ok {
+		t.Fatalf("%s declares no service %q", composeFile, collectorService)
+	}
+	if value, set := svc.Environment["TALLY_OSC_HTTP_PORT"]; set {
+		t.Errorf("%s sets TALLY_OSC_HTTP_PORT=%s on %s, want it unset, so the collector listens on the default port the target names",
+			composeFile, value, collectorService)
+	}
+	port := strconv.Itoa(collectorListener(t).HTTPPort)
+
+	aliases := svc.Networks[kindNetwork].Aliases
+	if len(aliases) != 1 {
+		t.Fatalf("%s gives %s the aliases %v on %s, want exactly one", composeFile, collectorService, aliases, kindNetwork)
+	}
+	if got := aliases[0] + ":" + port; got != collectorTarget {
+		t.Errorf("%s gives %s the address %s on %s, want %s, which the %s job scrapes",
+			composeFile, collectorService, got, kindNetwork, collectorTarget, collectorJob)
+	}
+
+	// The host reaches the same listener through the published port, which is
+	// what the lessons read the counters from.
+	if len(svc.Ports) != 1 {
+		t.Fatalf("%s publishes %v for %s, want one mapping", composeFile, svc.Ports, collectorService)
+	}
+	mapping := svc.Ports[0]
+	if container := mapping[strings.LastIndex(mapping, ":")+1:]; container != port {
+		t.Errorf("%s publishes %s for %s, want the container side %s, the port the collector listens on",
+			composeFile, mapping, collectorService, port)
+	}
+}
+
 func TestCounterSourcesMeasureTheSimulatedEgress(t *testing.T) {
 	// The engine reads this file the way Load reads a deployment's, so a source
 	// it refuses is an hourly tick that fails before it opens a database. What
@@ -594,6 +669,23 @@ func simulatorListener(t *testing.T, env map[string]string) simulator.Config {
 	cfg, err := simulator.Load()
 	if err != nil {
 		t.Fatalf("loading the simulator's configuration from the %s environment: %v", composeFile, err)
+	}
+	return cfg
+}
+
+// collectorListener loads the collector's configuration with every variable it
+// reads blanked to its default, so a value in the developer's shell never
+// reaches it. The compose collector sets nothing that moves its listener,
+// which the caller asserts.
+func collectorListener(t *testing.T) openstack.Config {
+	t.Helper()
+
+	for _, name := range openstack.EnvNames {
+		t.Setenv(name, "")
+	}
+	cfg, err := openstack.Load()
+	if err != nil {
+		t.Fatalf("loading the collector's configuration from its defaults: %v", err)
 	}
 	return cfg
 }

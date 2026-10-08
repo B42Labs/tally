@@ -7,6 +7,13 @@
 # victoriametrics/scrape.yaml that carries kubernetes_sd_configs, which
 # manifest_test.go holds it to, so a drill under another scrape config edits
 # this file with scrape.yaml.
+#
+# It differs from the base's in one clause. The base's names
+# openstack-collector too, which the base discovers, while this cluster's
+# scrape config reads the compose collector as a static target, and a static
+# target that stops answering is TallyScrapeTargetDown's. manifest_test.go
+# holds the rest of the rule to the base's, and `make check-alerting` loads
+# this file into vmalert. The overlay keeps the base's rules.yaml unchanged.
 groups:
   - name: tally-scrape
     interval: 1m

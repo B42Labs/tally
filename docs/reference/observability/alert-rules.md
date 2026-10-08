@@ -283,7 +283,7 @@ Scrape job {{ $labels.job }} resolves to no targets
 Expression:
 
 ```promql
-absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+absent(up{job="reporting-api"}) or absent(up{job="otel-collector"}) or absent(up{job="openstack-collector"})
 ```
 <!-- refdoc:end scrape-rules -->
 

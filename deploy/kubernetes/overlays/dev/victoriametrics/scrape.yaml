@@ -4,18 +4,26 @@
 # behavior: replace generator in the overlay's kustomization.yaml, which is the
 # mechanism docs/how-to/observability/scrape-the-openstack-exporters.md
 # documents under "Replace the scrape targets". Everything below is the base
-# file; the one change is the openstack-db-exporter job.
+# file with two changes: the openstack-db-exporter job, and the
+# openstack-collector job, which reads the compose collector as a static target.
 #
-# That job scrapes the simulated cloud of the compose stack at
+# The exporter job scrapes the simulated cloud of the compose stack at
 # tally-openstack-simulator:8080, the simulator's alias and container port on
 # the kind network, the same address reconciliation/clouds.yaml relies on. A
 # pod resolves the alias because CoreDNS forwards to the node's resolver, which
 # is Docker's. The cloud is os-sim, the SIM_CLOUD default; a drill under another
 # cloud name edits this file, the rule the reconciliation directory carries too.
 #
-# Between two runs no container answers to that name, so the job is down and
-# TallyScrapeTargetDown fires for it after five minutes, which is what it does
-# against the base's placeholder as well. The job goes green while a drill runs.
+# The collector job scrapes the compose collector at
+# tally-openstack-collector:8080, its alias and container port on the kind
+# network. The dev collector is a compose container rather than a pod, so there
+# is no endpointslice to discover, and scrape-rules.yaml beside this file names
+# no absent clause for the job. It carries no labels: the collector stamps
+# platform and cloud on its own series.
+#
+# Between two runs no container answers to either name, so both jobs are down
+# and TallyScrapeTargetDown fires for them after five minutes, which is what it
+# does against the base's placeholder as well. Both go green while a drill runs.
 #
 # The ceilometer job is copied over unchanged, on its placeholder target: the
 # recorded Ceilometer default is the Pushgateway path, where that job carries
@@ -100,3 +108,8 @@ scrape_configs:
       - source_labels:
           - __meta_kubernetes_pod_name
         target_label: instance
+  # The compose collector by its alias on the kind network; see the header.
+  - job_name: openstack-collector
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["tally-openstack-collector:8080"]
