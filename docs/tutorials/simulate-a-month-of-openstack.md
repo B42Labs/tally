@@ -109,6 +109,20 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    keeps 84 of the month's 1812 billable notifications off the bus, and the
    simulator holds them until a release.
 
+   The collector and the simulator start together once the broker answers. The
+   simulator declares the exchanges when it connects, and the collector
+   consumes only once every one of them exists, so
+   `docker compose -f deploy/compose/compose.yaml logs collector` may open with
+   one or more WARN lines `the AMQP session ended, reconnecting` whose `error`
+   reads
+   `the exchange <name> does not exist on the broker, and TALLY_OSC_REQUIRE_EXCHANGES requires it`,
+   naming the first exchange of `TALLY_OSC_EXCHANGES` the simulator had not
+   declared yet. The INFO line `the AMQP session is established, consuming`
+   follows within seconds. That is the order the stack starts in and not a
+   fault. A WARN line that keeps repeating a minute in is one, and
+   `docker compose -f deploy/compose/compose.yaml logs simulator` then says why
+   the simulator stopped.
+
    `ERROR: set SIM_PERIOD to the past month to simulate, e.g. make simulator-up SIM_PERIOD=2026-07`
    in place of the build output means the period was left off the command. A
    `dial tcp` error from the admin CLI at the credential step means the cluster
