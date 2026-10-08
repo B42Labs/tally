@@ -11,7 +11,7 @@ import (
 const (
 	realRules   = "../../deploy/kubernetes/base/vmalert/rules.yaml"
 	realRouting = "../../deploy/kubernetes/base/alertmanager/config.yaml"
-	realRuleSet = 12
+	realRuleSet = 11
 )
 
 func TestAlertRules(t *testing.T) {

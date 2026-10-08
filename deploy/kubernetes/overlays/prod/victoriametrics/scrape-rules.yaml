@@ -1,0 +1,31 @@
+# The rule over the scrape jobs that discover their targets, in a group of its
+# own at a one-minute interval. It is a file of its own because its absent list
+# is the one piece of the rules that is a property of a deployment's scrape
+# config. A discovered job that resolves to no targets emits no up series at
+# all, so only a clause naming the job sees it, and a clause naming a job the
+# deployment does not scrape fires for as long as the cluster runs. An overlay
+# that replaces the scrape config therefore replaces this file with it, through
+# a vmalert-scrape-rules generator marked behavior: replace.
+#
+# deploy/kubernetes/base/vmalert/rules_test.go holds the base's copy to the
+# base's scrape config, and the manifest_test.go of an overlay holds the
+# overlay's copy to the overlay's. `make check-alerting` loads the base's copy
+# beside rules.yaml.
+groups:
+  - name: tally-scrape
+    interval: 1m
+    rules:
+      # Scrape job gone entirely. `up` is a per-target series, and every job
+      # named here discovers its targets (see the scrape config), so a job that
+      # resolves to no targets emits no `up` series at all and
+      # TallyScrapeTargetDown stays silent. A Deployment scaled to zero, a
+      # renamed Service or port, a removed RoleBinding, or an unreachable API
+      # server all land here rather than there.
+      - alert: TallyScrapeJobMissing
+        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape job {{ $labels.job }} resolves to no targets"
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing

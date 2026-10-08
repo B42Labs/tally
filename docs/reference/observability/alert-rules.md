@@ -7,22 +7,26 @@ audience: operator
 
 # Alert rules
 
-vmalert evaluates
+vmalert evaluates two files against the store, each group on its own interval:
 [`deploy/kubernetes/base/vmalert/rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules.yaml)
-against the store on the group's interval. An expression that keeps returning a
-series for as long as its `for` says is posted to Alertmanager as a firing
-alert.
+and
+[`deploy/kubernetes/base/vmalert/scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/scrape-rules.yaml).
+An expression that keeps returning a series for as long as its `for` says is
+posted to Alertmanager as a firing alert.
 
 `make check-alerting` loads the rules and the Alertmanager configuration into
 the binaries the cluster runs, from the images the manifests pin: the vmalert
-image with `-dryRun` over `rules.yaml`, and the Alertmanager image's
-`amtool check-config` over `config.yaml`. Docker is its only prerequisite and
-no cluster is involved. It is what says the expressions parse.
+image with `-dryRun` over `rules.yaml` and `scrape-rules.yaml`, then over the
+dev overlay's `scrape-rules.yaml`, and the Alertmanager image's
+`amtool check-config` over `config.yaml`. Docker is its
+only prerequisite and no cluster is involved. It is what says the expressions
+parse.
 
 [`rules_test.go`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules_test.go)
 pins the rest from disk: the alert names and the order they stand in, the
 severities, the runbook annotations and the pages they name, the recorded series
-the anomaly rule reads, and the scrape jobs the last three rules select.
+the anomaly rule reads, and the scrape jobs `TallyScrapeJobMissing` and
+`TallyExporterServiceSilent` select.
 
 The `runbook` annotation carries the published URL of the alert's guide under
 [Respond to an alert](/how-to/#respond-to-an-alert), so a receiver that renders
@@ -223,27 +227,7 @@ Scrape target {{ $labels.instance }} of job {{ $labels.job }} is down
 Expression:
 
 ```promql
-up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0
-```
-
-### `TallyScrapeJobMissing`
-
-| Property | Value |
-| --- | --- |
-| Severity | `critical` |
-| For | `5m` |
-| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing` |
-
-Summary:
-
-```text
-Scrape job {{ $labels.job }} resolves to no targets
-```
-
-Expression:
-
-```promql
-absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+up == 0
 ```
 
 ### `TallyExporterServiceSilent`
@@ -270,6 +254,38 @@ or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_
 or (up{job="openstack-db-exporter"} == 1) unless on (cloud, instance) openstack_loadbalancer_total_loadbalancers{job="openstack-db-exporter"}
 ```
 <!-- refdoc:end rules -->
+
+## The scrape rules
+
+`scrape-rules.yaml` carries one `absent` clause per discovered job of the scrape
+config, and an overlay that replaces the scrape config replaces this file
+together with it, through a `vmalert-scrape-rules` generator marked
+`behavior: replace`. Its group is evaluated on its own timer, apart from the
+group `tally`.
+
+<!-- refdoc:begin scrape-rules -->
+Group `tally-scrape`, evaluated every `1m`.
+
+### `TallyScrapeJobMissing`
+
+| Property | Value |
+| --- | --- |
+| Severity | `critical` |
+| For | `5m` |
+| Runbook | `https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing` |
+
+Summary:
+
+```text
+Scrape job {{ $labels.job }} resolves to no targets
+```
+
+Expression:
+
+```promql
+absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+```
+<!-- refdoc:end scrape-rules -->
 
 ## The recorded series
 

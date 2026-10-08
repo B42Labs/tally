@@ -1,14 +1,17 @@
 # The rules vmalert evaluates against the store, in one group at a one-minute
-# interval: eleven alerting rules and the one series recorded for the anomaly
-# rule among them to read. The five critical alerts carry a runbook annotation
-# naming the published page of the alert under docs/how-to/alerts/, which a
-# reader opens when the alert arrives.
+# interval: ten alerting rules and the one series recorded for the anomaly rule
+# among them to read. The four critical alerts carry a runbook annotation naming
+# the published page of the alert under docs/how-to/alerts/, which a reader
+# opens when the alert arrives. TallyScrapeJobMissing, the fifth critical alert,
+# is in scrape-rules.yaml beside this file, because the jobs it names are a
+# property of a deployment's scrape config and an overlay replaces that file
+# with it.
 #
-# rules_test.go pins the shape of this file: the alert names and their order,
+# rules_test.go pins the shape of both files: the alert names and their order,
 # the severities, the runbooks, the recorded series the anomaly rule reads, and
-# the scrape jobs the last three rules name.
-# `make check-alerting` loads it into the vmalert binary the cluster runs, which
-# is what says the expressions parse.
+# the scrape jobs the rules read.
+# `make check-alerting` loads both into the vmalert binary the cluster runs,
+# which is what says the expressions parse.
 groups:
   - name: tally
     interval: 1m
@@ -109,35 +112,19 @@ groups:
         annotations:
           summary: "vmalert is not writing tally:current_resources:sum while tally_current_resources is still scraped, so TallyResourceCountAnomaly evaluates nothing"
 
-      # The regex names the four jobs of scrape.yaml, one more than the roadmap
-      # lists: the recorded Ceilometer default pushes to a gateway the
-      # ceilometer job scrapes
-      # (docs/explanation/the-openstack-metrics-pipeline.md), so on that path
-      # the job carries metering data and a target of it that stops answering
-      # costs samples the same way the other three do.
+      # Every target of the store's scrape config. Each one is a target the
+      # deployment chose to scrape, so one that answers nothing is down
+      # whatever its job is called, and the rule names no job. A discovered job
+      # that resolves to no targets at all emits no up series, which is the
+      # business of TallyScrapeJobMissing in scrape-rules.yaml.
       - alert: TallyScrapeTargetDown
-        expr: up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0
+        expr: up == 0
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Scrape target {{ $labels.instance }} of job {{ $labels.job }} is down"
           runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeTargetDown
-
-      # Scrape job gone entirely. `up` is a per-target series, and `reporting-api`
-      # and `otel-collector` discover their targets (see the scrape config), so a
-      # job that resolves to no targets emits no `up` series at all and
-      # TallyScrapeTargetDown stays silent. A Deployment scaled to zero, a
-      # renamed Service or port, a removed RoleBinding, or an unreachable API
-      # server all land here rather than there.
-      - alert: TallyScrapeJobMissing
-        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Scrape job {{ $labels.job }} resolves to no targets"
-          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing
 
       # Exporter answering 200 with a service missing. The database exporter opens
       # one connection pool per service, and a scrape that runs out of connections

@@ -88,6 +88,14 @@ configMapGenerator:
     behavior: replace
     files:
       - victoriametrics/scrape.yaml
+  # The rule over the jobs that scrape config discovers, in place of the
+  # base's. The two files are replaced together, because the absent list of
+  # TallyScrapeJobMissing is the scrape config's list of discovered jobs; what
+  # the overlay's file names, and why, is written in its own header.
+  - name: vmalert-scrape-rules
+    behavior: replace
+    files:
+      - victoriametrics/scrape-rules.yaml
   # What the scheduler measures beyond the drafts metering folds: the egress of
   # a simulated instance, out of the counter the simulator pushes. Generated
   # from the file for the same reason as the reconciliation config above, and

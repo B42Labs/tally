@@ -1,6 +1,6 @@
 # The rule evaluator. It queries the store on the group's interval, and an
 # expression that keeps returning a series for as long as its `for` says is
-# posted to Alertmanager as a firing alert (rules.yaml).
+# posted to Alertmanager as a firing alert (rules.yaml and scrape-rules.yaml).
 apiVersion: v1
 kind: Service
 metadata:
@@ -36,15 +36,16 @@ spec:
           image: victoriametrics/vmalert:v1.148.0
           args:
             - -rule=/etc/vmalert/rules.yaml
+            - -rule=/etc/vmalert/scrape-rules.yaml
             - -datasource.url=http://victoriametrics:8428
             - -notifier.url=http://alertmanager:9093
             # The pair keeps the state of a pending alert outside the process.
             # vmalert writes the ALERTS and ALERTS_FOR_STATE series to the store
             # and reads them back at startup, so an alert that has been pending
             # for ten of its fifteen minutes resumes there rather than starting
-            # its timer again. Without them an edit to rules.yaml, which rolls
-            # the pod through the generated ConfigMap name, would silently reset
-            # every `for` in the file.
+            # its timer again. Without them an edit to either rules file, which
+            # rolls the pod through the generated ConfigMap name, would silently
+            # reset every `for` in it.
             - -remoteWrite.url=http://victoriametrics:8428
             - -remoteRead.url=http://victoriametrics:8428
             # The flag reads its value from the argument and Kubernetes expands
@@ -85,9 +86,18 @@ spec:
               mountPath: /etc/vmalert
               readOnly: true
       volumes:
+        # Both rule files in one directory, each under the file name its
+        # ConfigMap keys it by, which is what the two -rule flags read. The
+        # sources name the generated ConfigMaps by their unsuffixed names, and
+        # kustomize's name reference transformer rewrites them to the hashed
+        # ones.
         - name: rules
-          configMap:
-            name: vmalert-rules
+          projected:
+            sources:
+              - configMap:
+                  name: vmalert-rules
+              - configMap:
+                  name: vmalert-scrape-rules
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

@@ -39,6 +39,8 @@ const (
 	issuersFile       = "issuers.yaml"
 	scrapeFile        = "victoriametrics/scrape.yaml"
 	baseScrapeFile    = "../../base/victoriametrics/scrape.yaml"
+	scrapeRulesFile   = "victoriametrics/scrape-rules.yaml"
+	baseScrapeRules   = "../../base/vmalert/scrape-rules.yaml"
 	baseGatewayFile   = "../../base/gateway/gateway.yaml"
 	baseDir           = "../../base"
 	componentDir      = "../../components/envoy-gateway"
@@ -61,8 +63,11 @@ const (
 	namespace      = "tally"
 	acmeIssuer     = "letsencrypt"
 
-	// The generated ConfigMap the overlay's scrape file replaces.
-	scrapeConfigMap = "victoriametrics-scrape"
+	// The generated ConfigMaps the overlay's scrape file and its rules file
+	// replace, and the one rule the rules file carries.
+	scrapeConfigMap      = "victoriametrics-scrape"
+	scrapeRulesConfigMap = "vmalert-scrape-rules"
+	jobMissingAlert      = "TallyScrapeJobMissing"
 
 	// The Reporting API image by the name the base gives it, and the
 	// repository the release workflow publishes it to.
@@ -183,9 +188,10 @@ type scrapeConfig struct {
 }
 
 type scrapeJob struct {
-	JobName        string          `yaml:"job_name"`
-	ScrapeInterval string          `yaml:"scrape_interval"`
-	RelabelConfigs []relabelConfig `yaml:"relabel_configs"`
+	JobName        string           `yaml:"job_name"`
+	ScrapeInterval string           `yaml:"scrape_interval"`
+	RelabelConfigs []relabelConfig  `yaml:"relabel_configs"`
+	KubernetesSD   []map[string]any `yaml:"kubernetes_sd_configs"`
 }
 
 type relabelConfig struct {
@@ -194,6 +200,19 @@ type relabelConfig struct {
 	Action       string   `yaml:"action"`
 	TargetLabel  string   `yaml:"target_label"`
 }
+
+// ruleFile is the part of a vmalert rules file these tests assert over.
+type ruleFile struct {
+	Groups []struct {
+		Rules []struct {
+			Alert string `yaml:"alert"`
+			Expr  string `yaml:"expr"`
+		} `yaml:"rules"`
+	} `yaml:"groups"`
+}
+
+// absentJobRe finds every job an absent() clause over up names.
+var absentJobRe = regexp.MustCompile(`absent\(up\{job="([^"]+)"\}\)`)
 
 func TestHostsAreSixNamesUnderOneDomain(t *testing.T) {
 	// hosts.yaml is the one place the domain is written, so serving another
@@ -873,6 +892,77 @@ func TestScrapeConfigKeepsOnlyTheInClusterJobs(t *testing.T) {
 	}
 	if !slices.Equal(g.Files, []string{scrapeFile}) {
 		t.Errorf("the %s generator carries %v, want exactly [%s]", scrapeConfigMap, g.Files, scrapeFile)
+	}
+}
+
+func TestScrapeRulesNameTheDiscoveredJobsOfThisOverlay(t *testing.T) {
+	// The absent list of TallyScrapeJobMissing is this cluster's list of
+	// discovered jobs, and the overlay replaces the base's with it. A clause
+	// for a job the scrape config does not discover fires for as long as the
+	// cluster runs, and a discovered job without one resolves to no targets
+	// unheard.
+	raw, err := os.ReadFile(scrapeRulesFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", scrapeRulesFile, err)
+	}
+	var rules ruleFile
+	if err := yaml.Unmarshal(raw, &rules); err != nil {
+		t.Fatalf("parsing %s: %v", scrapeRulesFile, err)
+	}
+	if len(rules.Groups) != 1 || len(rules.Groups[0].Rules) != 1 || rules.Groups[0].Rules[0].Alert != jobMissingAlert {
+		t.Fatalf("%s carries %+v, want one group with the one alerting rule %s", scrapeRulesFile, rules.Groups, jobMissingAlert)
+	}
+
+	var named []string
+	for _, match := range absentJobRe.FindAllStringSubmatch(rules.Groups[0].Rules[0].Expr, -1) {
+		named = append(named, match[1])
+	}
+	var discovered []string
+	for _, job := range scrapeConfigOf(t, scrapeFile).ScrapeConfigs {
+		if len(job.KubernetesSD) > 0 {
+			discovered = append(discovered, job.JobName)
+		}
+	}
+	for _, job := range named {
+		if !slices.Contains(discovered, job) {
+			t.Errorf("%s carries absent(up{job=%q}), a job %s does not discover, so %s fires for as long as the cluster runs",
+				scrapeRulesFile, job, scrapeFile, jobMissingAlert)
+		}
+	}
+	for _, job := range discovered {
+		if !slices.Contains(named, job) {
+			t.Errorf("%s carries no absent(up{job=%q}), so the discovered job resolving to no targets is reported by nothing",
+				scrapeRulesFile, job)
+		}
+	}
+	if !slices.Equal(named, discovered) {
+		t.Errorf("%s names the jobs %v, want %v, the discovered jobs of %s in its order", scrapeRulesFile, named, discovered, scrapeFile)
+	}
+
+	// The scrape config copies the base's discovered jobs, so the rule over
+	// them is the base's too, byte for byte, the way the jobs are.
+	base, err := os.ReadFile(baseScrapeRules)
+	if err != nil {
+		t.Fatalf("reading %s: %v", baseScrapeRules, err)
+	}
+	if !bytes.Equal(raw, base) {
+		t.Errorf("%s differs from %s, which it copies unchanged", scrapeRulesFile, baseScrapeRules)
+	}
+
+	// Without the replacing generator vmalert keeps the base's file, which is
+	// the same today and drifts apart unnoticed the day either changes.
+	k := kustomizationOf(t)
+	i := slices.IndexFunc(k.ConfigMapGenerator, func(g generator) bool { return g.Name == scrapeRulesConfigMap })
+	if i < 0 {
+		t.Fatalf("%s generates no ConfigMap %s", kustomizationFile, scrapeRulesConfigMap)
+	}
+	g := k.ConfigMapGenerator[i]
+	if g.Behavior != "replace" {
+		t.Errorf("the %s generator has behavior %q, want \"replace\": that is what overrides the base's generated ConfigMap",
+			scrapeRulesConfigMap, g.Behavior)
+	}
+	if !slices.Equal(g.Files, []string{scrapeRulesFile}) {
+		t.Errorf("the %s generator carries %v, want exactly [%s]", scrapeRulesConfigMap, g.Files, scrapeRulesFile)
 	}
 }
 
