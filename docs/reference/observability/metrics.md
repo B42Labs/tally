@@ -111,7 +111,7 @@ section of its page states every one of those.
 
 ## Scrape jobs
 
-The store reads these four jobs, from
+The store reads these five jobs, from
 [`deploy/kubernetes/base/victoriametrics/scrape.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/victoriametrics/scrape.yaml).
 
 <!-- refdoc:begin scrape-jobs -->
@@ -121,12 +121,15 @@ The store reads these four jobs, from
 | `openstack-db-exporter` | `300s` | `60s` | `os-db-exporter:9180` | `cloud=os-prod-eu1`, `platform=openstack` |
 | `ceilometer` | `60s` | none | `ceilometer-exporter:9101` | `cloud=os-prod-eu1`, `platform=openstack` |
 | `otel-collector` | `15s` | none | discovered, role `endpointslice`, kept by `otel-collector;metrics` | none |
+| `openstack-collector` | `30s` | none | discovered, role `endpointslice`, kept by `openstack-collector;http` | none |
 <!-- refdoc:end scrape-jobs -->
 
 The static `platform` and `cloud` labels on the two OpenStack jobs put a
 third-party exporter's samples in the coordinate system the
-[label convention](/reference/formats/label-convention) page states. The two
-in-cluster jobs carry no such labels.
+[label convention](/reference/formats/label-convention) page states. The three
+in-cluster jobs set no static labels. The Reporting API's and the OTel
+Collector's series are service metrics, and the OpenStack collector's series
+carry `platform` and `cloud` from the process itself.
 
 The targets and the cloud name of the two OpenStack jobs are placeholders: those
 exporters run beside an OpenStack control plane rather than in this cluster. A

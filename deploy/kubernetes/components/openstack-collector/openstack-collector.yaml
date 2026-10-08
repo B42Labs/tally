@@ -22,7 +22,7 @@ spec:
 ---
 # The collector of one cloud. It binds a queue on the broker the amqp-url names,
 # buffers what it consumed in the outbox, and posts the buffer to the Reporting
-# API. No Service is declared: nothing in the cluster calls the collector.
+# API.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -180,3 +180,22 @@ spec:
         - name: outbox
           persistentVolumeClaim:
             claimName: openstack-collector-outbox
+---
+# The Service exists so that the store's openstack-collector job discovers the
+# pod through its endpointslice; nothing else in the cluster calls it. A pod
+# that is not ready stays a target, because endpointslice discovery keeps
+# addresses that are not ready, so a collector without its broker session is
+# still scraped and its outbox gauges stay visible.
+apiVersion: v1
+kind: Service
+metadata:
+  name: openstack-collector
+  labels:
+    app.kubernetes.io/name: openstack-collector
+spec:
+  selector:
+    app.kubernetes.io/name: openstack-collector
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,11 +1,13 @@
 // This file pins the collector Deployment's contract with the binary, with the
-// two Secrets it reads, with the claim its outbox lies on and with the Service
-// of the base it posts to. It fails quietly: a second replica or a rolling
-// update puts two writers on one outbox file, a volume the process cannot write
-// ends the pod on its first start, a *_FILE path that stopped matching its
-// mount leaves the collector restarting on a file it cannot read, and a URL
-// naming a Service the base no longer declares leaves every event in the
-// outbox. None of it stops kustomize or an apply. The tests read the YAML from
+// two Secrets it reads, with the claim its outbox lies on, with the Service of
+// the base it posts to and with the scrape job of the base that reads it. It
+// fails quietly: a second replica or a rolling update puts two writers on one
+// outbox file, a volume the process cannot write ends the pod on its first
+// start, a *_FILE path that stopped matching its mount leaves the collector
+// restarting on a file it cannot read, a URL naming a Service the base no
+// longer declares leaves every event in the outbox, and a Service the scrape
+// job does not keep leaves the outbox gauges unread. None of it stops
+// kustomize or an apply. The tests read the YAML from
 // disk and need neither a cluster nor kustomize.
 package openstackcollector_test
 
@@ -13,6 +15,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path"
@@ -35,8 +38,10 @@ const (
 	// The ConfigMap an overlay generates the non-secret settings into.
 	settingsConfigMap = "tally-openstack-collector"
 
-	// The file of the base that declares the Service the collector posts to.
+	// The file of the base that declares the Service the collector posts to,
+	// and the scrape config of the base that discovers the collector.
 	reportingAPIFile = "../../base/reporting-api/reporting-api.yaml"
+	baseScrapeFile   = "../../base/victoriametrics/scrape.yaml"
 
 	// The user the image runs as, distroless nonroot.
 	nonroot = 65532
@@ -54,7 +59,7 @@ var fileSecrets = []struct {
 
 // object is the part of a manifest document these tests assert over. yaml.v3
 // ignores every field not named here, so one shape covers the claim, the
-// Deployment and the Service of the base.
+// Deployment, its Service and the Service of the base.
 type object struct {
 	Kind     string `yaml:"kind"`
 	Metadata struct {
@@ -69,15 +74,22 @@ type object struct {
 			Type string `yaml:"type"`
 		} `yaml:"strategy"`
 		Template struct {
+			Metadata struct {
+				Labels map[string]string `yaml:"labels"`
+			} `yaml:"metadata"`
 			Spec podSpec `yaml:"spec"`
 		} `yaml:"template"`
-		// Service
-		Ports []servicePort `yaml:"ports"`
+		// Service. The selector is untyped because the Deployment's nests
+		// matchLabels under the same key; a Service's is a flat map.
+		Selector map[string]any `yaml:"selector"`
+		Ports    []servicePort  `yaml:"ports"`
 	} `yaml:"spec"`
 }
 
 type servicePort struct {
-	Port int `yaml:"port"`
+	Name       string `yaml:"name"`
+	Port       int    `yaml:"port"`
+	TargetPort string `yaml:"targetPort"`
 }
 
 type podSpec struct {
@@ -451,6 +463,76 @@ func TestTheCollectorPostsToTheReportingAPIOfItsNamespace(t *testing.T) {
 		if allowed, err := strconv.ParseBool(got); err != nil || !allowed {
 			t.Errorf("%s = %q beside %s = %q, want true, without which the collector refuses a URL that is not https", insecure, got, variable, value)
 		}
+	}
+}
+
+func TestTheServiceCarriesThePortTheScrapeJobKeeps(t *testing.T) {
+	// The store's openstack-collector job discovers the pod through the
+	// endpointslice of this Service and keeps the address whose Service and
+	// port names its regex matches. A selector that misses the pod's labels
+	// leaves the slice empty, and a port of another name is dropped by the keep
+	// rule; either way the job resolves to no targets, the outbox gauges go
+	// unread, and only TallyScrapeJobMissing says so.
+	docs := objects(t)
+	svc := objectNamed(t, docs, "Service", collector)
+	deployment := objectNamed(t, docs, "Deployment", collector)
+
+	selector := make(map[string]string, len(svc.Spec.Selector))
+	for key, value := range svc.Spec.Selector {
+		label, ok := value.(string)
+		if !ok {
+			t.Fatalf("Service %s selects %s by %v, which is no label value", collector, key, value)
+		}
+		selector[key] = label
+	}
+	if labels := deployment.Spec.Template.Metadata.Labels; len(selector) == 0 || !maps.Equal(selector, labels) {
+		t.Errorf("Service %s selects %v, want the pod labels %v of Deployment %s", collector, selector, labels, collector)
+	}
+
+	if len(svc.Spec.Ports) != 1 {
+		t.Fatalf("Service %s declares the ports %+v, want the one the scrape job keeps", collector, svc.Spec.Ports)
+	}
+	port := svc.Spec.Ports[0]
+	if port.Name != "http" || port.TargetPort != "http" {
+		t.Errorf("Service %s declares port %q targeting %q, want \"http\" targeting \"http\", the container port that serves /metrics",
+			collector, port.Name, port.TargetPort)
+	}
+	ports := containerOf(t, deployment).Ports
+	i := slices.IndexFunc(ports, func(p containerPort) bool { return p.Name == port.TargetPort })
+	if i < 0 {
+		t.Fatalf("the collector container declares no port named %q, which Service %s targets", port.TargetPort, collector)
+	}
+	if port.Port != ports[i].ContainerPort {
+		t.Errorf("Service %s declares port %d, want %d, the container port it targets", collector, port.Port, ports[i].ContainerPort)
+	}
+
+	var cfg struct {
+		ScrapeConfigs []struct {
+			JobName        string `yaml:"job_name"`
+			RelabelConfigs []struct {
+				Regex  string `yaml:"regex"`
+				Action string `yaml:"action"`
+			} `yaml:"relabel_configs"`
+		} `yaml:"scrape_configs"`
+	}
+	raw, err := os.ReadFile(baseScrapeFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", baseScrapeFile, err)
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parsing %s: %v", baseScrapeFile, err)
+	}
+	want := svc.Metadata.Name + ";" + port.Name
+	kept := false
+	for _, job := range cfg.ScrapeConfigs {
+		for _, r := range job.RelabelConfigs {
+			if r.Action == "keep" && r.Regex == want {
+				kept = true
+			}
+		}
+	}
+	if !kept {
+		t.Errorf("%s declares no job keeping %q, so nothing scrapes the collector", baseScrapeFile, want)
 	}
 }
 

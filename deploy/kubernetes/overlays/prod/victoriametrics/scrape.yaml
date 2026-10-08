@@ -3,15 +3,16 @@
 # This file replaces the generated victoriametrics-scrape ConfigMap through the
 # behavior: replace generator in the overlay's kustomization.yaml, which is the
 # mechanism docs/how-to/observability/scrape-the-openstack-exporters.md
-# documents under "Replace the scrape targets". It holds the base's two
-# in-cluster jobs, copied unchanged, and nothing else.
+# documents under "Replace the scrape targets". It holds the base's three
+# in-cluster jobs, copied unchanged, and nothing else: the Reporting API, the
+# OTel Collector and the OpenStack collector the collector component runs.
 #
 # The two OpenStack jobs of the base scrape placeholder addresses. Left in
 # place on a cluster with no such exporter, they would keep
 # TallyScrapeTargetDown firing for as long as the cluster runs.
-# TallyScrapeJobMissing selects exactly the two jobs below, so that rule holds
-# here as it does against the base. The first cloud's exporters are added
-# through the how-to above.
+# scrape-rules.yaml beside this file names the three jobs below in
+# TallyScrapeJobMissing, the same three the base's names. The first cloud's
+# exporters are added through the how-to above.
 #
 # The jobs, their intervals, and how the in-cluster jobs find their targets are
 # documented in docs/explanation/the-openstack-metrics-pipeline.md.
@@ -39,7 +40,7 @@ scrape_configs:
   # per-target series, so zero targets produce no up series at all rather than
   # up == 0: a Deployment scaled to zero, a renamed Service, a renamed port, a
   # removed RoleBinding, or an unreachable API server all take the job off
-  # /targets instead of turning it red. An alert on these two jobs therefore
+  # /targets instead of turning it red. An alert on these three jobs therefore
   # pairs up == 0 with absent(up{job="..."})
   # (roadmap/02-phase-2-reporting-dashboards.md).
   - job_name: reporting-api
@@ -68,6 +69,27 @@ scrape_configs:
           - __meta_kubernetes_service_name
           - __meta_kubernetes_endpointslice_port_name
         regex: otel-collector;metrics
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  # The OpenStack collector of a cluster that runs the collector component,
+  # whose Service exists for this job alone. The interval is the Reporting
+  # API's: the two outbox gauges feed a warning rule without a `for` and a stat
+  # panel, and a shorter one would scrape a one-replica pod for nothing. The job
+  # sets no static labels, because the collector stamps platform and cloud on
+  # its own series from TALLY_OSC_CLOUD.
+  - job_name: openstack-collector
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: openstack-collector;http
         action: keep
       - source_labels:
           - __meta_kubernetes_pod_name
