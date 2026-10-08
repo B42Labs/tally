@@ -1,9 +1,11 @@
-// This file pins the two files this overlay adds to the metrics pipeline, and
-// the wiring that carries them into the cluster. Every mismatch it looks for
-// fails quietly. A scrape config that dropped or renamed a job of the base
-// leaves TallyScrapeTargetDown, TallyScrapeJobMissing and
-// TallyExporterServiceSilent selecting jobs this cluster no longer scrapes, and
-// neither the scrape nor the rules fail on their own. An exporter job on
+// This file pins the three files this overlay adds to the metrics pipeline,
+// and the wiring that carries them into the cluster. Every mismatch it looks
+// for fails quietly. A scrape config that dropped or renamed a job of the base
+// leaves TallyExporterServiceSilent selecting a job this cluster no longer
+// scrapes, and a rules file whose absent list is not the scrape config's
+// discovered jobs leaves TallyScrapeJobMissing firing for a job nobody
+// configured or silent on one that resolves to nothing; neither the scrape nor
+// the rules fail on their own. An exporter job on
 // another address or under another cloud label scrapes nothing while the
 // inventory of the simulated month sits unread, and an address that is not the
 // simulator's alias in the compose stack is one no pod resolves. A counter
@@ -20,6 +22,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,9 +36,14 @@ import (
 
 const (
 	scrapeFile        = "victoriametrics/scrape.yaml"
+	scrapeRulesFile   = "victoriametrics/scrape-rules.yaml"
 	baseScrapeFile    = "../../base/victoriametrics/scrape.yaml"
 	sourcesFile       = "counter-sources.yaml"
 	kustomizationFile = "kustomization.yaml"
+
+	// The base's rule over its discovered jobs, which this overlay's differs
+	// from in the absent list alone.
+	baseScrapeRulesFile = "../../base/vmalert/scrape-rules.yaml"
 
 	// The two OpenStack jobs: the one this overlay repoints and the one it
 	// copies over untouched.
@@ -57,10 +65,14 @@ const (
 	cloudsFile       = "reconciliation/clouds.yaml"
 
 	// The generated ConfigMaps, by their unsuffixed names, and the CronJob the
-	// second one is mounted into, which carries a container of the same name.
-	scrapeConfigMap  = "victoriametrics-scrape"
-	sourcesConfigMap = "tally-counter-sources"
-	cronJob          = "tally-engine"
+	// last one is mounted into, which carries a container of the same name.
+	scrapeConfigMap      = "victoriametrics-scrape"
+	scrapeRulesConfigMap = "vmalert-scrape-rules"
+	sourcesConfigMap     = "tally-counter-sources"
+	cronJob              = "tally-engine"
+
+	// The one rule the overlay's rules file carries.
+	jobMissingAlert = "TallyScrapeJobMissing"
 
 	// What points the engine at the mounted sources file.
 	sourcesVariable = "TALLY_ENGINE_COUNTER_SOURCES"
@@ -83,16 +95,30 @@ type scrapeConfig struct {
 }
 
 type scrapeJob struct {
-	JobName        string         `yaml:"job_name"`
-	ScrapeInterval string         `yaml:"scrape_interval"`
-	ScrapeTimeout  string         `yaml:"scrape_timeout"`
-	StaticConfigs  []staticConfig `yaml:"static_configs"`
+	JobName        string           `yaml:"job_name"`
+	ScrapeInterval string           `yaml:"scrape_interval"`
+	ScrapeTimeout  string           `yaml:"scrape_timeout"`
+	StaticConfigs  []staticConfig   `yaml:"static_configs"`
+	KubernetesSD   []map[string]any `yaml:"kubernetes_sd_configs"`
 }
 
 type staticConfig struct {
 	Targets []string          `yaml:"targets"`
 	Labels  map[string]string `yaml:"labels"`
 }
+
+// ruleFile is the part of a vmalert rules file these tests assert over.
+type ruleFile struct {
+	Groups []struct {
+		Rules []struct {
+			Alert string `yaml:"alert"`
+			Expr  string `yaml:"expr"`
+		} `yaml:"rules"`
+	} `yaml:"groups"`
+}
+
+// absentJobRe finds every job an absent() clause over up names.
+var absentJobRe = regexp.MustCompile(`absent\(up\{job="([^"]+)"\}\)`)
 
 // kustomization is the part of the overlay these tests assert over: the
 // components it lists, what it generates and what it patches.
@@ -170,17 +196,86 @@ type volume struct {
 }
 
 func TestScrapeConfigKeepsTheBaseJobs(t *testing.T) {
-	// Three alerting rules name the scrape jobs rather than a metric, and
-	// deploy/kubernetes/base/vmalert/rules_test.go holds them to the base file.
+	// TallyExporterServiceSilent names a scrape job rather than a metric, and
+	// deploy/kubernetes/base/vmalert/rules_test.go holds it to the base file.
 	// This overlay replaces that file wholesale, so a job it drops or renames
-	// takes itself out of all three selectors while both files stay legal YAML
-	// and the cluster keeps scraping the rest.
+	// takes itself out of the selector while both files stay legal YAML and the
+	// cluster keeps scraping the rest. The absent list of TallyScrapeJobMissing
+	// is the overlay's own, which the test below holds to this file.
 	overlay := jobNames(scrapeConfigOf(t, scrapeFile))
 	base := jobNames(scrapeConfigOf(t, baseScrapeFile))
 
 	if !slices.Equal(overlay, base) {
-		t.Fatalf("%s declares jobs %v, want %v, the jobs of %s that TallyScrapeTargetDown, TallyScrapeJobMissing and TallyExporterServiceSilent select",
+		t.Fatalf("%s declares jobs %v, want %v, the jobs of %s the base's rules are written against",
 			scrapeFile, overlay, base, baseScrapeFile)
+	}
+}
+
+func TestScrapeRulesNameTheDiscoveredJobsOfThisOverlay(t *testing.T) {
+	// The absent list of TallyScrapeJobMissing is this cluster's list of
+	// discovered jobs, and the overlay replaces the base's with it. A clause
+	// for a job the scrape config does not discover fires for as long as the
+	// cluster runs, and a discovered job without one resolves to no targets
+	// unheard.
+	var rules ruleFile
+	decodeFile(t, scrapeRulesFile, &rules)
+	if len(rules.Groups) != 1 || len(rules.Groups[0].Rules) != 1 || rules.Groups[0].Rules[0].Alert != jobMissingAlert {
+		t.Fatalf("%s carries %+v, want one group with the one alerting rule %s", scrapeRulesFile, rules.Groups, jobMissingAlert)
+	}
+
+	var named []string
+	for _, match := range absentJobRe.FindAllStringSubmatch(rules.Groups[0].Rules[0].Expr, -1) {
+		named = append(named, match[1])
+	}
+	var discovered []string
+	for _, job := range scrapeConfigOf(t, scrapeFile).ScrapeConfigs {
+		if len(job.KubernetesSD) > 0 {
+			discovered = append(discovered, job.JobName)
+		}
+	}
+	for _, job := range named {
+		if !slices.Contains(discovered, job) {
+			t.Errorf("%s carries absent(up{job=%q}), a job %s does not discover, so %s fires for as long as the cluster runs",
+				scrapeRulesFile, job, scrapeFile, jobMissingAlert)
+		}
+	}
+	for _, job := range discovered {
+		if !slices.Contains(named, job) {
+			t.Errorf("%s carries no absent(up{job=%q}), so the discovered job resolving to no targets is reported by nothing",
+				scrapeRulesFile, job)
+		}
+	}
+	if !slices.Equal(named, discovered) {
+		t.Errorf("%s names the jobs %v, want %v, the discovered jobs of %s in its order", scrapeRulesFile, named, discovered, scrapeFile)
+	}
+
+	// Without the replacing generator vmalert keeps the base's file, whose
+	// absent list is the base's scrape config's.
+	g := generatorNamed(t, kustomizationOf(t), scrapeRulesConfigMap)
+	if g.Behavior != "replace" {
+		t.Errorf("the %s generator has behavior %q, want \"replace\": that is what overrides the base's generated ConfigMap",
+			scrapeRulesConfigMap, g.Behavior)
+	}
+	if !slices.Equal(g.Files, []string{scrapeRulesFile}) {
+		t.Errorf("the %s generator carries %v, want exactly [%s]", scrapeRulesConfigMap, g.Files, scrapeRulesFile)
+	}
+}
+
+func TestScrapeRulesKeepTheBaseRuleBesideTheAbsentList(t *testing.T) {
+	// The absent list is the one part of the rule that is this cluster's. The
+	// group, the for, the severity and the annotations are the base's, which
+	// deploy/kubernetes/base/vmalert/rules_test.go pins, and a copy that drifts
+	// from them pages on the dev cluster in a way the base does not: a dropped
+	// for fires on the first evaluation, a warning severity takes the root
+	// route's repeat interval, and a renamed runbook is a dead link. The test
+	// above reads the absent clauses alone, and `make check-alerting` loads
+	// this file into vmalert, which is what says the expression parses.
+	overlay := linesBesideTheAbsentList(t, scrapeRulesFile)
+	base := linesBesideTheAbsentList(t, baseScrapeRulesFile)
+
+	if !slices.Equal(overlay, base) {
+		t.Errorf("%s differs from %s beside its expr line:\n%s\nwant\n%s",
+			scrapeRulesFile, baseScrapeRulesFile, strings.Join(overlay, "\n"), strings.Join(base, "\n"))
 	}
 }
 
@@ -459,6 +554,27 @@ func decodeFile(t *testing.T, path string, v any) {
 	if err := yaml.Unmarshal(raw, v); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
+}
+
+// linesBesideTheAbsentList returns the lines of a rules file that are neither
+// blank, a comment nor the expr line, in file order. The expr of both copies is
+// one line, so what is left is everything of the rule but its absent list.
+func linesBesideTheAbsentList(t *testing.T, path string) []string {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var kept []string
+	for line := range strings.Lines(string(raw)) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "expr:") {
+			continue
+		}
+		kept = append(kept, strings.TrimRight(line, "\n"))
+	}
+	return kept
 }
 
 // simulatorListener loads the simulator's configuration from the two variables

@@ -106,14 +106,16 @@ secretGenerator:
     files:
       - secrets/clouds.yaml
 
-# The scrape config of this cluster, in place of the base's. What the file
-# keeps, and why, is written in its own header.
+# The scrape config of this cluster, in place of the base's, and the rule over
+# the jobs it discovers, which is replaced together with it because the absent
+# list of TallyScrapeJobMissing is that config's list of discovered jobs. What
+# each file keeps, and why, is written in its own header.
 #
-# The second entry is the non-secret settings of the collector, one variable
-# per line of collector.env. The file is tracked and ships with an empty
+# The third entry is the non-secret settings of the collector, one variable per
+# line of collector.env. The file is tracked and ships with an empty
 # TALLY_OSC_CLOUD, which `make prod-up` refuses.
 #
-# The third is the cloud the Reporting API reconciles, which the sync names
+# The fourth is the cloud the Reporting API reconciles, which the sync names
 # through the collector's TALLY_OSC_CLOUD. The file is tracked, edited in place
 # like collector.env, and ships with empty names, which `make prod-up` refuses.
 configMapGenerator:
@@ -121,6 +123,10 @@ configMapGenerator:
     behavior: replace
     files:
       - victoriametrics/scrape.yaml
+  - name: vmalert-scrape-rules
+    behavior: replace
+    files:
+      - victoriametrics/scrape-rules.yaml
   - name: tally-openstack-collector
     envs:
       - collector.env

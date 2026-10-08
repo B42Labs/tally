@@ -1,11 +1,12 @@
 // This file pins what turns a metric into a page. Every one of these fails
 // quietly: a rule dropped in an edit leaves the condition it watched unwatched
 // and nothing reports the gap, a runbook annotation naming a page that was
-// renamed hands whoever is woken at 03:00 a dead link, and a scrape job added
-// without a matching rule is a target nobody hears about once it stops
-// answering. Whether the expressions parse is what `make check-alerting`
-// answers, by loading them into the vmalert binary the cluster runs; this test
-// reads the YAML from disk and needs no cluster.
+// renamed hands whoever is woken at 03:00 a dead link, and a discovered scrape
+// job added without an absent clause is a job nobody hears about once it
+// resolves to no targets. Whether the expressions parse is what
+// `make check-alerting` answers, by loading both rules files into the vmalert
+// binary the cluster runs; this test reads the YAML from disk and needs no
+// cluster.
 package vmalert_test
 
 import (
@@ -23,6 +24,9 @@ import (
 const (
 	rulesFile  = "rules.yaml"
 	scrapeFile = "../victoriametrics/scrape.yaml"
+	// The rule over the discovered scrape jobs, in a file of its own because an
+	// overlay replaces it together with its scrape config.
+	scrapeRulesFile = "scrape-rules.yaml"
 	// The page an annotation names is read from runbookDir under the repository
 	// root, which is four levels up from this directory.
 	repoRoot = "../../../.."
@@ -41,8 +45,11 @@ const (
 	// path the site is served under and whether its pages carry an extension.
 	configFile = "docs/.vitepress/config.mts"
 
-	// The job TallyExporterServiceSilent selects, the pair the anomaly rule is
-	// split into, and the rule that watches that pair.
+	// The two rules over the scrape config, the job TallyExporterServiceSilent
+	// selects, the pair the anomaly rule is split into, and the rule that
+	// watches that pair.
+	targetDownAlert   = "TallyScrapeTargetDown"
+	jobMissingAlert   = "TallyScrapeJobMissing"
 	exporterJob       = "openstack-db-exporter"
 	anomalyAlert      = "TallyResourceCountAnomaly"
 	coverageAlert     = "TallyRecordedSeriesMissing"
@@ -50,7 +57,8 @@ const (
 	rawResourceSeries = "tally_current_resources"
 )
 
-// alerts is the rule set in the order rules.yaml carries it. The order is
+// alerts is the rule set in the order rules.yaml carries it, without the one
+// rule scrape-rules.yaml carries. The order is
 // asserted rather than the set alone, so a rule that is moved out of the block
 // its comment explains is noticed.
 var alerts = []string{
@@ -63,17 +71,17 @@ var alerts = []string{
 	"TallyResourceCountAnomaly",
 	"TallyRecordedSeriesMissing",
 	"TallyScrapeTargetDown",
-	"TallyScrapeJobMissing",
 	"TallyExporterServiceSilent",
 }
 
-// criticalAlerts are the ones a deployment's Alertmanager repeats on the short
-// interval and that carry a runbook. Severity decides what wakes a person, so
-// which rules hold it is a decision of this repository rather than a detail.
+// criticalAlerts are the ones of rules.yaml a deployment's Alertmanager repeats
+// on the short interval and that carry a runbook. Severity decides what wakes a
+// person, so which rules hold it is a decision of this repository rather than a
+// detail. The rule of scrape-rules.yaml is critical too, which
+// TestScrapeRulesCarryTheAbsenceRuleAlone pins.
 var criticalAlerts = []string{
 	"TallyCloudEventsSilent",
 	"TallyExporterServiceSilent",
-	"TallyScrapeJobMissing",
 	"TallyScrapeTargetDown",
 	"TallySyncStale",
 }
@@ -99,6 +107,9 @@ var (
 // alert and stops at a description leaves the reader where the alert did.
 var runbookHeadings = []string{"## Symptom", "## Impact on billing", "## First checks"}
 
+// absentJobRe finds every job an absent() clause over up names.
+var absentJobRe = regexp.MustCompile(`absent\(up\{job="([^"]+)"\}\)`)
+
 type ruleFile struct {
 	Groups []group `yaml:"groups"`
 }
@@ -121,7 +132,7 @@ type rule struct {
 }
 
 func TestRuleGroup(t *testing.T) {
-	groups := rules(t)
+	groups := groupsIn(t, rulesFile)
 
 	// vmalert evaluates every group on its own timer, and a second group would
 	// evaluate on a timer this test says nothing about.
@@ -184,7 +195,7 @@ func TestCriticalRules(t *testing.T) {
 	t.Run("link a runbook that answers", func(t *testing.T) {
 		base := siteBase(t)
 
-		for _, r := range all {
+		for _, r := range slices.Concat(all, scrapeRules(t)) {
 			if r.Labels["severity"] != "critical" {
 				continue
 			}
@@ -211,10 +222,46 @@ func TestCriticalRules(t *testing.T) {
 	})
 }
 
+func TestScrapeRulesCarryTheAbsenceRuleAlone(t *testing.T) {
+	// An overlay replaces this file together with its scrape config, so a
+	// second rule here would be replaced with it, and an overlay that writes
+	// its own absent list would drop that rule without a word.
+	groups := groupsIn(t, scrapeRulesFile)
+	if len(groups) != 1 {
+		t.Fatalf("%s declares %d groups, want 1", scrapeRulesFile, len(groups))
+	}
+	g := groups[0]
+	if g.Name != "tally-scrape" {
+		t.Errorf("group name = %q, want %q", g.Name, "tally-scrape")
+	}
+	if g.Interval != "1m" {
+		t.Errorf("group interval = %q, want %q, the interval of the group in %s", g.Interval, "1m", rulesFile)
+	}
+	if len(g.Rules) != 1 || g.Rules[0].Alert != jobMissingAlert {
+		t.Fatalf("%s carries %+v, want the one alerting rule %s", scrapeRulesFile, g.Rules, jobMissingAlert)
+	}
+
+	r := g.Rules[0]
+	if r.Labels["severity"] != "critical" {
+		t.Errorf("%s has severity %q, want \"critical\": a discovered job gone entirely takes its series with it", r.Alert, r.Labels["severity"])
+	}
+	if strings.TrimSpace(r.Annotations["summary"]) == "" {
+		t.Errorf("%s carries no summary, so a notification of it says no more than its name", r.Alert)
+	}
+	want := siteOrigin + siteBase(t) + strings.TrimPrefix(runbookDir, "docs/") + "/" + r.Alert
+	if got := r.Annotations["runbook"]; got != want {
+		t.Errorf("%s links runbook %q, want %q", r.Alert, got, want)
+	}
+}
+
 func TestScrapeJobsAreCovered(t *testing.T) {
-	// The three rules that name jobs rather than metrics. A job added to the
-	// scrape config or renamed there is invisible to all of them until this file
-	// names it too, and neither the scrape nor the rules fail on their own.
+	// The rules that read the scrape config rather than a metric. A target that
+	// stops answering is TallyScrapeTargetDown's whatever its job, a discovered
+	// job that resolves to nothing is reported by a clause of
+	// TallyScrapeJobMissing naming it, a clause naming a job the scrape config
+	// does not declare fires for as long as the cluster runs, and one naming a
+	// static job can never fire. Neither the scrape nor the rules fail on their
+	// own.
 	var cfg struct {
 		ScrapeConfigs []struct {
 			JobName      string           `yaml:"job_name"`
@@ -233,33 +280,57 @@ func TestScrapeJobsAreCovered(t *testing.T) {
 	}
 
 	byName := map[string]rule{}
-	for _, r := range alertRules(t) {
+	for _, r := range slices.Concat(alertRules(t), scrapeRules(t)) {
 		byName[r.Alert] = r
 	}
-	targetDown := byName["TallyScrapeTargetDown"].Expr
-	jobMissing := byName["TallyScrapeJobMissing"].Expr
+	targetDown := byName[targetDownAlert].Expr
+	jobMissing := byName[jobMissingAlert].Expr
 	exporterSilent := byName["TallyExporterServiceSilent"].Expr
 
-	var declaresExporterJob bool
+	// Every target of the scrape config is one the deployment chose to scrape.
+	// A job list here only repeated scrape.yaml, and a job added there without
+	// being named here was a target nobody heard about once it stopped
+	// answering.
+	if got := strings.TrimSpace(targetDown); got != "up == 0" {
+		t.Errorf("%s in %s is %q, want \"up == 0\", which reads every target of %s whatever its job is called",
+			targetDownAlert, rulesFile, got, scrapeFile)
+	}
+
+	declared := map[string]bool{}
+	var discovered []string
 	for _, job := range cfg.ScrapeConfigs {
-		if job.JobName == exporterJob {
-			declaresExporterJob = true
+		declared[job.JobName] = true
+		if len(job.KubernetesSD) > 0 {
+			discovered = append(discovered, job.JobName)
 		}
-		if !strings.Contains(targetDown, job.JobName) {
-			t.Errorf("TallyScrapeTargetDown does not name job %q of %s, so a target of it that stops answering is reported by nothing",
-				job.JobName, scrapeFile)
+	}
+	var named []string
+	for _, match := range absentJobRe.FindAllStringSubmatch(jobMissing, -1) {
+		named = append(named, match[1])
+	}
+	// A discovered job that resolves to no targets emits no up series at all
+	// rather than up == 0, so TallyScrapeTargetDown stays silent and absent()
+	// is what sees it. A static target emits up whether it answers or not, so
+	// a clause naming a static job can never fire.
+	for _, job := range named {
+		switch {
+		case !declared[job]:
+			t.Errorf("%s in %s carries absent(up{job=%q}), a job %s does not declare, so the clause fires for as long as the cluster runs",
+				jobMissingAlert, scrapeRulesFile, job, scrapeFile)
+		case !slices.Contains(discovered, job):
+			t.Errorf("%s in %s carries absent(up{job=%q}), a static job of %s, whose target emits up whether it answers or not, so the clause can never fire",
+				jobMissingAlert, scrapeRulesFile, job, scrapeFile)
 		}
-		if len(job.KubernetesSD) == 0 {
-			continue
+	}
+	for _, job := range discovered {
+		if !slices.Contains(named, job) {
+			t.Errorf("%s in %s has no absent(up{job=%q}), so the discovered job resolving to no targets is reported by nothing",
+				jobMissingAlert, scrapeRulesFile, job)
 		}
-		// A discovered job that resolves to no targets emits no up series at
-		// all rather than up == 0, so TallyScrapeTargetDown stays silent and
-		// absent() is what sees it.
-		want := fmt.Sprintf("absent(up{job=%q})", job.JobName)
-		if !strings.Contains(jobMissing, want) {
-			t.Errorf("TallyScrapeJobMissing has no %s, so job %q resolving to zero targets is reported by nothing",
-				want, job.JobName)
-		}
+	}
+	if !slices.Equal(named, discovered) {
+		t.Errorf("%s in %s names the jobs %v, want %v, the discovered jobs of %s in its order",
+			jobMissingAlert, scrapeRulesFile, named, discovered, scrapeFile)
 	}
 
 	// TallyExporterServiceSilent pins one job on both sides of every `unless`,
@@ -273,7 +344,7 @@ func TestScrapeJobsAreCovered(t *testing.T) {
 		t.Errorf("TallyExporterServiceSilent no longer selects %s, so this test asserts nothing about the job %s declares",
 			selector, scrapeFile)
 	}
-	if !declaresExporterJob {
+	if !declared[exporterJob] {
 		t.Errorf("%s declares no job %q while TallyExporterServiceSilent selects it, so the rule matches no series and the short invoice it exists to prevent goes unreported",
 			scrapeFile, exporterJob)
 	}
@@ -383,34 +454,48 @@ func siteBase(t *testing.T) string {
 	return string(matches[0][1])
 }
 
-// rules parses the groups vmalert evaluates.
-func rules(t *testing.T) []group {
+// groupsIn parses the groups vmalert evaluates out of one rules file.
+func groupsIn(t *testing.T, path string) []group {
 	t.Helper()
 
-	raw, err := os.ReadFile(rulesFile)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading %s: %v", rulesFile, err)
+		t.Fatalf("reading %s: %v", path, err)
 	}
 
 	var file ruleFile
 	if err := yaml.Unmarshal(raw, &file); err != nil {
-		t.Fatalf("parsing %s, which vmalert refuses to start on: %v", rulesFile, err)
+		t.Fatalf("parsing %s, which vmalert refuses to start on: %v", path, err)
 	}
 	return file.Groups
 }
 
-// allRules returns the rules of the one group, in file order.
+// allRules returns the rules of the one group of rules.yaml, in file order.
 func allRules(t *testing.T) []rule {
 	t.Helper()
 
-	groups := rules(t)
+	return rulesOfOneGroup(t, rulesFile)
+}
+
+// scrapeRules returns the rules of the one group of scrape-rules.yaml.
+func scrapeRules(t *testing.T) []rule {
+	t.Helper()
+
+	return rulesOfOneGroup(t, scrapeRulesFile)
+}
+
+// rulesOfOneGroup returns the rules of a file that declares one group.
+func rulesOfOneGroup(t *testing.T, path string) []rule {
+	t.Helper()
+
+	groups := groupsIn(t, path)
 	if len(groups) != 1 {
-		t.Fatalf("%s declares %d groups, want 1", rulesFile, len(groups))
+		t.Fatalf("%s declares %d groups, want 1", path, len(groups))
 	}
 	return groups[0].Rules
 }
 
-// alertRules returns the alerting rules of the one group, in file order. A
+// alertRules returns the alerting rules of rules.yaml, in file order. A
 // recording rule carries no severity, no summary and no runbook, so the
 // assertions over those read this rather than allRules.
 func alertRules(t *testing.T) []rule {

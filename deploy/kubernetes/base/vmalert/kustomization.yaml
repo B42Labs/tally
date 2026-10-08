@@ -4,10 +4,15 @@ kind: Kustomization
 resources:
   - vmalert.yaml
 
-# Generating the ConfigMap from the file means editing rules.yaml re-rolls the
-# pod through the generated name hash, rather than leaving it evaluating rules
-# that are no longer in the repository.
+# Generating the ConfigMaps from the files means editing either of them
+# re-rolls the pod through the generated name hash, rather than leaving it
+# evaluating rules that are no longer in the repository. scrape-rules.yaml is a
+# ConfigMap of its own because an overlay that replaces the scrape config
+# replaces it too.
 configMapGenerator:
   - name: vmalert-rules
     files:
       - rules.yaml
+  - name: vmalert-scrape-rules
+    files:
+      - scrape-rules.yaml

@@ -1,0 +1,27 @@
+# The rule over the discovered scrape jobs of the dev cluster, in place of the
+# base's deploy/kubernetes/base/vmalert/scrape-rules.yaml.
+#
+# This file replaces the generated vmalert-scrape-rules ConfigMap through the
+# behavior: replace generator in the overlay's kustomization.yaml, beside the
+# scrape config it is written against. It names one absent clause per job of
+# victoriametrics/scrape.yaml that carries kubernetes_sd_configs, which
+# manifest_test.go holds it to, so a drill under another scrape config edits
+# this file with scrape.yaml.
+groups:
+  - name: tally-scrape
+    interval: 1m
+    rules:
+      # Scrape job gone entirely. `up` is a per-target series, and every job
+      # named here discovers its targets (see the scrape config), so a job that
+      # resolves to no targets emits no `up` series at all and
+      # TallyScrapeTargetDown stays silent. A Deployment scaled to zero, a
+      # renamed Service or port, a removed RoleBinding, or an unreachable API
+      # server all land here rather than there.
+      - alert: TallyScrapeJobMissing
+        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape job {{ $labels.job }} resolves to no targets"
+          runbook: https://b42labs.github.io/tally/how-to/alerts/TallyScrapeJobMissing

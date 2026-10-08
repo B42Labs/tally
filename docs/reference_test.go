@@ -83,15 +83,16 @@ const (
 )
 
 // The manifests the three observability pages render from: the scrape
-// configuration the store reads, the rules the evaluator loads, the routing a
-// fired alert takes, and the directory the provisioned dashboards are shipped
-// out of. Each is the file a cluster runs, so a page states what is deployed
+// configuration the store reads, the two rules files the evaluator loads, the
+// routing a fired alert takes, and the directory the provisioned dashboards are
+// shipped out of. Each is the file a cluster runs, so a page states what is deployed
 // rather than what was once written down.
 const (
-	scrapeSource     = "../deploy/kubernetes/base/victoriametrics/scrape.yaml"
-	rulesSource      = "../deploy/kubernetes/base/vmalert/rules.yaml"
-	routingSource    = "../deploy/kubernetes/base/alertmanager/config.yaml"
-	dashboardsSource = "../deploy/kubernetes/base/grafana/dashboards"
+	scrapeSource      = "../deploy/kubernetes/base/victoriametrics/scrape.yaml"
+	rulesSource       = "../deploy/kubernetes/base/vmalert/rules.yaml"
+	scrapeRulesSource = "../deploy/kubernetes/base/vmalert/scrape-rules.yaml"
+	routingSource     = "../deploy/kubernetes/base/alertmanager/config.yaml"
+	dashboardsSource  = "../deploy/kubernetes/base/grafana/dashboards"
 )
 
 // The sources the export page renders its documents from: the two file writers
@@ -331,11 +332,13 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 
 	t.Run("observability/alert-rules.md", func(t *testing.T) {
 		rules, rulesErr := refdoc.AlertRules(readSource(t, rulesSource))
+		scrapeRules, scrapeRulesErr := refdoc.AlertRules(readSource(t, scrapeRulesSource))
 		routing, routingErr := refdoc.AlertRouting(readSource(t, routingSource))
 
 		refdoc.Verify(t, referencePage("observability/alert-rules.md"), map[string]string{
-			"rules":   render(t, rules, rulesErr),
-			"routing": render(t, routing, routingErr),
+			"rules":        render(t, rules, rulesErr),
+			"scrape-rules": render(t, scrapeRules, scrapeRulesErr),
+			"routing":      render(t, routing, routingErr),
 		})
 	})
 

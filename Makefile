@@ -937,7 +937,9 @@ fmt:
 
 # Each file is loaded by the binary that will evaluate it, so an expression or a
 # routing field the pinned version rejects fails here rather than in the
-# cluster. Docker is the only prerequisite; no cluster is involved.
+# cluster. Docker is the only prerequisite; no cluster is involved. The dev
+# overlay's scrape-rules.yaml is loaded on its own, because it is the one
+# overlay rules file whose absent list is not the base's.
 ## check-alerting: validate the alert rules and the Alertmanager config
 check-alerting:
 	@[ -n '$(VMALERT_IMAGE)' ] || { \
@@ -949,7 +951,10 @@ check-alerting:
 		exit 1; \
 	}
 	docker run --rm -v "$(CURDIR)/deploy/kubernetes/base/vmalert:/etc/vmalert:ro" \
-		'$(VMALERT_IMAGE)' -dryRun -rule=/etc/vmalert/rules.yaml
+		'$(VMALERT_IMAGE)' -dryRun -rule=/etc/vmalert/rules.yaml \
+		-rule=/etc/vmalert/scrape-rules.yaml
+	docker run --rm -v "$(CURDIR)/deploy/kubernetes/overlays/dev/victoriametrics:/etc/vmalert:ro" \
+		'$(VMALERT_IMAGE)' -dryRun -rule=/etc/vmalert/scrape-rules.yaml
 	docker run --rm --entrypoint amtool \
 		-v "$(CURDIR)/deploy/kubernetes/base/alertmanager:/etc/alertmanager:ro" \
 		'$(ALERTMANAGER_IMAGE)' check-config /etc/alertmanager/config.yaml
