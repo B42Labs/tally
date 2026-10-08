@@ -61,7 +61,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: 'Oldest buffered collector event is {{ $value | printf "%.0f" }}s old; the Reporting API is unreachable from the provider side'
+          summary: 'Oldest buffered collector event of {{ $labels.cloud }} is {{ $value | printf "%.0f" }}s old; the Reporting API is unreachable from the provider side'
 
       # Recorded so the rule below reads one pre-aggregated series. Written as a
       # subquery over the raw ones instead, the baseline made the engine repeat

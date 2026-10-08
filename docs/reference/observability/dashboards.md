@@ -62,10 +62,10 @@ Title `Tally / Ingestion Health`, uid `tally-ingestion-health`.
 | Event ingest rate | `timeseries` | `sum by (cloud, source) (rate(tally_events_ingested_total{platform=~"$platform", cloud=~"$cloud"}[5m]))` |
 | Dedup rate | `timeseries` | `sum by (cloud) (rate(tally_events_deduplicated_total{cloud=~"$cloud"}[5m]))` |
 | Rejected events | `timeseries` | `sum by (cloud, reason) (increase(tally_events_rejected_total{cloud=~"$cloud"}[1h]))` |
-| Collector buffer depth | `timeseries` | `tally_collector_buffer_depth` |
-| Oldest buffered event age | `stat` | `tally_collector_oldest_buffered_seconds` |
+| Collector buffer depth | `timeseries` | `tally_collector_buffer_depth{platform=~"$platform", cloud=~"$cloud"}` |
+| Oldest buffered event age | `stat` | `tally_collector_oldest_buffered_seconds{platform=~"$platform", cloud=~"$cloud"}` |
 | Projection replays | `timeseries` | `sum by (cloud) (rate(tally_projection_replays_total{cloud=~"$cloud"}[15m]))` |
-| Scrape health | `stat` | `up{job=~"reporting-api\|openstack-db-exporter\|ceilometer\|otel-collector"}` |
+| Scrape health | `stat` | `up` |
 
 ### `project-drilldown.json`
 

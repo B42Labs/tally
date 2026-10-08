@@ -246,8 +246,8 @@ store any invoice is derived from puts invented usage into the billing record.
    {"name":"openstack_neutron_floating_ip","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"$NOW","attributes":$PROJECT}]}},
    {"name":"openstack_neutron_router","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"$NOW","attributes":$PROJECT}]}},
    {"name":"openstack_loadbalancer_loadbalancer_status","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"$NOW","attributes":$PROJECT}]}},
-   {"name":"tally_collector_buffer_depth","gauge":{"dataPoints":[{"asDouble":12,"timeUnixNano":"$NOW"}]}},
-   {"name":"tally_collector_oldest_buffered_seconds","gauge":{"dataPoints":[{"asDouble":4,"timeUnixNano":"$NOW"}]}},
+   {"name":"tally_collector_buffer_depth","gauge":{"dataPoints":[{"asDouble":12,"timeUnixNano":"$NOW","attributes":$CLOUD}]}},
+   {"name":"tally_collector_oldest_buffered_seconds","gauge":{"dataPoints":[{"asDouble":4,"timeUnixNano":"$NOW","attributes":$CLOUD}]}},
    {"name":"tally_sync_runs_total","sum":{"aggregationTemporality":2,"isMonotonic":true,"dataPoints":[
      {"asDouble":4,"timeUnixNano":"$THEN","attributes":$RUNS},
      {"asDouble":5,"timeUnixNano":"$NOW","attributes":$RUNS}]}},
