@@ -203,6 +203,9 @@ store any invoice is derived from puts invented usage into the billing record.
    all (see the coverage table under
    [coverage against the concept](/explanation/the-openstack-metrics-pipeline#coverage-against-the-concept)).
    The `CLOUD`, `TENANT` and `PROJECT` attribute sets carry that difference.
+   `UNLIMITED` is a second tenant, `unlimited-project`, whose three nova limits
+   report a max of `-1`, which is how the nova limits collector reports an
+   unlimited quota.
    The exporter's per-resource labels, `id` and `name` among them, are left
    out: the panels count series and filter on the cloud and the project, so
    nothing reads them. The three `tally_sync_*` series are cumulative monotonic
@@ -222,6 +225,7 @@ store any invoice is derived from puts invented usage into the billing record.
    CLOUD='[{"key":"platform","value":{"stringValue":"openstack"}},{"key":"cloud","value":{"stringValue":"os-prod-eu1"}}]'
    TENANT='[{"key":"platform","value":{"stringValue":"openstack"}},{"key":"cloud","value":{"stringValue":"os-prod-eu1"}},{"key":"tenant_id","value":{"stringValue":"drill-project"}}]'
    PROJECT='[{"key":"platform","value":{"stringValue":"openstack"}},{"key":"cloud","value":{"stringValue":"os-prod-eu1"}},{"key":"project_id","value":{"stringValue":"drill-project"}}]'
+   UNLIMITED='[{"key":"platform","value":{"stringValue":"openstack"}},{"key":"cloud","value":{"stringValue":"os-prod-eu1"}},{"key":"tenant_id","value":{"stringValue":"unlimited-project"}}]'
    RUNS='[{"key":"cloud","value":{"stringValue":"os-prod-eu1"}},{"key":"status","value":{"stringValue":"completed"}}]'
    RECONCILED='[{"key":"cloud","value":{"stringValue":"os-prod-eu1"}},{"key":"action","value":{"stringValue":"created"}}]'
    ERRORS='[{"key":"cloud","value":{"stringValue":"os-prod-eu1"}}]'
@@ -239,6 +243,12 @@ store any invoice is derived from puts invented usage into the billing record.
    {"name":"openstack_nova_limits_vcpus_max","gauge":{"dataPoints":[{"asDouble":40,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
    {"name":"openstack_nova_limits_memory_used","gauge":{"dataPoints":[{"asDouble":24576,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
    {"name":"openstack_nova_limits_memory_max","gauge":{"dataPoints":[{"asDouble":81920,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
+   {"name":"openstack_nova_limits_instances_used","gauge":{"dataPoints":[{"asDouble":72,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
+   {"name":"openstack_nova_limits_instances_max","gauge":{"dataPoints":[{"asDouble":-1,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
+   {"name":"openstack_nova_limits_vcpus_used","gauge":{"dataPoints":[{"asDouble":286,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
+   {"name":"openstack_nova_limits_vcpus_max","gauge":{"dataPoints":[{"asDouble":-1,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
+   {"name":"openstack_nova_limits_memory_used","gauge":{"dataPoints":[{"asDouble":589824,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
+   {"name":"openstack_nova_limits_memory_max","gauge":{"dataPoints":[{"asDouble":-1,"timeUnixNano":"$NOW","attributes":$UNLIMITED}]}},
    {"name":"openstack_nova_server_status","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
    {"name":"openstack_cinder_volume_status","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
    {"name":"openstack_cinder_volume_gb","gauge":{"dataPoints":[{"asDouble":100,"timeUnixNano":"$NOW","attributes":$TENANT}]}},
@@ -273,7 +283,9 @@ store any invoice is derived from puts invented usage into the billing record.
    `openstack_nova_limits_instances_used` series above supplies. Every panel on
    all four dashboards then carries a value. The panels built on `rate()` and
    `increase()` show this as one spike over their window rather than a level,
-   because each series was pushed once.
+   because each series was pushed once. The three Quota usage gauges read 30 %,
+   30 % and 30 %. With `unlimited-project` in the Project variable they read
+   `unlimited`, because its quotas report a max of `-1`.
 
 2. A simulated month fills the same `openstack_*` panels without the second
    part. `make simulator-up SIM_PERIOD=2026-07` pushes the traffic counters and

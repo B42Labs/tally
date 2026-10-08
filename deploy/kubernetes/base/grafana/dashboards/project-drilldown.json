@@ -66,7 +66,7 @@
           "uid": "victoriametrics"
         },
         "query": "label_values(openstack_nova_limits_instances_used, tenant_id)",
-        "refresh": 1,
+        "refresh": 2,
         "sort": 1,
         "current": {},
         "options": []
@@ -74,13 +74,13 @@
       {
         "name": "api_base",
         "label": "Reporting API",
-        "description": "Base URL the event link points at. The dev overlay serves the API on port 8443.",
+        "description": "Base URL the event link points at. The base's placeholder hostname; set it to the hostname your overlay publishes the Reporting API under, with the port where the Gateway is not on 443 (the dev overlay: https://api.tally.127-0-0-1.nip.io:8443).",
         "type": "textbox",
-        "query": "https://api.tally.127-0-0-1.nip.io:8443",
+        "query": "https://api.tally.example.com",
         "current": {
           "selected": false,
-          "text": "https://api.tally.127-0-0-1.nip.io:8443",
-          "value": "https://api.tally.127-0-0-1.nip.io:8443"
+          "text": "https://api.tally.example.com",
+          "value": "https://api.tally.example.com"
         },
         "options": []
       }
@@ -243,7 +243,7 @@
       "id": 3,
       "type": "gauge",
       "title": "Quota usage",
-      "description": "Used over max, from the nova limits collector, which is the only quota source that carries a project id.",
+      "description": "Used over max, from the nova limits collector, which is the only quota source that carries a project id. A quota of -1 in every selected cloud reads unlimited. A cloud whose quota is -1 is left out of the ratio, so a project unlimited in one cloud and limited in another reads the ratio of the limited one. A max of 0, the quota that allows nothing, and a project the exporter has not reported both read No data.",
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -259,6 +259,18 @@
           "unit": "percentunit",
           "min": 0,
           "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "unlimited",
+                  "color": "blue",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -296,7 +308,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(openstack_nova_limits_instances_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_instances_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "expr": "sum(openstack_nova_limits_instances_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} and (openstack_nova_limits_instances_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0)) / (sum(openstack_nova_limits_instances_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0) > 0) or (max(openstack_nova_limits_instances_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) == -1)",
           "legendFormat": "instances",
           "instant": true,
           "range": false
@@ -307,7 +319,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(openstack_nova_limits_vcpus_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_vcpus_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "expr": "sum(openstack_nova_limits_vcpus_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} and (openstack_nova_limits_vcpus_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0)) / (sum(openstack_nova_limits_vcpus_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0) > 0) or (max(openstack_nova_limits_vcpus_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) == -1)",
           "legendFormat": "vcpus",
           "instant": true,
           "range": false
@@ -318,7 +330,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum(openstack_nova_limits_memory_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) / sum(openstack_nova_limits_memory_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"})",
+          "expr": "sum(openstack_nova_limits_memory_used{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} and (openstack_nova_limits_memory_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0)) / (sum(openstack_nova_limits_memory_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"} >= 0) > 0) or (max(openstack_nova_limits_memory_max{cloud=~\"$cloud\", tenant_id=~\"$project_id\"}) == -1)",
           "legendFormat": "memory",
           "instant": true,
           "range": false
