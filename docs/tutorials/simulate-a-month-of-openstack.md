@@ -271,7 +271,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```text
-   tally_collector_delivered_total 1728
+   tally_collector_delivered_total{cloud="os-sim",platform="openstack"} 1728
    ```
 
    The 1728 delivered are the 1728 consumed. A depth that does not fall while a
