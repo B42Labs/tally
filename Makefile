@@ -358,6 +358,15 @@ GO_MIN_VERSION := $(shell sed -n 's/^go \([0-9][0-9.]*\)$$/\1/p' go.mod)
 # is where a missing tool is cheapest to find. The Node toolchain is not probed:
 # `docs` and `docs-build` are the only targets that need it, and the `npm ci`
 # they run says plainly enough what is missing.
+#
+# Go is not probed through the probe function, because its stderr stays on the
+# terminal. When this probe is the first Go command in a clone, as it is in
+# lesson 1 of the tutorials, a Go older than the `toolchain` line of go.mod
+# downloads that toolchain here and says so on stderr. Captured, that line
+# would land inside the `ok` line; left alone, it stands on a line of its own
+# above it, and a `go env` that fails prints its error above a `broken` line
+# the same way. `command -v` tells a Go that is not on the path from one that
+# answers an error.
 ## check-tools: check that the tools the dev stack and the tutorials need answer
 check-tools:
 	@failed=0; \
@@ -386,7 +395,10 @@ check-tools:
 	probe kubectl 'every call the targets make against the cluster' kubectl version --client; \
 	probe jq 'reading the JSON the lessons print' jq --version; \
 	probe curl 'the calls against the Reporting API' curl --version; \
-	if goversion="$$(go env GOVERSION 2>&1)"; then \
+	if ! command -v go >/dev/null 2>&1; then \
+		report missing go 'not on the path, and every binary here is built with it'; \
+		failed=$$((failed + 1)); \
+	elif goversion="$$(go env GOVERSION)"; then \
 		if [ "$$(printf '%s\n%s\n' '$(GO_MIN_VERSION)' "$${goversion#go}" | sort -V | head -n1)" = '$(GO_MIN_VERSION)' ]; then \
 			report ok go "$$goversion, at or above the go $(GO_MIN_VERSION) of go.mod"; \
 		else \
@@ -394,7 +406,7 @@ check-tools:
 			failed=$$((failed + 1)); \
 		fi; \
 	else \
-		report missing go 'not on the path, and every binary here is built with it'; \
+		report broken go 'answered an error, printed above'; \
 		failed=$$((failed + 1)); \
 	fi; \
 	if resources="$$(docker info --format '{{.NCPU}} {{.MemTotal}}' 2>/dev/null)"; then \
