@@ -4,7 +4,7 @@ description: Open the dev cluster's Grafana as an anonymous viewer, point its fo
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-10-08 from commit 4941c0e with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
 
 # Watch the month in Grafana
 
@@ -202,6 +202,58 @@ the five panels of the July range that read one instant, `Projects (OpenStack)`,
 `Top 10 projects by instance count` and the three `Quota usage` gauges, because
 their last sample lies five minutes before it.
 
+## Read a panel without the browser
+
+1. Ask Grafana for the value the `Projects (OpenStack)` panel shows over the
+   July range:
+
+   ```sh
+   curl --cacert tally-ca.crt -H 'Content-Type: application/json' https://grafana.tally.127-0-0-1.nip.io:8443/api/ds/query -d '{"from":"1782864000000","to":"1785542399000","queries":[{"refId":"A","datasource":{"uid":"victoriametrics"},"expr":"sum(openstack_identity_projects{cloud=\"os-sim\"})","instant":true}]}' | jq '.results.A.frames[0].data.values'
+   ```
+
+   ```json
+   [
+     [
+       1785542399000
+     ],
+     [
+       6
+     ]
+   ]
+   ```
+
+   This is the route the dashboards' panels query through from the browser,
+   with the query that panel sends, and the call carries no credential, so it
+   is the anonymous viewer again. `from` and `to` are the July range of step 2
+   of "Set the cloud and the month" in milliseconds, `2026-07-01T00:00:00Z`
+   and `2026-07-31T23:59:59Z`. The first list is the instant the value was
+   read at, the range's end, and the second is the value. The 6 has to match.
+
+   The same call with `"to":"1785542400000"`, which is `2026-08-01T00:00:00Z`,
+   prints `[]`: the frame carries no value, which is what the browser shows as
+   `No data`, with the causes the end of the section above names. An
+   expression the store refuses answers with a `.results.A.error` that names
+   the store's error and a `.results.A.status` other than 200, 422 on the run
+   for the expression `sum(`. Its frame is empty as well, so the filter above
+   prints `[]` for it too, and `jq '.results.A'` in place of that filter tells
+   the two apart.
+
+2. Read the store through Grafana's datasource proxy instead:
+
+   ```sh
+   curl --cacert tally-ca.crt -w '%{http_code}\n' 'https://grafana.tally.127-0-0-1.nip.io:8443/api/datasources/proxy/uid/victoriametrics/api/v1/query?query=up'
+   ```
+
+   ```text
+   The Grafana datasource proxy is not published.
+   403
+   ```
+
+   The body and the `403` have to match. The Gateway answers before Grafana
+   sees the request, and the dev and the prod overlay both carry that rule.
+   [What the route publishes](/explanation/grafana-and-the-read-only-proxy#what-the-route-publishes)
+   says why the prefix is refused while `/api/ds/query` is published.
+
 ## Find the alerts
 
 1. Read what vmalert holds as firing:
@@ -288,6 +340,9 @@ their last sample lies five minutes before it.
 - Grafana reads the store through a read-only proxy in its own pod rather than
   reaching the store directly:
   [the datasource and the proxy](/explanation/grafana-and-the-read-only-proxy#the-datasource-and-the-proxy).
+- The dashboards query the store through `/api/ds/query`, and the Gateway
+  refuses the datasource proxy prefix before Grafana sees the request:
+  [what the route publishes](/explanation/grafana-and-the-read-only-proxy#what-the-route-publishes).
 - The pushed series carry the simulated month's timestamps and the scraped ones
   the wall clock's, which is why the dashboards need two time ranges here:
   [two paths into one store](/explanation/the-openstack-metrics-pipeline#two-paths-into-one-store).
