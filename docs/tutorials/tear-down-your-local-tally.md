@@ -45,11 +45,17 @@ This lesson takes about 5 minutes.
   that it can be stopped there. Any shell ends it with:
 
   ```sh
-  pkill -f 'port-forward svc/victoriametrics'
+  pkill -f '[p]ort-forward svc/victoriametrics'
   ```
 
   It prints nothing and ends the background job lesson 3 started, and on a
   machine where lesson 3 never ran it ends nothing and exits 1, which is fine.
+  The bracket makes a pattern that matches `port-forward` and not itself.
+  `pkill -f` matches against the whole command line of every process, so
+  without the bracket a shell whose own command line carries the pattern, a
+  `bash -c` handed this line with a second command, is ended with the job.
+  The `pkill` of Linux does that; the one of macOS spares the shells that
+  called it.
 
 ## Stop the simulator stack
 
