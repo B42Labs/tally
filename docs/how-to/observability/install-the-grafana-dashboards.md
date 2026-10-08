@@ -120,8 +120,9 @@ may reach and what the route refuses is in
 4. The scrape-health stat on Tally / Ingestion Health reports `up == 0` for
    `ceilometer`, a static target for an exporter that runs beside an OpenStack
    control plane rather than in this cluster, and for `openstack-db-exporter`
-   until a simulator run publishes a month, when that job scrapes the
-   simulator's inventory. That is the designed dev state, described under
+   and `openstack-collector` between simulator runs. While a run publishes a
+   month, those two jobs scrape the simulator's inventory and the compose
+   collector. That is the designed dev state, described under
    [replace the scrape targets](/how-to/observability/scrape-the-openstack-exporters#replace-the-scrape-targets),
    and not a fault to chase.
 

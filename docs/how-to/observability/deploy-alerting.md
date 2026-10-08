@@ -116,21 +116,27 @@ this way is in [alerting design](/explanation/alerting-design).
 
 ## Edit the rules
 
-1. Edit `rules.yaml` or `config.yaml` in its component's directory. Neither
-   file is applied as a file: each is the source of a `configMapGenerator` in
-   its component's `kustomization.yaml`, generating `vmalert-rules` and
-   `alertmanager-config`, and kustomize appends a content hash to each name.
-   Editing a file changes the generated name, which changes the pod spec that
-   mounts it, which rolls the pod. Neither component is left evaluating rules
-   or routing by a config that no longer matches the tree.
+1. Edit `rules.yaml`, `scrape-rules.yaml` or `config.yaml` in its component's
+   directory. None of them is applied as a file: each is the source of a
+   `configMapGenerator` in its component's `kustomization.yaml`, generating
+   `vmalert-rules`, `vmalert-scrape-rules` and `alertmanager-config`, and
+   kustomize appends a content hash to each name. Editing a file changes the
+   generated name, which changes the pod spec that mounts it, which rolls the
+   pod. Neither component is left evaluating rules or routing by a config that
+   no longer matches the tree. `scrape-rules.yaml` names the discovered scrape
+   jobs, so an overlay that replaces the scrape config replaces
+   `vmalert-scrape-rules` with it, as
+   [replace the scrape targets](/how-to/observability/scrape-the-openstack-exporters#replace-the-scrape-targets)
+   describes.
 
-2. Validate both files before the commit:
+2. Validate the files before the commit:
 
    ```sh
    make check-alerting
    ```
 
-   It loads `rules.yaml` into vmalert with `-dryRun` and runs
+   It loads `rules.yaml` and `scrape-rules.yaml` into vmalert with `-dryRun`
+   and runs
    `amtool check-config` over `config.yaml`, each in the image the cluster
    runs, so an expression or a routing field the pinned version refuses fails
    here rather than in the cluster.
@@ -171,21 +177,25 @@ this way is in [alerting design](/explanation/alerting-design).
 ## Check the result
 
 1. About five minutes after `make up`, `TallyScrapeTargetDown` fires for the
-   jobs `openstack-db-exporter` and `ceilometer`. Both are static targets for
-   exporters that run beside an OpenStack control plane rather than in this
-   cluster, which is the designed dev state described under
+   jobs `openstack-db-exporter`, `ceilometer` and `openstack-collector`. All
+   three are static targets of the dev overlay: `ceilometer` names an exporter
+   that runs beside an OpenStack control plane rather than in this cluster, and
+   the other two read the simulator and the collector of the compose stack,
+   which run only while `make simulator-up` publishes a month. That is the
+   designed dev state described under
    [replace the scrape targets](/how-to/observability/scrape-the-openstack-exporters#replace-the-scrape-targets),
    and not a fault to chase. What to do when it fires against a deployment is
    in its runbook,
    [`TallyScrapeTargetDown`](/how-to/alerts/TallyScrapeTargetDown).
 
 2. No other rule fires on a cluster nothing has reported to.
-   `TallyScrapeJobMissing` stays silent because both discovered jobs resolve to
+   `TallyScrapeJobMissing` stays silent because the jobs the dev overlay's
+   `scrape-rules.yaml` names, `reporting-api` and `otel-collector`, resolve to
    targets, and `TallyExporterServiceSilent` needs an exporter target that
-   answers a scrape, which is the target that is down. The remaining seven read
-   `tally_` series the store does not carry yet, and an expression over nothing
-   returns nothing. `TallyRecordedSeriesMissing` is quiet for a different
-   reason: its `absent()` clause is true here, and the
+   answers a scrape, which is the target that is down. The remaining seven
+   read `tally_` series the store does not carry yet, and an expression over
+   nothing returns nothing. `TallyRecordedSeriesMissing` is quiet for a
+   different reason: its `absent()` clause is true here, and the
    `count(tally_current_resources) > 0` it is paired with is what keeps it from
    reporting a cluster that has not reconciled yet as a stalled write path.
 

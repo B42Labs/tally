@@ -207,20 +207,23 @@ mismatch that would otherwise fail quietly.
   that references a filter no file declares still renders.
 - `deploy/kubernetes/components/openstack-collector/manifest_test.go` pins the
   collector Deployment's contract with the binary, with its two Secrets, with
-  the claim its outbox lies on and with the Service of the Reporting API it
-  posts to. A second replica or a rolling update puts two writers on one
-  outbox file, a volume without `fsGroup` ends the pod on its first start, a
-  `*_FILE` path that matches no mount leaves the collector restarting on a
-  file it cannot read, and a URL naming a Service the base no longer declares
-  leaves every event in the outbox. kustomize renders all four.
-- `deploy/kubernetes/overlays/dev/manifest_test.go` pins the two files this
+  the claim its outbox lies on, with the Service of the Reporting API it posts
+  to and with the Service the store's `openstack-collector` scrape job keeps. A
+  second replica or a rolling update puts two writers on one outbox file, a
+  volume without `fsGroup` ends the pod on its first start, a `*_FILE` path
+  that matches no mount leaves the collector restarting on a file it cannot
+  read, a URL naming a Service the base no longer declares leaves every event
+  in the outbox, and a Service the scrape job does not keep leaves the outbox
+  gauges unread. kustomize renders all five.
+- `deploy/kubernetes/overlays/dev/manifest_test.go` pins the three files this
   overlay adds to the metrics pipeline. A scrape config that dropped or
-  renamed a job of the base leaves `TallyScrapeTargetDown`,
-  `TallyScrapeJobMissing` and `TallyExporterServiceSilent` selecting jobs the
-  cluster no longer scrapes, and neither the scrape nor the rules fail on
-  their own. It asserts that the overlay lists the `envoy-gateway` component
-  too: without the entry the overlay renders, and the cluster has no
-  GatewayClass.
+  renamed a job of the base leaves `TallyExporterServiceSilent` selecting a
+  job the cluster no longer scrapes, and a `scrape-rules.yaml` whose `absent`
+  clauses are not the discovered jobs of the overlay's scrape config leaves
+  `TallyScrapeJobMissing` firing for a job nobody configured or silent on one
+  that resolves to nothing. Neither the scrape nor the rules fail on their
+  own. It asserts that the overlay lists the `envoy-gateway` component too:
+  without the entry the overlay renders, and the cluster has no GatewayClass.
 - `deploy/kubernetes/overlays/prod/manifest_test.go` pins where the prod
   overlay's names come from and what it keeps off the internet. A replacement
   aimed at the wrong field, a delete patch lost in an edit, or a listener
@@ -296,9 +299,9 @@ go test ./docs/ -run 'TestHeadingsAreSentenceCaseWithOneH1/how-to'
 
 `go vet ./...` and `make lint` are the other two checks CI applies to the Go
 code; [The toolchain](/contributing/toolchain) says which linter version they
-pin. `make check-alerting` loads `rules.yaml` into the vmalert image the
-cluster runs and the Alertmanager config into `amtool` from the Alertmanager
-image, so an expression or a routing field the pinned version rejects fails
+pin. `make check-alerting` loads `rules.yaml` and `scrape-rules.yaml` into the
+vmalert image the cluster runs and the Alertmanager config into `amtool` from
+the Alertmanager image, so an expression or a routing field the pinned version rejects fails
 here rather than in the cluster. It needs Docker and no cluster.
 
 Every integration test pays for a container start of its own, so the
