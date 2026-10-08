@@ -181,10 +181,12 @@ machine:
   authenticates the reconciled cloud with. It carries a cloud password, which
   is why it is a Secret rather than part of the ConfigMap below.
 
-Three ConfigMaps are generated beside them. `tally-reconciliation` holds what
+Four ConfigMaps are generated beside them. `tally-reconciliation` holds what
 the Reporting API reconciles here. `victoriametrics-scrape` is marked
 `behavior: replace`, so it overrides the generated ConfigMap of the same name
-in the base with this cluster's scrape config. `tally-counter-sources` tells
+in the base with this cluster's scrape config, and `vmalert-scrape-rules` is
+replaced the same way with the rule over the jobs that config discovers.
+`tally-counter-sources` tells
 the engine where to measure the egress counter the simulator pushes. Each
 generated name carries a hash of its content, so editing one of these files
 re-rolls the pod that mounts it.
@@ -244,7 +246,9 @@ uses, so the Gateway's certificate and routes match them. The cluster reaches
 the simulator as `tally-openstack-simulator:8080`, its alias on the `kind`
 network and its container port: the `openstack-db-exporter` scrape job reads
 the inventory there, and the Reporting API authenticates against the simulated
-cloud there. No path goes through the host, so the stack runs the same way on
+cloud there. It reaches the collector the same way, as
+`tally-openstack-collector:8080`, where the `openstack-collector` scrape job
+reads the outbox gauges. No path goes through the host, so the stack runs the same way on
 Docker Desktop and on a Docker Engine on Linux.
 
 The collector's outbox is a named volume mounted at `/home/nonroot`. The image
@@ -472,7 +476,7 @@ literals. The Gateway keeps the default LoadBalancer Service of Envoy Gateway
 instead of `envoyproxy.yaml`, and it has no `postgres` listener, so the admin
 CLI and the engine CLI reach the database through a port-forward. The routes
 of VictoriaMetrics, vmalert and Alertmanager are deleted. Grafana serves no
-`/metrics`. VictoriaMetrics scrapes the two in-cluster jobs only.
+`/metrics`. VictoriaMetrics scrapes the three in-cluster jobs only.
 [Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
 walks the deployment through.
 

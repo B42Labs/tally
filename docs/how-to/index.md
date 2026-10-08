@@ -129,9 +129,9 @@ Tally sit together.
   run of a cloud reached `completed` in the last 30 minutes.
 - [TallyScrapeTargetDown](/how-to/alerts/TallyScrapeTargetDown) fires when a
   configured scrape target has answered nothing for five minutes.
-- [TallyScrapeJobMissing](/how-to/alerts/TallyScrapeJobMissing) fires when one
-  of the two discovered jobs resolves to no target at all, so the job leaves
-  the target page instead of turning red.
+- [TallyScrapeJobMissing](/how-to/alerts/TallyScrapeJobMissing) fires when a
+  discovered scrape job resolves to no target at all, so the job leaves the
+  target page instead of turning red.
 - [TallyExporterServiceSilent](/how-to/alerts/TallyExporterServiceSilent) fires
   when the database exporter target is up while one of the five billed services
   emits no series for a cloud.

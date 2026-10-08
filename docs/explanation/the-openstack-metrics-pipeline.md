@@ -22,7 +22,7 @@ and
 Two paths carry numbers into Tally's metrics store and both end in
 VictoriaMetrics. On the push path a producer speaks OTLP to the OpenTelemetry
 Collector, which remote-writes what it received. On the pull path
-VictoriaMetrics scrapes four jobs on its own schedule. Once a sample is
+VictoriaMetrics scrapes five jobs on its own schedule. Once a sample is
 written the two are indistinguishable: a query cannot tell which path a series
 arrived on.
 
@@ -71,13 +71,19 @@ The two OpenStack jobs carry static `platform` and `cloud` labels, because
 third-party exporters do not know Tally's label convention
 ([the architecture page](/explanation/architecture-and-the-provider-pattern),
 [`roadmap/00-conventions.md`](https://github.com/B42Labs/tally/blob/main/roadmap/00-conventions.md)
-section 3). The other two jobs carry no such labels: they export service
-metrics, not provider resource metrics.
+section 3). The three in-cluster jobs set none. The Reporting API's and the
+OpenTelemetry Collector's series are service metrics, not provider resource
+metrics, and the OpenStack collector's series carry `platform` and `cloud` from
+the process, which knows the one cloud it serves from `TALLY_OSC_CLOUD`.
 
-The two in-cluster jobs discover their targets through the Kubernetes API
+The three in-cluster jobs discover their targets through the Kubernetes API
 (`kubernetes_sd_configs`, role `endpointslice`) rather than naming a Service
-address. A Service address is one ClusterIP that kube-proxy resolves to an
-arbitrary backend per connection, so a second replica of either Deployment would
+address. Each keeps the endpoints of one Service and one port name: the
+Services `reporting-api` and `otel-collector`, and the Service
+`openstack-collector` the collector component declares for this job alone,
+which nothing else in the cluster calls. A Service address is one ClusterIP
+that kube-proxy resolves to an arbitrary backend per connection, so a second
+replica of any of the Deployments would
 leave every scrape landing on a different pod while all samples carry the same
 `instance` label. One series would then interleave two independent counters,
 `rate()` would read each decrease as a counter reset, and nothing would look
@@ -88,7 +94,7 @@ what the ServiceAccount, Role, and RoleBinding in
 [`victoriametrics.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/victoriametrics/victoriametrics.yaml)
 grant.
 
-Both jobs relabel `instance` from the pod name. The default is `__address__`,
+All three jobs relabel `instance` from the pod name. The default is `__address__`,
 which for this role is the pod IP and port, and a pod IP goes back to the pool
 when the pod is deleted and is handed to the next pod that needs one. That pod
 would then continue the series its predecessor wrote, the same interleaving of
@@ -101,9 +107,12 @@ than `up == 0`: a Deployment scaled to zero, a renamed Service, a renamed port,
 a removed RoleBinding, or an unreachable API server all take the job off
 `/targets` instead of turning it red. A pod that exists and refuses the
 connection is still caught, because endpointslice discovery keeps not-ready
-addresses as targets. Alerting on these two jobs therefore takes two rules, one
-on `up == 0` and one on `absent(up{job="..."})`; both are in
+addresses as targets. Alerting on these three jobs therefore takes two rules,
+one on `up == 0` and one on `absent(up{job="..."})`; both are in
 [`roadmap/02-phase-2-reporting-dashboards.md`](https://github.com/B42Labs/tally/blob/main/roadmap/02-phase-2-reporting-dashboards.md).
+The `absent()` rule names one clause per discovered job and lives in
+`scrape-rules.yaml`, which an overlay replaces together with its scrape config
+([the alerting design](/explanation/alerting-design)).
 
 The database exporter's job is the one with an explicit `scrape_timeout`. Every
 scrape of it runs the exporter's whole query set against the live OpenStack

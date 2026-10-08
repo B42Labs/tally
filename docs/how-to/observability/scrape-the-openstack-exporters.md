@@ -25,7 +25,7 @@ job scrapes. What the pull path collects and what it cannot is in
 - A Ceilometer whose publisher entry points carry `prometheus`, and a
   Prometheus Pushgateway it reaches, for the last section.
 - The [metrics](/reference/observability/metrics) reference page, which states
-  the four scrape jobs with their intervals, targets and static labels.
+  the five scrape jobs with their intervals, targets and static labels.
 
 ## Replace the scrape targets
 
@@ -55,6 +55,39 @@ job scrapes. What the pull path collects and what it cannot is in
    is pointed at the OpenStack simulator instead.
    [`victoriametrics/scrape.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/overlays/dev/victoriametrics/scrape.yaml)
    of the dev overlay is such a file.
+
+5. Replace the rule over the discovered jobs together with the scrape config.
+   Add a second replacing generator to the same list:
+
+   ```yaml
+   configMapGenerator:
+     - name: victoriametrics-scrape
+       behavior: replace
+       files:
+         - scrape.yaml
+     - name: vmalert-scrape-rules
+       behavior: replace
+       files:
+         - scrape-rules.yaml
+   ```
+
+   Write the overlay's `scrape-rules.yaml` from the base's
+   [`vmalert/scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/scrape-rules.yaml),
+   with one `absent(up{job="..."})` clause in `TallyScrapeJobMissing` per job
+   of your `scrape.yaml` that carries `kubernetes_sd_configs`, and none for any
+   other job. A clause for a job the overlay does not scrape fires for as long
+   as the cluster runs, and a discovered job without one resolves to no targets
+   unreported. The dev overlay's
+   [`victoriametrics/scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/overlays/dev/victoriametrics/scrape-rules.yaml)
+   differs from the base's: its `openstack-collector` job reads the compose
+   collector as a static target, so the file names `reporting-api` and
+   `otel-collector` alone.
+
+   Every job you keep is one `TallyScrapeTargetDown` reports when a target of
+   it answers nothing. A collector run with `TALLY_METRICS_ENABLED=false`
+   answers `/metrics` with 404, so a deployment that scrapes it hears
+   `TallyScrapeTargetDown` for it; leave the `openstack-collector` job out of
+   both files for such a collector.
 
 ## Create the read-only database user
 
@@ -234,10 +267,11 @@ job scrapes. What the pull path collects and what it cannot is in
    curl --cacert tally-ca.crt 'https://vm.tally.127-0-0-1.nip.io:8443/targets'
    ```
 
-2. Four jobs are listed. `reporting-api` and `otel-collector` are up.
+2. Five jobs are listed. `reporting-api` and `otel-collector` are up.
    `ceilometer` is down with an unresolved-host error, because its target
-   exists in no dev cluster. `openstack-db-exporter` is down between simulator
-   runs, when no container answers to `tally-openstack-simulator`, with the
+   exists in no dev cluster. `openstack-db-exporter` and `openstack-collector`
+   are down between simulator runs, when no container answers to
+   `tally-openstack-simulator` or `tally-openstack-collector`, with the
    unresolved-host error `ceilometer` shows, and up while `make simulator-up`
-   publishes a month. Neither is a fault to chase on a dev cluster: both are
-   the dev state as it is designed.
+   publishes a month. None of the three is a fault to chase on a dev cluster:
+   they are the dev state as it is designed.

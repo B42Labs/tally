@@ -7,7 +7,7 @@ audience: operator
 
 # TallyScrapeTargetDown
 
-`up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"} == 0`, `for: 5m`.
+`up == 0`, `for: 5m`.
 
 ## Symptom
 
@@ -22,9 +22,11 @@ It depends on the job:
   reads one, so the ingestion and reconciliation alerts go blind at the same
   time. The API may also be refusing ingest, in which case the collectors are
   filling their buffers.
-- `otel-collector`: the pushed series are lost at the receiver, the collector
-  gauges and Ceilometer's OTLP path among them. Nothing buffers them on the way
-  in.
+- `otel-collector`: the pushed series are lost at the receiver, Ceilometer's
+  OTLP path among them. Nothing buffers them on the way in.
+- `openstack-collector`: the outbox gauges go dark while the collector keeps
+  consuming, so a growing buffer is not reported until the target answers
+  again. TallyCollectorBufferAging reads the gauge it no longer gets.
 - `openstack-db-exporter` and `ceilometer`: a metering source runs empty. The
   inventory Tally bills from stops being observed for the cloud the job carries
   in its static labels.
@@ -41,6 +43,8 @@ It depends on the job:
    A statement cap that ends the queries fails the scrape, while a connection
    cap that is too low leaves the target up and the scrape short, which is
    TallyExporterServiceSilent rather than this alert.
-4. Whether this is a dev cluster. Both static jobs, `openstack-db-exporter` and
-   `ceilometer`, are down there by design: neither target exists in that
-   cluster.
+4. Whether this is a dev cluster. Three of its static targets are down there
+   by design. `openstack-db-exporter` and `openstack-collector` read the
+   simulator and the collector of the compose stack, which run only between
+   `make simulator-up` and `make simulator-down`, and `ceilometer` is always
+   down, because its target does not exist in that cluster.

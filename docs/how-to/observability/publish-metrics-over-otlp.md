@@ -24,7 +24,7 @@ two paths into the store are and where each one ends is in
   roll the collector pod.
 - A shell that reaches the cluster, for the rollout and the push at the end.
 - The [metrics](/reference/observability/metrics) reference page, which states
-  every `tally_` series the services expose and the four scrape jobs that run
+  every `tally_` series the services expose and the five scrape jobs that run
   beside this path.
 
 ## Establish what Ceilometer can publish

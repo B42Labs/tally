@@ -647,7 +647,27 @@ that the catalog is missing.
    `"connected":true` is what counts. `delivered` rises once the cloud sends
    notifications, and `buffered` stays at 0 while the Reporting API takes them.
 
-8. The migration Job has completed:
+8. The store scrapes the collector. Through the VictoriaMetrics port-forward
+   of [reach the unpublished services](#reach-the-unpublished-services), read
+   the health of the `openstack-collector` target:
+
+   ```sh
+   curl -s http://127.0.0.1:8428/api/v1/targets \
+     | jq -r '.data.activeTargets[] | select(.labels.job == "openstack-collector") | .health'
+   ```
+
+   ```text
+   up
+   ```
+
+   The job discovers the collector pod through the Service
+   `openstack-collector`. The three discovered jobs of the prod scrape config,
+   `reporting-api`, `otel-collector` and `openstack-collector`, are the three
+   `absent` clauses of
+   `deploy/kubernetes/overlays/prod/victoriametrics/scrape-rules.yaml`, so
+   `TallyScrapeJobMissing` stays quiet while all three resolve to targets.
+
+9. The migration Job has completed:
 
    ```sh
    kubectl --context <ctx> -n tally get job tally-migrate
@@ -658,32 +678,32 @@ that the catalog is missing.
    tally-migrate   Complete   1/1           6s         6s
    ```
 
-9. A sync of the cloud completes. Create a Job from the CronJob, wait for it,
-   read its log and delete it:
+10. A sync of the cloud completes. Create a Job from the CronJob, wait for it,
+    read its log and delete it:
 
-   ```sh
-   kubectl --context <ctx> -n tally create job --from=cronjob/tally-sync sync-check
-   kubectl --context <ctx> -n tally wait --for=condition=complete job/sync-check --timeout=2m
-   kubectl --context <ctx> -n tally logs job/sync-check
-   kubectl --context <ctx> -n tally delete job sync-check
-   ```
+    ```sh
+    kubectl --context <ctx> -n tally create job --from=cronjob/tally-sync sync-check
+    kubectl --context <ctx> -n tally wait --for=condition=complete job/sync-check --timeout=2m
+    kubectl --context <ctx> -n tally logs job/sync-check
+    kubectl --context <ctx> -n tally delete job sync-check
+    ```
 
-   ```text
-   job.batch/sync-check created
-   job.batch/sync-check condition met
-   {"stats":{"created":0,"deleted":0,"updated":2},"sync_run_id":"2c0b7e07-197b-4d53-af19-dce55400e216"}
-   job.batch "sync-check" deleted from tally namespace
-   ```
+    ```text
+    job.batch/sync-check created
+    job.batch/sync-check condition met
+    {"stats":{"created":0,"deleted":0,"updated":2},"sync_run_id":"2c0b7e07-197b-4d53-af19-dce55400e216"}
+    job.batch "sync-check" deleted from tally namespace
+    ```
 
-   The log is the answer of the Reporting API, and `sync_run_id` names the row
-   of `sync_runs` the run left. A Job that fails logs one line starting with
-   `wget:`. `404 Not Found` is a cloud `clouds-config.yaml` does not name,
-   `500 Internal Server Error` a run that failed, whose reasons
-   [check the result](/how-to/openstack/reconcile-a-cloud#check-the-result)
-   reads, `409 Conflict` a scheduled run that held the cloud at the same
-   moment, and `download timed out` a Reporting API that does not answer.
+    The log is the answer of the Reporting API, and `sync_run_id` names the row
+    of `sync_runs` the run left. A Job that fails logs one line starting with
+    `wget:`. `404 Not Found` is a cloud `clouds-config.yaml` does not name,
+    `500 Internal Server Error` a run that failed, whose reasons
+    [check the result](/how-to/openstack/reconcile-a-cloud#check-the-result)
+    reads, `409 Conflict` a scheduled run that held the cloud at the same
+    moment, and `download timed out` a Reporting API that does not answer.
 
-10. Both CronJobs are scheduled:
+11. Both CronJobs are scheduled:
 
     ```sh
     kubectl --context <ctx> -n tally get cronjob tally-engine tally-sync
@@ -699,7 +719,7 @@ that the catalog is missing.
     the next multiple of 10 minutes for `tally-sync` and the next full hour
     for `tally-engine`.
 
-11. A second deploy changes nothing but the migration Job. The filter keeps
+12. A second deploy changes nothing but the migration Job. The filter keeps
     the lines of `kubectl apply` that report a change and the answers of the
     two chains:
 

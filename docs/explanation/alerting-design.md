@@ -32,6 +32,7 @@ port 8880. Every flag it takes:
 | Flag | Why it is set |
 | --- | --- |
 | `-rule=/etc/vmalert/rules.yaml` | The rules, mounted from the generated `vmalert-rules` ConfigMap. |
+| `-rule=/etc/vmalert/scrape-rules.yaml` | The rule over the discovered scrape jobs, mounted from the generated `vmalert-scrape-rules` ConfigMap. Both ConfigMaps are projected into the one directory `/etc/vmalert`. |
 | `-datasource.url=http://victoriametrics:8428` | The store every expression is evaluated against, reached in-cluster by Service name. |
 | `-notifier.url=http://alertmanager:9093` | Where a firing alert is posted, again in-cluster. |
 | `-remoteWrite.url=http://victoriametrics:8428` | vmalert writes the `ALERTS` and `ALERTS_FOR_STATE` series for every pending and firing alert back into the store. |
@@ -40,9 +41,9 @@ port 8880. Every flag it takes:
 
 The remote pair is what keeps a `for` from restarting on every pod roll. An
 alert that has been pending for ten of its fifteen minutes resumes at ten
-minutes rather than at zero, and that matters here because editing `rules.yaml`
-rolls the pod through the generated ConfigMap name. Without the pair, every edit
-to the file would silently reset every timer in it.
+minutes rather than at zero, and that matters here because editing either rules
+file rolls the pod through the generated ConfigMap name. Without the pair, every
+edit to a file would silently reset every timer in it.
 
 `-external.url` reads its value from the argument, and Kubernetes expands
 `$(VAR)` in an argument from the container's own environment. The base sets
@@ -95,15 +96,15 @@ The five critical rules carry a `runbook` annotation naming the guide a reader
 opens when the alert arrives, such as
 [`TallyScrapeTargetDown`](/how-to/alerts/TallyScrapeTargetDown).
 
-`TallyScrapeTargetDown` matches
-`up{job=~"reporting-api|openstack-db-exporter|ceilometer|otel-collector"}`. That
-regex names four jobs, one more than
-[`roadmap/02-phase-2-reporting-dashboards.md`](https://github.com/B42Labs/tally/blob/main/roadmap/02-phase-2-reporting-dashboards.md)
-lists, and the fourth is `ceilometer`. The recorded Ceilometer default pushes to
-a gateway that job scrapes
-([the metrics pipeline](/explanation/the-openstack-metrics-pipeline)), so
-on that path the job carries metering data, and a target of it that stops
-answering costs samples the same way a target of the other three does.
+`TallyScrapeTargetDown` is `up == 0` and names no job. Every target in the
+store's scrape config is one the deployment chose to scrape, and a target that
+answers nothing is down whatever its job is called. A job list in the expression
+would only repeat the scrape config, and a job added there without being named
+in the rule would be a target nobody hears about once it stops answering. The
+`ceilometer` job is one such target: the recorded Ceilometer default pushes to a
+gateway that job scrapes
+([the metrics pipeline](/explanation/the-openstack-metrics-pipeline)), so on
+that path the job carries metering data.
 
 `TallyResourceCountAnomaly` reads a recorded series, `tally:current_resources:sum`,
 which the same group writes one rule earlier. Aggregating
@@ -132,11 +133,18 @@ fault: the scrape path filling while the write path does not.
 would have the healthy target's series answer for the silent one, and any other
 producer of a series by one of those names would suppress the alert for good.
 
-`TallyScrapeJobMissing` covers what `TallyScrapeTargetDown` cannot see.
-`reporting-api` and `otel-collector` discover their targets, so a job that
-resolves to no targets emits no `up` series at all and the `up == 0` rule stays
-silent. A Deployment scaled to zero, a renamed Service or port, a removed
-RoleBinding, and an unreachable API server all land in the `absent()` rule.
+`TallyScrapeJobMissing` covers what `TallyScrapeTargetDown` cannot see. The
+three discovered jobs of the base, `reporting-api`, `otel-collector` and
+`openstack-collector`, find their targets through the endpointslices of the
+namespace, so a job that resolves to no targets emits no `up` series at all and
+the `up == 0` rule stays silent. A Deployment scaled to zero, a renamed Service
+or port, a removed RoleBinding, and an unreachable API server all land in the
+`absent()` rule. The rule is the one piece of the rules whose content is a
+property of the scrape config, one clause per discovered job, so it lives in
+[`scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/scrape-rules.yaml)
+rather than in `rules.yaml`. An overlay that replaces the scrape config replaces
+that file with it, and a clause for a job the overlay does not scrape would fire
+for as long as the cluster runs.
 
 ## Where an alert is delivered
 
