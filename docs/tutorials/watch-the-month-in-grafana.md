@@ -123,9 +123,10 @@ The four read one store from four angles, and each of them narrows to what the
 `cloud` variable is set to. What you see on them:
 
 - `Tally / Fleet Overview`, the fleet the events built. It counts the resources
-  the projection holds by type and state, draws the same counts as a trend, and
-  says how many clouds report; two of its panels read the pushed inventory
-  instead, the number of tenants and the ten with the most instances.
+  the projection holds that are not deleted, by type and state, draws the same
+  counts as a trend, and says how many clouds report; two of its panels read
+  the pushed inventory instead, the number of tenants and the ten with the
+  most instances.
 - `Tally / Ingestion Health`, the way in. It draws the events ingested per
   cloud and source, the duplicates dropped and the items rejected, the
   collector's buffer and its oldest buffered event, the projection replays, and
@@ -143,10 +144,9 @@ Which panels carry a value in this lesson and which stay empty is what the four
 steps below say, and each of them names the time range its panels need.
 
 1. `Tally / Fleet Overview`. With `Last 3 hours`, `Resources by type and state`
-   shows 37 instances `active`, 630 `deleted` and 1 `shelved`, 16 volumes
-   `available`, 12 `in-use` and 141 `deleted`, 9 floating IPs `active` and 7
-   `deleted`, 7 images `active` and 2 `deleted`, and 4 load balancers `active`
-   and 1 `deleted`. The whole month has ended, so most of the fleet is deleted.
+   shows 37 instances `active` and 1 `shelved`, 16 volumes `available` and 12
+   `in-use`, 9 floating IPs `active`, 7 images `active`, and 4 load balancers
+   `active`. Deleted resources are left out.
    `Resource count trend` draws the same counts as lines that jump once, when
    the month went out, and `Clouds reporting` is 1.
 

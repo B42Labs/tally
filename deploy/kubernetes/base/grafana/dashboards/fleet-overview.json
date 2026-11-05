@@ -63,6 +63,7 @@
       "id": 1,
       "type": "barchart",
       "title": "Resources by type and state",
+      "description": "Deleted resources are left out. The projection keeps a row for each, and the Reporting API lists them with status=deleted.",
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -106,7 +107,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum by (resource_type, state) (tally_current_resources{platform=~\"$platform\", cloud=~\"$cloud\"})",
+          "expr": "sum by (resource_type, state) (tally_current_resources{platform=~\"$platform\", cloud=~\"$cloud\", state!=\"deleted\"})",
           "instant": true,
           "range": false,
           "format": "table"
@@ -117,6 +118,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Resource count trend",
+      "description": "Deleted resources are left out. The projection keeps a row for each, and the Reporting API lists them with status=deleted.",
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -157,7 +159,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "sum by (resource_type, state) (tally_current_resources{platform=~\"$platform\", cloud=~\"$cloud\"})",
+          "expr": "sum by (resource_type, state) (tally_current_resources{platform=~\"$platform\", cloud=~\"$cloud\", state!=\"deleted\"})",
           "legendFormat": "{{resource_type}} {{state}}",
           "range": true
         }

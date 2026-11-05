@@ -25,7 +25,8 @@ to the store and refuses everything else.
 pins the file set the ConfigMap ships, that every file parses, the uids and the
 titles, the datasource uid on every query target, the variables the expressions
 read, the refresh of the `project_id` list, the `unlimited` reading of the quota
-gauges, and the drift note of the reconciliation dashboard.
+gauges, the `state!="deleted"` filter of the two Fleet Overview count panels,
+and the drift note of the reconciliation dashboard.
 
 ## Dashboards
 
@@ -43,8 +44,8 @@ Title `Tally / Fleet Overview`, uid `tally-fleet-overview`.
 
 | Panel | Type | Expression |
 | --- | --- | --- |
-| Resources by type and state | `barchart` | `sum by (resource_type, state) (tally_current_resources{platform=~"$platform", cloud=~"$cloud"})` |
-| Resource count trend | `timeseries` | `sum by (resource_type, state) (tally_current_resources{platform=~"$platform", cloud=~"$cloud"})` |
+| Resources by type and state | `barchart` | `sum by (resource_type, state) (tally_current_resources{platform=~"$platform", cloud=~"$cloud", state!="deleted"})` |
+| Resource count trend | `timeseries` | `sum by (resource_type, state) (tally_current_resources{platform=~"$platform", cloud=~"$cloud", state!="deleted"})` |
 | Clouds reporting | `stat` | `count(count by (cloud) (tally_current_resources))` |
 | Projects (OpenStack) | `stat` | `sum(openstack_identity_projects{cloud=~"$cloud"})` |
 | Top 10 projects by instance count | `table` | `topk(10, sum by (tenant_id) (openstack_nova_limits_instances_used{cloud=~"$cloud"}))` |
