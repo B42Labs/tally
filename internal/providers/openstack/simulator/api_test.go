@@ -709,6 +709,57 @@ func TestFakeAPIRefusesAWindowItCannotRead(t *testing.T) {
 	}
 }
 
+// TestFakeAPIServesNoHiddenImage holds glance's image path to the two listings
+// a run sends. The hidden one has to come back empty: the world hides no image,
+// and an image answered by both listings would be observed twice by every sync
+// of the month.
+func TestFakeAPIServesNoHiddenImage(t *testing.T) {
+	server, token := cloudServer(t, cloudDay(10),
+		oneResource(typeImage, "image-01", cloudDay(2), cloudTo, stateActive,
+			imageSizeOf(&image{size: quarterGiB})))
+
+	// Glance compares os_hidden ignoring case, so any spelling of true asks for
+	// the hidden listing and false asks for the visible one.
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{name: "the hidden listing", query: "?os_hidden=true&visibility=all", want: nil},
+		{name: "the hidden listing in another case", query: "?os_hidden=True", want: nil},
+		{
+			name:  "the visible listing asked explicitly",
+			query: "?os_hidden=false&visibility=all",
+			want:  []string{"image-01"},
+		},
+		{name: "the default listing", query: "", want: []string{"image-01"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := imagesPath + tc.query
+			status, body := askCloud(t, server, token, path)
+			if status != http.StatusOK {
+				t.Fatalf("GET %s = %d, want %d (body %q)", path, status, http.StatusOK, body)
+			}
+			if got := servedIDs(t, body, "images"); !slices.Equal(got, tc.want) {
+				t.Errorf("GET %s answered with %v, want %v", path, got, tc.want)
+			}
+		})
+	}
+
+	// A caller that never authenticated is refused the way every listing refuses
+	// one.
+	status, body := askCloud(t, server, "", imagesPath)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("GET %s without a token = %d, want %d (body %q)",
+			imagesPath, status, http.StatusUnauthorized, body)
+	}
+	want := `{"error": {"code": 401, "title": "Unauthorized", ` +
+		`"message": "the token is not the one this run issued"}}`
+	if body != want {
+		t.Errorf("GET %s body = %q, want %q", imagesPath, body, want)
+	}
+}
+
 // TestFakeAPIHoldsTheInventoryAtTheEndOfTheMonth covers the clock that has run
 // past the month. Every interval of an oracle ends inside the period, so a
 // listing answered at the clock's own instant would report a cloud that lost

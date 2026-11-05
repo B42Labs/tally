@@ -244,6 +244,10 @@ reconciliation adapter asks no further back than 24 hours, a bound stated in
 Everything else is the live listing, the admin-scope probe a sync sends before
 it observes anything included.
 
+Glance's image path serves two listings as well. A request carrying
+`os_hidden=true` is answered with no image, because no image of the world is
+hidden. Every other request is the live listing.
+
 Every document is answered at the instant the run's virtual clock stands at,
 clamped to the end of the month, so a clock that ran past the month still serves
 the resources that outlived it.
