@@ -710,67 +710,106 @@ func listFloatingIPs(ctx context.Context, client *gophercloud.ServiceClient, out
 		})
 }
 
-// listImages observes every project's images.
+// imageVisibilityAll is the visibility filter that lifts every visibility
+// condition from a glance listing. gophercloud names public, private, shared and
+// community, but not this one.
+const imageVisibilityAll images.ImageVisibility = "all"
+
+// listImages observes every project's images. Glance's inventory takes two
+// listings, because its default listing is narrower than the store, for an
+// admin as well.
+//
+// The first is the listing glance answers by default, the images it does not
+// hide. Glance reads an absent os_hidden as false and accepts nothing but true
+// and false
+// (https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/api/v2/images.py#L525-L531),
+// and its database compares the flag for equality
+// (https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/db/sqlalchemy/api.py#L489-L491).
+// The hidden images are therefore a second listing, disjoint from the first,
+// and no value of the flag asks for both. Both listings ask for visibility=all:
+// without it glance keeps a community image only for the project that owns it,
+// whoever asks
+// (https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/db/sqlalchemy/api.py#L706-L722).
+// An image left out of both would be booked deleted while it still occupies
+// the store.
+//
+// The visible listing is asked first. An image hidden between the two requests
+// is observed by both, and the later observation, which is identical, replaces
+// the earlier one (reconciliation.collect). One un-hidden between them is
+// observed by neither and booked deleted, and the next run observes it again
+// and books it created at the poll. Hiding an image is the routine operation,
+// so this order is the one that turns it into the harmless race.
+//
+// The hidden listing is walked even after the visible one failed. Holding the
+// type back stops the deletes and nothing else, so a hidden image's create or
+// update still lands. Only a consumer that stopped reading or a run that ended
+// stops both.
 func listImages(ctx context.Context, client *gophercloud.ServiceClient, out *observer) bool {
-	// Whether this listing has already reported an ownerless image, which is what
-	// keeps the run to one reason for however many of them glance holds.
+	// Whether this run has already reported an ownerless image, which is what
+	// keeps it to one reason for however many of them glance holds. One flag
+	// spans both listings, so an ownerless image in each is still one reason.
 	var reported bool
-	return enumerate(ctx, out, images.List(client, nil),
-		images.ExtractImages, func(image images.Image) bool {
-			// glance holds an image in its listing before its bits are uploaded and
-			// after it was removed, and neither is a resource the collector booked:
-			// an image is registered without a size and reaches the projection with
-			// the upload that follows (mapping.go:178-197, 294-297). A deactivated
-			// image is the opposite case. It still exists, still occupies the store,
-			// and glance publishes no notification that would have taken its row out
-			// of the projection, so skipping it would book a delete for a resource
-			// that is there.
-			if image.Status != images.ImageStatusActive &&
-				image.Status != images.ImageStatusDeactivated {
+	observe := func(image images.Image) bool {
+		// glance holds an image in its listing before its bits are uploaded and
+		// after it was removed, and neither is a resource the collector booked:
+		// an image is registered without a size and reaches the projection with
+		// the upload that follows (mapping.go:178-197, 294-297). A deactivated
+		// image is the opposite case. It still exists, still occupies the store,
+		// and glance publishes no notification that would have taken its row out
+		// of the projection, so skipping it would book a delete for a resource
+		// that is there.
+		if image.Status != images.ImageStatusActive &&
+			image.Status != images.ImageStatusDeactivated {
+			return true
+		}
+		// An image glance names no owner for is one the collector booked to the
+		// project of whoever registered it (mapping.go:252-265). This run cannot
+		// say which that was, so the whole type stays incomplete rather than one
+		// row being deleted for an absence the adapter caused.
+		//
+		// Only the first of them is reported. A glance holding a hundred would
+		// otherwise fill the whole of Stats.Errors with copies of one reason: the
+		// cap is 100 (reconciliation.maxRecordedErrors), image is the fourth of the
+		// five resource types a run enumerates, and whatever the fifth failed with
+		// would never reach the row an operator reads.
+		//
+		// The listing still walks to its end. Holding the type back stops the
+		// deletes and nothing else — the diff still books a create or an update
+		// for every image this run observed (reconciliation.diff), and
+		// glance orders its listing newest first, so ending here would leave every
+		// image older than the ownerless one unobserved until somebody reaps it by
+		// hand: a create the run missed would never be corrected, and a size or
+		// owner that drifted would never settle.
+		if image.Owner == "" {
+			if reported {
 				return true
 			}
-			// An image glance names no owner for is one the collector booked to the
-			// project of whoever registered it (mapping.go:252-265). This run cannot
-			// say which that was, so the whole type stays incomplete rather than one
-			// row being deleted for an absence the adapter caused.
-			//
-			// Only the first of them is reported. A glance holding a hundred would
-			// otherwise fill the whole of Stats.Errors with copies of one reason: the
-			// cap is 100 (reconciliation/sync.go:59), images are the fourth of five
-			// listings, and whatever the fifth failed with would never reach the row
-			// an operator reads.
-			//
-			// The listing still walks to its end. Holding the type back stops the
-			// deletes and nothing else — the diff still books a create or an update
-			// for every image this run observed (reconciliation/sync.go:536-589), and
-			// glance orders its listing newest first, so ending here would leave every
-			// image older than the ownerless one unobserved until somebody reaps it by
-			// hand: a create the run missed would never be corrected, and a size or
-			// owner that drifted would never settle.
-			if image.Owner == "" {
-				if reported {
-					return true
-				}
-				reported = true
-				return out.fail(ctx,
-					fmt.Errorf("glance reports the image %s without an owner", image.ID))
-			}
-			return out.observe(reconciliation.ObservedResource{
-				ResourceID: image.ID,
-				ProjectID:  image.Owner,
-				// The state glance reports is not booked: the collector writes
-				// "active" for every image it records and has no notification that
-				// would write another, so reporting a deactivation here would be
-				// drift no collector event could ever settle.
-				State: "active",
-				Size: map[string]any{
-					"size_gb": json.Number(
-						money.Div(decimal.NewFromInt(image.SizeBytes), osmap.BytesPerGibibyte).String()),
-				},
-				CreatedAt: timestamp(image.CreatedAt),
-				ChangedAt: changedAt(image.UpdatedAt, image.CreatedAt),
-			})
+			reported = true
+			return out.fail(ctx,
+				fmt.Errorf("glance reports the image %s without an owner", image.ID))
+		}
+		return out.observe(reconciliation.ObservedResource{
+			ResourceID: image.ID,
+			ProjectID:  image.Owner,
+			// The state glance reports is not booked: the collector writes
+			// "active" for every image it records and has no notification that
+			// would write another, so reporting a deactivation here would be
+			// drift no collector event could ever settle.
+			State: "active",
+			Size: map[string]any{
+				"size_gb": json.Number(
+					money.Div(decimal.NewFromInt(image.SizeBytes), osmap.BytesPerGibibyte).String()),
+			},
+			CreatedAt: timestamp(image.CreatedAt),
+			ChangedAt: changedAt(image.UpdatedAt, image.CreatedAt),
 		})
+	}
+	return enumerate(ctx, out,
+		images.List(client, images.ListOpts{Visibility: imageVisibilityAll}),
+		images.ExtractImages, observe) &&
+		enumerate(ctx, out,
+			images.List(client, images.ListOpts{Visibility: imageVisibilityAll, Hidden: true}),
+			images.ExtractImages, observe)
 }
 
 // listLoadBalancers observes every project's load balancers.

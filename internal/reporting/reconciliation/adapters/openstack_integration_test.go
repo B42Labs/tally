@@ -390,6 +390,42 @@ func TestOpenStackSync(t *testing.T) {
 		}})
 	})
 
+	t.Run("keeps an image glance hid", func(t *testing.T) {
+		const cloud = "os-openstack-hidden-image"
+		openstack := newCloud(t)
+		openstack.serve(t, imagesPath, "images_before_hiding.json")
+		// The first run's hidden listing is empty and the second run's holds the
+		// image, which is what an operator hiding it between the two leaves.
+		openstack.serveHidden(t, "images_empty.json", "images_hidden.json")
+		writeCloudsYAML(t, openstack.URL)
+		syncer := newSyncer(t, db, pipeline, cloud, map[string]any{"os_cloud": testCloud})
+
+		res := mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(1, 0, 0))
+		assertCorrections(t, db, cloud, "sync.create", []correction{{
+			resourceType: "image", resourceID: "4f506172-8394-4a5b-9c6d-7e8f90a1b2c3",
+			projectID: projectB, at: "2026-05-04T10:00:00Z", state: "active",
+			size: map[string]any{"size_gb": 1.0},
+		}})
+
+		// Hidden, the image drops out of glance's default listing while it still
+		// occupies the store. The run observes it from the hidden listing, so the
+		// absence pass has nothing to book.
+		openstack.reload(t, imagesPath, "images_empty.json")
+		res = mustSync(t, syncer, cloud)
+
+		assertStats(t, res.Stats, tally(0, 0, 0))
+		assertRun(t, db, res, statusCompleted)
+		assertCorrections(t, db, cloud, "sync.delete", nil)
+		assertRows(t, db, cloud, []projectionRow{{
+			resourceType: "image", resourceID: "4f506172-8394-4a5b-9c6d-7e8f90a1b2c3",
+			projectID: projectB, state: "active",
+			size:      map[string]any{"size_gb": 1.0},
+			createdAt: "2026-05-04T10:00:00Z",
+		}})
+	})
+
 	t.Run("creates a load balancer the seeded schema accepts", func(t *testing.T) {
 		const cloud = "os-openstack-octavia"
 		openstack := newCloud(t)

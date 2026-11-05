@@ -143,8 +143,8 @@ type request struct {
 
 // listing is one registered set of recorded pages together with the requests it
 // answers. The live servers listing and the deleted-servers listing are sent to
-// one path and are told apart by their query alone, so a path holds more than
-// one of these.
+// one path and are told apart by their query alone, and so are the visible and
+// the hidden image listing, so a path holds more than one of these.
 type listing struct {
 	answers func(url.Values) bool
 	pages   [][]byte
@@ -358,16 +358,32 @@ func (c *cloud) serveDeleted(t *testing.T, fixtures ...string) {
 	c.answer(t, serversPath, deleted, fixtures...)
 }
 
-// live, deleted and probe are the three requests that reach the servers path.
-// Every other listing is registered as a live one, because no other is ever
-// asked with deleted=true and no other is ever probed.
+// serveHidden answers the hidden-images listing, the one request to the images
+// path that carries os_hidden=true. Registered without a fixture it answers that
+// request with a 500, which is how a test breaks the hidden listing while the
+// visible one keeps working. A cloud that registers none answers it with no
+// image, so a test that says nothing about hidden images observes what the
+// visible listing holds.
+func (c *cloud) serveHidden(t *testing.T, fixtures ...string) {
+	t.Helper()
+
+	c.answer(t, imagesPath, hidden, fixtures...)
+}
+
+// live, deleted and probe are the three requests that reach the servers path,
+// and live and hidden are the two that reach the images path. Every other
+// listing is registered as a live one, because no other is ever asked with
+// deleted=true or os_hidden=true and no other is ever probed.
 //
 // The probe is the scope request the run sends before it observes anything: one
 // server from the start of the listing. A page nova links on from carries the
 // same limit back, so the marker is what tells the two apart — the probe asks
 // for the head of the listing and never follows anything.
-func live(query url.Values) bool    { return !probe(query) && !deleted(query) }
+func live(query url.Values) bool {
+	return !probe(query) && !deleted(query) && !hidden(query)
+}
 func deleted(query url.Values) bool { return query.Get("deleted") == "true" }
+func hidden(query url.Values) bool  { return query.Get("os_hidden") == "true" }
 func probe(query url.Values) bool {
 	return query.Get("limit") == "1" && query.Get("marker") == ""
 }
@@ -389,20 +405,28 @@ func (c *cloud) answer(t *testing.T, path string, answers func(url.Values) bool,
 		return
 	}
 	c.mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
-		page, ok := c.page(path, r.URL.Query())
-		if !ok {
+		query := r.URL.Query()
+		page, answered, ok := c.page(path, query)
+		switch {
+		case !answered && hidden(query):
+			// The catch-all's answer: a hidden listing no test registered holds
+			// nothing. It is a 204, which gophercloud reads as an empty page, where
+			// glance itself would send a 200 with an empty listing.
+			w.WriteHeader(http.StatusNoContent)
+		case !ok:
 			w.WriteHeader(http.StatusInternalServerError)
-			return
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(page)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(page)
 	})
 }
 
-// page is the next recorded page for one request, and false where the cloud has
-// none left for it: a listing asked for past its last page, or one no fixture
-// answers at all.
-func (c *cloud) page(path string, query url.Values) ([]byte, bool) {
+// page is the next recorded page for one request. answered says whether any
+// registered listing answers the request, and ok whether that listing has a
+// page left for it: a listing asked for past its last page is answered but not
+// ok.
+func (c *cloud) page(path string, query url.Values) (page []byte, answered, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -411,13 +435,13 @@ func (c *cloud) page(path string, query url.Values) ([]byte, bool) {
 			continue
 		}
 		if registered.served >= len(registered.pages) {
-			return nil, false
+			return nil, true, false
 		}
-		page := registered.pages[registered.served]
+		page = registered.pages[registered.served]
 		registered.served++
-		return page, true
+		return page, true, true
 	}
-	return nil, false
+	return nil, false, false
 }
 
 // cancelDuring makes the cloud end the run while it is answering a request the
@@ -1607,6 +1631,239 @@ func TestOpenStackWalksTheImageListingPastTheOneItCannotPlace(t *testing.T) {
 			`changed=2026-03-01T12:07:42Z UTC transitional=false`)
 }
 
+// hiddenImage is the active image the hidden-listing fixtures hold, as it is
+// observed.
+const hiddenImage = `type=image id=4f506172-8394-4a5b-9c6d-7e8f90a1b2c3 ` +
+	`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=active ` +
+	`size={"size_gb":1} created=2026-05-04T10:00:00Z UTC deleted=none ` +
+	`changed=2026-08-12T14:19:11Z UTC transitional=false`
+
+// visibleImages are the active images images.json holds, as they are observed.
+var visibleImages = []string{
+	`type=image id=0b1c2d3e-4f50-4617-8394-0516273849ab ` +
+		`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active ` +
+		`size={"size_gb":2.5} created=2026-03-01T12:00:00Z UTC deleted=none ` +
+		`changed=2026-03-01T12:07:42Z UTC transitional=false`,
+	`type=image id=3e4f5061-7283-494a-b627-38495061728d ` +
+		`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active ` +
+		`size={"size_gb":5} created=2026-03-06T09:45:31Z UTC deleted=none ` +
+		`changed=2026-08-10T17:02:14Z UTC transitional=false`,
+}
+
+// loadBalancers are the load balancers loadbalancers.json holds, as they are
+// observed.
+var loadBalancers = []string{
+	`type=loadbalancer id=4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23 ` +
+		`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=active ` +
+		`size={"listeners":2,"pools":1} created=2026-04-20T10:00:00Z UTC deleted=none ` +
+		`changed=2026-07-14T09:20:31Z UTC transitional=false`,
+	`type=loadbalancer id=6c7d8e90-1234-4567-8901-2d3e4f5a6b78 ` +
+		`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_delete ` +
+		`size={"listeners":1,"pools":0} created=2026-05-28T16:11:39Z UTC deleted=none ` +
+		`changed=2026-08-16T21:58:04Z UTC transitional=true`,
+	`type=loadbalancer id=7d8e9012-3456-4789-a012-3e4f5a6b7c89 ` +
+		`project=4c9d2f6b81e34a7f9b3c5d8e0a1f2b34 state=pending_create ` +
+		`size={"listeners":0,"pools":0} created=2026-08-19T08:30:12Z UTC deleted=none ` +
+		`changed=2026-08-19T08:30:12Z UTC transitional=true`,
+	`type=loadbalancer id=8e901234-5678-4890-b123-4f5a6b7c8d90 ` +
+		`project=8a1b7c6d5e4f40398271a6b5c4d3e2f1 state=pending_update ` +
+		`size={"listeners":1,"pools":1} created=2026-03-12T08:40:27Z UTC deleted=none ` +
+		`changed=2026-08-19T11:25:40Z UTC transitional=true`,
+}
+
+func TestOpenStackObservesTheImagesGlanceHides(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, imagesPath, "images.json")
+	cloud.serveHidden(t, "images_hidden.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	// Glance's default listing leaves out every hidden image, for an admin too,
+	// so a hidden image is observed from the second listing or not at all. The
+	// queued one is skipped the way a visible queued image is.
+	assertObserved(t, observed, append(slices.Clone(visibleImages), hiddenImage)...)
+
+	// Both listings ask for visibility=all, without which glance answers another
+	// project's community image to its owner alone. The visible one goes first,
+	// so an image hidden between the two requests is observed twice rather than
+	// not at all.
+	requests := cloud.requestsTo(imagesPath)
+	if len(requests) != 2 {
+		t.Fatalf("the cloud answered %d requests for %s, want 2", len(requests), imagesPath)
+	}
+	for i, want := range []string{"visibility=all", "os_hidden=true&visibility=all"} {
+		if got := requests[i].query.Encode(); got != want {
+			t.Errorf("image request %d asked for %q, want %q", i+1, got, want)
+		}
+	}
+}
+
+func TestOpenStackHoldsBackImagesWhenTheHiddenListingFails(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, imagesPath, "images.json")
+	// No hidden page is recorded, so that half of the image listing fails while
+	// the visible half answered in full.
+	cloud.serveHidden(t)
+	cloud.serve(t, loadBalancersPath, "loadbalancers.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
+
+	// A hidden image this run could not read must not be booked deleted, so the
+	// whole type is held back even though every visible image was observed.
+	if len(errs) != 1 {
+		t.Fatalf("ListResources() yielded %d errors, want 1: %v", len(errs), errs)
+	}
+	var enumErr *reconciliation.EnumerationError
+	if !errors.As(errs[0], &enumErr) {
+		t.Fatalf("ListResources() error = %q, want an EnumerationError", errs[0])
+	}
+	if enumErr.ResourceType != "image" {
+		t.Errorf("EnumerationError.ResourceType = %q, want %q", enumErr.ResourceType, "image")
+	}
+	var codeErr gophercloud.ErrUnexpectedResponseCode
+	if !errors.As(errs[0], &codeErr) {
+		t.Fatalf("ListResources() error = %q, want it to unwrap to the cloud's response code", errs[0])
+	}
+	if codeErr.Actual != http.StatusInternalServerError {
+		t.Errorf("the reported response code = %d, want %d",
+			codeErr.Actual, http.StatusInternalServerError)
+	}
+	// The request the error names is what tells an operator which of the two
+	// listings failed.
+	if !strings.Contains(errs[0].Error(), "os_hidden=true") {
+		t.Errorf("ListResources() error = %q, want it to name the hidden listing", errs[0])
+	}
+
+	// The visible images stay observed, and the type after them is enumerated as
+	// if nothing had happened.
+	assertObserved(t, observed, slices.Concat(visibleImages, loadBalancers)...)
+}
+
+func TestOpenStackHoldsBackImagesOnceGlanceIsDown(t *testing.T) {
+	cloud := newCloud(t)
+	// No page is recorded for either listing, so both image requests fail, the
+	// way they do while glance itself is down.
+	cloud.serve(t, imagesPath)
+	cloud.serveHidden(t)
+	cloud.serve(t, loadBalancersPath, "loadbalancers.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
+
+	// Each failed request is one reason, so an operator reads which of the two
+	// listings failed, and the type is held back either way.
+	if len(errs) != 2 {
+		t.Fatalf("ListResources() yielded %d errors, want 2: %v", len(errs), errs)
+	}
+	for i, want := range []string{"images?visibility=all", "images?os_hidden=true&visibility=all"} {
+		var enumErr *reconciliation.EnumerationError
+		if !errors.As(errs[i], &enumErr) || enumErr.ResourceType != "image" {
+			t.Errorf("error %d = %q, want an image EnumerationError", i+1, errs[i])
+		}
+		if !strings.Contains(errs[i].Error(), want) {
+			t.Errorf("error %d = %q, want it to name %q", i+1, errs[i], want)
+		}
+	}
+
+	// The type after glance is enumerated as if nothing had happened.
+	assertObserved(t, observed, loadBalancers...)
+}
+
+func TestOpenStackWalksTheHiddenListingAfterTheVisibleOneFailed(t *testing.T) {
+	cloud := newCloud(t)
+	// No visible page is recorded, so the first of the two image listings fails.
+	cloud.serve(t, imagesPath)
+	cloud.serveHidden(t, "images_hidden.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+
+	if len(errs) != 1 {
+		t.Fatalf("ListResources() yielded %d errors, want 1: %v", len(errs), errs)
+	}
+	var enumErr *reconciliation.EnumerationError
+	if !errors.As(errs[0], &enumErr) {
+		t.Fatalf("ListResources() error = %q, want an EnumerationError", errs[0])
+	}
+	if enumErr.ResourceType != "image" {
+		t.Errorf("EnumerationError.ResourceType = %q, want %q", enumErr.ResourceType, "image")
+	}
+	if strings.Contains(errs[0].Error(), "os_hidden") {
+		t.Errorf("ListResources() error = %q, want it to name the visible listing", errs[0])
+	}
+
+	// Holding the type back stops the deletes and nothing else, so the hidden
+	// listing is still walked: a hidden image's create or update still lands.
+	assertObserved(t, observed, hiddenImage)
+}
+
+func TestOpenStackReportsOneOwnerlessImageAcrossBothListings(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, imagesPath, "images_ownerless.json")
+	cloud.serveHidden(t, "images_hidden_ownerless.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+
+	// Both listings hold ownerless images, and the run still gives one reason:
+	// the type is held back by the first, wherever the others are listed.
+	if len(errs) != 1 {
+		t.Fatalf("ListResources() yielded %d errors, want 1: %v", len(errs), errs)
+	}
+	var enumErr *reconciliation.EnumerationError
+	if !errors.As(errs[0], &enumErr) {
+		t.Fatalf("ListResources() error = %q, want an EnumerationError", errs[0])
+	}
+	if enumErr.ResourceType != "image" {
+		t.Errorf("EnumerationError.ResourceType = %q, want %q", enumErr.ResourceType, "image")
+	}
+	if !strings.Contains(errs[0].Error(), "1c2d3e4f-5061-4728-9405-1627384950bc") {
+		t.Errorf("ListResources() error = %q, want it to name the first image it could not place",
+			errs[0])
+	}
+
+	assertObserved(t, observed, hiddenImage)
+}
+
+func TestOpenStackEndsTheRunCancelledDuringTheHiddenListing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	cloud := newCloud(t)
+	cloud.serve(t, imagesPath, "images.json")
+	cloud.serve(t, loadBalancersPath, "loadbalancers.json")
+	cloud.cancelDuring(cancel, func(seen request) bool {
+		return seen.path == imagesPath && hidden(seen.query)
+	})
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(ctx,
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
+
+	// The second listing ends the run like any other, rather than the type being
+	// held back and the run carrying on with octavia.
+	assertRunEnded(t, errs)
+	if !strings.Contains(errs[0].Error(), "enumerating image") {
+		t.Errorf("ListResources() error = %q, want it to name the image listing", errs[0])
+	}
+
+	assertObserved(t, observed, visibleImages...)
+	if requests := cloud.requestsTo(loadBalancersPath); len(requests) != 0 {
+		t.Errorf("the cloud answered %d requests for %s, want none after the run ended",
+			len(requests), loadBalancersPath)
+	}
+}
+
 func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
 	t.Run("octavia is left alone by default", func(t *testing.T) {
 		cloud := newCloud(t)
@@ -1678,6 +1935,7 @@ func TestOpenStackObservesNothingOfAnEmptyCloud(t *testing.T) {
 	for path, fixture := range listings {
 		cloud.serve(t, path, fixture)
 	}
+	cloud.serveHidden(t, "images_empty.json")
 	writeCloudsYAML(t, cloud.URL)
 
 	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
@@ -1693,8 +1951,13 @@ func TestOpenStackObservesNothingOfAnEmptyCloud(t *testing.T) {
 		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
 	}
 	for path := range listings {
-		if requests := cloud.requestsTo(path); len(requests) != 1 {
-			t.Errorf("the cloud answered %d requests for %s, want 1", len(requests), path)
+		// Glance's inventory is two listings, the visible and the hidden one.
+		want := 1
+		if path == imagesPath {
+			want = 2
+		}
+		if requests := cloud.requestsTo(path); len(requests) != want {
+			t.Errorf("the cloud answered %d requests for %s, want %d", len(requests), path, want)
 		}
 	}
 }
