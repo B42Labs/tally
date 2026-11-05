@@ -1,8 +1,9 @@
 // Package grafana_test pins the JSON contract of the provisioned dashboards:
 // the file set the ConfigMap ships, that every file parses, the fixed uids and
 // titles, the datasource each query target names, the template variables the
-// expressions read, the quota gauges' reading of an unlimited quota, and the
-// drift note. Grafana loads these files at startup
+// expressions read, the quota gauges' reading of an unlimited quota, the
+// deleted filter of the two Fleet Overview count panels, and the drift note.
+// Grafana loads these files at startup
 // and reports a broken one only in its own log, so without this test a
 // truncated file or a renamed datasource reaches a cluster before anyone sees
 // it. The test reads the files from disk and needs no Grafana and no cluster.
@@ -217,6 +218,34 @@ func TestProjectDrilldown(t *testing.T) {
 			return
 		}
 		t.Error("project-drilldown.json declares no project_id variable")
+	})
+}
+
+func TestFleetOverview(t *testing.T) {
+	t.Run("leaves deleted resources out of the counts", func(t *testing.T) {
+		// The projection keeps a row per deleted resource, so a count over every
+		// state draws a deleted bar and a deleted line that only grow and flatten
+		// the live counts against the bottom of the axis.
+		const liveFilter = `state!="deleted"`
+
+		panels := flatten(load(t, "fleet-overview.json").Panels)
+		for _, title := range []string{"Resources by type and state", "Resource count trend"} {
+			t.Run(title, func(t *testing.T) {
+				i := slices.IndexFunc(panels, func(p panel) bool { return p.Title == title })
+				if i < 0 {
+					t.Fatalf("fleet-overview.json carries no %s panel", title)
+				}
+				if len(panels[i].Targets) == 0 {
+					t.Fatalf("%s carries no query target, so nothing pins its %s filter", title, liveFilter)
+				}
+				for _, tgt := range panels[i].Targets {
+					if !strings.Contains(tgt.Expr, liveFilter) {
+						t.Errorf("%s target %q carries no %s, so it counts every deleted resource the projection keeps:\n%s",
+							title, tgt.RefID, liveFilter, tgt.Expr)
+					}
+				}
+			})
+		}
 	})
 }
 
