@@ -51,7 +51,8 @@ The instruments are declared in
 `resource_type`, `event_type` and `state` carry values an ingested event
 decides. Each of the three admits 128 distinct values, on a first-seen basis,
 and records everything past that under `other`. A value longer than 128
-characters is recorded under `other` too.
+characters is recorded under `other` too. `state` admits `deleted` before any
+value an event sends, so a deleted resource is never recorded under `other`.
 
 `reason` on `tally_events_rejected_total` is the check that refused the event,
 which is the text of the pipeline's reason before its first colon: `schema`,
@@ -63,7 +64,10 @@ which is the text of the pipeline's reason before its first colon: `schema`,
 `tally_current_resources` is written by the refresher rather than by the ingest
 path. The refresher counts the projection rows per platform, cloud, resource
 type and state, and it runs on the interval
-`TALLY_REPORTING_METRICS_REFRESH_S` names. A group the projection no longer
+`TALLY_REPORTING_METRICS_REFRESH_S` names. A deleted resource keeps its row
+under state `deleted`, so the gauge carries every deletion since the cloud was
+first reported, and a query for the live fleet size selects
+`tally_current_resources{state!="deleted"}`. A group the projection no longer
 holds is deleted from the gauge on the next run, and an empty projection leaves
 the gauge without series.
 
