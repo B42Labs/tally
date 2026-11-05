@@ -196,8 +196,9 @@ this way is in [alerting design](/explanation/alerting-design).
    read `tally_` series the store does not carry yet, and an expression over
    nothing returns nothing. `TallyRecordedSeriesMissing` is quiet for a
    different reason: its `absent()` clause is true here, and the
-   `count(tally_current_resources) > 0` it is paired with is what keeps it from
-   reporting a cluster that has not reconciled yet as a stalled write path.
+   `count(tally_current_resources{state!="deleted"}) > 0` it is paired with is
+   what keeps it from reporting a cluster that has not reconciled yet as a
+   stalled write path.
 
 3. When an alert you expect does not appear, read `/api/v1/rules` on the
    vmalert hostname and find the rule. A non-empty `lastError` on it means the

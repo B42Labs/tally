@@ -55,6 +55,9 @@ const (
 	coverageAlert     = "TallyRecordedSeriesMissing"
 	recordedSeries    = "tally:current_resources:sum"
 	rawResourceSeries = "tally_current_resources"
+	// The resources the projection still holds. A deleted one keeps its row
+	// under state deleted.
+	liveResourceSeries = `tally_current_resources{state!="deleted"}`
 )
 
 // alerts is the rule set in the order rules.yaml carries it, without the one
@@ -358,7 +361,9 @@ func TestScrapeJobsAreCovered(t *testing.T) {
 // both sides of the comparison behind vmalert's -remoteWrite.url: a queue that
 // overflows leaves a hole in the recorded series, the anomaly rule returns
 // nothing on every evaluation, and legal, silent and never firing is what that
-// looks like from outside.
+// looks like from outside. The record and the watching rule's second clause
+// both count live resources, because the projection keeps a row per deleted
+// resource and a sum over every state only grows.
 func TestTheAnomalyRuleReadsARecordedSeries(t *testing.T) {
 	var recorded, anomaly, coverage *rule
 	all := allRules(t)
@@ -386,6 +391,13 @@ func TestTheAnomalyRuleReadsARecordedSeries(t *testing.T) {
 		t.Errorf("%s selects %s directly, so its baseline re-aggregates the raw series on every evaluation instead of reading the recorded one:\n%s",
 			anomalyAlert, rawResourceSeries, anomaly.Expr)
 	}
+	// The projection keeps a row per deleted resource, so a sum over every
+	// state counts each deletion since the cloud was first reported, and the
+	// anomaly rule fires on a cloud with churn and cannot resolve.
+	if !strings.Contains(recorded.Expr, liveResourceSeries) {
+		t.Errorf("%s does not sum %s, so it counts every deleted resource the projection keeps and never settles:\n%s",
+			recordedSeries, liveResourceSeries, recorded.Expr)
+	}
 
 	// Nothing else in this group reads the write path vmalert records through,
 	// so without this rule a stalled remote-write queue takes the anomaly rule
@@ -398,10 +410,12 @@ func TestTheAnomalyRuleReadsARecordedSeries(t *testing.T) {
 	}
 	// The second clause. absent() alone fires wherever nothing writes the raw
 	// series either, which is every dev cluster and every production one before
-	// its first reconciliation run.
-	if !strings.Contains(coverage.Expr, rawResourceSeries) {
-		t.Errorf("%s does not pair its absent() with %s, so it fires on any cluster that has not reconciled yet rather than on a stalled write path:\n%s",
-			coverageAlert, rawResourceSeries, coverage.Expr)
+	// its first reconciliation run, and the record writes nothing for a store
+	// that holds only deleted resources, so the clause counts the set the
+	// record sums.
+	if want := "count(" + liveResourceSeries + ")"; !strings.Contains(coverage.Expr, want) {
+		t.Errorf("%s does not pair its absent() with %s, so it fires on a cluster that has not reconciled yet or holds only deleted resources rather than on a stalled write path:\n%s",
+			coverageAlert, want, coverage.Expr)
 	}
 }
 

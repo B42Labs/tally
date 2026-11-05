@@ -25,7 +25,8 @@ parse.
 [`rules_test.go`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules_test.go)
 pins the rest from disk: the alert names and the order they stand in, the
 severities, the runbook annotations and the pages they name, the recorded series
-the anomaly rule reads, and the scrape jobs `TallyScrapeJobMissing` and
+the anomaly rule reads, the live-resource filter of that series and of
+`TallyRecordedSeriesMissing`, and the scrape jobs `TallyScrapeJobMissing` and
 `TallyExporterServiceSilent` select.
 
 The `runbook` annotation carries the published URL of the alert's guide under
@@ -165,7 +166,7 @@ Recorded series.
 Expression:
 
 ```promql
-sum by (cloud, resource_type) (tally_current_resources)
+sum by (cloud, resource_type) (tally_current_resources{state!="deleted"})
 ```
 
 ### `TallyResourceCountAnomaly`
@@ -207,7 +208,7 @@ Expression:
 
 ```promql
 absent(tally:current_resources:sum)
-  and on () (count(tally_current_resources) > 0)
+  and on () (count(tally_current_resources{state!="deleted"}) > 0)
 ```
 
 ### `TallyScrapeTargetDown`
@@ -297,10 +298,12 @@ and writes what a rule records through the second, so a recorded series is
 queryable only once the write path has carried it back into the store.
 
 `TallyResourceCountAnomaly` reads `tally:current_resources:sum` on both sides of
-its comparison, so the whole rule sits behind that pair of flags.
+its comparison, so the whole rule sits behind that pair of flags. The record
+sums live resources, the rows `tally_current_resources{state!="deleted"}`
+selects, so a deleted resource is not counted.
 `TallyRecordedSeriesMissing` watches the pair: it fires while
-`tally:current_resources:sum` is absent and `tally_current_resources` is still
-being scraped.
+`tally:current_resources:sum` is absent and `tally_current_resources` still
+counts live resources.
 
 ## Routing
 
