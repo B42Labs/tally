@@ -27,7 +27,8 @@ Every run enumerates the instances, the volumes, the floating IP addresses, and
 the images of all projects of the cloud, and its load balancers where
 `include_octavia` is set. It also asks nova for the servers it destroyed since
 the last completed run, which is the one listing that dates a missed delete at
-the instant the platform performed it.
+the instant the platform performed it. The images come from two glance listings:
+the images glance shows and the ones it hides.
 
 After the listings, a run reads cinder's volume types, the private ones
 included, and stores each type's id with its name in the `size_names` table.
@@ -85,10 +86,9 @@ stray one retargets all of them. `OS_CLOUD` has no such effect, because the
 
 The account has to be admin-scoped. The instance and the volume listings ask for
 `all_tenants`, and the deleted-servers listing asks nova for `deleted=true`.
-Both are admin operations in the stock policies. The floating IP and the image
-listings pass no project filter at all: neutron and glance answer with every row
-the account's policy lets it see, which for an admin-scoped account is the whole
-cloud.
+Both are admin operations in the stock policies. The floating IP listing passes
+no project filter at all: neutron answers with every row the account's policy
+lets it see, which for an admin-scoped account is the whole cloud.
 
 The run establishes that against the cloud, before it observes anything: it asks
 nova for one server across every project, and a cloud that refuses that request
@@ -117,6 +117,21 @@ recreates an application credential without its role assignment leaves behind,
 and what anyone who can edit the mounted `clouds.yaml`/`secure.yaml` Secret can
 arrange. The probe turns both into a failed run rather than into a wiped
 projection.
+
+Glance's default listing is narrower than its store, for an admin as well. It
+reads an absent `os_hidden` as `false` and accepts nothing but `true` and
+`false`
+([the flag](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/api/v2/images.py#L525-L531)),
+and its database compares the flag for equality
+([the condition](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/db/sqlalchemy/api.py#L489-L491)),
+so the hidden images are a listing of their own and no value of the flag lists
+both. Without a `visibility` filter, glance keeps a `community` image only where
+the caller's project owns it, and `visibility=all` lifts every visibility
+condition
+([the visibility](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/glance/db/sqlalchemy/api.py#L706-L722)).
+A run therefore sends two image listings, both with `visibility=all` and the
+second with `os_hidden=true`. An image left out of both would be booked deleted
+while it still occupies the store.
 
 ## Why no reader account passes
 
@@ -182,10 +197,13 @@ A run sends `compute`, `block-storage`, `network`, `image` and `load-balancer`
 nothing but `GET`. Eight paths need a rule: `servers/detail` for the probe and
 both instance listings, `flavors/detail`, nova's version document, which the
 run reads to negotiate the microversion, `volumes/detail`, `types` for cinder's
-volume type listing, `floatingips`, `images` and `lbaas/loadbalancers`. The
-version documents gophercloud reads from glance, neutron and octavia before it
-uses them are answered before keystonemiddleware sees the request, so they need
-none
+volume type listing, `floatingips`, `images` and `lbaas/loadbalancers`. A rule
+matches a request's path alone, because keystonemiddleware compares
+`request.path`
+([the match](https://github.com/openstack/keystonemiddleware/blob/9401c513219f86008d1df380a10d57464bb20b2d/keystonemiddleware/auth_token/__init__.py#L586)),
+so the `images` rule covers both image listings. The version documents
+gophercloud reads from glance, neutron and octavia before it uses them are
+answered before keystonemiddleware sees the request, so they need none
 ([glance](https://github.com/openstack/glance/blob/a160d42e94dc5ea70cf3aa6d76e6bfaa39e47069/etc/glance-api-paste.ini#L42),
 [neutron](https://github.com/openstack/neutron/blob/6dc774b25b9cc9b47dee127bfb41d67975677446/etc/api-paste.ini#L1-L15),
 [octavia](https://github.com/openstack/octavia/blob/d3a882b734cdcc176301c77e20cac9f7720451b0/octavia/common/keystone.py#L25-L26)).
