@@ -238,8 +238,7 @@ func NewCloudAPI(clock *Clock, oracle Oracle) (http.Handler, error) {
 		api.listing(typeVolume, "volumes", volumeDocument))
 	mux.HandleFunc("GET /network/v2.0/floatingips",
 		api.listing(typeFloatingIP, "floatingips", floatingIPDocument))
-	mux.HandleFunc("GET /image/v2/images",
-		api.listing(typeImage, "images", imageDocument))
+	mux.HandleFunc("GET /image/v2/images", api.authorized(api.serveImages))
 	mux.HandleFunc("GET /load-balancer/v2.0/lbaas/loadbalancers",
 		api.listing(typeLoadBalancer, "loadbalancers", loadBalancerDocument))
 
@@ -379,6 +378,20 @@ func (a *cloudAPI) serveServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeListing(w, "servers", a.documents(typeInstance, a.effective(), a.serverDocument))
+}
+
+// serveImages answers both listings glance publishes at one path. The hidden
+// one is the request whose os_hidden equals true ignoring case, the comparison
+// glance makes, and it holds no image: no image of the world is hidden. Every
+// other request is the live listing. The visibility a run asks for is not
+// read, because every simulated image is private and the run's admin token is
+// answered with all of them anyway.
+func (a *cloudAPI) serveImages(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(r.URL.Query().Get("os_hidden"), "true") {
+		writeListing(w, "images", []map[string]any{})
+		return
+	}
+	writeListing(w, "images", a.documents(typeImage, a.effective(), imageDocument))
 }
 
 // serveFlavors answers the flavor catalog of the world. A client reads it only
