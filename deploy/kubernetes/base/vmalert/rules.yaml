@@ -70,8 +70,15 @@ groups:
       # serves Grafana and the Reporting API's query path. vmalert writes this
       # series back through -remoteWrite.url and reads it through
       # -datasource.url, the same pair that carries ALERTS_FOR_STATE.
+      #
+      # The projection keeps a row for every deleted resource under state
+      # deleted, so a sum over every state counts each deletion since the cloud
+      # was first reported, and that count only grows. A (cloud, resource_type)
+      # pair with no live row gets no recorded sample, so the rule below has no
+      # left-hand side for it and stays quiet, which is the right answer for a
+      # count of zero.
       - record: tally:current_resources:sum
-        expr: sum by (cloud, resource_type) (tally_current_resources)
+        expr: sum by (cloud, resource_type) (tally_current_resources{state!="deleted"})
 
       # The offset keeps the current value out of the baseline it is measured
       # against. Without it a rise pulls its own reference up as it goes, and
@@ -100,12 +107,15 @@ groups:
       # The second clause is what keeps this quiet where it should be. absent()
       # alone fires wherever nothing writes tally_current_resources at all: a
       # dev cluster, or a production one before its first reconciliation run.
-      # Paired with the raw series it reports the one case that is a fault, the
-      # scrape path filling while the write path does not.
+      # The clause counts live resources, the same set the record sums, so a
+      # store that holds only deleted resources, where the record rightly
+      # writes nothing, stays quiet too. Paired with it, absent() reports the
+      # one case that is a fault, the scrape path filling while the write path
+      # does not.
       - alert: TallyRecordedSeriesMissing
         expr: |
           absent(tally:current_resources:sum)
-            and on () (count(tally_current_resources) > 0)
+            and on () (count(tally_current_resources{state!="deleted"}) > 0)
         for: 15m
         labels:
           severity: warning

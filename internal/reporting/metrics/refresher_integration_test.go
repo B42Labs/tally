@@ -100,6 +100,35 @@ func TestRefresh(t *testing.T) {
 		assertSamples(t, reg, map[group]float64{deleted: 1})
 	})
 
+	t.Run("keeps deleted resources under their own state once the label is full", func(t *testing.T) {
+		// The alert rules and the Fleet Overview count live resources with
+		// state!="deleted". A deleted row recorded under the overflow value
+		// would match that filter and be counted as live again. Two hundred
+		// states are more than the label admits, so the first refresh fills it
+		// before any row is deleted.
+		truncate(t, db)
+		for i := range 200 {
+			seed(t, db, group{
+				platform:     platform,
+				cloud:        otherCloud,
+				resourceType: "volume",
+				state:        "junk-" + strconv.Itoa(i),
+			}, "vol-junk-"+strconv.Itoa(i))
+		}
+
+		r, reg := newRefresher(t, db.Store)
+		refresh(t, r)
+
+		gone := group{platform: platform, cloud: cloud, resourceType: "volume", state: "deleted"}
+		seed(t, db, gone, "vol-gone")
+		refresh(t, r)
+
+		if got, ok := samples(t, reg)[gone]; !ok || got != 1 {
+			t.Errorf("%s for %+v = %v (present %t), want 1: the deleted row was recorded under another state",
+				gaugeName, gone, got, ok)
+		}
+	})
+
 	t.Run("never reports an incomplete fleet while it refreshes", func(t *testing.T) {
 		// A refresh that cleared the gauge before writing it again would leave a
 		// window in which a scrape sees no series, or only the ones written so

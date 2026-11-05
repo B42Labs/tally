@@ -114,6 +114,10 @@ func New(reg *prometheus.Registry) *Metrics {
 			Help: "Resources the projection holds, by state.",
 		}, []string{"platform", "cloud", "resource_type", "state"}),
 	}
+	// The alert rules and the Fleet Overview select state!="deleted", so the
+	// state deleted rows carry is admitted before any an event sends and is
+	// never folded into cardinality.Overflow.
+	m.limiter.Bound(labelState, "deleted")
 
 	reg.MustRegister(
 		m.eventsIngested,

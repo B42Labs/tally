@@ -113,7 +113,10 @@ that aggregation once per step of the seven-day window on every minute
 evaluation, and that store is the single replica Grafana and the Reporting API's
 query path also read. vmalert writes the recorded series through
 `-remoteWrite.url` and reads it back through `-datasource.url`, the same pair
-that carries `ALERTS_FOR_STATE`.
+that carries `ALERTS_FOR_STATE`. The record leaves out rows whose state is
+`deleted`: the projection keeps one per deleted resource, so a sum over every
+state counts each deletion since the cloud was first reported, a number that
+only grows and that the baseline never catches on a cloud with churn.
 
 `TallyRecordedSeriesMissing` is what watches that pair, because reading the
 recorded series put both sides of the anomaly rule's comparison behind the
@@ -122,10 +125,12 @@ unavailable, leaves a hole in `tally:current_resources:sum`: past the store's
 lookbehind the instant selector goes absent, the expression returns nothing on
 every evaluation, and the anomaly rule stops watching with no `for` timer, no
 notification and no log line to say so. The second clause,
-`count(tally_current_resources) > 0`, is what keeps the rule quiet where the
-absence is expected (`absent()` alone fires on any cluster that has not
-reconciled yet, dev clusters included), so it reports the one case that is a
-fault: the scrape path filling while the write path does not.
+`count(tally_current_resources{state!="deleted"}) > 0`, is what keeps the rule
+quiet where the absence is expected: on a cluster that has not reconciled yet,
+dev clusters included, where `absent()` alone fires, and on a store that holds
+only deleted resources, where the record rightly writes nothing. It reports the
+one case that is a fault: the scrape path filling while the write path does
+not.
 
 `TallyExporterServiceSilent` matches `up` against the exporter's series on
 `(cloud, instance)` and selects `job="openstack-db-exporter"` on both sides. On
