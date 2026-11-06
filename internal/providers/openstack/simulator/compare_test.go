@@ -398,6 +398,14 @@ func rowsOf(id string) func([]string) bool {
 	return func(row []string) bool { return row[columnResourceID] == id }
 }
 
+// rowsOfInterval matches the rows of one interval of one resource, by the
+// instant the interval starts at.
+func rowsOfInterval(id string, from time.Time) func([]string) bool {
+	return func(row []string) bool {
+		return row[columnResourceID] == id && row[columnFromTS] == instantCell(from)
+	}
+}
+
 // rowsOfDimension matches the row one dimension of one resource is rated by.
 func rowsOfDimension(id, dimension string) func([]string) bool {
 	return func(row []string) bool {
@@ -596,8 +604,11 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 	rows := ratedOf(t, oracle, model)
 	priced, _ := pricedResources(oracle, model)
 
-	volume := pickResource(t, oracle, "volume", 1, "")
-	volumeSpan := volume.Intervals[0]
+	// A volume is booked available from its create and in-use from its attach two
+	// seconds later, so the one interval a case below changes is the second.
+	volume := pickResource(t, oracle, "volume", 2, stateAvailable)
+	volumeSpan := volume.Intervals[1]
+	volumeSpanRows := rowsOfInterval(volume.ResourceID, volumeSpan.From)
 	split := pickResource(t, oracle, "volume", 2, "")
 	splitSpan := split.Intervals[1]
 	instance := pickResource(t, oracle, "instance", 1, stateActive)
@@ -668,7 +679,7 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 		{
 			name: "an interval that ends too early",
 			mutate: func(rows [][]string) [][]string {
-				return editRows(rows, rowsOf(volume.ResourceID), func(row []string) {
+				return editRows(rows, volumeSpanRows, func(row []string) {
 					row[columnToTS] = instantCell(volumeSpan.To.Add(-time.Second))
 				})
 			},
@@ -694,7 +705,7 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 		{
 			name: "an interval booked to another project",
 			mutate: func(rows [][]string) [][]string {
-				return editRows(rows, rowsOf(volume.ResourceID), func(row []string) {
+				return editRows(rows, volumeSpanRows, func(row []string) {
 					row[columnProjectID] = otherProject
 				})
 			},
@@ -744,7 +755,9 @@ func TestCompareReportsEveryKindOfDifference(t *testing.T) {
 		{
 			name: "one interval rated twice by one dimension",
 			mutate: func(rows [][]string) [][]string {
-				return copyRows(rows, rowsOfDimension(volume.ResourceID, "size_gb"), func([]string) {})
+				return copyRows(rows, func(row []string) bool {
+					return volumeSpanRows(row) && row[columnDimension] == "size_gb"
+				}, func([]string) {})
 			},
 			want: Difference{
 				ResourceType: "volume", ResourceID: volume.ResourceID,
@@ -819,7 +832,7 @@ func TestCompareCopiesTheFaultsOntoADifference(t *testing.T) {
 	// yet. The order is the document's rather than FaultNames', which is what a
 	// report keeps and its lines sort.
 	oracle.Faults = []string{FaultHeldBack, FaultDuplicates}
-	touched := pickResource(t, oracle, "volume", 1, "")
+	touched := pickResource(t, oracle, "volume", 2, stateAvailable)
 	for i := range oracle.Resources {
 		if oracle.Resources[i].ResourceID == touched.ResourceID {
 			oracle.Resources[i].Faults = []string{FaultMissingCreate}
@@ -1095,7 +1108,7 @@ func TestCompareRefusesAModelTheRunDidNotRateWith(t *testing.T) {
 	oracle := oracleOf(t)
 	model := parseModel(t, testModel)
 	rows := ratedOf(t, oracle, model)
-	volume := pickResource(t, oracle, "volume", 1, "")
+	volume := pickResource(t, oracle, "volume", 2, stateAvailable)
 	image := pickResource(t, oracle, "image", 1, "")
 
 	for _, tc := range []struct {
@@ -1207,7 +1220,7 @@ func TestCompareSkipsTheRecordsOfAnotherPlatform(t *testing.T) {
 	oracle := oracleOf(t)
 	model := parseModel(t, testModel)
 	rows := ratedOf(t, oracle, model)
-	volume := pickResource(t, oracle, "volume", 1, "")
+	volume := pickResource(t, oracle, "volume", 2, stateAvailable)
 
 	beside := copyRows(rows, rowsOf(volume.ResourceID), func(row []string) {
 		row[columnPlatform] = "harbor"

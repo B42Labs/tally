@@ -825,9 +825,9 @@ func (g *generator) lifetime(p *project, inst *instance, index int, end time.Tim
 }
 
 // volumes gives every instance its one or two volumes. Each of them is attached
-// to the server it was created for, which cinder announces under a type the
-// collector does not map, and the volume reports the in-use status from there
-// on.
+// to the server it was created for, which cinder announces with the
+// volume.attach.end the collector books, so the volume is in-use from there on
+// and reports that status in every later notification.
 func (g *generator) volumes(p *project) {
 	for index, inst := range p.instances {
 		for i, vol := range inst.volumes {

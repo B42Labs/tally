@@ -206,6 +206,8 @@ var billableTypes = map[string]billableType{
 	"volume.resize.end":          {"volume", "volume.resize.end"},
 	"volume.retype":              {"volume", "volume.retype"},
 	"volume.transfer.accept.end": {"volume", "volume.transfer.accept.end"},
+	"volume.attach.end":          {"volume", "volume.attach.end"},
+	"volume.detach.end":          {"volume", "volume.detach.end"},
 
 	"floatingip.create.end": {"floating_ip", "floatingip.create.end"},
 	"floatingip.delete.end": {"floating_ip", "floatingip.delete.end"},
@@ -242,7 +244,10 @@ var billableTypes = map[string]billableType{
 // from compute.instance.finish_resize.end and its
 // compute.instance.resize.confirm.end or compute.instance.resize.revert.end
 // rather than from compute.instance.resize.end, and drops the state resized.
-const oracleFormat = 4
+// Format 5 books the attach and the detach of a volume from volume.attach.end
+// and volume.detach.end, so a volume is in-use from its attach rather than from
+// the next billable notification about it.
+const oracleFormat = 5
 
 // Oracle is the generator's statement of what a month contained: for every
 // billable resource the intervals of constant state, size and project it

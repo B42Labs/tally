@@ -181,7 +181,7 @@ func TestRenderedPayloadsCarryTheRecordedMembers(t *testing.T) {
 // repeats them: nova sends the same server description before a create that it
 // sends with one, and cinder the same volume on an attach that it sends on a
 // resize, so the noise is pinned against these sets rather than against
-// sixty-five lists written out one by one.
+// sixty-three lists written out one by one.
 var (
 	createMembers = []string{
 		"availability_zone", "created_at", "disk_gb", "display_name", "ephemeral_gb", "host",
@@ -226,7 +226,8 @@ var (
 	// The attachment list of a volume connected to nothing is empty, which is
 	// the member with nothing under it, and the one of a volume a server holds
 	// carries the record cinder wrote. The two halves of an attach and of a
-	// detach are one of each.
+	// detach are one of each: the .start halves are pinned here, and the .end
+	// halves are billable and held against the collector's fixtures.
 	attachmentMembers = append(slices.Clone(volumeStateMembers), "volume_attachment")
 	attachedMembers   = append(slices.Clone(volumeStateMembers),
 		"volume_attachment.attach_mode", "volume_attachment.attach_status",
@@ -316,9 +317,7 @@ var noiseMembers = map[string][]string{
 	"volume.resize.start":          volumeStateMembers,
 	"volume.transfer.accept.start": volumeStateMembers,
 	"volume.attach.start":          attachmentMembers,
-	"volume.attach.end":            attachedMembers,
 	"volume.detach.start":          attachedMembers,
-	"volume.detach.end":            attachmentMembers,
 
 	"network.create.start": {"network.admin_state_up", "network.name"},
 	"network.create.end": {

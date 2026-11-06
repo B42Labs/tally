@@ -45,6 +45,8 @@ value with, which is what to look up in the same file.
 | `volume.resize.end` | `volume.resize.end` | `volume` | `volumeStatus` | `volumeSize` | `volume_id` | `tenant_id` | none |
 | `volume.retype` | `volume.retype` | `volume` | `volumeStatus` | `volumeSize` | `volume_id` | `tenant_id` | none |
 | `volume.transfer.accept.end` | `volume.transfer.accept.end` | `volume` | `volumeStatus` | `volumeSize` | `volume_id` | `tenant_id` | none |
+| `volume.attach.end` | `volume.attach.end` | `volume` | `volumeStatusOr("in-use")` | `volumeSize` | `volume_id` | `tenant_id` | none |
+| `volume.detach.end` | `volume.detach.end` | `volume` | `volumeStatus` | `volumeSize` | `volume_id` | `tenant_id` | none |
 | `floatingip.create.end` | `floatingip.create.end` | `floating_ip` | `fixedState("active")` | `floatingIPSize` | `floatingip.id` | `floatingip.tenant_id` | none |
 | `floatingip.delete.end` | `floatingip.delete.end` | `floating_ip` | none | none | `floatingip_id` | request context | none |
 | `image.upload` | `image.create` | `image` | `fixedState("active")` | `imageSize` | `id` | `owner` | none |
@@ -107,9 +109,14 @@ intervals an earlier version booked.
 `fixedState` reads nothing. The notification type already says what the state
 became, so the entry names the value in the table itself.
 
-`volumeStatus` reads `status`. The events it serves change a volume's size or
+`volumeStatus` reads `status`. Most events it serves change a volume's size or
 its owner rather than its status, and cinder does not always repeat the status
-in them, so an absent one falls back to `available`.
+in them, so an absent one falls back to `available`. It serves the detach of a
+volume as well, and a detach without a status left the volume usable.
+
+`volumeStatusOr("in-use")` reads `status` the same way and falls back to
+`in-use`. It serves the attach of a volume: an attach that reports no status
+still attached the volume.
 
 ## Size builders
 
@@ -184,8 +191,10 @@ The counts reach Tally through reconciliation alone. A sync of a cloud whose
 entry sets `include_octavia` reads them off the API and books them as a
 `sync.update` dated at the sync's own instant, so the time between the change
 and that sync is booked at the earlier counts. Without such a sync every load
-balancer stays at zero of both. Each correction counts in
-`tally_sync_resources_reconciled_total` under `action="updated"`.
+balancer stays at zero of both. A correction whose whole difference lies in the
+two counts counts in `tally_sync_resources_reconciled_total` under
+`action="refreshed"` rather than `action="updated"`, because no notification
+could have carried it.
 [How reconciliation observes a cloud](/explanation/how-reconciliation-observes-a-cloud)
 explains the sync, and [reconcile a cloud](/how-to/openstack/reconcile-a-cloud)
 sets it up.
@@ -226,6 +235,50 @@ to. Each is booked under its own name with the state nova set, `active` or
 `stopped`, which `vmState` records as `active` or `shutoff`. Nova confirms a
 resize on its own only when `resize_confirm_window` is set; its default of 0
 leaves the instance in `resized` until the user confirms or reverts.
+
+## The attach and the detach of a volume
+
+The table books the `.end` of every attach and every detach of a volume, so a
+volume is booked `in-use` or `available` at the instant cinder changes it.
+
+Cinder sends `volume.attach.end` from `AttachmentsController.complete` in
+[`cinder/api/v3/attachments.py`](https://github.com/openstack/cinder/blob/b5de51c977077ee767cb4937f7b2d256382f7ed3/cinder/api/v3/attachments.py#L289-L305),
+right after it sets the volume `in-use`, and from the legacy
+`VolumeManager.attach_volume` in
+[`cinder/volume/manager.py`](https://github.com/openstack/cinder/blob/b5de51c977077ee767cb4937f7b2d256382f7ed3/cinder/volume/manager.py#L1476-L1482)
+after `finish_attach`. It sends `volume.detach.end` from `API.attachment_delete`
+in
+[`cinder/volume/api.py`](https://github.com/openstack/cinder/blob/b5de51c977077ee767cb4937f7b2d256382f7ed3/cinder/volume/api.py#L2663-L2693)
+after `finish_detach`, and from the legacy `VolumeManager.detach_volume` in
+[`cinder/volume/manager.py`](https://github.com/openstack/cinder/blob/b5de51c977077ee767cb4937f7b2d256382f7ed3/cinder/volume/manager.py#L1572-L1573)
+after `finish_detach`. `VolumeManager.attachment_update` sends only
+`volume.attach.start`.
+
+Both carry cinder's whole usage payload,
+[`_usage_from_volume`](https://github.com/openstack/cinder/blob/b5de51c977077ee767cb4937f7b2d256382f7ed3/cinder/volume/volume_utils.py#L93-L134),
+and its `status` is the one cinder set before it notified: `in-use` after an
+attach, and after a detach `available`, or `in-use` while another attachment of
+a multiattach volume remains. The attach reads it with
+`volumeStatusOr("in-use")` and the detach with `volumeStatus`, so an absent
+status falls back to `in-use` on the attach and to `available` on the detach.
+The size is read with `volumeSize`, as on every other volume event, and an
+attach or a detach whose payload lacks `size` is dead-lettered with a
+`size_schema` reason, as every volume event is.
+
+The payload also carries `volume_attachment`, the list of the volume's
+attachments, and on a real cloud its records hold `connection_info` with the
+storage backend's credentials. The mapping reads nothing of that list, so none
+of it reaches an event.
+
+The `.start` halves report `reserved`, `attaching` or `detaching`, and the table
+has no entry for them: cinder sends the `.end` for every attach and detach that
+finishes. The collector counts them under `tally_collector_skipped_total`.
+
+Both `.end` types keep their oslo names. Neither names a `create` or a `delete`
+segment, so the projection folds them as updates. A collector up to v0.6.0
+skips both and books a volume `available` from its create until the next
+billable notification about it or a sync corrects it; the intervals it booked
+stay as they are.
 
 ## See also
 

@@ -13,10 +13,11 @@ import (
 // bills: the scheduler's placement decisions, the ports of every server, the
 // networks, subnets, routers and security groups underneath them, the
 // keypairs, keystone's authentications, designate's zones and record sets,
-// barbican's audit records, the attach and the detach of a volume, and the
-// .start half of every step that has one. The collector receives every one of
-// them and counts it as skipped, so a month without them is a month whose skip
-// counters stay at zero and whose ratio of billable to received says nothing.
+// barbican's audit records, and the .start half of every step that has one,
+// the attach and the detach of a volume among them. The collector receives
+// every one of them and counts it as skipped, so a month without them is a
+// month whose skip counters stay at zero and whose ratio of billable to
+// received says nothing.
 //
 // Three rules hold for everything this file renders.
 //
@@ -30,7 +31,9 @@ import (
 // the noise identifier stream, its message id included. That is what keeps the
 // billable transitions of a seed, a period, and a cloud the ones they would be
 // without the catalogue: same instants, same ids, same payloads, same message
-// ids.
+// ids. The one exception is the attachment record a billable volume.attach.end
+// carries: its id is drawn from the noise identifier stream, and the mapping
+// reads nothing of it.
 //
 // Noise is rendered by the helpers of this file and by nothing else. The
 // billable workload calls into them, so what a month is billed for and what it
@@ -268,42 +271,47 @@ func (g *generator) createVolume(p *project, vol *volume, t time.Time) {
 	g.noise(t.Add(-volumeProvision), "volume.create.start", volumePublisher, vol.id, p,
 		volumeCreateStartPayload(p, vol))
 
-	// The mapping books a create under a fixed available, and the attach that follows is noise.
+	// The mapping books a create under a fixed available, and the attach that
+	// follows books the volume in-use.
 	g.emit(t, "volume.create.end", volumePublisher, vol.id, p, volumeCreatePayload(p, vol),
 		alive(stateAvailable, volumeSizeOf(vol)))
 }
 
 // attach connects a volume to a server. Cinder announces the attach with the
 // volume connected to nothing yet and reports it in use a second later, holding
-// the attachment record it handed out until the detach gives it back.
+// the attachment record it handed out until the detach gives it back. The .start
+// half is noise, and the .end is the attach the collector books: the volume is
+// in-use from that instant on.
 //
 // The volume is attached from here on, which is what puts the in-use status
-// into every billable notification about it: a payload rendered after this
-// point reports the volume the way cinder reports one a server holds.
+// into every later billable notification about it as well: a payload rendered
+// after this point reports the volume the way cinder reports one a server holds.
 //
 // The server may be nil. The attachment then names no instance and no host, and
-// the volume is attached all the same, so a billable payload rendered afterwards
-// reports in-use exactly as it does for a volume a server holds.
+// the volume is attached all the same, so the attach is booked and a billable
+// payload rendered afterwards reports in-use exactly as it does for a volume a
+// server holds.
 func (g *generator) attach(p *project, vol *volume, inst *instance, t time.Time) {
 	vol.attachment = attachmentOf(g.noiseIDs.nextUUID(), vol, inst, t)
 
 	g.noise(t, "volume.attach.start", volumePublisher, vol.id, p,
 		volumeAttachmentPayload(p, vol, "attaching", nil))
-	g.noise(t.Add(time.Second), "volume.attach.end", volumePublisher, vol.id, p,
-		volumeAttachmentPayload(p, vol, "in-use", vol.attachment))
+	g.emit(t.Add(time.Second), "volume.attach.end", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "in-use", vol.attachment), alive(stateInUse, volumeSizeOf(vol)))
 
 	vol.attached = true
 }
 
-// detach disconnects a volume from the server that held it. The .start half
-// repeats the attachment of that server one last time and the .end carries
-// none, which is the volume as cinder reports it from here on: available, and
-// connected to nothing.
+// detach disconnects a volume from the server that held it. The .start half is
+// noise and repeats the attachment of that server one last time. The .end is
+// the detach the collector books, and it carries no attachment, which is the
+// volume as cinder reports it from here on: available, and connected to
+// nothing.
 func (g *generator) detach(p *project, vol *volume, t time.Time) {
 	g.noise(t, "volume.detach.start", volumePublisher, vol.id, p,
 		volumeAttachmentPayload(p, vol, "detaching", vol.attachment))
-	g.noise(t.Add(time.Second), "volume.detach.end", volumePublisher, vol.id, p,
-		volumeAttachmentPayload(p, vol, "available", nil))
+	g.emit(t.Add(time.Second), "volume.detach.end", volumePublisher, vol.id, p,
+		volumeAttachmentPayload(p, vol, "available", nil), alive(stateAvailable, volumeSizeOf(vol)))
 
 	vol.attached = false
 	vol.attachment = nil

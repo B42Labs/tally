@@ -181,6 +181,34 @@ var mappings = map[string]mappingEntry{
 		resourceIDPath: []string{"volume_id"},
 		projectIDPath:  []string{"tenant_id"},
 	},
+	// Cinder sends the attach's .end from AttachmentsController.complete in
+	// cinder/api/v3/attachments.py, right after it sets the volume in-use, and
+	// from the legacy VolumeManager.attach_volume after finish_attach. It sends
+	// the detach's .end from API.attachment_delete in cinder/volume/api.py after
+	// finish_detach, and from the legacy VolumeManager.detach_volume after
+	// finish_detach. Either way the payload's status is the one cinder set before
+	// it notified: in-use after an attach, and available after a detach, or
+	// in-use while another attachment of a multiattach volume remains.
+	//
+	// Both payloads carry the volume_attachment list as well, and on a real cloud
+	// its records hold connection_info with backend credentials. Nothing here
+	// reads that list.
+	"volume.attach.end": {
+		eventType:      "volume.attach.end",
+		resourceType:   "volume",
+		state:          volumeStatusOr("in-use"),
+		size:           volumeSize,
+		resourceIDPath: []string{"volume_id"},
+		projectIDPath:  []string{"tenant_id"},
+	},
+	"volume.detach.end": {
+		eventType:      "volume.detach.end",
+		resourceType:   "volume",
+		state:          volumeStatus,
+		size:           volumeSize,
+		resourceIDPath: []string{"volume_id"},
+		projectIDPath:  []string{"tenant_id"},
+	},
 	"floatingip.create.end": {
 		eventType:      "floatingip.create.end",
 		resourceType:   "floating_ip",
@@ -353,15 +381,25 @@ func fixedState(state string) stateRule {
 	return func(map[string]any) string { return state }
 }
 
-// volumeStatus reads the status cinder reports. The events it is used for change
-// a volume's size or owner rather than its status, and cinder does not always
-// repeat the status in them, so an absent one falls back to the state a usable
-// volume is in.
+// volumeStatus reads the status cinder reports. Most of the events it is used
+// for change a volume's size or owner rather than its status, and cinder does
+// not always repeat the status in them, so an absent one falls back to the state
+// a usable volume is in. A detach without a status left the volume usable too.
 func volumeStatus(payload map[string]any) string {
-	if status := stringAt(payload, "status"); status != "" {
-		return status
+	return volumeStatusOr("available")(payload)
+}
+
+// volumeStatusOr is the rule that reads the status cinder reports and takes the
+// fallback when the payload has none. An event without a state is dead-lettered
+// by the API, so the fallback is the state the event type itself implies: an
+// attach that reports no status still attached the volume.
+func volumeStatusOr(fallback string) stateRule {
+	return func(payload map[string]any) string {
+		if status := stringAt(payload, "status"); status != "" {
+			return status
+		}
+		return fallback
 	}
-	return "available"
 }
 
 // unsizedImage reports whether a glance image is still without content. An image
