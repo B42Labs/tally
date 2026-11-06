@@ -396,7 +396,8 @@ The tally of one sync run, which is one that finished clean.
 | --- | --- | --- | --- |
 | `created` | integer | yes | How many resources the run reported to the projection as new, one synthetic event each. |
 | `deleted` | integer | yes | How many it reported as gone. |
-| `updated` | integer | yes | How many it corrected the state, size, or owner of. |
+| `refreshed` | integer | yes | How many it corrected only in what no platform event reports, such as the listener and pool counts of a load balancer. Such a correction is no sign of a lost event. |
+| `updated` | integer | yes | How many it corrected the state, size, or owner of, where a platform event could have reported the difference. |
 
 ### `UpdateProject`
 

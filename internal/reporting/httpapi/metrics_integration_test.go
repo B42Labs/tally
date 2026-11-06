@@ -199,12 +199,24 @@ func TestMetricsCountWhatTheServiceDid(t *testing.T) {
 		if result.Stats.Created != 1 {
 			t.Fatalf("stats = %+v, want the observed resource reported as new", result.Stats)
 		}
+		// The answer names every action the counter carries, the zero of a run
+		// that refreshed nothing included.
+		var raw struct {
+			Stats map[string]json.RawMessage `json:"stats"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decoding the body %q: %v", rec.Body.String(), err)
+		}
+		if got := string(raw.Stats["refreshed"]); got != "0" {
+			t.Errorf("stats.refreshed = %q, want %q in the answer %s", got, "0", rec.Body)
+		}
 
 		assertScrape(t, a, runsSeries, map[string]float64{runLabels(cloud, "completed"): 1})
 		assertScrape(t, a, reconciledSeries, map[string]float64{
-			reconciledLabels(cloud, "created"): float64(result.Stats.Created),
-			reconciledLabels(cloud, "updated"): float64(result.Stats.Updated),
-			reconciledLabels(cloud, "deleted"): float64(result.Stats.Deleted),
+			reconciledLabels(cloud, "created"):   float64(result.Stats.Created),
+			reconciledLabels(cloud, "updated"):   float64(result.Stats.Updated),
+			reconciledLabels(cloud, "refreshed"): float64(result.Stats.Refreshed),
+			reconciledLabels(cloud, "deleted"):   float64(result.Stats.Deleted),
 		})
 		// The corrections go through the ordinary pipeline, so they count as
 		// ingested events under the source the run stamped them with.

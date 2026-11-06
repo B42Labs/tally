@@ -99,7 +99,7 @@ func New(reg *prometheus.Registry) *Metrics {
 		}, []string{"cloud", "status"}),
 		resourcesReconciled: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tally_sync_resources_reconciled_total",
-			Help: "Resources a reconciliation run created, updated, or deleted.",
+			Help: "Resources a reconciliation run created, updated, refreshed, or deleted.",
 		}, []string{"cloud", "action"}),
 		resourcesDeferred: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tally_sync_resources_deferred_total",
@@ -220,7 +220,9 @@ func (m *Metrics) SyncRunFinished(cloud, status string) {
 }
 
 // ResourcesReconciled counts n resources a reconciliation run acted on. action
-// is created, updated, or deleted.
+// is created, updated, refreshed, or deleted. refreshed is an update whose
+// whole difference lay in what no platform event reports, so it is no sign of
+// a lost event.
 func (m *Metrics) ResourcesReconciled(cloud, action string, n int) {
 	if m == nil {
 		return

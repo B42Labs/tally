@@ -322,6 +322,130 @@ func TestSync(t *testing.T) {
 		}
 	})
 
+	t.Run("counts an update of unannounced members alone as refreshed", func(t *testing.T) {
+		const cloud = "os-sync-refresh"
+		fake, syncer := seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10, "exports": 0}))
+
+		// No event carries a share's exports here, so the sync is their only
+		// source: a correction of them alone delivers them rather than making up
+		// for a lost event.
+		grown := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10, "exports": 2})
+		grown.Unannounced = []string{"exports"}
+		fake.steps = stream(grown)
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Refreshed = 1
+		assertStats(t, res.Stats, want)
+		assertRun(t, db, res, statusCompleted)
+		assertStoredCount(t, db, res, "refreshed", 1)
+		// The event is the update any correction of the size is: the run alone
+		// tells the two apart.
+		assertCorrection(t, db, cloud, "sync.update", correction{
+			eventType: "sync.update", resourceType: typeShare, resourceID: "share-1",
+			projectID: projectA, at: rfc(pollTime), state: "available",
+			size: map[string]any{"size_gb": 10.0, "exports": 2.0},
+		})
+	})
+
+	t.Run("counts an update as refreshed only when its whole difference is unannounced", func(t *testing.T) {
+		held := map[string]any{"size_gb": 10, "exports": 0}
+		grown := map[string]any{"size_gb": 10, "exports": 2}
+		exports := []string{"exports"}
+
+		for _, tc := range []struct {
+			name     string
+			cloud    string
+			held     map[string]any
+			observed reconciliation.ObservedResource
+			want     reconciliation.Stats
+			updates  int
+		}{
+			{
+				name:     "a state that differs as well is an update",
+				cloud:    "os-sync-refresh-state",
+				held:     held,
+				observed: observation(seen(typeShare, "share-1", projectA, "in-use", grown), exports, false),
+				want:     tally(0, 1, 0),
+				updates:  1,
+			},
+			{
+				name:     "an owner that differs as well is an update",
+				cloud:    "os-sync-refresh-owner",
+				held:     held,
+				observed: observation(seen(typeShare, "share-1", projectB, "available", grown), exports, false),
+				want:     tally(0, 1, 0),
+				updates:  1,
+			},
+			{
+				name:  "a member that is not unannounced and differs is an update",
+				cloud: "os-sync-refresh-announced",
+				held:  held,
+				observed: observation(seen(typeShare, "share-1", projectA, "available",
+					map[string]any{"size_gb": 20, "exports": 2}), exports, false),
+				want:    tally(0, 1, 0),
+				updates: 1,
+			},
+			{
+				name:     "an observation that names nothing unannounced is an update",
+				cloud:    "os-sync-refresh-unnamed",
+				held:     held,
+				observed: observation(seen(typeShare, "share-1", projectA, "available", grown), nil, false),
+				want:     tally(0, 1, 0),
+				updates:  1,
+			},
+			{
+				name:     "an observation without a size corrects nothing",
+				cloud:    "os-sync-refresh-sizeless",
+				held:     held,
+				observed: observation(seen(typeShare, "share-1", projectA, "available", nil), exports, false),
+				want:     tally(0, 0, 0),
+				updates:  0,
+			},
+			{
+				name:  "a member the row does not hold yet is a refresh",
+				cloud: "os-sync-refresh-empty-row",
+				held:  map[string]any{},
+				observed: observation(seen(typeShare, "share-1", projectA, "available",
+					map[string]any{"exports": 2}), exports, false),
+				want:    reconciliation.Stats{Refreshed: 1, Errors: []string{}},
+				updates: 1,
+			},
+			{
+				name:     "a refresh of a resource in transition is deferred",
+				cloud:    "os-sync-refresh-transitional",
+				held:     held,
+				observed: observation(seen(typeShare, "share-1", projectA, "available", grown), exports, true),
+				want: reconciliation.Stats{
+					Deferred: reconciliation.Deferred{Transitional: 1}, Errors: []string{},
+				},
+				updates: 0,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fake, syncer := seedFleet(t, db, pipeline, tc.cloud,
+					seen(typeShare, "share-1", projectA, "available", tc.held))
+
+				fake.steps = stream(tc.observed)
+				res := mustSync(t, syncer, tc.cloud)
+
+				assertStats(t, res.Stats, tc.want)
+				assertRun(t, db, res, statusCompleted)
+				assertStoredCount(t, db, res, "refreshed", tc.want.Refreshed)
+				var updates int
+				for _, got := range corrections(t, db, tc.cloud) {
+					if got.eventType == "sync.update" {
+						updates++
+					}
+				}
+				if updates != tc.updates {
+					t.Errorf("stored sync.update corrections = %d, want %d", updates, tc.updates)
+				}
+			})
+		}
+	})
+
 	t.Run("takes the last word of a resource the adapter listed twice", func(t *testing.T) {
 		const cloud = "os-sync-duplicate-observation"
 		fake, syncer := seedFleet(t, db, pipeline, cloud,
@@ -1922,10 +2046,13 @@ func TestSyncCounts(t *testing.T) {
 		assertSamples(t, reg, runsSeries, map[string]float64{
 			fmt.Sprintf("cloud=%q,status=%q", cloud, statusCompleted): 1,
 		})
+		// A run that refreshed nothing exports the zero it counted, so every
+		// finished run makes all four action series appear.
 		assertSamples(t, reg, reconciledSeries, map[string]float64{
-			reconciledLabels(cloud, "created"): float64(res.Stats.Created),
-			reconciledLabels(cloud, "updated"): float64(res.Stats.Updated),
-			reconciledLabels(cloud, "deleted"): float64(res.Stats.Deleted),
+			reconciledLabels(cloud, "created"):   float64(res.Stats.Created),
+			reconciledLabels(cloud, "updated"):   float64(res.Stats.Updated),
+			reconciledLabels(cloud, "refreshed"): 0,
+			reconciledLabels(cloud, "deleted"):   float64(res.Stats.Deleted),
 		})
 		// A clean run reports the zero it recorded rather than leaving the series
 		// out, so a rate over it reads no errors instead of no data.
@@ -1962,9 +2089,35 @@ func TestSyncCounts(t *testing.T) {
 		})
 		// A deferred correction is no correction: the drift series stay at zero.
 		assertSamples(t, reg, reconciledSeries, map[string]float64{
-			reconciledLabels(cloud, "created"): 0,
-			reconciledLabels(cloud, "updated"): 0,
-			reconciledLabels(cloud, "deleted"): 0,
+			reconciledLabels(cloud, "created"):   0,
+			reconciledLabels(cloud, "updated"):   0,
+			reconciledLabels(cloud, "refreshed"): 0,
+			reconciledLabels(cloud, "deleted"):   0,
+		})
+	})
+
+	t.Run("counts a refresh apart from an update", func(t *testing.T) {
+		const cloud = "os-sync-count-refreshed"
+		seedFleet(t, db, pipeline, cloud,
+			seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10, "exports": 0}))
+
+		grown := seen(typeShare, "share-1", projectA, "available", map[string]any{"size_gb": 10, "exports": 2})
+		grown.Unannounced = []string{"exports"}
+		fake := &fakeAdapter{types: []string{typeShare}, steps: stream(grown)}
+		syncer, reg := meteredSyncer(t, db, pipeline, cloud, fake)
+
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Refreshed = 1
+		assertStats(t, res.Stats, want)
+		// A refresh is no sign of a lost event, so it stays out of the updated
+		// series the drift alert reads.
+		assertSamples(t, reg, reconciledSeries, map[string]float64{
+			reconciledLabels(cloud, "created"):   0,
+			reconciledLabels(cloud, "updated"):   0,
+			reconciledLabels(cloud, "refreshed"): 1,
+			reconciledLabels(cloud, "deleted"):   0,
 		})
 	})
 
@@ -2002,9 +2155,10 @@ func TestSyncCounts(t *testing.T) {
 		// A run that spoiled part of its work keeps what it did reconcile, and the
 		// action it never took is exported as the zero it is.
 		assertSamples(t, reg, reconciledSeries, map[string]float64{
-			reconciledLabels(cloud, "created"): float64(res.Stats.Created),
-			reconciledLabels(cloud, "updated"): 0,
-			reconciledLabels(cloud, "deleted"): float64(res.Stats.Deleted),
+			reconciledLabels(cloud, "created"):   float64(res.Stats.Created),
+			reconciledLabels(cloud, "updated"):   0,
+			reconciledLabels(cloud, "refreshed"): 0,
+			reconciledLabels(cloud, "deleted"):   float64(res.Stats.Deleted),
 		})
 		assertSamples(t, reg, errorsSeries, map[string]float64{
 			fmt.Sprintf("cloud=%q", cloud): float64(res.Stats.ErrorCount),
@@ -2160,6 +2314,16 @@ func seen(resourceType, id, project, state string, size map[string]any) reconcil
 		State:        state,
 		Size:         size,
 	}
+}
+
+// observation is resource with the size members no event carries named, and
+// reported in transition where transitional says so.
+func observation(resource reconciliation.ObservedResource, unannounced []string,
+	transitional bool,
+) reconciliation.ObservedResource {
+	resource.Unannounced = unannounced
+	resource.Transitional = transitional
+	return resource
 }
 
 // vanished is a resource the platform reports as deleted at ts. It carries the
@@ -2327,6 +2491,20 @@ func assertStoredDeferred(t *testing.T, db storetest.DB, res reconciliation.Resu
 	want := map[string]any{"transitional": float64(transitional), "recent": float64(recent)}
 	if !reflect.DeepEqual(raw["deferred"], want) {
 		t.Errorf("stored deferred = %v, want %v", raw["deferred"], want)
+	}
+}
+
+// assertStoredCount fails the test unless the stored stats document of the run
+// carries want under key, the name an operator reads the count by.
+func assertStoredCount(t *testing.T, db storetest.DB, res reconciliation.Result, key string, want int) {
+	t.Helper()
+
+	var raw map[string]any
+	if err := json.Unmarshal(runRow(t, db, res.RunID).Stats, &raw); err != nil {
+		t.Fatalf("decoding the stored stats: %v", err)
+	}
+	if got, ok := raw[key]; !ok || got != float64(want) {
+		t.Errorf("stored %s = %v, want %d", key, got, want)
 	}
 }
 

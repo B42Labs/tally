@@ -264,7 +264,10 @@ reported with its listener and pool counts. No octavia notification carries
 them, so the sync is their only source: the collector books a load balancer at
 zero of both on its create, and the first sync that finds the load balancer out
 of `pending_*` and not changed inside the settle window books the counts as a
-`sync.update` (see [what a run defers](#what-a-run-defers)). Migration `0006_seed_loadbalancer_type.sql` registers the size
+`sync.update` (see [what a run defers](#what-a-run-defers)). The run counts
+that correction as `refreshed` rather than `updated`, and so does every later
+one that changes the counts alone
+(see [what a run counts as refreshed](#what-a-run-counts-as-refreshed)). Migration `0006_seed_loadbalancer_type.sql` registers the size
 schema those two are validated against, so on a database the chain seeded the
 corrections land whatever `TALLY_INGEST_REQUIRE_SIZE_SCHEMA` is set to.
 
@@ -502,6 +505,28 @@ at a resource stuck in transition.
 A correction a later run books is dated the way any correction is: a create at
 the platform's creation instant, a reported delete at `terminated_at`, an update
 and a delete by absence at the poll of the run that books them.
+
+## What a run counts as refreshed
+
+Some size members reach Tally through a sync alone. Octavia notifies on a load
+balancer and on nothing below it, and the dictionary it publishes names neither
+the listeners nor the pools, so the adapter reports `listeners` and `pools` of
+every load balancer as members no event carries. The other four types report
+none.
+
+An update is counted as `refreshed` rather than `updated` when the observed
+state and project match the row, and every size member that differs is one of
+those members. A member that only one side holds differs. A state, an owner,
+or any other member that differs is something an event could have reported, so
+such an update stays `updated`, whatever else it changes.
+
+The correction itself is the same `sync.update` either way, with the same id
+and the same payload. The difference lives in the run's tally alone: `refreshed`
+in `stats` of the `sync_runs` row, in the answer of `POST /internal/sync/{cloud}`,
+and as `action="refreshed"` on `tally_sync_resources_reconciled_total`. A refresh
+is deferred like any other correction, as `transitional` while the load
+balancer is in `pending_*` and as `recent` inside the settle window, and a
+deferred one is not counted as refreshed.
 
 ## The instants a missed delete is booked at
 

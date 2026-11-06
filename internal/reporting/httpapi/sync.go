@@ -106,9 +106,10 @@ func (s *server) SyncCloud(w http.ResponseWriter, r *http.Request, cloud string)
 	writeJSON(w, SyncResult{
 		SyncRunId: result.RunID,
 		Stats: SyncStats{
-			Created: result.Stats.Created,
-			Updated: result.Stats.Updated,
-			Deleted: result.Stats.Deleted,
+			Created:   result.Stats.Created,
+			Updated:   result.Stats.Updated,
+			Refreshed: result.Stats.Refreshed,
+			Deleted:   result.Stats.Deleted,
 		},
 	})
 }

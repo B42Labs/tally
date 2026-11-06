@@ -452,6 +452,36 @@ func TestOpenStackSync(t *testing.T) {
 			createdAt: "2026-04-20T10:00:00Z",
 		}})
 	})
+
+	t.Run("counts a listener octavia never announced as refreshed", func(t *testing.T) {
+		const cloud = "os-openstack-octavia-refresh"
+		openstack := newCloud(t)
+		openstack.serve(t, loadBalancersPath, "loadbalancers.json")
+		writeCloudsYAML(t, openstack.URL)
+		syncer := newSyncer(t, db, pipeline, cloud,
+			map[string]any{"os_cloud": testCloud, "include_octavia": true})
+
+		first := tally(1, 0, 0)
+		first.Deferred = reconciliation.Deferred{Transitional: 3}
+		assertStats(t, mustSync(t, syncer, cloud).Stats, first)
+
+		// The same cloud after a third listener was added to web-lb. Octavia
+		// sends no notification for a listener, so the sync is the only source of
+		// the count, and a correction of it alone is a refresh rather than drift.
+		openstack.reload(t, loadBalancersPath, "loadbalancers_grown.json")
+		res := mustSync(t, syncer, cloud)
+
+		want := tally(0, 0, 0)
+		want.Refreshed = 1
+		want.Deferred = reconciliation.Deferred{Transitional: 3}
+		assertStats(t, res.Stats, want)
+		assertRun(t, db, res, statusCompleted)
+		assertCorrections(t, db, cloud, "sync.update", []correction{{
+			resourceType: "loadbalancer", resourceID: "4a5b6c7d-8e90-4123-a456-7b8c9d0e1f23",
+			projectID: projectA, at: rfc(pollTime), state: "active",
+			size: map[string]any{"listeners": 3.0, "pools": 1.0},
+		}})
+	})
 }
 
 // newSyncer builds a Syncer that reconciles one cloud through the production

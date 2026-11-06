@@ -2583,7 +2583,7 @@ components:
     SyncStats:
       type: object
       description: The tally of one sync run, which is one that finished clean.
-      required: [created, updated, deleted]
+      required: [created, updated, refreshed, deleted]
       properties:
         created:
           type: integer
@@ -2592,7 +2592,15 @@ components:
             synthetic event each.
         updated:
           type: integer
-          description: How many it corrected the state, size, or owner of.
+          description: >-
+            How many it corrected the state, size, or owner of, where a
+            platform event could have reported the difference.
+        refreshed:
+          type: integer
+          description: >-
+            How many it corrected only in what no platform event reports, such
+            as the listener and pool counts of a load balancer. Such a
+            correction is no sign of a lost event.
         deleted:
           type: integer
           description: How many it reported as gone.

@@ -84,13 +84,19 @@ const completionBudget = 10 * time.Second
 // returned to the caller unchanged, so the row and the answer say the same
 // thing.
 type Stats struct {
-	// Created, Updated, and Deleted count the corrections a batch the database
-	// committed carried, one per synthetic event. A batch that was rolled back is
-	// in none of them: the row would otherwise report corrections that never
-	// happened.
-	Created int `json:"created"`
-	Updated int `json:"updated"`
-	Deleted int `json:"deleted"`
+	// Created, Updated, Refreshed, and Deleted count the corrections a batch the
+	// database committed carried, one per synthetic event. A batch that was
+	// rolled back is in none of them: the row would otherwise report corrections
+	// that never happened.
+	//
+	// Updated counts the corrections of a difference a platform event could have
+	// carried. Refreshed counts the updates whose whole difference lay in the
+	// observation's Unannounced members, which no event carries: a sync is their
+	// only source, so such a correction is no sign of a lost event.
+	Created   int `json:"created"`
+	Updated   int `json:"updated"`
+	Refreshed int `json:"refreshed"`
+	Deleted   int `json:"deleted"`
 	// Deferred counts the corrections the run found and left to a later run. It
 	// is set before the first batch is ingested, so a run that fails while
 	// ingesting still records it.
@@ -313,7 +319,8 @@ func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result,
 		return abort(fmt.Errorf("loading the projection of %s: %w", cloud, err))
 	}
 
-	events, deferred, err := diff(runID, entry, observed, rows, enumerated, now, runAt, s.settle)
+	events, refreshes, deferred, err := diff(runID, entry, observed, rows, enumerated, now, runAt,
+		s.settle)
 	if err != nil {
 		return abort(err)
 	}
@@ -351,7 +358,13 @@ func (s *Syncer) Sync(ctx context.Context, cloud string, at *time.Time) (Result,
 			case event.CategoryCreate:
 				stats.Created++
 			case event.CategoryUpdate:
-				stats.Updated++
+				// A refresh is a sync.update like any other update. The diff kept
+				// its verdict by event id, and that is the only place it lives.
+				if refreshes[e.EventID] {
+					stats.Refreshed++
+				} else {
+					stats.Updated++
+				}
 			case event.CategoryDelete:
 				stats.Deleted++
 			}
@@ -391,6 +404,7 @@ func (s *Syncer) finish(ctx context.Context, id uuid.UUID, cloud string, stats S
 	// delete count of zero rather than no series at all.
 	s.metrics.ResourcesReconciled(cloud, "created", stats.Created)
 	s.metrics.ResourcesReconciled(cloud, "updated", stats.Updated)
+	s.metrics.ResourcesReconciled(cloud, "refreshed", stats.Refreshed)
 	s.metrics.ResourcesReconciled(cloud, "deleted", stats.Deleted)
 	s.metrics.ResourcesDeferred(cloud, reasonTransitional, stats.Deferred.Transitional)
 	s.metrics.ResourcesDeferred(cloud, reasonRecent, stats.Deferred.Recent)
@@ -648,16 +662,22 @@ type resourceKey struct {
 // listing: a resource created after the platform answered and booked by the
 // collector before the rows were read is a live row the observation does not
 // name.
+//
+// The second result holds the event ids of the updates that are refreshes: the
+// state and the project match the row, and every size member that differs is
+// one the observation names as unannounced. Such an update is a sync.update
+// like any other; the run counts it apart.
 func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedResource,
 	rows []sqlcgen.ListCurrentResourcesByCloudRow, enumerated map[string]bool,
 	now func() time.Time, at time.Time, settle time.Duration,
-) ([]event.Event, Deferred, error) {
+) ([]event.Event, map[string]bool, Deferred, error) {
 	stored := make(map[resourceKey]sqlcgen.ListCurrentResourcesByCloudRow, len(rows))
 	for _, row := range rows {
 		stored[resourceKey{ResourceType: row.ResourceType, ResourceID: row.ResourceID}] = row
 	}
 
 	var events []event.Event
+	refreshes := map[string]bool{}
 	var deferred Deferred
 	// A change after windowStart is recent. A window of 0 leaves it nil, which
 	// turns the window off.
@@ -730,7 +750,7 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 
 		same, err := sameSize(obs.Size, row.Size)
 		if err != nil {
-			return nil, Deferred{}, fmt.Errorf("comparing the size of %s %s: %w",
+			return nil, nil, Deferred{}, fmt.Errorf("comparing the size of %s %s: %w",
 				key.ResourceType, key.ResourceID, err)
 		}
 		if row.State == obs.State && row.ProjectID == obs.ProjectID && same {
@@ -740,6 +760,19 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 			deferred.changedRecently(windowStart, obs.ChangedAt, lastEvent) {
 			continue
 		}
+		// An update whose whole difference lies in members no platform event
+		// carries is a refresh: the sync is their only source, so it delivers
+		// them rather than correcting a lost event. A state or an owner that
+		// differs is something an event could have said, so only a size can make
+		// a refresh.
+		refresh := false
+		if row.State == obs.State && row.ProjectID == obs.ProjectID {
+			refresh, err = unannouncedOnly(obs.Size, row.Size, obs.Unannounced)
+			if err != nil {
+				return nil, nil, Deferred{}, fmt.Errorf("comparing the size of %s %s: %w",
+					key.ResourceType, key.ResourceID, err)
+			}
+		}
 		// A resource that changed hands drifted like one that changed size, so
 		// the correction names the owner the platform reports.
 		update := syntheticEvent(runID, entry, key, kindUpdate,
@@ -748,6 +781,9 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 		// event without one leaves the projection the size it holds.
 		update.Payload = event.PayloadEnvelope{State: &state, Size: obs.Size}
 		events = append(events, update)
+		if refresh {
+			refreshes[update.EventID] = true
+		}
 	}
 
 	// What the projection holds live and the observation did not name at all. A
@@ -770,7 +806,7 @@ func diff(runID string, entry CloudConfig, observed map[resourceKey]ObservedReso
 		events = append(events,
 			syntheticEvent(runID, entry, key, kindDelete, correctedAt(now().UTC(), row), row.ProjectID))
 	}
-	return events, deferred, nil
+	return events, refreshes, deferred, nil
 }
 
 // inTransition reports whether a run leaves a correction to a later run because
@@ -869,6 +905,71 @@ func sameSize(observed map[string]any, stored []byte) (bool, error) {
 		return false, fmt.Errorf("decoding the stored size: %w", err)
 	}
 	return reflect.DeepEqual(reported, held), nil
+}
+
+// unannouncedOnly reports whether every member the observed size and the stored
+// one differ in is named in unannounced, the members no platform event carries.
+// An update whose whole difference lies there is a refresh rather than drift.
+//
+// An empty unannounced makes no update a refresh, and nothing is decoded for
+// it. Otherwise both sides are decoded the way sameSize decodes them. A stored
+// null reads as a size without members, and a stored document that is not an
+// object has no members to tell apart, so it makes no refresh either. A member
+// one side holds and the other does not differs.
+func unannouncedOnly(observed map[string]any, stored []byte, unannounced []string) (bool, error) {
+	if len(unannounced) == 0 {
+		return false, nil
+	}
+
+	raw, err := json.Marshal(observed)
+	if err != nil {
+		return false, fmt.Errorf("marshaling the observed size: %w", err)
+	}
+	var reported, held any
+	if err := json.Unmarshal(raw, &reported); err != nil {
+		return false, fmt.Errorf("decoding the observed size: %w", err)
+	}
+	if err := json.Unmarshal(stored, &held); err != nil {
+		return false, fmt.Errorf("decoding the stored size: %w", err)
+	}
+	reportedMembers, ok := sizeMembers(reported)
+	if !ok {
+		return false, nil
+	}
+	heldMembers, ok := sizeMembers(held)
+	if !ok {
+		return false, nil
+	}
+
+	// The union of both sides' members: one that only one side holds differs.
+	for _, members := range []map[string]any{reportedMembers, heldMembers} {
+		for member := range members {
+			if !sameMember(reportedMembers, heldMembers, member) &&
+				!slices.Contains(unannounced, member) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// sizeMembers is a decoded size document as its members. A JSON null is a size
+// without members; the second result is false for a document that is not an
+// object.
+func sizeMembers(decoded any) (map[string]any, bool) {
+	if decoded == nil {
+		return map[string]any{}, true
+	}
+	members, ok := decoded.(map[string]any)
+	return members, ok
+}
+
+// sameMember reports whether two decoded size documents agree on one member: both
+// hold it, and with the same value.
+func sameMember(a, b map[string]any, member string) bool {
+	va, inA := a[member]
+	vb, inB := b[member]
+	return inA && inB && reflect.DeepEqual(va, vb)
 }
 
 // compareSizeValue orders two size values byte-wise over their three fields,

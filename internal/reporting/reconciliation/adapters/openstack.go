@@ -812,6 +812,14 @@ func listImages(ctx context.Context, client *gophercloud.ServiceClient, out *obs
 			images.ExtractImages, observe)
 }
 
+// loadBalancerUnannounced are the size members of a load balancer no OpenStack
+// notification carries. Octavia notifies on the load balancer alone, and the
+// dictionary it publishes names neither its listeners nor its pools (the
+// comment above the octavia entries of the collector's mapping table,
+// internal/providers/openstack/mapping.go), so a sync is the only source of
+// both counts and a correction of them alone is a refresh rather than drift.
+var loadBalancerUnannounced = []string{"listeners", "pools"}
+
 // listLoadBalancers observes every project's load balancers.
 func listLoadBalancers(ctx context.Context, client *gophercloud.ServiceClient, out *observer) bool {
 	return enumerate(ctx, out, loadbalancers.List(client, nil),
@@ -837,6 +845,7 @@ func listLoadBalancers(ctx context.Context, client *gophercloud.ServiceClient, o
 				CreatedAt:    timestamp(balancer.CreatedAt),
 				Transitional: strings.HasPrefix(state, "pending_"),
 				ChangedAt:    changedAt(balancer.UpdatedAt, balancer.CreatedAt),
+				Unannounced:  loadBalancerUnannounced,
 			})
 		})
 }

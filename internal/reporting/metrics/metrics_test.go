@@ -122,12 +122,13 @@ func TestResourcesReconciled(t *testing.T) {
 		m := fresh(t)
 
 		m.ResourcesReconciled("prod", "created", 3)
+		m.ResourcesReconciled("prod", "refreshed", 2)
 		m.ResourcesReconciled("prod", "deleted", 1)
 
-		if got := testutil.CollectAndCount(m.resourcesReconciled); got != 2 {
+		if got := testutil.CollectAndCount(m.resourcesReconciled); got != 3 {
 			t.Fatalf("tally_sync_resources_reconciled_total has %d series, want one per action", got)
 		}
-		for action, want := range map[string]float64{"created": 3, "deleted": 1} {
+		for action, want := range map[string]float64{"created": 3, "refreshed": 2, "deleted": 1} {
 			if got := testutil.ToFloat64(m.resourcesReconciled.WithLabelValues("prod", action)); got != want {
 				t.Errorf(`tally_sync_resources_reconciled_total{action=%q} = %v, want %v`, action, got, want)
 			}

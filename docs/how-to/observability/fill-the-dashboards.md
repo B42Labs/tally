@@ -212,8 +212,8 @@ store any invoice is derived from puts invented usage into the billing record.
    sums with two datapoints two minutes apart and growing values, because the
    panels read them through `increase()` and a single point has no slope. Their
    label values are the ones the reconciliation service emits: `completed` or
-   `failed` for a run status, and `created`, `updated` or `deleted` for a
-   reconciled resource.
+   `failed` for a run status, and `created`, `updated`, `refreshed` or
+   `deleted` for a reconciled resource.
 
 2. Push it. The OpenStack panels read the database exporter's series, no dev
    cluster runs that exporter, and this one push writes exactly the series

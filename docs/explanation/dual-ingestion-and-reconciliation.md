@@ -76,6 +76,12 @@ was never missed.
 | The platform API holds a resource the projection does not | Insert it into `current_resources`, write a synthetic create event |
 | The projection holds a resource the platform API does not | Mark it deleted, write a synthetic delete event |
 | The attributes differ, a flavor after a resize for example | Update `current_resources`, write a synthetic update event |
+| The size differs only in members no platform event carries, the listener and pool counts of a load balancer for example | Update `current_resources`, write a synthetic update event, and count it as `refreshed` rather than `updated` |
+
+Only a sync can see the last kind of difference, so its correction delivers a
+value rather than making up for a lost event.
+[What a run counts as refreshed](/explanation/how-reconciliation-observes-a-cloud#what-a-run-counts-as-refreshed)
+states the rule.
 
 Synthetic events carry the types `sync.create`, `sync.update` and `sync.delete`
 (decision D8), which categorize correctly under the create and delete verb rule
