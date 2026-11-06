@@ -255,7 +255,7 @@ shows.
    ```
 
    ```json
-   {"sync_run_id": "...", "stats": {"created": 3, "updated": 1, "deleted": 2}}
+   {"sync_run_id": "...", "stats": {"created": 3, "updated": 1, "refreshed": 0, "deleted": 2}}
    ```
 
    `POST /internal/sync/{cloud}` is not part of the public API
@@ -315,7 +315,7 @@ instant its caller picked.
    ```
 
    ```json
-   {"sync_run_id": "...", "stats": {"created": 3, "updated": 1, "deleted": 2}}
+   {"sync_run_id": "...", "stats": {"created": 3, "updated": 1, "refreshed": 0, "deleted": 2}}
    ```
 
    A call with no body, one whose body is empty, and one whose body carries no
@@ -349,7 +349,7 @@ instant its caller picked.
    ```
 
    ```json
-   {"sync_run_id": "6c1f0a94-3b52-4d7e-8f10-2a5b7c9d0e13", "stats": {"created": 3, "updated": 1, "deleted": 2}}
+   {"sync_run_id": "6c1f0a94-3b52-4d7e-8f10-2a5b7c9d0e13", "stats": {"created": 3, "updated": 1, "refreshed": 0, "deleted": 2}}
    ```
 
 2. A cloud the configuration does not name is answered 404. A cloud another run
@@ -378,9 +378,9 @@ instant its caller picked.
    ```
 
    ```text
-            started_at         |        completed_at        |  status   |                                                 stats
-   ----------------------------+----------------------------+-----------+--------------------------------------------------------------------------------------------------------
-    2026-07-09 14:22:00.512+00 | 2026-07-09 14:22:07.118+00 | completed | {"errors": [], "created": 3, "deleted": 2, "updated": 1, "deferred": {"recent": 0, "transitional": 0}}
+            started_at         |        completed_at        |  status   |                                                         stats
+   ----------------------------+----------------------------+-----------+------------------------------------------------------------------------------------------------------------------------
+    2026-07-09 14:22:00.512+00 | 2026-07-09 14:22:07.118+00 | completed | {"errors": [], "created": 3, "deleted": 2, "updated": 1, "deferred": {"recent": 0, "transitional": 0}, "refreshed": 0}
     2026-07-09 13:22:00.401+00 | 2026-07-09 13:22:01.930+00 | failed    | {"errors": ["unknown setting \"include_octavia_lb\""]}
    ```
 
@@ -388,6 +388,12 @@ instant its caller picked.
    for a resource the platform was still changing, `recent` for one changed
    inside `TALLY_REPORTING_SYNC_SETTLE_S` before the run. A count that stays
    above zero for the same cloud points at a resource stuck in transition.
+
+   `refreshed` counts the updates that changed only what no notification
+   carries, the listener and pool counts of a load balancer, and `updated`
+   counts every other update
+   ([what a run counts as refreshed](/explanation/how-reconciliation-observes-a-cloud#what-a-run-counts-as-refreshed)).
+   A row an earlier release wrote carries no `refreshed`.
 
    The Reporting API's log carries the same reasons on the request that
    triggered the run, together with the `sync_run_id` the row is found by.

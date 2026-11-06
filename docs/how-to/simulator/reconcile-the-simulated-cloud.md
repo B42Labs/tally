@@ -81,7 +81,8 @@ the generator built, which is described in
 
 2. Stop the loop when `published` reaches `total`: Ctrl-C on the loop, then
    `kill %1` on the port-forward it started. What goes into a write-up is the
-   totals the answers carried: `created`, `updated` and `deleted`.
+   totals the answers carried: `created`, `updated`, `refreshed` and
+   `deleted`.
 
 ## Check the result
 
@@ -89,7 +90,7 @@ the generator built, which is described in
    comes back. The first is the document below, with the counts the sync found:
 
    ```json
-   {"sync_run_id": "...", "stats": {"created": 0, "updated": 0, "deleted": 0}}
+   {"sync_run_id": "...", "stats": {"created": 0, "updated": 0, "refreshed": 0, "deleted": 0}}
    ```
 
    At factor 744 a sync corrects the resources whose notifications the collector
@@ -101,9 +102,12 @@ the generator built, which is described in
    A load balancer needs no lost notification to be corrected: the first sync
    after a balancer's `octavia.loadbalancer.update.end` books a `sync.update`
    with its listener and pool counts, and the sync after the day `api-prod`
-   gets its third listener books one more. `0, 0, 0` is what a sync answers
-   when the outbox was empty at its instant and no balancer changed since the
-   sync before.
+   gets its third listener books one more. The answer counts each of those
+   under `refreshed` rather than `updated`, because no notification carries
+   the counts
+   ([what a run counts as refreshed](/explanation/how-reconciliation-observes-a-cloud#what-a-run-counts-as-refreshed)).
+   Zero in all four is what a sync answers when the outbox was empty at its
+   instant and no balancer changed since the sync before.
 
 2. Read a `409` with `a sync for this cloud is already running` as the previous
    iteration's run still holding the cloud. The next iteration waits it out.

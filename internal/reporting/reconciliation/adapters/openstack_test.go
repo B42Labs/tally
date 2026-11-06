@@ -1923,6 +1923,46 @@ func TestOpenStackObservesLoadBalancersOnlyOnRequest(t *testing.T) {
 	})
 }
 
+// TestOpenStackMarksTheCountsOfALoadBalancerUnannounced pins which observations
+// name size members no notification carries. Octavia's notifications name
+// neither the listeners nor the pools of a load balancer, so a sync is their
+// only source; every other type's size is what the collector's events report.
+func TestOpenStackMarksTheCountsOfALoadBalancerUnannounced(t *testing.T) {
+	cloud := newCloud(t)
+	cloud.serve(t, serversPath, "servers_page1.json", "servers_page2.json")
+	cloud.serve(t, volumesPath, "volumes.json")
+	cloud.serve(t, floatingIPsPath, "floatingips.json")
+	cloud.serve(t, imagesPath, "images.json")
+	cloud.serve(t, loadBalancersPath, "loadbalancers.json")
+	writeCloudsYAML(t, cloud.URL)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud, "include_octavia": true}, nil, time.Now().UTC()))
+	if len(errs) != 0 {
+		t.Fatalf("ListResources() errors = %v, want none", errs)
+	}
+
+	seenTypes := map[string]int{}
+	for _, resource := range observed {
+		seenTypes[resource.ResourceType]++
+		var want []string
+		if resource.ResourceType == "loadbalancer" {
+			want = []string{"listeners", "pools"}
+		}
+		if !slices.Equal(resource.Unannounced, want) || (want == nil) != (resource.Unannounced == nil) {
+			t.Errorf("%s %s is observed with unannounced members %#v, want %#v",
+				resource.ResourceType, resource.ResourceID, resource.Unannounced, want)
+		}
+	}
+	// A type the cloud answered nothing for would pass the loop above without
+	// being held to anything.
+	for _, resourceType := range []string{"instance", "volume", "floating_ip", "image", "loadbalancer"} {
+		if seenTypes[resourceType] == 0 {
+			t.Errorf("ListResources() observed no %s, want the recorded ones", resourceType)
+		}
+	}
+}
+
 func TestOpenStackObservesNothingOfAnEmptyCloud(t *testing.T) {
 	cloud := newCloud(t)
 	listings := map[string]string{

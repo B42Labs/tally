@@ -41,7 +41,7 @@ is answered 503. A scrape that outlives the budget of 10 seconds is cut off.
 | `tally_projection_replays_total` | counter | `cloud` | Projection rows folded again from a resource's whole event history. |
 | `tally_sync_errors_total` | counter | `cloud` | Errors reconciliation runs reported. |
 | `tally_sync_resources_deferred_total` | counter | `cloud`, `reason` | Corrections a reconciliation run deferred to a later run, by reason. |
-| `tally_sync_resources_reconciled_total` | counter | `cloud`, `action` | Resources a reconciliation run created, updated, or deleted. |
+| `tally_sync_resources_reconciled_total` | counter | `cloud`, `action` | Resources a reconciliation run created, updated, refreshed, or deleted. |
 | `tally_sync_runs_total` | counter | `cloud`, `status` | Reconciliation runs that finished, by status. |
 <!-- refdoc:end reporting-api -->
 
@@ -60,6 +60,13 @@ which is the text of the pipeline's reason before its first colon: `schema`,
 
 `reason` on `tally_sync_resources_deferred_total` is `transitional` or
 `recent`.
+
+`action` on `tally_sync_resources_reconciled_total` is `created`, `updated`,
+`refreshed` or `deleted`. Every finished run adds to all four, zeros included.
+`refreshed` counts the updates whose whole difference lay in size members no
+platform event carries, the listener and pool counts of a load balancer, so a
+sync is their only source and the correction is no sign of a lost event.
+`updated` counts every other update.
 
 `tally_current_resources` is written by the refresher rather than by the ingest
 path. The refresher counts the projection rows per platform, cloud, resource

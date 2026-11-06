@@ -691,7 +691,7 @@ that the catalog is missing.
     ```text
     job.batch/sync-check created
     job.batch/sync-check condition met
-    {"stats":{"created":0,"deleted":0,"updated":2},"sync_run_id":"2c0b7e07-197b-4d53-af19-dce55400e216"}
+    {"stats":{"created":0,"deleted":0,"refreshed":0,"updated":2},"sync_run_id":"2c0b7e07-197b-4d53-af19-dce55400e216"}
     job.batch "sync-check" deleted from tally namespace
     ```
 

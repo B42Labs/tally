@@ -76,6 +76,11 @@ type ObservedResource struct {
 	// API exposes one. The framework defers a correction of a resource that
 	// changed inside the settle window.
 	ChangedAt *time.Time
+	// Unannounced names the size members of this resource that no platform event
+	// carries, which leaves a sync their only source. A correction whose whole
+	// difference lies in them is counted as refreshed rather than updated: it is no
+	// sign of a lost event. It is nil on a resource whose size the events report.
+	Unannounced []string
 }
 
 // Adapter is the platform-specific half of a sync, and the only half. What the
