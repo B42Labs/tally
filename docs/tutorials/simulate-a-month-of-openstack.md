@@ -133,7 +133,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
 1. Read the simulator's clock:
 
    ```sh
-   curl -s http://127.0.0.1:8091/clock
+   curl -sS http://127.0.0.1:8091/clock
    ```
 
    ```json
@@ -143,7 +143,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    A minute later the same call answers:
 
    ```sh
-   curl -s http://127.0.0.1:8091/clock
+   curl -sS http://127.0.0.1:8091/clock
    ```
 
    ```json
@@ -154,11 +154,27 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    and `period_to` `2026-08-01T00:00:00Z` have to match. `virtual_now` and
    `published` are your own and grow between the two reads, which lie twelve
    virtual hours apart. `holding` is false while the month publishes.
-   Connection refused on 8091 means the simulator is not running, and
-   `docker compose -f deploy/compose/compose.yaml ps` shows the three
-   containers while
+
+   A read in the first seconds after `make simulator-up` returned can fail with
+   `curl: (52) Empty reply from server` on Docker Desktop or
+   `curl: (56) Recv failure: Connection reset by peer` on Docker Engine. Docker
+   publishes 8091 as soon as the container starts, and the simulator listens on
+   it only once it has built the month and the collector consumes from its
+   queue, so repeat the read. The simulator waits up to two minutes for the
+   collector. A read that keeps failing that way points at the collector, and
+   `docker compose -f deploy/compose/compose.yaml logs collector` says why it
+   does not consume.
+
+   `curl: (7)`, a refused connection, means no container publishes the port:
+   the simulator is not running.
+   `docker compose -f deploy/compose/compose.yaml ps` shows which of the three
+   containers run, and
    `docker compose -f deploy/compose/compose.yaml logs simulator` says why it
-   stopped.
+   stopped. A simulator that gave up on the collector after the two minutes
+   says `no consumer on the queue tally-notifications appeared within 2m0s`
+   there.
+   `-S` shows the error that `-s` alone hides, and the wording after the
+   number is your own `curl`'s.
 
 ## Watch the events arrive
 
