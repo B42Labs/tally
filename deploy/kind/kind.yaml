@@ -19,6 +19,15 @@
 #
 # The node image is held one Kubernetes minor behind kind's default on purpose:
 # Envoy Gateway v1.8 supports Kubernetes v1.32 to v1.35.
+#
+# Loading an image onto this node needs kind v0.32.0 or newer. The node's
+# containerd writes a version 4 configuration, which `kind load` reads from
+# v0.32.0 on; an older kind creates the cluster and then fails the first image
+# load of `make up` with `unknown containerd config version: 4`. kind's release
+# notes list the node image digests each release was built for. `make
+# check-tools` reads the minimum off the next line, so a new node image that
+# needs a newer kind raises it here.
+# kind-minimum: v0.32.0
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: tally

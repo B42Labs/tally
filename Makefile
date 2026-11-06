@@ -336,13 +336,25 @@ DOCKER_MIN_MEMORY_GB ?= 8
 # which is why nothing here asks for that one.
 GO_MIN_VERSION := $(shell sed -n 's/^go \([0-9][0-9.]*\)$$/\1/p' go.mod)
 
-# check-tools runs one probe per tool and prints what the probe answered, rather
-# than judging a version against a list. A version written here would be a
-# second pin beside the ones that decide anything, deploy/kind/kind.yaml, the
-# manifests and go.mod, and it would age on its own, telling a reader whose
-# machine works that their machine is wrong. What the target asserts is that the
-# tool is on the path and answers, and for Go that it satisfies the minimum the
-# module itself states.
+# The oldest kind whose `kind load` reads the containerd configuration of the
+# node image deploy/kind/kind.yaml pins. It is read off the `# kind-minimum:`
+# line of that file, beside the image it follows, rather than written a second
+# time here, so a new node image that needs a newer kind raises it in the same
+# edit. The sed matches the `#` of that line with `.`: make 3.81 starts a
+# comment at a `#` even inside $(shell ...), and make 4.3 and later hand a `\#`
+# escape to sed as two characters, whose meaning POSIX leaves undefined in a
+# regular expression.
+KIND_MIN_VERSION := $(shell sed -n 's/^. kind-minimum: v\([0-9][0-9.]*\)$$/\1/p' deploy/kind/kind.yaml)
+
+# check-tools runs one probe per tool and prints what the probe answered. What
+# the target asserts is that each tool is on the path and answers, and it
+# compares two of them against a minimum: Go against the `go` line of go.mod,
+# and kind against the `kind-minimum` line of deploy/kind/kind.yaml. No version
+# is written here, because each minimum is read from the file that holds the
+# pin it follows. A version written here would be a second pin beside the ones
+# that decide anything, deploy/kind/kind.yaml, the manifests and go.mod, and it
+# would age on its own, telling a reader whose machine works that their machine
+# is wrong.
 #
 # The probe function takes what to call the tool, what needs it, and the command
 # that proves it works. A command that is not there exits 127, which is what
@@ -367,6 +379,18 @@ GO_MIN_VERSION := $(shell sed -n 's/^go \([0-9][0-9.]*\)$$/\1/p' go.mod)
 # above it, and a `go env` that fails prints its error above a `broken` line
 # the same way. `command -v` tells a Go that is not on the path from one that
 # answers an error.
+#
+# kind is not probed through the probe function either, because its version is
+# compared: an older kind creates the cluster and fails the first image load of
+# `up` minutes later. The `.*` after the digits lets a development build such as
+# `kind v0.33.0-alpha+abc123` compare by its release digits. A pre-release of
+# the minimum itself is `old`: semver orders it before the release, and kind's
+# main branch reports that pre-release for every commit since the release
+# before it, including the ones before the change the minimum stands for. The
+# `kind version` substitution sits in an `elif` condition, as
+# `go env GOVERSION` does, because GNU Make 4 runs the recipe with the -e of
+# .SHELLFLAGS, which make 3.81 ignores, and a bare assignment would end the
+# recipe there on a failing kind.
 ## check-tools: check that the tools the dev stack and the tutorials need answer
 check-tools:
 	@failed=0; \
@@ -391,7 +415,31 @@ check-tools:
 	probe git 'cloning the repository' git --version; \
 	probe docker 'building the images and running the kind node' docker version --format 'engine {{.Server.Version}}'; \
 	probe 'docker compose' 'the simulator stack of deploy/compose' docker compose version; \
-	probe kind 'creating the dev cluster' kind version; \
+	if [ -z '$(KIND_MIN_VERSION)' ]; then \
+		report broken kind 'deploy/kind/kind.yaml names no kind-minimum line'; \
+		failed=$$((failed + 1)); \
+	elif ! command -v kind >/dev/null 2>&1; then \
+		report missing kind 'not on the path, and creating the dev cluster needs it'; \
+		failed=$$((failed + 1)); \
+	elif kindversion="$$(kind version 2>&1)"; then \
+		kindsemver="$$(printf '%s\n' "$$kindversion" | sed -n '1s/^kind v\([0-9][0-9.]*\).*/\1/p')"; \
+		kindpre="$$(printf '%s\n' "$$kindversion" | sed -n '1s/^kind v[0-9][0-9.]*-\([^ +]*\).*/\1/p')"; \
+		if [ -z "$$kindsemver" ]; then \
+			report broken kind "$$(first "$$kindversion"), which names no version"; \
+			failed=$$((failed + 1)); \
+		elif [ -n "$$kindpre" ] && [ "$$kindsemver" = '$(KIND_MIN_VERSION)' ]; then \
+			report old kind "v$$kindsemver-$$kindpre is a pre-release of the v$(KIND_MIN_VERSION) deploy/kind/kind.yaml asks for"; \
+			failed=$$((failed + 1)); \
+		elif [ "$$(printf '%s\n%s\n' '$(KIND_MIN_VERSION)' "$$kindsemver" | sort -V | head -n1)" = '$(KIND_MIN_VERSION)' ]; then \
+			report ok kind "$$(first "$$kindversion"), at or above the v$(KIND_MIN_VERSION) of deploy/kind/kind.yaml"; \
+		else \
+			report old kind "v$$kindsemver is under the v$(KIND_MIN_VERSION) deploy/kind/kind.yaml asks for"; \
+			failed=$$((failed + 1)); \
+		fi; \
+	else \
+		report broken kind "$$(first "$$kindversion")"; \
+		failed=$$((failed + 1)); \
+	fi; \
 	probe kubectl 'every call the targets make against the cluster' kubectl version --client; \
 	probe jq 'reading the JSON the lessons print' jq --version; \
 	probe curl 'the calls against the Reporting API' curl --version; \
