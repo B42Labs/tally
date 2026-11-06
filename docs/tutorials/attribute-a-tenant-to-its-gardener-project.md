@@ -4,7 +4,7 @@ description: Register the two Gardener projects and the tenants their shoots run
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 2446e5c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Attribute a tenant to its Gardener project
 
