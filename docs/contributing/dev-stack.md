@@ -19,17 +19,20 @@ target owns each of them.
 The targets on this page are driven by tools on the host: `git`, `docker` with
 its `compose` plugin, `kind`, `kubectl`, Go, `jq` and `curl`. `make check-tools`
 probes each of them and prints one line per tool, `ok` with what the tool
-answered, `missing` when it is not on the path, or `broken` with the error it
-answered instead. Go's error stands on the lines above its `broken` line. It
+answered, `missing` when it is not on the path, `broken` with the error it
+answered instead, or `old` when it answers but is under the minimum the
+repository states. Go's error stands on the lines above its `broken` line. It
 exits non-zero when any of them failed, which is the cheap way to find a tool
 that is not there: `make up` reaches the same tool minutes in and stops with a
 half-created cluster behind it.
 
-No version is asserted. The pins that decide anything live where the thing they
-pin does, in `deploy/kind/kind.yaml`, in the manifests and in `go.mod`, and a
-list of versions in the `Makefile` would age beside them and start calling a
-working machine wrong. The one comparison the target makes is the Go on the
-path against the `go` line of `go.mod`, which it reads out of the file. Beside
+No version is written in the `Makefile`. The pins that decide anything live
+where the thing they pin does, in `deploy/kind/kind.yaml`, in the manifests and
+in `go.mod`, and a list of versions in the `Makefile` would age beside them and
+start calling a working machine wrong. The target makes two comparisons, each
+against the file that holds the pin it follows: the Go on the path against the
+`go` line of `go.mod`, and the kind on the path against the `# kind-minimum:`
+line of `deploy/kind/kind.yaml`. It reads both out of their files. Beside
 the tools it prints what the Docker engine was given and warns, rather than
 fails, when that is under `DOCKER_MIN_CPUS` CPUs or `DOCKER_MIN_MEMORY_GB` GB:
 the stack comes up on less, more slowly, and that number is the first thing to
@@ -46,7 +49,9 @@ is the cluster's own configuration: one control-plane node on
 `kindest/node:v1.35.5`, pinned by digest so that the tag cannot re-resolve to
 another image. The node image is held one Kubernetes minor behind kind's
 default on purpose, because Envoy Gateway v1.8 supports Kubernetes v1.32 to
-v1.35.
+v1.35. The `# kind-minimum:` line beside the node image names the oldest kind
+whose `kind load` reads the node's containerd configuration, and a new node
+image that needs a newer kind raises that line in the same edit.
 
 All traffic enters through the Gateway, so the node publishes three ports and
 nothing uses a per-service NodePort or a port-forward.
