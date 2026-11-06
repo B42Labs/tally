@@ -110,9 +110,10 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    `==> creating kind cluster tally`, installs cert-manager v1.21.1 and Envoy
    Gateway v1.8.3 and waits for their rollouts, applies the dev certificate
    authority, builds the four images (`tally-reporting`, `tally-engine`,
-   `tally-openstack-collector` and `tally-openstack-simulator`), puts those and
-   the eight images the stack runs on the node, applies the dev overlay, and
-   applies the two migration chains, the reporting one and the engine one.
+   `tally-openstack-collector` and `tally-openstack-simulator`), puts
+   `tally-reporting` and `tally-engine` and the eight images the stack runs on
+   the node, applies the dev overlay, and applies the two migration chains, the
+   reporting one and the engine one.
    Several hundred lines go by. These are the last ones:
 
    ```text
@@ -132,10 +133,12 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    them differs in timing and in the ids Kubernetes hands out.
 
 2. Leave it alone while it moves the images. A new node carries none of them,
-   so the step before the overlay puts all twelve there: the four built above,
-   and the eight the stack runs. An image your Docker already holds is copied
-   straight onto the node, and only an image it lacks is fetched from the
-   network, which is what the `==> pulling` lines are:
+   so the step before the overlay puts all ten there: `tally-reporting` and
+   `tally-engine` of the four built above, and the eight the stack runs. The
+   collector and the simulator images stay off the node: they run in compose
+   beside the cluster, which lesson 2 starts. An image your Docker already
+   holds is copied straight onto the node, and only an image it lacks is
+   fetched from the network, which is what the `==> pulling` lines are:
 
    ```text
    ==> pulling busybox:1.37
