@@ -68,6 +68,7 @@ compute.instance.shelve_offload.end / unshelve.end
 compute.instance.power_on.end / power_off.end
 volume.create.end / volume.delete.end / volume.resize.end / volume.retype
 volume.transfer.accept.end
+volume.attach.end / volume.detach.end
 floatingip.create.end / floatingip.delete.end
 image.upload / image.create / image.delete
 octavia.loadbalancer.create.end / update.end / delete.end

@@ -200,13 +200,14 @@ the shoot and the CI activity onto that month's working days.
 
 ## The noise
 
-Beside the 22 types the mapping knows, a month renders 65 the collector bills
+Beside the 24 types the mapping knows, a month renders 63 the collector bills
 nothing for. They are what a real bus carries around every billable transition:
 the scheduler's placement decisions, the ports of every server, the networks,
 subnets, routers and security groups underneath them, the keypairs, keystone's
 authentications, designate's zones and record sets, barbican's audit records,
-the attach and the detach of a volume, the `.start` half of every step that has
-one, and the `compute.instance.resize.end` the source host of a resize sends.
+the `.start` half of every step that has one, the attach and the detach of a
+volume among them, and the `compute.instance.resize.end` the source host of a
+resize sends.
 The collector receives all of them and counts each as skipped, so a month
 without them is a month whose skip counters stay at zero and whose ratio of
 billable to received says nothing.
@@ -224,7 +225,9 @@ instant it belongs to, and every identifier comes from a third generator, the
 noise identifier stream, salted with the cloud and the month the way the
 identifier stream is. The billable transitions of a seed, a period, and a cloud
 therefore keep every instant, id, and payload they had without the catalogue,
-message ids aside.
+message ids aside. The one exception is the attachment record a billable
+`volume.attach.end` carries: its id comes from the noise identifier stream, and
+the mapping reads nothing of it.
 
 It is rendered by
 [`noise.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/simulator/noise.go) and by nothing
@@ -252,7 +255,8 @@ day so far, `compute.instance.delete.start` at -3 and the shutdown around it,
 `compute.instance.delete.end` follows. Neutron releases the port afterwards,
 `port.delete.start` at +1 with its `.end` at +2, and cinder detaches every
 volume the server still held, `volume.detach.start` at +3 with its `.end` at
-+4.
++4. The collector books that `.end`, so the volume is `available` from there
+on.
 
 ### The daily audits
 
@@ -293,7 +297,9 @@ attachment record naming the server, its compute, and the device: `/dev/vda` for
 a root volume and `/dev/vdb` otherwise. A delete of an attached volume detaches
 it first, at -3 and -2, and `volume.delete.start` follows at -1. The claims of
 `api-dev` are detached at every hibernation and attached again at every wake-up.
-The spare volume a project hands over is never attached.
+The spare volume a project hands over is never attached. The `.start` halves are
+noise, and the collector books the `.end` of every attach and every detach: the
+attach books the volume `in-use` and the detach books it `available`.
 
 An image is prepared before its upload and activated after it. `image.prepare`
 at -1 is the image while its content is still arriving, the one notification
@@ -384,9 +390,7 @@ endpoint the audit records name is `https://barbican.<cloud>.example:9311`.
 | `volume.resize.start` | `openstack` | paired step |
 | `volume.transfer.accept.start` | `openstack` | paired step |
 | `volume.attach.start` | `openstack` | volume |
-| `volume.attach.end` | `openstack` | volume |
 | `volume.detach.start` | `openstack` | volume, delete |
-| `volume.detach.end` | `openstack` | volume, delete |
 | `network.create.start` | `neutron` | shoot infrastructure, tenant |
 | `network.create.end` | `neutron` | shoot infrastructure, tenant |
 | `network.delete.start` | `neutron` | shoot tear-down |
@@ -424,7 +428,7 @@ endpoint the audit records name is `https://barbican.<cloud>.example:9311`.
 | `audit.http.request` | `barbican` | load balancer |
 | `audit.http.response` | `barbican` | load balancer |
 
-Of the 65, only `compute.instance.resize.end` has a recorded sample, the 2025.1
+Of the 63, only `compute.instance.resize.end` has a recorded sample, the 2025.1
 shape the collector skips. The fixtures under
 [`internal/providers/openstack/testdata/golden/notifications/`](https://github.com/B42Labs/tally/tree/main/internal/providers/openstack/testdata/golden/notifications)
 are the collector's, and it maps none of these types, so a real deployment never
@@ -443,8 +447,8 @@ month stay inside it, so no series of a simulated month lands under
 month to the bound, so a catalogue or a mapping that grows past it fails the
 suite rather than silently folding the types that arrive last.
 
-The workload renders 87 oslo notification types: the 22 of the table below,
-which the collector's mapping knows, and the 65 of the catalogue above, which it
+The workload renders 87 oslo notification types: the 24 of the table below,
+which the collector's mapping knows, and the 63 of the catalogue above, which it
 skips.
 
 | Notification | Exchange | Billable |
@@ -463,6 +467,8 @@ skips.
 | `volume.resize.end` | `openstack` | yes |
 | `volume.retype` | `openstack` | yes |
 | `volume.transfer.accept.end` | `openstack` | yes |
+| `volume.attach.end` | `openstack` | yes |
+| `volume.detach.end` | `openstack` | yes |
 | `floatingip.create.end` | `neutron` | yes |
 | `floatingip.delete.end` | `neutron` | yes |
 | `image.create` | `glance` | no |
@@ -522,7 +528,9 @@ its own from the third stream, so a catalogue one transition longer renumbers
 nothing the collector books. The one place the catalogue reaches into the
 billable month is the bound of a deleted instance's last lifetime step, which
 lies before the five seconds of nova's pre-delete sequence rather than at the
-delete itself.
+delete itself. The billable `volume.attach.end` carries the attachment record,
+whose id comes from the third stream, and the mapping reads nothing of that
+record.
 
 The fault switches draw from streams of their own, one per switch, seeded by the
 seed together with the switch's name. A fault stream carries neither the cloud
@@ -596,13 +604,12 @@ translates it. A power-off books `shutoff`, a shelve `shelved`, and an
 unshelve, a power-on, a `finish_resize`, a confirm, and a revert book `active`.
 A `finish_resize` reports nova's `resized`, which `osmap.VMState` normalizes to
 `active`, and the `compute.instance.resize.end` before it is not booked. A
-volume books `available` on its create whatever attaches it a second later,
-which is the state the mapping fixes on `volume.create.end`, and on a resize, a
-retype, and a transfer it books `in-use` when the world holds it attached and
-`available` otherwise. A state change that only a non-billable notification
-carries, the attach and the detach of the noise catalogue, changes nothing in
-the oracle until the next billable notification reports it. A floating IP, an
-image, and a load balancer are `active` from their create to their delete.
+volume books `available` on its create, which is the state the mapping fixes on
+`volume.create.end`, `in-use` on a `volume.attach.end`, two seconds later for a
+volume attached at its create, and `available` on a `volume.detach.end`. On a
+resize, a retype, and a transfer it books `in-use` when the world holds it
+attached and `available` otherwise. A floating IP, an image, and a load balancer
+are `active` from their create to their delete.
 
 The size is the simulator's own view of the resource, written as JSON numbers
 that carry every digit. An instance holds `vcpus`, `ram_gb` (the reported memory
@@ -684,9 +691,9 @@ not read, and one that leaves a member it does read unstated. The last of the
 three is the one nothing else would catch, because JSON leaves an absent member
 at its zero value: an oracle without its sizes would be compared, and every
 `time_gauge` dimension of every priced resource would come out as a difference
-the engine did not cause. This build is at format 4, which books a resize from
-its `finish_resize` and its confirm or revert, so a file an earlier build wrote
-at format 3 is refused rather than compared.
+the engine did not cause. This build is at format 5, which books the attach
+and the detach of a volume, so a file an earlier build wrote at format 4 is
+refused rather than compared.
 
 ## The fault switches
 
@@ -863,10 +870,10 @@ being one request per step.
 
 ## What a month renders
 
-Seed 1 over `2026-07` renders 15741 notifications, 1812 of them billable. Nine
-of the other 13929 are the unsized `image.create`, one per image: two per
+Seed 1 over `2026-07` renders 15741 notifications, 2201 of them billable. Nine
+of the other 13540 are the unsized `image.create`, one per image: two per
 classic project, one per Gardener tenant, and one for the CI tenant. The
-remaining 13920 are the noise catalogue. The month carries 87 distinct
+remaining 13531 are the noise catalogue. The month carries 87 distinct
 `event_type` values. The shape of a month is the seed's alone, so the counts
 below hold on every cloud. They are those of a run with every fault switch off.
 What each switch changes about them is on
@@ -893,9 +900,7 @@ sends before a delete.
 | `compute.instance.shutdown.start` | 659 |
 | `compute.instance.shutdown.end` | 659 |
 | `volume.attach.start` | 203 |
-| `volume.attach.end` | 203 |
 | `volume.detach.start` | 186 |
-| `volume.detach.end` | 186 |
 | `volume.create.start` | 169 |
 | `identity.authenticate` | 158 |
 | `volume.delete.start` | 146 |
