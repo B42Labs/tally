@@ -90,11 +90,13 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 
    On a machine whose Go is older than the `toolchain` line of `go.mod`, the
    `go` probe is the first Go command inside the clone, and that Go downloads
-   the toolchain there. `go: downloading go1.27.1 (<os>/<arch>)` then stands on
-   a line of its own immediately above
-   `ok       go              go1.27.1, at or above the go 1.26.0 of go.mod`,
-   with your own platform in place of `<os>/<arch>`. The download is where that
-   probe's time goes. A Go already at go1.27.1 prints no such line.
+   the toolchain there. `go: downloading go<toolchain> (<os>/<arch>)` then
+   stands on a line of its own immediately above
+   `ok       go              go<toolchain>, at or above the go <go> of go.mod`.
+   Here `<toolchain>` is the version on the `toolchain` line of `go.mod`, `<go>`
+   the version on its `go` line, and `<os>/<arch>` your own platform. The
+   download is where that probe's time goes. A Go already at that toolchain
+   prints no such line.
 
 ## Create the cluster and bring the stack up
 
