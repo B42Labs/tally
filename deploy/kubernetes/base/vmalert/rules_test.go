@@ -58,6 +58,10 @@ const (
 	// The resources the projection still holds. A deleted one keeps its row
 	// under state deleted.
 	liveResourceSeries = `tally_current_resources{state!="deleted"}`
+	// The drift rule and the corrections it sums: every action but the
+	// refreshes, which only a sync delivers and no lost event explains.
+	driftAlert    = "TallyReconciliationDriftHigh"
+	driftSelector = `tally_sync_resources_reconciled_total{action!="refreshed"}`
 )
 
 // alerts is the rule set in the order rules.yaml carries it, without the one
@@ -416,6 +420,29 @@ func TestTheAnomalyRuleReadsARecordedSeries(t *testing.T) {
 	if want := "count(" + liveResourceSeries + ")"; !strings.Contains(coverage.Expr, want) {
 		t.Errorf("%s does not pair its absent() with %s, so it fires on a cluster that has not reconciled yet or holds only deleted resources rather than on a stalled write path:\n%s",
 			coverageAlert, want, coverage.Expr)
+	}
+}
+
+// TestTheDriftRuleLeavesRefreshesOut pins what the drift rule sums. A refreshed
+// correction is the listener and pool counts of a load balancer, which no
+// notification carries and only a sync delivers, so every load balancer that
+// gains a listener adds one. Summed with the rest, the rule fires on routine
+// work, and an operator who learns to ignore it misses the drift it is for.
+func TestTheDriftRuleLeavesRefreshesOut(t *testing.T) {
+	var drift *rule
+	all := alertRules(t)
+	for i := range all {
+		if all[i].Alert == driftAlert {
+			drift = &all[i]
+		}
+	}
+
+	if drift == nil {
+		t.Fatalf("%s carries no %s", rulesFile, driftAlert)
+	}
+	if !strings.Contains(drift.Expr, driftSelector) {
+		t.Errorf("%s does not sum %s, so it counts the refreshes a sync delivers as drift:\n%s",
+			driftAlert, driftSelector, drift.Expr)
 	}
 }
 

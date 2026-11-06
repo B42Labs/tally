@@ -141,6 +141,9 @@ collector events in the last 24 hours has produced none for an hour, and
 says what to do about it. It sits beside
 `TallySyncErrors`, `TallySyncStale` and `TallyReconciliationDriftHigh` in
 [the alerting rules](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/rules.yaml).
+`TallyReconciliationDriftHigh` reads every action of
+`tally_sync_resources_reconciled_total` but `refreshed`, because a refresh is
+a value only a sync delivers and no sign of a lost event.
 
 A correction can also come at the wrong moment. A delete found by absence can
 race its own notification: a volume, floating IP, image or load balancer whose

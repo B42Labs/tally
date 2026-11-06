@@ -49,8 +49,11 @@ groups:
           summary: "No completed reconciliation run for {{ $labels.cloud }} in 30m"
           runbook: https://b42labs.github.io/tally/how-to/alerts/TallySyncStale
 
+      # A refreshed correction is the listener and pool counts of a load
+      # balancer, which only a sync delivers. It is no missed event, so the
+      # drift sum leaves it out.
       - alert: TallyReconciliationDriftHigh
-        expr: sum by (cloud) (increase(tally_sync_resources_reconciled_total[6h])) > 50
+        expr: sum by (cloud) (increase(tally_sync_resources_reconciled_total{action!="refreshed"}[6h])) > 50
         labels:
           severity: warning
         annotations:

@@ -1,7 +1,7 @@
 {
   "uid": "tally-reconciliation-drift",
   "title": "Tally / Reconciliation Drift",
-  "description": "What reconciliation changed against the cloud's own inventory. Anything but an updated resource means the event stream and the cloud had drifted apart.",
+  "description": "What reconciliation changed against the cloud's own inventory. Anything but an updated or refreshed resource means the event stream and the cloud had drifted apart.",
   "tags": ["tally"],
   "editable": true,
   "schemaVersion": 39,
@@ -223,7 +223,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "Non-zero `created`/`deleted` here = collectors missed events → investigate before period finalization\n"
+        "content": "Non-zero `created`/`deleted` here = collectors missed events → investigate before period finalization\n\nA `refreshed` count is the listener and pool counts of load balancers, which only a sync delivers; it is no missed event, and `TallyReconciliationDriftHigh` leaves it out.\n"
       }
     }
   ]
