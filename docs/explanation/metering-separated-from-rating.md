@@ -114,6 +114,7 @@ table below from seeded events today, while no collector emits such events
 | OpenStack | Volume | `volume.resize.end` | `size.size_gb` changes (100 to 200) |
 | OpenStack | Volume | `volume.retype` | `size.type` changes (ssd to hdd) |
 | OpenStack | Volume | `volume.transfer.accept.end` | `project_id` changes (ownership transfer: usage is attributed to the old project up to T and to the new one from T) |
+| OpenStack | Volume | `volume.attach.end` / `volume.detach.end` | `state` changes (available to in-use to available) |
 | Hetzner (Phase 4 design) | Server | `server.upgrade` / `server.downgrade` | `size` changes (server_type) |
 | STACKIT (Phase 4 design) | Server | `server.resize` | `size` changes (machine_type) |
 | Gardener (Phase 4 design) | Shoot | `shoot.worker.scale` | `size.worker_count` changes (3 to 5) |

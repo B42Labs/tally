@@ -100,7 +100,7 @@ back through the Reporting API. What such a month holds is in
    ```
 
    ```json
-   {"virtual_now":"2026-08-01T00:00:00Z","factor":744,"published":15657,"total":15741,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-08-01T00:00:00Z","factor":744,"published":15645,"total":15741,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
 3. Build a backlog on the durable queue and drain it again. The messages are
@@ -176,7 +176,7 @@ back through the Reporting API. What such a month holds is in
      out, and carries the three `octavia.loadbalancer.*.end` series among the
      others.
    - `tally_collector_skipped_total` climbs per type beside it, and it climbs
-     faster: 13929 of the month's 15741 notifications are ones the mapping claims
+     faster: 13540 of the month's 15741 notifications are ones the mapping claims
      nothing for.
    - Neither counter carries an `event_type="other"` series. The month's 87 types
      stay inside the bound of 100 label values the two of them share.
@@ -187,7 +187,7 @@ back through the Reporting API. What such a month holds is in
      Reporting API is not taking them.
 
 3. Hold the totals against the seed. Seed 1 over `2026-07` renders 15741
-   notifications, 1812 of them billable, and 87 distinct `event_type` values. The
+   notifications, 2201 of them billable, and 87 distinct `event_type` values. The
    shape of a month is the seed's alone, so those counts hold on every cloud.
    They are the counts of a run with every fault switch off.
 
