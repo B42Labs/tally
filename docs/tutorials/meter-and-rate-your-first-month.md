@@ -4,7 +4,7 @@ description: Point the metering engine at the month lesson 2 ingested, import a 
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Meter and rate your first month
 
@@ -21,7 +21,7 @@ This lesson takes about 5 minutes.
 ## Before you start
 
 - The state lesson 2 leaves: the kind cluster with the dev overlay, the
-  simulator stack holding its 84 notifications, the month of July 2026 in the
+  simulator stack holding its 96 notifications, the month of July 2026 in the
   reporting database, `tally-ca.crt` at the repository root, and that shell at
   the repository root.
 - `jq` on the path, the one lesson 1 asks for.
@@ -112,7 +112,7 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   2026-03 valid_from=2026-03-01T00:00:00Z currency=EUR imported_at=2026-10-05T08:20:14Z
+   2026-03 valid_from=2026-03-01T00:00:00Z currency=EUR imported_at=2026-11-06T12:10:39Z
    ```
 
    The version, `valid_from` and `currency=EUR` have to match. `imported_at` is
@@ -140,9 +140,9 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   run 108a9c8a-8ea5-4788-a869-f3aa796ca76a completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
-   warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
+   run df98413b-e49a-406b-ab96-b9c25e999d5c completed for 2026-07 with pricing model 2026-03
+   metered 869 candidates into 1303 usage records, 3440 rated records and 6 project statements
+   warnings recorded in runs.stats: 32 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
    ```
 
    The `metered` line and the warnings line have to match. The run id on the
@@ -156,7 +156,7 @@ both. Lesson 4 needs neither.
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=108a9c8a-8ea5-4788-a869-f3aa796ca76a
+   export RUN_ID=df98413b-e49a-406b-ab96-b9c25e999d5c
    ```
 
    Every command below reads `RUN_ID`.
@@ -183,7 +183,7 @@ both. Lesson 4 needs neither.
    non-zero:
 
    ```text
-   warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
+   warnings recorded in runs.stats: 32 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 6 unregistered projects
    ```
 
    Unpriced resource types, 2: `openstack/image` and `openstack/loadbalancer`,
@@ -194,23 +194,21 @@ both. Lesson 4 needs neither.
    Unregistered projects, 6: the six tenant ids of the month, because the
    project registry is empty. Each is billed standalone under its id. The ids
    stand with their resource counts in the `unregistered_projects` list below,
-   at 309, 16, 447, 15, 16 and 16 resources. The billing track's registration
+   at 319, 15, 451, 15, 16 and 17 resources. The billing track's registration
    lesson fills the registry, and
    [register simulated projects](/how-to/simulator/register-simulated-projects)
    is the how-to behind it.
 
-   Metering warnings, 38: every one of them is `history_starts_without_create`,
+   Metering warnings, 32: every one of them is `history_starts_without_create`,
    a resource whose stored history begins with a later transition because its
-   create is among the 84 notifications the simulator holds back. They are 28
-   instances, 9 volumes and 1 floating IP. 23 of the instances are CI runners
-   of the CI tenant `10e287d5788957a2a331cabd1b5dccdf`, 3 are workers of the
-   Gardener tenant `005be5adeef3d87e280d03d9d57c38b4`, 1 is a worker of the
-   Gardener tenant `e31f9083a7e5ee15071a3bd53cb2bac7` and 1 is an instance of
-   the classic project `d5a8024946ddf673277b9e2490643a2c`. The 9 volumes belong
-   to `005be5adeef3d87e280d03d9d57c38b4` and the floating IP to
-   `e31f9083a7e5ee15071a3bd53cb2bac7`. These counts and these ids are the
+   create is among the 96 notifications the simulator holds back. They are 25
+   instances and 7 volumes. 20 of the instances are CI runners of the CI
+   tenant `10e287d5788957a2a331cabd1b5dccdf`, 4 are workers of the Gardener
+   tenant `005be5adeef3d87e280d03d9d57c38b4` and 1 is a worker of the Gardener
+   tenant `e31f9083a7e5ee15071a3bd53cb2bac7`. The 7 volumes belong to
+   `005be5adeef3d87e280d03d9d57c38b4`. These counts and these ids are the
    seed's and have to match. The billing track's correction lesson settles the
-   38 once the held share is released.
+   32 once the held share is released.
 
    The other four classes read 0: no counter source failed, no project was
    claimed twice, no kickback was dropped and no usage field was unreadable. A
@@ -226,7 +224,7 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   run 108a9c8a-8ea5-4788-a869-f3aa796ca76a exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07
+   run df98413b-e49a-406b-ab96-b9c25e999d5c exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07
    wrote run.json and 6 statements
    wrote kickbacks.json with 0 kickbacks
    ```
@@ -257,7 +255,7 @@ both. Lesson 4 needs neither.
    the tenant id joined by a slash, escaped, which is where the `%2F` comes
    from.
 
-3. Read the run's stats off the index, with the 38 metering warnings counted
+3. Read the run's stats off the index, with the 32 metering warnings counted
    by resource type:
 
    ```sh
@@ -278,42 +276,37 @@ both. Lesson 4 needs neither.
          "resource_type": "loadbalancer"
        }
      ],
-     "candidates": 867,
+     "candidates": 869,
      "statements": 6,
-     "snapshot_at": "2026-10-05T08:20:15.195541Z",
-     "rated_records": 3081,
-     "usage_records": 940,
+     "snapshot_at": "2026-11-06T12:10:44.147589Z",
+     "rated_records": 3440,
+     "usage_records": 1303,
      "metering_warnings": [
        {
          "code": "history_starts_without_create",
-         "resource_type": "floating_ip",
-         "count": 1
-       },
-       {
-         "code": "history_starts_without_create",
          "resource_type": "instance",
-         "count": 28
+         "count": 25
        },
        {
          "code": "history_starts_without_create",
          "resource_type": "volume",
-         "count": 9
+         "count": 7
        }
      ],
      "unregistered_projects": [
        {
          "cloud": "os-sim",
-         "resources": 309,
+         "resources": 319,
          "project_id": "005be5adeef3d87e280d03d9d57c38b4"
        },
        {
          "cloud": "os-sim",
-         "resources": 16,
+         "resources": 15,
          "project_id": "018504a6cc10019a40e3f9eef4dae529"
        },
        {
          "cloud": "os-sim",
-         "resources": 447,
+         "resources": 451,
          "project_id": "10e287d5788957a2a331cabd1b5dccdf"
        },
        {
@@ -328,14 +321,14 @@ both. Lesson 4 needs neither.
        },
        {
          "cloud": "os-sim",
-         "resources": 16,
+         "resources": 17,
          "project_id": "e31f9083a7e5ee15071a3bd53cb2bac7"
        }
      ]
    }
    ```
 
-   The three lists are the warnings line as lists: the 38 metering warnings
+   The three lists are the warnings line as lists: the 32 metering warnings
    counted by resource type, the 2 unpriced resource types and the 6
    unregistered projects. The four counts beside them are the `metered` line
    of the run. `snapshot_at` is your own, the instant the run opened its
@@ -364,19 +357,19 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   005be5adeef3d87e280d03d9d57c38b4	3661.32	EUR
-   018504a6cc10019a40e3f9eef4dae529	876.63	EUR
-   10e287d5788957a2a331cabd1b5dccdf	698.29	EUR
-   34e991db9fc6466f8ca69b43f70fce65	651.63	EUR
-   d5a8024946ddf673277b9e2490643a2c	905.10	EUR
-   e31f9083a7e5ee15071a3bd53cb2bac7	651.24	EUR
+   005be5adeef3d87e280d03d9d57c38b4	3476.13	EUR
+   018504a6cc10019a40e3f9eef4dae529	879.52	EUR
+   10e287d5788957a2a331cabd1b5dccdf	527.82	EUR
+   34e991db9fc6466f8ca69b43f70fce65	672.39	EUR
+   d5a8024946ddf673277b9e2490643a2c	1165.57	EUR
+   e31f9083a7e5ee15071a3bd53cb2bac7	653.61	EUR
    ```
 
    The six totals have to match: they are the seed's usage rated at the model's
-   prices. The largest is `3661.32` for `005be5adeef3d87e280d03d9d57c38b4`, one
+   prices. The largest is `3476.13` for `005be5adeef3d87e280d03d9d57c38b4`, one
    of the two Gardener tenants, and the reads below open that statement. `jq`
    1.7 and later print the amounts as the file carries them, while `jq` 1.6
-   re-renders `905.10` as `905.1`.
+   drops a trailing zero, which none of these six totals has.
 
 2. Count its line items:
 
@@ -385,11 +378,11 @@ both. Lesson 4 needs neither.
    ```
 
    ```text
-   309
+   319
    ```
 
    The count has to match. There is one line item per resource the project is
-   billed for: 169 instances, 137 volumes and 3 floating IPs on this statement.
+   billed for: 169 instances, 146 volumes and 4 floating IPs on this statement.
    Images and load balancers carry no line item at all, because the model
    prices neither.
 
@@ -445,7 +438,7 @@ both. Lesson 4 needs neither.
      "periods": [
        {
          "state": "active",
-         "hours": 12.00,
+         "hours": 545.00,
          "usage": {
            "disk_gb": 0.0000,
            "egress_gb": 72.4533,
@@ -455,14 +448,14 @@ both. Lesson 4 needs neither.
          "cost": {
            "disk_gb": 0.00,
            "egress_gb": 6.52,
-           "ram_gb": 0.48,
-           "total": 7.96,
-           "vcpus": 0.96
+           "ram_gb": 21.80,
+           "total": 71.92,
+           "vcpus": 43.60
          },
          "state_modifier": 1.0000
        }
      ],
-     "total": 7.96
+     "total": 71.92
    }
    ```
 
@@ -482,7 +475,7 @@ both. Lesson 4 needs neither.
 
    ```json
    {
-     "total": 3661.32,
+     "total": 3476.13,
      "currency": "EUR"
    }
    ```

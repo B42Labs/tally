@@ -90,7 +90,7 @@ This lesson takes about 5 minutes.
    The names have to match: the three containers, the network
    `tally-simulator_default` and the volume `tally-simulator_outbox`. The order
    the `Stopping` and `Stopped` lines arrive in is your own. With the simulator
-   container the 84 notifications it was holding are discarded: no release was
+   container the 96 notifications it was holding are discarded: no release was
    sent, and the held share exists nowhere else. The last line removes
    `deploy/compose/.env`, the file with the ingest credential, and the
    credential itself stays in the reporting database until the cluster goes in

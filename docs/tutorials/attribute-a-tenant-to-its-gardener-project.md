@@ -4,7 +4,7 @@ description: Register the two Gardener projects and the tenants their shoots run
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Attribute a tenant to its Gardener project
 
@@ -78,17 +78,17 @@ the same. Both are cured by
    ```json
    {
      "cloud": "os-sim",
-     "created_at": "2026-09-07T21:28:08.425664Z",
+     "created_at": "2026-11-06T12:40:52.906832Z",
      "external_id": "005be5adeef3d87e280d03d9d57c38b4",
-     "id": "e9e6a14a-14c0-4fa6-95b2-6b284c873f0d",
+     "id": "c85f3a21-78da-4845-93c3-78d80f3dcc5b",
      "metadata": {},
      "name": "Infrastructure tenant of alpha",
      "platform": "openstack"
    }
    ```
 
-   This is the tenant with 309 resources and the largest statement of the
-   list-price run, 3661.32. It is `alpha`'s tenant because `alpha` runs two
+   This is the tenant with 319 resources and the largest statement of the
+   list-price run, 3476.13. It is `alpha`'s tenant because `alpha` runs two
    shoots all month while `beta` runs one shoot for about two weeks:
    [the Gardener projects](/explanation/the-simulated-openstack-world#the-gardener-projects).
 
@@ -118,9 +118,9 @@ the same. Both are cured by
    ```
 
    ```json
-   {"id":"75b72e57-da37-48db-adb8-fe00ac3f812a","cloud":"os-sim","external_id":"e31f9083a7e5ee15071a3bd53cb2bac7","name":"Infrastructure tenant of beta"}
-   {"id":"0fec01ef-dc9b-4a2e-9545-10b8ed64f77f","cloud":"garden-sim","external_id":"alpha","name":"Gardener project alpha"}
-   {"id":"c86423ed-e394-44a4-8e07-136fdd50e7dc","cloud":"garden-sim","external_id":"beta","name":"Gardener project beta"}
+   {"id":"1a3f66e8-1e2d-481c-9000-e2a2afbbe284","cloud":"os-sim","external_id":"e31f9083a7e5ee15071a3bd53cb2bac7","name":"Infrastructure tenant of beta"}
+   {"id":"84ea3bb8-0b84-4875-8976-1b7dd5c61040","cloud":"garden-sim","external_id":"alpha","name":"Gardener project alpha"}
+   {"id":"9b9e4909-504a-47d9-a802-d3f8b6d582b9","cloud":"garden-sim","external_id":"beta","name":"Gardener project beta"}
    ```
 
    `cloud`, `external_id` and `name` have to match on every line, and the ids
@@ -149,7 +149,7 @@ the same. Both are cured by
    ```
 
    ```text
-   e9e6a14a-14c0-4fa6-95b2-6b284c873f0d 75b72e57-da37-48db-adb8-fe00ac3f812a 0fec01ef-dc9b-4a2e-9545-10b8ed64f77f c86423ed-e394-44a4-8e07-136fdd50e7dc
+   c85f3a21-78da-4845-93c3-78d80f3dcc5b 1a3f66e8-1e2d-481c-9000-e2a2afbbe284 84ea3bb8-0b84-4875-8976-1b7dd5c61040 9b9e4909-504a-47d9-a802-d3f8b6d582b9
    ```
 
    The four ids are your own, and they are the ids the calls above printed, in
@@ -175,12 +175,12 @@ the same. Both are cured by
 
    ```json
    {
-     "created_at": "2026-09-07T21:28:08.615857Z",
-     "id": "700508b3-e5e4-42ce-be04-970febb813f9",
+     "created_at": "2026-11-06T12:41:11.489366Z",
+     "id": "ab09e7fa-f0a1-4286-83c0-0c813634a3f5",
      "metadata": {},
      "relation_type": "infrastructure_tenant",
-     "source_id": "0fec01ef-dc9b-4a2e-9545-10b8ed64f77f",
-     "target_id": "e9e6a14a-14c0-4fa6-95b2-6b284c873f0d",
+     "source_id": "84ea3bb8-0b84-4875-8976-1b7dd5c61040",
+     "target_id": "c85f3a21-78da-4845-93c3-78d80f3dcc5b",
      "valid_from": "2026-07-01T00:00:00Z",
      "valid_to": null
    }
@@ -217,7 +217,7 @@ the same. Both are cured by
    ```
 
    ```json
-   {"id":"cc791285-89f8-4c22-ba4e-7ee34b701853","relation_type":"infrastructure_tenant"}
+   {"id":"f09f7d4e-fdb0-4748-9475-c73c8407818a","relation_type":"infrastructure_tenant"}
    ```
 
    `relation_type` has to match, and the id is your own.
@@ -281,11 +281,11 @@ the same. Both are cured by
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 completed for 2026-07 with pricing model 2026-03
+   metered 869 candidates into 1303 usage records, 3440 rated records and 6 project statements
    applied 5 pricing adjustments
-   superseded run d49e7469-4052-45e2-a44d-0936e29b0906
-   warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
+   superseded run 87f1eea6-c4ae-408b-a1c7-662c736246b6
+   warnings recorded in runs.stats: 32 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
    ```
 
    The `metered` line, `applied 5 pricing adjustments` and the warnings line
@@ -301,7 +301,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=923dc7cb-09da-44bf-9203-18140e0ac759
+   export RUN_ID=2eb6724e-4139-4337-bc85-b7a04f07a1a2
    ```
 
    Every command below reads `RUN_ID`.
@@ -334,7 +334,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-attributed
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-attributed
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    ```
@@ -380,18 +380,18 @@ the same. Both are cured by
          "relation_type": "infrastructure_tenant",
          "project_id": "005be5adeef3d87e280d03d9d57c38b4",
          "platform": "openstack",
-         "items": 309,
-         "total": 3661.32
+         "items": 319,
+         "total": 3476.13
        }
      ],
-     "total": 3661.32
+     "total": 3476.13
    }
    ```
 
    `alpha` has 0 line items of its own and one related cost, of type
    `infrastructure_tenant`, for `005be5adeef3d87e280d03d9d57c38b4` on platform
-   `openstack`, with 309 items and the total 3661.32, and its statement total is
-   3661.32. All of it has to match. The 309 line items are the ones Meter and
+   `openstack`, with 319 items and the total 3476.13, and its statement total is
+   3476.13. All of it has to match. The 319 line items are the ones Meter and
    rate your first month read on the tenant's own statement, moved whole under
    `related_costs`.
 
@@ -404,16 +404,16 @@ the same. Both are cured by
    ```
 
    ```text
-   garden-sim/alpha	3661.32
-   garden-sim/beta	651.24
-   os-sim/018504a6cc10019a40e3f9eef4dae529	788.97
-   os-sim/10e287d5788957a2a331cabd1b5dccdf	593.55
-   os-sim/34e991db9fc6466f8ca69b43f70fce65	586.47
-   os-sim/d5a8024946ddf673277b9e2490643a2c	814.59
+   garden-sim/alpha	3476.13
+   garden-sim/beta	653.61
+   os-sim/018504a6cc10019a40e3f9eef4dae529	791.57
+   os-sim/10e287d5788957a2a331cabd1b5dccdf	448.65
+   os-sim/34e991db9fc6466f8ca69b43f70fce65	605.15
+   os-sim/d5a8024946ddf673277b9e2490643a2c	1049.01
    ```
 
-   Six statements: the two Gardener projects at their tenants' totals, 3661.32
-   and 651.24, and the four tenants at the totals the two lessons before
+   Six statements: the two Gardener projects at their tenants' totals, 3476.13
+   and 653.61, and the four tenants at the totals the two lessons before
    produced. All six have to match.
 
 2. Sum the statements of the reseller run and of this one:
@@ -423,7 +423,7 @@ the same. Both are cured by
    ```
 
    ```text
-   7096.14
+   7024.119999999999
    ```
 
    ```sh
@@ -431,10 +431,10 @@ the same. Both are cured by
    ```
 
    ```text
-   7096.140000000001
+   7024.119999999999
    ```
 
-   The two sums are equal. The trailing digits of the second are `jq`'s
+   The two sums are equal. The trailing digits of both are `jq`'s
    floating-point rendering of the same sum, which it adds in double precision.
    Attribution moves costs from one statement to another and adds none.
 

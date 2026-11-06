@@ -4,7 +4,7 @@ description: Register three projects of the simulated cloud, group them under a 
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Discount a customer group
 
@@ -25,7 +25,7 @@ This lesson takes about 5 minutes.
   leaves, which is the state Meter and rate your first month leaves:
 
   - the kind cluster `tally` with the dev overlay;
-  - the compose stack with the simulator holding its 84 notifications, so
+  - the compose stack with the simulator holding its 96 notifications, so
     `GET /clock` on `http://127.0.0.1:8091/clock` answers `holding` true;
   - the reporting database holding the month of July 2026 minus the held share,
     with an empty project registry;
@@ -83,9 +83,9 @@ the same. Both are cured by
    ```json
    {
      "cloud": "os-sim",
-     "created_at": "2026-09-07T21:26:32.361891Z",
+     "created_at": "2026-11-06T12:34:42.202665Z",
      "external_id": "018504a6cc10019a40e3f9eef4dae529",
-     "id": "8e4e84bd-e6fb-4c38-a2eb-cde386f94202",
+     "id": "acc4f936-7297-4ae9-b347-875b5200aef3",
      "metadata": {},
      "name": "Acme team 1",
      "platform": "openstack"
@@ -121,8 +121,8 @@ the same. Both are cured by
    ```
 
    ```json
-   {"id":"1bb9b4d0-b256-4e78-bc0c-385787c23495","external_id":"34e991db9fc6466f8ca69b43f70fce65","name":"Acme team 2"}
-   {"id":"7e35789b-36b1-4f90-b5fb-f924d79ebfa6","external_id":"d5a8024946ddf673277b9e2490643a2c","name":"Acme team 3"}
+   {"id":"578f1293-965a-40c0-9192-2c55c5043573","external_id":"34e991db9fc6466f8ca69b43f70fce65","name":"Acme team 2"}
+   {"id":"49631a10-0803-4c38-8ee1-460df919495d","external_id":"d5a8024946ddf673277b9e2490643a2c","name":"Acme team 3"}
    ```
 
    `external_id` and `name` have to match on both lines, and the ids are your
@@ -139,7 +139,7 @@ the same. Both are cured by
    ```
 
    ```text
-   8e4e84bd-e6fb-4c38-a2eb-cde386f94202 1bb9b4d0-b256-4e78-bc0c-385787c23495 7e35789b-36b1-4f90-b5fb-f924d79ebfa6
+   acc4f936-7297-4ae9-b347-875b5200aef3 578f1293-965a-40c0-9192-2c55c5043573 49631a10-0803-4c38-8ee1-460df919495d
    ```
 
    The three ids are your own, and they are the ids the calls above printed.
@@ -165,7 +165,7 @@ the same. Both are cured by
 
    ```text
    registered meta-project acme
-   13a5e981-edc2-4666-b22e-65e7696de02b
+   a97d1ae7-9a1c-4e60-b879-294d24d08198
    ```
 
    `registered meta-project acme` is the CLI's notice on stderr. The id went to
@@ -205,8 +205,8 @@ the same. Both are cured by
 
    ```json
    {
-     "created_at": "2026-09-07T21:26:57.706276Z",
-     "id": "8d9aaff5-56f2-43ba-8e04-6a73906136cf",
+     "created_at": "2026-11-06T12:35:01.252741Z",
+     "id": "82c2e130-afc0-4867-a595-557fe5b9bc3f",
      "metadata": {
        "pricing_adjustments": [
          {
@@ -218,8 +218,8 @@ the same. Both are cured by
        ]
      },
      "relation_type": "member_of",
-     "source_id": "8e4e84bd-e6fb-4c38-a2eb-cde386f94202",
-     "target_id": "13a5e981-edc2-4666-b22e-65e7696de02b",
+     "source_id": "acc4f936-7297-4ae9-b347-875b5200aef3",
+     "target_id": "a97d1ae7-9a1c-4e60-b879-294d24d08198",
      "valid_from": "2026-07-01T00:00:00Z",
      "valid_to": null
    }
@@ -283,8 +283,8 @@ the same. Both are cured by
    ```
 
    ```json
-   {"id":"071e2e14-d251-4bd2-a229-3f15ec97eacf","source_id":"1bb9b4d0-b256-4e78-bc0c-385787c23495","relation_type":"member_of"}
-   {"id":"14b925a3-08e4-4e27-ace8-5ebb3837747b","source_id":"7e35789b-36b1-4f90-b5fb-f924d79ebfa6","relation_type":"member_of"}
+   {"id":"484e9b6c-dcef-4da2-beed-ad35ee3908de","source_id":"578f1293-965a-40c0-9192-2c55c5043573","relation_type":"member_of"}
+   {"id":"3d86c5f0-b65d-4085-832f-058bdfa28927","source_id":"49631a10-0803-4c38-8ee1-460df919495d","relation_type":"member_of"}
    ```
 
    `relation_type` has to match on both lines. The ids are your own, and
@@ -313,19 +313,19 @@ the same. Both are cured by
    ```
 
    ```text
-   run 3935cd7f-204e-411a-baee-c8fa395abdd9 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
+   run 02576bfc-d28f-47fd-8153-e39bfa14e2be completed for 2026-07 with pricing model 2026-03
+   metered 869 candidates into 1303 usage records, 3440 rated records and 6 project statements
    applied 3 pricing adjustments
-   superseded run 108a9c8a-8ea5-4788-a869-f3aa796ca76a
-   warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 3 unregistered projects
+   superseded run df98413b-e49a-406b-ab96-b9c25e999d5c
+   warnings recorded in runs.stats: 32 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 3 unregistered projects
    ```
 
    The `metered` line, `applied 3 pricing adjustments` and the warnings line
    have to match. Both run ids are your own, and the superseded one is the run
    Meter and rate your first month made.
 
-   The `metered` counts are the ones that run printed, 867 candidates, 940
-   usage records, 3081 rated records and 6 statements, because nothing in the
+   The `metered` counts are the ones that run printed, 869 candidates, 1303
+   usage records, 3440 rated records and 6 statements, because nothing in the
    month changed. An adjustment is a record of its own kind beside the rated
    records, which is what `applied 3` counts, one line per member statement.
    The warnings line now ends in `3 unregistered projects`: the three
@@ -338,7 +338,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=3935cd7f-204e-411a-baee-c8fa395abdd9
+   export RUN_ID=02576bfc-d28f-47fd-8153-e39bfa14e2be
    ```
 
    Every command below reads `RUN_ID`.
@@ -367,7 +367,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run 3935cd7f-204e-411a-baee-c8fa395abdd9 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-group
+   run 02576bfc-d28f-47fd-8153-e39bfa14e2be exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-group
    wrote run.json and 6 statements
    wrote kickbacks.json with 0 kickbacks
    wrote 1 rollup documents over member_of
@@ -388,30 +388,30 @@ the same. Both are cured by
 
    ```json
    {
-     "base_cost": 876.63,
+     "base_cost": 879.52,
      "adjustments": [
        {
          "type": "project_discount",
          "relation_type": "member_of",
          "relation_target": "acme",
-         "relation_id": "8d9aaff5-56f2-43ba-8e04-6a73906136cf",
+         "relation_id": "82c2e130-afc0-4867-a595-557fe5b9bc3f",
          "scope": "all",
          "description": "Acme group discount",
          "rate": 0.100000,
-         "base": 876.63,
-         "amount": -87.66
+         "base": 879.52,
+         "amount": -87.95
        }
      ],
-     "net_cost": 788.97,
-     "total": 788.97
+     "net_cost": 791.57,
+     "total": 791.57
    }
    ```
 
-   `base_cost` 876.63 is the total the same statement carried at list price.
+   `base_cost` 879.52 is the total the same statement carried at list price.
    The one `adjustments` line has `type` `project_discount`, `relation_type`
    `member_of`, `relation_target` `acme`, `scope` `all`, `rate` 0.100000,
-   `base` 876.63 and `amount` -87.66, the base times the rate rounded once to
-   two places. `net_cost` 788.97 is the base plus the signed amount, and
+   `base` 879.52 and `amount` -87.95, the base times the rate rounded once to
+   two places. `net_cost` 791.57 is the base plus the signed amount, and
    `total` is the net. All of these have to match. `relation_id` is your own,
    the id of the membership this line traces back to. The amount is rounded the
    way every other amount is:
@@ -426,13 +426,13 @@ the same. Both are cured by
    ```json
    {
      "base_cost": null,
-     "total": 698.29
+     "total": 527.82
    }
    ```
 
    This is the CI tenant, which no membership reaches, so its statement carries
    none of the four members `base_cost`, `adjustments`, `net_cost` and
-   `kickback_total`, and `jq` prints an absent member as null. Its total 698.29
+   `kickback_total`, and `jq` prints an absent member as null. Its total 527.82
    has to match and is unchanged from the list-price run.
 
 ## Read the rollup
@@ -480,32 +480,32 @@ the same. Both are cured by
          "file": "statement-os-sim%2F018504a6cc10019a40e3f9eef4dae529.json",
          "cloud": "os-sim",
          "project_id": "018504a6cc10019a40e3f9eef4dae529",
-         "total": 788.97,
+         "total": 791.57,
          "currency": "EUR"
        },
        {
          "file": "statement-os-sim%2F34e991db9fc6466f8ca69b43f70fce65.json",
          "cloud": "os-sim",
          "project_id": "34e991db9fc6466f8ca69b43f70fce65",
-         "total": 586.47,
+         "total": 605.15,
          "currency": "EUR"
        },
        {
          "file": "statement-os-sim%2Fd5a8024946ddf673277b9e2490643a2c.json",
          "cloud": "os-sim",
          "project_id": "d5a8024946ddf673277b9e2490643a2c",
-         "total": 814.59,
+         "total": 1049.01,
          "currency": "EUR"
        }
      ],
-     "total": 2190.03,
+     "total": 2445.73,
      "currency": "EUR"
    }
    ```
 
    `project_id` `acme`, `platform` `meta`, `relation_type` `member_of`, `kind`
-   `regular`, the three `members` with their files and their totals 788.97,
-   586.47 and 814.59, and the `total` 2190.03, their sum, have to match. The
+   `regular`, the three `members` with their files and their totals 791.57,
+   605.15 and 1049.01, and the `total` 2445.73, their sum, have to match. The
    rollup is read from the registry at export time and sums the statements
    without changing them: [rollup](/reference/formats/exports#rollup).
 
@@ -524,7 +524,7 @@ the same. Both are cured by
          "cloud": "meta",
          "project_id": "acme",
          "members": 3,
-         "total": 2190.03,
+         "total": 2445.73,
          "currency": "EUR"
        }
      ]

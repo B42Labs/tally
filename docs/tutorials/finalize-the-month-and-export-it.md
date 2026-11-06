@@ -4,7 +4,7 @@ description: Close July 2026 on the attributed run, see that the month cannot be
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Finalize the month and export it
 
@@ -16,7 +16,7 @@ CSV.
 At the end the engine database holds `2026-07` finalized on `RUN_ID`, three new
 export directories stand under `~/tally-tutorial/` (`2026-07-final`,
 `2026-07-final-again` and `2026-07-final-csv`), and the simulator still holds
-its 84 notifications for the lesson after this one.
+its 96 notifications for the lesson after this one.
 
 This lesson takes about 5 minutes.
 
@@ -61,7 +61,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 finalized, period 2026-07 closed
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 finalized, period 2026-07 closed
    ```
 
    The line has to match with your own run id in it, the id `RUN_ID` carries.
@@ -98,13 +98,14 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   2026-07 finalized finalized_run=923dc7cb-09da-44bf-9203-18140e0ac759 finalized_at=2026-10-05T08:22:09Z
+   2026-07 finalized finalized_run=2eb6724e-4139-4337-bc85-b7a04f07a1a2 finalized_at=2026-11-06T12:44:32Z
+   2026-10 grace
    ```
 
    The first line has to read `2026-07 finalized`, and its `finalized_run` has
    to be the id in `RUN_ID`. `finalized_at` is your own.
 
-   The `2026-08` line is the tick's: the cluster's hourly `tally-engine`
+   The `2026-10` line is the tick's: the cluster's hourly `tally-engine`
    scheduler opens the months that have ended and moves them into their grace
    window. Its status is your own, and the line is absent on a machine whose
    cluster has not passed an hour mark yet.
@@ -118,7 +119,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   Error: the billing period is finalized: 2026-07 was closed by run 923dc7cb-09da-44bf-9203-18140e0ac759, and a finalized period is changed with tally-engine correct --period 2026-07
+   Error: the billing period is finalized: 2026-07 was closed by run 2eb6724e-4139-4337-bc85-b7a04f07a1a2, and a finalized period is changed with tally-engine correct --period 2026-07
    exit status 1
    ```
 
@@ -133,7 +134,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   Error: the run is not completed: run 923dc7cb-09da-44bf-9203-18140e0ac759 is finalized, and a period is closed over a completed run, which tally-engine run --period 2026-07 produces
+   Error: the run is not completed: run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 is finalized, and a period is closed over a completed run, which tally-engine run --period 2026-07 produces
    exit status 1
    ```
 
@@ -156,7 +157,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-final
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-final
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    wrote 1 rollup documents over member_of
@@ -173,7 +174,7 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```json
    {
-     "run_id": "923dc7cb-09da-44bf-9203-18140e0ac759",
+     "run_id": "2eb6724e-4139-4337-bc85-b7a04f07a1a2",
      "kind": "regular",
      "status": "finalized",
      "pricing_version": "2026-03",
@@ -193,7 +194,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-final-again
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-final-again
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    wrote 1 rollup documents over member_of
@@ -229,13 +230,13 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 exported for 2026-07 as csv into /Users/berendt/tally-tutorial/2026-07-final-csv
-   wrote rated.csv with 3081 rated records
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 exported for 2026-07 as csv into /Users/berendt/tally-tutorial/2026-07-final-csv
+   wrote rated.csv with 3440 rated records
    wrote kickbacks.csv with 1 kickbacks
    ```
 
-   `wrote rated.csv with 3081 rated records` and
-   `wrote kickbacks.csv with 1 kickbacks` have to match. 3081 is the rated
+   `wrote rated.csv with 3440 rated records` and
+   `wrote kickbacks.csv with 1 kickbacks` have to match. 3440 is the rated
    record count the `metered` line of every run of this track printed.
 
 2. List what the export wrote:
@@ -260,8 +261,8 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```text
    run_id,kind,corrects_run_id,period_from,period_to,cloud,platform,resource_type,resource_id,project_id,state,from_ts,to_ts,dimension,quantity,amount,currency
-   923dc7cb-09da-44bf-9203-18140e0ac759,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,os-sim,openstack,floating_ip,11327c4f-5563-4b70-9769-7ec877ff59b8,018504a6cc10019a40e3f9eef4dae529,active,2026-07-01T02:31:36Z,2026-07-22T01:55:52Z,count,1.0000,2.52,EUR
-   923dc7cb-09da-44bf-9203-18140e0ac759,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,os-sim,openstack,floating_ip,28b8f170-6b0c-474a-8b0d-a65b479c8e98,d5a8024946ddf673277b9e2490643a2c,active,2026-07-01T03:07:27Z,2026-08-01T00:00:00Z,count,1.0000,3.70,EUR
+   2eb6724e-4139-4337-bc85-b7a04f07a1a2,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,os-sim,openstack,floating_ip,11327c4f-5563-4b70-9769-7ec877ff59b8,018504a6cc10019a40e3f9eef4dae529,active,2026-07-01T02:31:36Z,2026-07-22T01:55:52Z,count,1.0000,2.52,EUR
+   2eb6724e-4139-4337-bc85-b7a04f07a1a2,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,os-sim,openstack,floating_ip,28b8f170-6b0c-474a-8b0d-a65b479c8e98,d5a8024946ddf673277b9e2490643a2c,active,2026-07-01T03:07:27Z,2026-08-01T00:00:00Z,count,1.0000,3.70,EUR
    ```
 
    The header has to match, and it is the column order of the table. There is
@@ -275,10 +276,10 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-       3082
+       3441
    ```
 
-   3082 has to match, the 3081 records and the header. The leading spaces are
+   3441 has to match, the 3440 records and the header. The leading spaces are
    how the `wc` of macOS pads its count.
 
 5. Count the rows of one tenant:
@@ -288,10 +289,10 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-        827
+       1172
    ```
 
-   827 has to match: the rows whose tenth column, `project_id`, is the tenant
+   1172 has to match: the rows whose tenth column, `project_id`, is the tenant
    of `alpha`. The table carries the tenant that owned each resource, and the
    attribution to `alpha` stands in the statements alone, which is why the JSON
    export has no statement for that tenant while the table has its rows.
@@ -304,7 +305,7 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```text
    run_id,kind,corrects_run_id,period_from,period_to,beneficiary,cloud,project_id,relation_id,scope,rate,base,amount,currency
-   923dc7cb-09da-44bf-9203-18140e0ac759,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,04489747-96ab-45c1-9654-1d02f8f3152f,all,0.100000,593.55,59.36,EUR
+   2eb6724e-4139-4337-bc85-b7a04f07a1a2,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,3d74d601-5029-4e07-b82f-1c55999a54ca,all,0.100000,448.65,44.87,EUR
    ```
 
    The header has to match, and there is one row, the `cloudhouse` kickback of
@@ -330,7 +331,7 @@ A connection error from any `go run` command means the cluster is not up, and
 ## Where to go next
 
 [Book the late events as a credit note](/tutorials/book-the-late-events-as-a-credit-note)
-releases the 84 notifications the simulator holds and books them as a
+releases the 96 notifications the simulator holds and books them as a
 correction of the month you just closed.
 
 It starts from the state this lesson leaves behind:
@@ -339,4 +340,4 @@ It starts from the state this lesson leaves behind:
 - `2026-07` finalized on `RUN_ID` in the engine database;
 - the three export directories `~/tally-tutorial/2026-07-final`,
   `2026-07-final-again` and `2026-07-final-csv`;
-- the simulator still holding its 84 notifications.
+- the simulator still holding its 96 notifications.

@@ -4,7 +4,7 @@ description: Register the CI tenant of the simulated cloud, create a partner, pu
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Pay a reseller a kickback
 
@@ -77,9 +77,9 @@ the same. Both are cured by
    ```json
    {
      "cloud": "os-sim",
-     "created_at": "2026-10-05T08:21:35.13925Z",
+     "created_at": "2026-11-06T12:37:48.214861Z",
      "external_id": "10e287d5788957a2a331cabd1b5dccdf",
-     "id": "2b3bcd7a-94c4-4f92-8414-c48baabab266",
+     "id": "3bd55959-bde3-4b5f-b0f0-283560d7b561",
      "metadata": {},
      "name": "ci",
      "platform": "openstack"
@@ -88,8 +88,8 @@ the same. Both are cured by
 
    This is [the CI tenant](/explanation/the-simulated-openstack-world#the-ci-tenant),
    which boots and deletes runners on every working day of the month. It
-   carries 447 resources, more than any other tenant of the month, and its
-   total in the list-price run is 698.29.
+   carries 451 resources, more than any other tenant of the month, and its
+   total in the list-price run is 527.82.
 
    `cloud` `os-sim`, `external_id`, `name` `ci`, `platform` `openstack` and
    `metadata` `{}` have to match. `id` and `created_at` are your own.
@@ -110,7 +110,7 @@ the same. Both are cured by
    ```
 
    ```text
-   2b3bcd7a-94c4-4f92-8414-c48baabab266
+   3bd55959-bde3-4b5f-b0f0-283560d7b561
    ```
 
    The id is your own, and it is the id the registration printed. This read is
@@ -130,7 +130,7 @@ the same. Both are cured by
 
    ```text
    registered partner cloudhouse
-   1b262c17-ad69-4471-9ef3-77de15f507ba
+   46bd7769-f518-422c-bfec-b6c91e3957d7
    ```
 
    `registered partner cloudhouse` is the CLI's notice on stderr. The id went
@@ -173,8 +173,8 @@ the same. Both are cured by
 
    ```json
    {
-     "created_at": "2026-10-05T08:21:35.316925Z",
-     "id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+     "created_at": "2026-11-06T12:38:04.078204Z",
+     "id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
      "metadata": {
        "pricing_adjustments": [
          {
@@ -192,8 +192,8 @@ the same. Both are cured by
        ]
      },
      "relation_type": "managed_by",
-     "source_id": "2b3bcd7a-94c4-4f92-8414-c48baabab266",
-     "target_id": "1b262c17-ad69-4471-9ef3-77de15f507ba",
+     "source_id": "3bd55959-bde3-4b5f-b0f0-283560d7b561",
+     "target_id": "46bd7769-f518-422c-bfec-b6c91e3957d7",
      "valid_from": "2026-07-01T00:00:00Z",
      "valid_to": null
    }
@@ -232,11 +232,11 @@ the same. Both are cured by
    ```
 
    ```text
-   run d49e7469-4052-45e2-a44d-0936e29b0906 completed for 2026-07 with pricing model 2026-03
-   metered 867 candidates into 940 usage records, 3081 rated records and 6 project statements
+   run 87f1eea6-c4ae-408b-a1c7-662c736246b6 completed for 2026-07 with pricing model 2026-03
+   metered 869 candidates into 1303 usage records, 3440 rated records and 6 project statements
    applied 5 pricing adjustments
-   superseded run 3935cd7f-204e-411a-baee-c8fa395abdd9
-   warnings recorded in runs.stats: 38 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 2 unregistered projects
+   superseded run 02576bfc-d28f-47fd-8153-e39bfa14e2be
+   warnings recorded in runs.stats: 32 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 2 unregistered projects
    ```
 
    The `metered` line, `applied 5 pricing adjustments` and the warnings line
@@ -252,7 +252,7 @@ the same. Both are cured by
 2. Put the id from the first line of your own output in place of this one:
 
    ```sh
-   export RUN_ID=d49e7469-4052-45e2-a44d-0936e29b0906
+   export RUN_ID=87f1eea6-c4ae-408b-a1c7-662c736246b6
    ```
 
    Every command below reads `RUN_ID`.
@@ -292,7 +292,7 @@ the same. Both are cured by
    ```
 
    ```text
-   run d49e7469-4052-45e2-a44d-0936e29b0906 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-reseller
+   run 87f1eea6-c4ae-408b-a1c7-662c736246b6 exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-reseller
    wrote run.json and 6 statements
    wrote kickbacks.json with 1 kickbacks
    ```
@@ -311,43 +311,43 @@ the same. Both are cured by
 
    ```json
    {
-     "base_cost": 698.29,
+     "base_cost": 527.82,
      "adjustments": [
        {
          "type": "discount",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+         "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
          "scope": "all",
          "description": "Cloudhouse end-customer discount",
          "rate": 0.150000,
-         "base": 698.29,
-         "amount": -104.74
+         "base": 527.82,
+         "amount": -79.17
        },
        {
          "type": "kickback",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+         "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
          "scope": "all",
          "description": "Cloudhouse commission",
          "rate": 0.100000,
-         "base": 593.55,
-         "amount": 59.36
+         "base": 448.65,
+         "amount": 44.87
        }
      ],
-     "net_cost": 593.55,
-     "kickback_total": 59.36,
-     "total": 593.55
+     "net_cost": 448.65,
+     "kickback_total": 44.87,
+     "total": 448.65
    }
    ```
 
-   `base_cost` 698.29 is the tenant's total at list price. The `discount` line
-   is computed on that base: 698.29 times 0.15, rounded once to two places, is
-   `amount` -104.74. `net_cost` 593.55 is the base plus that amount, and
+   `base_cost` 527.82 is the tenant's total at list price. The `discount` line
+   is computed on that base: 527.82 times 0.15, rounded once to two places, is
+   `amount` -79.17. `net_cost` 448.65 is the base plus that amount, and
    `total` is the net. The `kickback` line is computed on the running net:
-   `base` 593.55 times 0.10, rounded once, is `amount` 59.36, and it leaves the
-   net alone. `kickback_total` 59.36 stands beside `net_cost`, not inside it.
+   `base` 448.65 times 0.10, rounded once, is `amount` 44.87, and it leaves the
+   net alone. `kickback_total` 44.87 stands beside `net_cost`, not inside it.
 
    All of these have to match. The two `relation_id` values are your own, and
    both name the one relation. The two lines stand in the order the engine
@@ -384,7 +384,7 @@ the same. Both are cured by
 
    ```json
    {
-     "run_id": "d49e7469-4052-45e2-a44d-0936e29b0906",
+     "run_id": "87f1eea6-c4ae-408b-a1c7-662c736246b6",
      "kind": "regular",
      "corrects_run_id": null,
      "period_from": "2026-07-01T00:00:00Z",
@@ -393,17 +393,17 @@ the same. Both are cured by
        {
          "beneficiary": "cloudhouse",
          "currency": "EUR",
-         "kickback_total": 59.36,
+         "kickback_total": 44.87,
          "projects": 1,
          "breakdown": [
            {
              "cloud": "os-sim",
              "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-             "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+             "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
              "scope": "all",
              "rate": 0.100000,
-             "base": 593.55,
-             "amount": 59.36
+             "base": 448.65,
+             "amount": 44.87
            }
          ]
        }
@@ -412,10 +412,10 @@ the same. Both are cured by
    ```
 
    `kind` `regular`, the one beneficiary `cloudhouse` in `EUR`, its
-   `kickback_total` 59.36 equal to the statement's, `projects` 1 and the one
+   `kickback_total` 44.87 equal to the statement's, `projects` 1 and the one
    `breakdown` entry with its cloud `os-sim`, its project
    `10e287d5788957a2a331cabd1b5dccdf`, its relation id, its scope `all`, its
-   rate 0.100000, its base 593.55 and its amount 59.36 have to match. `run_id`
+   rate 0.100000, its base 448.65 and its amount 44.87 have to match. `run_id`
    and `relation_id` are your own.
 
    A month named alone reports the regular run that bills it. The document
@@ -429,7 +429,7 @@ the same. Both are cured by
 
    ```text
    run_id,kind,corrects_run_id,period_from,period_to,beneficiary,cloud,project_id,relation_id,scope,rate,base,amount,currency
-   d49e7469-4052-45e2-a44d-0936e29b0906,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,04489747-96ab-45c1-9654-1d02f8f3152f,all,0.100000,593.55,59.36,EUR
+   87f1eea6-c4ae-408b-a1c7-662c736246b6,regular,,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,cloudhouse,os-sim,10e287d5788957a2a331cabd1b5dccdf,3d74d601-5029-4e07-b82f-1c55999a54ca,all,0.100000,448.65,44.87,EUR
    ```
 
    The header has to match. There is one row per kickback record, and the ids
@@ -446,17 +446,17 @@ the same. Both are cured by
      {
        "beneficiary": "cloudhouse",
        "currency": "EUR",
-       "kickback_total": 59.36,
+       "kickback_total": 44.87,
        "projects": 1,
        "breakdown": [
          {
            "cloud": "os-sim",
            "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-           "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+           "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
            "scope": "all",
            "rate": 0.100000,
-           "base": 593.55,
-           "amount": 59.36
+           "base": 448.65,
+           "amount": 44.87
          }
        ]
      }
