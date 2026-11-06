@@ -27,14 +27,19 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
 - `git`, `kind`, `kubectl`, Go, `jq` and `curl` on the path, and `docker` with
   its `compose` plugin. No version is named here. The clone below carries
   `make check-tools`, which calls every one of them, prints what each answered
-  and what the Docker engine was given, and ends on the ones that are missing
-  or answering an error. The next section runs it, before `make up`: it touches
-  no cluster, and a tool that is not there is cheaper to find there than half
-  an hour into `make up`.
+  and what the Docker engine was given, and ends on the ones that are missing,
+  answering an error, or older than the repository needs. The next section
+  runs it, before `make up`: it touches no cluster, and a tool that is not
+  there is cheaper to find there than half an hour into `make up`.
 - The Go on the path has to satisfy the `go` line of `go.mod`, which is what
   `make check-tools` compares it against. That Go downloads the toolchain the
   `toolchain` line names on its first call inside the clone, which is the
   `make check-tools` of the next section.
+- The `kind` on the path has to be at least the release the `# kind-minimum:`
+  line of `deploy/kind/kind.yaml` names, which is what `make check-tools`
+  compares it against. An older kind creates the cluster and then fails the
+  first image load of `make up` minutes later with
+  `unknown containerd config version: 4`.
 - No kind cluster named `tally` on the machine. `kind get clusters` prints
   `No kind clusters found.` when there is none. If it prints `tally`, tear that
   cluster down with the `make down` of
@@ -75,10 +80,13 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    ```
 
    Every line has to read `ok`. A `missing` line names a tool that is not on
-   the path and a `broken` one a tool that is there and answering an error, and
-   both are to be settled before the next section: `make up` reaches the same
-   tool minutes in and stops with a half-created cluster behind it. A `warn`
-   line for the Docker engine costs time rather than the run.
+   the path, a `broken` one a tool that is there and answering an error, and an
+   `old` one a tool that is there and answers but is older than the repository
+   needs: Go under the `go` line of `go.mod`, or kind under the `kind-minimum`
+   line of `deploy/kind/kind.yaml`. All three are to be settled before the next
+   section: `make up` reaches the same tool minutes in and stops with a
+   half-created cluster behind it. A `warn` line for the Docker engine costs
+   time rather than the run.
 
    On a machine whose Go is older than the `toolchain` line of `go.mod`, the
    `go` probe is the first Go command inside the clone, and that Go downloads
