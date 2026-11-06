@@ -51,9 +51,7 @@ var noiseTypes = []string{
 	"volume.resize.start",
 	"volume.transfer.accept.start",
 	"volume.attach.start",
-	"volume.attach.end",
 	"volume.detach.start",
-	"volume.detach.end",
 	// neutron
 	"network.create.start",
 	"network.create.end",
@@ -154,11 +152,11 @@ func buildWorld(t *testing.T, seed uint64) *generator {
 }
 
 // TestEverySeedRendersTheWholeCatalogue is the drift guard of the catalogue. A
-// month that renders 64 of the 65 types is a month whose skip counters are
+// month that renders 62 of the 63 types is a month whose skip counters are
 // short of one type, whichever seed an operator picks, so every seed is held
 // against the whole list rather than one month against most of it.
 func TestEverySeedRendersTheWholeCatalogue(t *testing.T) {
-	const want = 65
+	const want = 63
 	if len(noiseTypes) != want {
 		t.Fatalf("the catalogue names %d types, want %d: the list is what the member sets and the "+
 			"sequences below are held against", len(noiseTypes), want)

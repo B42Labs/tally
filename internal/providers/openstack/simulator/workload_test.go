@@ -141,11 +141,11 @@ func shootNamed(t *testing.T, g *generator, name string) *shoot {
 func transitionsOf(schedule Schedule, s *shoot) []Transition {
 	var of []Transition
 	for _, transition := range ofWorkload(schedule, workloadGardener) {
-		// The life of a shoot is read off its billable transitions alone. The
-		// noise around its steps, the audits, the .start halves, the ports and
-		// the attach and detach, is held by noise_test.go, and a daily
-		// compute.instance.exists of a worker that is gone would otherwise be
-		// the last transition of batch.
+		// The life of a shoot is read off its billable transitions alone, the
+		// attach and the detach of its volumes among them. The noise around its
+		// steps, the audits, the .start halves and the ports, is held by
+		// noise_test.go, and a daily compute.instance.exists of a worker that is
+		// gone would otherwise be the last transition of batch.
 		if !transition.Billable {
 			continue
 		}
@@ -1062,6 +1062,42 @@ func TestShootsFollowTheirLives(t *testing.T) {
 				}
 			})
 
+			t.Run("api-dev books its claims available over every night", func(t *testing.T) {
+				// The attach and the detach are booked, so a claim is in-use from
+				// every wake-up and available from every hibernation. The two have to
+				// alternate, beginning with the attach of the claim's create.
+				steps := make(map[string][]Transition)
+				for _, transition := range transitionsOf(g.schedule, shootNamed(t, g, "api-dev")) {
+					name, _ := transition.Payload["display_name"].(string)
+					if !strings.Contains(name, "-dynamic-pvc-") {
+						continue
+					}
+					if transition.EventType == "volume.attach.end" || transition.EventType == "volume.detach.end" {
+						steps[transition.ResourceID] = append(steps[transition.ResourceID], transition)
+					}
+				}
+				detached := 0
+				for id, of := range steps {
+					for i, step := range of {
+						want := "volume.attach.end"
+						if i%2 == 1 {
+							want = "volume.detach.end"
+							detached++
+						}
+						if step.EventType != want {
+							t.Errorf("the claim %s books %s at %s as its step %d, want %s: a claim is "+
+								"detached at every hibernation and attached at every wake-up",
+								id, step.EventType, step.At, i, want)
+							break
+						}
+					}
+				}
+				if detached == 0 {
+					t.Errorf("api-dev's claims book no detach, want one per hibernation of the %d "+
+						"claims that attach", len(steps))
+				}
+			})
+
 			t.Run("batch is torn down in the order it was built", func(t *testing.T) {
 				s := shootNamed(t, g, "batch")
 				transitions := transitionsOf(g.schedule, s)
@@ -1126,6 +1162,26 @@ func TestShootsFollowTheirLives(t *testing.T) {
 				if !workersTo.Before(claims) {
 					t.Errorf("the last worker of batch goes at %s and its first claim at %s, want the "+
 						"workers first: a claim is released once nothing mounts it", workersTo, claims)
+				}
+
+				// A claim is unmounted before it is released, and the detach is
+				// booked: the claim is available from its detach to its delete.
+				for _, released := range torn {
+					if !isClaimDelete(released) {
+						continue
+					}
+					detachedAt := instantOf(torn, "volume.detach.end", released.ResourceID)
+					if detachedAt.IsZero() {
+						t.Errorf("the claim %s is released at %s with no booked detach before it, want "+
+							"the detach first: cinder unmounts a claim before it deletes it",
+							released.ResourceID, released.At)
+						continue
+					}
+					if detachedAt.Before(workersTo) || !detachedAt.Before(released.At) {
+						t.Errorf("the claim %s is detached at %s, want it after the last worker's delete "+
+							"at %s and before its own delete at %s", released.ResourceID, detachedAt,
+							workersTo, released.At)
+					}
 				}
 			})
 

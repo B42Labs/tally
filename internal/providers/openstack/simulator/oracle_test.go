@@ -883,7 +883,7 @@ func TestBuildOracleRefusesTwoFactsAtOneInstant(t *testing.T) {
 func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 	// surface is the format the lists below are stated for. A change to any of
 	// them raises this number and oracleFormat with it.
-	const surface = 4
+	const surface = 5
 
 	if oracleFormat != surface {
 		t.Fatalf("oracleFormat = %d and the surface below is stated for format %d, want the two "+
@@ -908,8 +908,10 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 			"octavia.loadbalancer.create.end -> loadbalancer/octavia.loadbalancer.create.end",
 			"octavia.loadbalancer.delete.end -> loadbalancer/octavia.loadbalancer.delete.end",
 			"octavia.loadbalancer.update.end -> loadbalancer/octavia.loadbalancer.update.end",
+			"volume.attach.end -> volume/volume.attach.end",
 			"volume.create.end -> volume/volume.create.end",
 			"volume.delete.end -> volume/volume.delete.end",
+			"volume.detach.end -> volume/volume.detach.end",
 			"volume.resize.end -> volume/volume.resize.end",
 			"volume.retype -> volume/volume.retype",
 			"volume.transfer.accept.end -> volume/volume.transfer.accept.end",
@@ -1020,7 +1022,7 @@ func TestOracleFormatCoversTheGeneratorsBookedSurface(t *testing.T) {
 // emptyOracleDocument is an oracle of a month that states no resource, written
 // out by hand because buildOracle only folds one from a ledger the generator
 // never produces.
-const emptyOracleDocument = `{"format":4,"cloud":"os-test","seed":1,` +
+const emptyOracleDocument = `{"format":5,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z",` +
 	`"period_to":"2026-08-01T00:00:00Z","resources":[],"counts":[],"faults":[],"traffic":[]}`
 
@@ -1031,7 +1033,7 @@ const emptyOracleDocument = `{"format":4,"cloud":"os-test","seed":1,` +
 const oracleIntervalDocument = `{"from":"2026-07-01T00:00:00Z","to":"2026-07-02T00:00:00Z",` +
 	`"state":"available","project_id":"p1","size":{"size_gb":50}}`
 
-const completeOracleDocument = `{"format":4,"cloud":"os-test","seed":1,` +
+const completeOracleDocument = `{"format":5,"cloud":"os-test","seed":1,` +
 	`"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z",` +
 	`"resources":[{"resource_type":"volume","resource_id":"v","workload":"classic",` +
 	`"intervals":[` + oracleIntervalDocument + `],"faults":[]}],"counts":[],"faults":[],` +
@@ -1240,11 +1242,11 @@ func TestReadOracleRefusesWhatIsNotAnOracle(t *testing.T) {
 	})
 
 	t.Run("an oracle written to another format", func(t *testing.T) {
-		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":4`, `"format":3`, 1))
+		path := writeOracleFile(t, strings.Replace(completeOracleDocument, `"format":5`, `"format":4`, 1))
 
 		_, err := ReadOracle(path)
 
-		want := fmt.Sprintf("%s states format 3 and this build writes format %d", path, oracleFormat)
+		want := fmt.Sprintf("%s states format 4 and this build writes format %d", path, oracleFormat)
 		if err == nil || err.Error() != want {
 			t.Fatalf("ReadOracle() error = %v, want %q", err, want)
 		}

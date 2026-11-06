@@ -163,9 +163,9 @@ func TestVMStateNormalizesNovaStates(t *testing.T) {
 }
 
 // TestVolumeStatusFallsBackToAvailable covers the rule the volume events that
-// change a size or an owner rest on: cinder does not always repeat the status in
-// them, and an event without a state is dead-lettered by the API, so an absent
-// status is read as the state a usable volume is in.
+// change a size or an owner, and the detach, rest on: cinder does not always
+// repeat the status in them, and an event without a state is dead-lettered by
+// the API, so an absent status is read as the state a usable volume is in.
 func TestVolumeStatusFallsBackToAvailable(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -381,23 +381,137 @@ func TestMapNotificationSkipsImageCreateWithoutSize(t *testing.T) {
 // mapping understands nothing in. It still becomes an event, because the
 // Reporting API dead-letters it with the rule it broke, and that record is what
 // an operator needs to fix the deployment. Dropping it here would be silent.
+//
+// The attach and the detach of a volume fall back to the state their type
+// implies, because cinder's status is the one member their state is read from.
 func TestMapNotificationProducesAnEventFromAnEmptyPayload(t *testing.T) {
-	got, ok := MapNotification(notify("compute.instance.create.end", map[string]any{}), goldenCloud)
+	tests := []struct {
+		eventType string
+		wantState string
+		// wantNoMembers holds the size to an object without members. The instance
+		// case states only that a size object is there, as it always did.
+		wantNoMembers bool
+	}{
+		{eventType: "compute.instance.create.end", wantState: ""},
+		{eventType: "volume.attach.end", wantState: "in-use", wantNoMembers: true},
+		{eventType: "volume.detach.end", wantState: "available", wantNoMembers: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.eventType, func(t *testing.T) {
+			got, ok := MapNotification(notify(tc.eventType, map[string]any{}), goldenCloud)
+			if !ok {
+				t.Fatal("MapNotification() ok = false, want true")
+			}
+
+			if got.ResourceID != "" {
+				t.Errorf("ResourceID = %q, want the empty string", got.ResourceID)
+			}
+			if got.ProjectID != "" {
+				t.Errorf("ProjectID = %q, want the empty string", got.ProjectID)
+			}
+			if got.Payload.State == nil || *got.Payload.State != tc.wantState {
+				t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, tc.wantState)
+			}
+			if got.Payload.Size == nil {
+				t.Error("payload.size = nil, want an empty size object")
+			}
+			if tc.wantNoMembers && len(got.Payload.Size) != 0 {
+				t.Errorf("payload.size = %v, want an object without members", got.Payload.Size)
+			}
+		})
+	}
+}
+
+// TestMapNotificationBooksTheAttachState covers the state the attach and the
+// detach of a volume are booked under. Cinder sets the status before it
+// notifies, so a reported status is kept; an attach without one still attached
+// the volume, and a detach without one left it usable. A detach that reports
+// in-use is a multiattach volume another attachment still holds.
+func TestMapNotificationBooksTheAttachState(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		payload   map[string]any
+		want      string
+	}{
+		{
+			name:      "an attach without a status books in-use",
+			eventType: "volume.attach.end",
+			payload:   map[string]any{},
+			want:      "in-use",
+		},
+		{
+			name:      "a detach without a status books available",
+			eventType: "volume.detach.end",
+			payload:   map[string]any{},
+			want:      "available",
+		},
+		{
+			name:      "a detach whose status is in-use books in-use",
+			eventType: "volume.detach.end",
+			payload:   map[string]any{"status": "in-use"},
+			want:      "in-use",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"volume_id":   "4d5e6f70-8192-4dae-bf20-3b4c5d6e7f80",
+				"tenant_id":   "project-1",
+				"size":        json.Number("100"),
+				"volume_type": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203",
+			}
+			for key, value := range tc.payload {
+				payload[key] = value
+			}
+
+			got, ok := MapNotification(notify(tc.eventType, payload), goldenCloud)
+			if !ok {
+				t.Fatal("MapNotification() ok = false, want true")
+			}
+			if got.Payload.State == nil || *got.Payload.State != tc.want {
+				t.Errorf("payload.state = %v, want a pointer to %q", got.Payload.State, tc.want)
+			}
+		})
+	}
+}
+
+// TestMapNotificationCopiesNothingOfTheAttachment covers the attachment record
+// an attach carries. On a real cloud it holds connection_info with the
+// backend's credentials, and the mapping reads the volume's members alone, so
+// nothing of the record reaches the event.
+func TestMapNotificationCopiesNothingOfTheAttachment(t *testing.T) {
+	const secret = "s3cret-probe"
+
+	got, ok := MapNotification(notify("volume.attach.end", map[string]any{
+		"volume_id":   "4d5e6f70-8192-4dae-bf20-3b4c5d6e7f80",
+		"tenant_id":   "project-1",
+		"status":      "in-use",
+		"size":        json.Number("100"),
+		"volume_type": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f70819203",
+		"volume_attachment": []any{map[string]any{
+			"id":            "5977caf2-740a-4d51-9b56-f36acbe2e618",
+			"volume_id":     "4d5e6f70-8192-4dae-bf20-3b4c5d6e7f80",
+			"attach_status": "attached",
+			"connection_info": map[string]any{
+				"data": map[string]any{"auth_password": secret},
+			},
+		}},
+	}), goldenCloud)
 	if !ok {
 		t.Fatal("MapNotification() ok = false, want true")
 	}
 
-	if got.ResourceID != "" {
-		t.Errorf("ResourceID = %q, want the empty string", got.ResourceID)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("encoding the event: %v", err)
 	}
-	if got.ProjectID != "" {
-		t.Errorf("ProjectID = %q, want the empty string", got.ProjectID)
-	}
-	if got.Payload.State == nil || *got.Payload.State != "" {
-		t.Errorf("payload.state = %v, want a pointer to the empty string", got.Payload.State)
-	}
-	if got.Payload.Size == nil {
-		t.Error("payload.size = nil, want an empty size object")
+	for _, leaked := range []string{"volume_attachment", "connection_info", secret} {
+		if bytes.Contains(raw, []byte(leaked)) {
+			t.Errorf("event = %s, want no %q in it", raw, leaked)
+		}
 	}
 }
 
