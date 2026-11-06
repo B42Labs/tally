@@ -66,9 +66,15 @@ type templateVar struct {
 // panel carries a nested panel list of its own: a row panel holds the panels
 // below it once the row is collapsed.
 type panel struct {
-	Title       string   `json:"title"`
-	Panels      []panel  `json:"panels"`
-	Targets     []target `json:"targets"`
+	Title   string   `json:"title"`
+	Type    string   `json:"type"`
+	Panels  []panel  `json:"panels"`
+	Targets []target `json:"targets"`
+	// Options.Content is the Markdown a text panel shows. Every other panel
+	// leaves it empty.
+	Options struct {
+		Content string `json:"content"`
+	} `json:"options"`
 	FieldConfig struct {
 		Defaults struct {
 			Mappings []valueMapping `json:"mappings"`
@@ -326,6 +332,26 @@ func TestReconciliationDrift(t *testing.T) {
 
 		if !bytes.Contains(raw, []byte(note)) {
 			t.Errorf("reconciliation-drift.json carries no %q", note)
+		}
+	})
+
+	t.Run("says what a refreshed count is", func(t *testing.T) {
+		// The first panel draws refreshed beside the other actions, and the
+		// drift alert leaves it out. Without the note an operator reads a load
+		// balancer that gained a listener as a missed event.
+		const refreshed = "`refreshed`"
+
+		var text string
+		for _, p := range load(t, "reconciliation-drift.json").Panels {
+			if p.Type == "text" {
+				text += p.Options.Content
+			}
+		}
+
+		for _, want := range []string{"investigate before period finalization", refreshed} {
+			if !strings.Contains(text, want) {
+				t.Errorf("the text panel of reconciliation-drift.json carries no %q:\n%s", want, text)
+			}
 		}
 	})
 }

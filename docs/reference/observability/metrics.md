@@ -66,7 +66,8 @@ which is the text of the pipeline's reason before its first colon: `schema`,
 `refreshed` counts the updates whose whole difference lay in size members no
 platform event carries, the listener and pool counts of a load balancer, so a
 sync is their only source and the correction is no sign of a lost event.
-`updated` counts every other update.
+`updated` counts every other update. `TallyReconciliationDriftHigh` sums every
+action but `refreshed`.
 
 `tally_current_resources` is written by the refresher rather than by the ingest
 path. The refresher counts the projection rows per platform, cloud, resource

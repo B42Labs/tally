@@ -528,6 +528,12 @@ is deferred like any other correction, as `transitional` while the load
 balancer is in `pending_*` and as `recent` inside the settle window, and a
 deferred one is not counted as refreshed.
 
+`TallyReconciliationDriftHigh` sums every action but `refreshed`. A cloud whose
+load balancers gain and lose listeners would otherwise fire it on routine
+work, and an alert that fires on routine work hides the drift it is there for.
+The Reconciliation Drift dashboard still draws `refreshed` as a series of its
+own.
+
 ## The instants a missed delete is booked at
 
 Two passes book a delete the collector missed, and they date it differently.

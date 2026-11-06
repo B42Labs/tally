@@ -136,7 +136,7 @@ Reconciliation corrected {{ $value | printf "%.0f" }} resources in {{ $labels.cl
 Expression:
 
 ```promql
-sum by (cloud) (increase(tally_sync_resources_reconciled_total[6h])) > 50
+sum by (cloud) (increase(tally_sync_resources_reconciled_total{action!="refreshed"}[6h])) > 50
 ```
 
 ### `TallyCollectorBufferAging`
