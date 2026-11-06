@@ -4,7 +4,7 @@ description: Open the dev cluster's Grafana as an anonymous viewer, point its fo
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-08 from commit 2d936cb with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Watch the month in Grafana
 
@@ -22,7 +22,7 @@ This lesson takes about 5 minutes.
 ## Before you start
 
 - The state lesson 3 leaves: the kind cluster with the dev overlay, the
-  simulator stack holding its 84 notifications, the month of July 2026 in the
+  simulator stack holding its 96 notifications, the month of July 2026 in the
   reporting database, and one completed run of that month in the engine
   database.
 - A browser.
@@ -144,9 +144,9 @@ Which panels carry a value in this lesson and which stay empty is what the four
 steps below say, and each of them names the time range its panels need.
 
 1. `Tally / Fleet Overview`. With `Last 3 hours`, `Resources by type and state`
-   shows 37 instances `active` and 1 `shelved`, 16 volumes `available` and 12
-   `in-use`, 9 floating IPs `active`, 7 images `active`, and 4 load balancers
-   `active`. Deleted resources are left out.
+   shows 43 instances `active`, 13 volumes `available` and 17 `in-use`,
+   9 floating IPs `active`, 6 images `active`, and 4 load balancers `active`.
+   Deleted resources are left out.
    `Resource count trend` draws the same counts as lines that jump once, when
    the month went out, and `Clouds reporting` is 1.
 
@@ -157,7 +157,7 @@ steps below say, and each of them names the time range its panels need.
 
 2. `Tally / Ingestion Health`. With `Last 3 hours`, `Event ingest rate` shows
    one spike for cloud `os-sim` and source `collector` over the minutes the
-   month went out, 1728 events in all. How high the spike stands is your
+   month went out, 2105 events in all. How high the spike stands is your
    machine's, because it is those events over the span the collector took to
    drain its outbox: about five events per second where that took three
    minutes, and above 30 where it took half a minute.
@@ -169,7 +169,7 @@ steps below say, and each of them names the time range its panels need.
    collector of the compose stack, which the `openstack-collector` job scrapes
    by its alias on the `kind` network while the stack runs. Both carry the
    legend `os-sim tally-openstack-collector:8080`. They rose while the month
-   went out, by one event and about one second on the run, and both read 0
+   went out, by 524 events and about six seconds on the run, and both read 0
    once the outbox has drained. `Projection replays` draws nothing.
 
    `Scrape health` lists five targets. `reporting-api`, `otel-collector` and
@@ -378,7 +378,7 @@ the billing track runs it after that track's last lesson rather than here.
 This is the state this track leaves behind:
 
 - the kind cluster `tally` with the dev overlay;
-- the compose stack with the simulator holding 84 notifications, so
+- the compose stack with the simulator holding 96 notifications, so
   `GET /clock` on `http://127.0.0.1:8091/clock` answers `holding` true;
 - the reporting database holding the month of seed 1 on `os-sim` minus the held
   share, with an empty project registry;

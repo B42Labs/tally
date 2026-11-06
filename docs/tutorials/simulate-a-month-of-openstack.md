@@ -4,7 +4,7 @@ description: Start the simulator stack beside the dev cluster, publish one gener
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Simulate a month of OpenStack
 
@@ -61,7 +61,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
 
    ```text
    ==> issuing an ingest credential for os-sim
-   created ingest_credentials 0ce1a769-1794-47e5-97c8-6241a087f49a
+   created ingest_credentials ca987950-5ff5-491a-adfa-0df9d2be3087
    the token above is printed this one time: store it now, it will not be shown again
    docker compose -f deploy/compose/compose.yaml up -d
    ```
@@ -106,7 +106,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    Three containers now run beside the cluster. The month of July 2026 of seed
    1 on the cloud `os-sim`, with its six tenants, goes onto the bus at factor
    744, which puts the 31 days on the bus in an hour. The `held-back` switch
-   keeps 84 of the month's 1812 billable notifications off the bus, and the
+   keeps 96 of the month's 2201 billable notifications off the bus, and the
    simulator holds them until a release.
 
    The collector and the simulator start together once the broker answers. The
@@ -137,7 +137,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-01T01:45:55Z","factor":744,"published":43,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-01T03:38:35Z","factor":744,"published":244,"total":15741,"held":96,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    A minute later the same call answers:
@@ -147,10 +147,10 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-01T14:10:23Z","factor":744,"published":649,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-01T16:30:22Z","factor":744,"published":657,"total":15741,"held":96,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `factor` 744, `total` 15741, `held` 84, `period_from` `2026-07-01T00:00:00Z`
+   `factor` 744, `total` 15741, `held` 96, `period_from` `2026-07-01T00:00:00Z`
    and `period_to` `2026-08-01T00:00:00Z` have to match. `virtual_now` and
    `published` are your own and grow between the two reads, which lie twelve
    virtual hours apart. `holding` is false while the month publishes.
@@ -169,7 +169,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","count":13,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":15,"resource_type":"instance"},{"cloud":"os-sim","count":2,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":25,"resource_type":"volume"}]}
+   {"items":[{"cloud":"os-sim","count":13,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":22,"resource_type":"instance"},{"cloud":"os-sim","count":2,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":30,"resource_type":"volume"}]}
    ```
 
    A minute later:
@@ -179,14 +179,15 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","count":13,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":20,"resource_type":"instance"},{"cloud":"os-sim","count":2,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":29,"resource_type":"volume"}]}
+   {"items":[{"cloud":"os-sim","count":13,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":17,"resource_type":"instance"},{"cloud":"os-sim","count":2,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":26,"resource_type":"volume"}]}
    ```
 
    The counts are your own. They are the resources the collector has delivered
-   at the moment of the call, and they grow while the month goes out. The five
-   resource types are the month's. An empty `items` list two minutes after the
-   start means the collector has delivered nothing yet, which the counter read
-   of the step "Wait for the collector to deliver" diagnoses.
+   at the moment of the call and that are not deleted, so they rise and fall
+   with the workload's day while the month goes out. The five resource types
+   are the month's. An empty `items` list two minutes after the start means
+   the collector has delivered nothing yet, which the counter read of the step
+   "Wait for the collector to deliver" diagnoses.
 
 2. Read one row of the fleet:
 
@@ -195,10 +196,10 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","created_at":"2026-07-01T03:17:02Z","deleted_at":null,"first_event_at":"2026-07-01T03:17:02Z","last_event_at":"2026-07-02T05:36:15Z","last_event_type":"compute.instance.power_off","last_payload":{"provider":{"oslo_event_type":"compute.instance.power_off.end"},"state":"shutoff"},"platform":"openstack","project_id":"d5a8024946ddf673277b9e2490643a2c","resource_id":"079faae9-9d39-426f-a963-769cb12aa629","resource_type":"instance","size":{"disk_gb":20,"flavor":"m1.small","ram_gb":2,"vcpus":1},"state":"shutoff"}],"next_cursor":"WyJvcy1zaW0iLCJpbnN0YW5jZSIsIjA3OWZhYWU5LTlkMzktNDI2Zi1hOTYzLTc2OWNiMTJhYTYyOSJd"}
+   {"items":[{"cloud":"os-sim","created_at":"2026-07-01T03:17:02Z","deleted_at":null,"first_event_at":"2026-07-01T03:17:02Z","last_event_at":"2026-07-01T03:17:02Z","last_event_type":"compute.instance.create.end","last_payload":{"provider":{"oslo_event_type":"compute.instance.create.end"},"size":{"disk_gb":20,"flavor":"m1.small","ram_gb":2,"vcpus":1},"state":"active"},"platform":"openstack","project_id":"d5a8024946ddf673277b9e2490643a2c","resource_id":"079faae9-9d39-426f-a963-769cb12aa629","resource_type":"instance","size":{"disk_gb":20,"flavor":"m1.small","ram_gb":2,"vcpus":1},"state":"active"}],"next_cursor":"WyJvcy1zaW0iLCJpbnN0YW5jZSIsIjA3OWZhYWU5LTlkMzktNDI2Zi1hOTYzLTc2OWNiMTJhYTYyOSJd"}
    ```
 
-   That is one row of the projection. Its `state` is `shutoff`, the state the
+   That is one row of the projection. Its `state` is `active`, the state the
    last event left it in. `project_id` names the tenant by id alone, the way
    the simulated cloud names its tenants, and `size` carries `vcpus`, `ram_gb`,
    `disk_gb` and `flavor`. `next_cursor` is the handle for the next page. Which
@@ -213,7 +214,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":946,"total":15741,"held":84,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T00:46:36Z","factor":0,"published":942,"total":15741,"held":96,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    The route rebases the clock on the virtual instant it has reached and
@@ -228,14 +229,14 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    curl -s http://127.0.0.1:8091/clock
    ```
 
-   On the run the answer below came 10 seconds after the factor changed. A
+   On the run the answer below came 19 seconds after the factor changed. A
    slower machine takes a few minutes.
 
    ```json
-   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T00:46:36Z","factor":0,"published":15645,"total":15741,"held":96,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `published` 15657, `held` 84, `holding` true and `total` 15741 have to
+   `published` 15645, `held` 96, `holding` true and `total` 15741 have to
    match. `virtual_now` is your own: at factor 0 the clock no longer advances,
    so it stays at the instant the factor became 0 while the rest of the month
    goes out at once. The simulator now waits for a release the billing track
@@ -255,12 +256,12 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```text
-   consumed 1728 skipped 13929 unparseable 0 depth 0
+   consumed 2105 skipped 13540 unparseable 0 depth 0
    ```
 
    Repeat the read until `depth` reads 0, about three minutes after the month
-   went out. The four numbers have to match. 1728 is the month's 1812 billable
-   notifications minus the 84 held ones, 13929 is the notifications the mapping
+   went out. The four numbers have to match. 2105 is the month's 2201 billable
+   notifications minus the 96 held ones, 13540 is the notifications the mapping
    claims nothing for, and the depth is the outbox the collector drains into
    the Reporting API.
 
@@ -271,10 +272,10 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```text
-   tally_collector_delivered_total{cloud="os-sim",platform="openstack"} 1728
+   tally_collector_delivered_total{cloud="os-sim",platform="openstack"} 2105
    ```
 
-   The 1728 delivered are the 1728 consumed. A depth that does not fall while a
+   The 2105 delivered are the 2105 consumed. A depth that does not fall while a
    `tally_collector_delivered_total` stays at 0 means the Reporting API refuses
    the batches, and
    `docker compose -f deploy/compose/compose.yaml logs collector` shows the
@@ -291,11 +292,11 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","count":16,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":668,"resource_type":"instance"},{"cloud":"os-sim","count":5,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":169,"resource_type":"volume"}]}
+   {"items":[{"cloud":"os-sim","count":16,"resource_type":"floating_ip"},{"cloud":"os-sim","count":9,"resource_type":"image"},{"cloud":"os-sim","count":670,"resource_type":"instance"},{"cloud":"os-sim","count":5,"resource_type":"loadbalancer"},{"cloud":"os-sim","count":169,"resource_type":"volume"}]}
    ```
 
    Every count has to match. They are the seed's: 16 floating IPs, 9 images,
-   668 instances, 5 load balancers and 169 volumes. `status=all` counts the
+   670 instances, 5 load balancers and 169 volumes. `status=all` counts the
    deleted resources too, which the default `active` leaves out.
 
 2. Read the first event the month stored:
@@ -305,7 +306,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"items":[{"cloud":"os-sim","event_id":"7d16f9f3-740a-4670-9898-bc32b30fd3f9","event_type":"image.create","payload":{"provider":{"oslo_event_type":"image.upload"},"size":{"size_gb":3.5},"state":"active"},"platform":"openstack","project_id":"005be5adeef3d87e280d03d9d57c38b4","received_at":"2026-09-07T12:37:37.784207Z","resource_id":"d45cc80a-b7ea-4988-8873-16b54ec1a39d","resource_type":"image","source":"collector","timestamp":"2026-07-01T00:21:32Z"}],"next_cursor":"WyIyMDI2LTA3LTAxVDAwOjIxOjMyWiIsIjdkMTZmOWYzLTc0MGEtNDY3MC05ODk4LWJjMzJiMzBmZDNmOSJd"}
+   {"items":[{"cloud":"os-sim","event_id":"7d16f9f3-740a-4670-9898-bc32b30fd3f9","event_type":"image.create","payload":{"provider":{"oslo_event_type":"image.upload"},"size":{"size_gb":3.5},"state":"active"},"platform":"openstack","project_id":"005be5adeef3d87e280d03d9d57c38b4","received_at":"2026-11-06T12:02:39.990442Z","resource_id":"d45cc80a-b7ea-4988-8873-16b54ec1a39d","resource_type":"image","source":"collector","timestamp":"2026-07-01T00:21:32Z"}],"next_cursor":"WyIyMDI2LTA3LTAxVDAwOjIxOjMyWiIsIjdkMTZmOWYzLTc0MGEtNDY3MC05ODk4LWJjMzJiMzBmZDNmOSJd"}
    ```
 
    It is an `image.create` at `2026-07-01T00:21:32Z` with its `size`.
@@ -322,7 +323,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1785542400,"667"]}]},"stats":{"seriesFetched": "667","executionTimeMsec":2}}
+   {"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1785542400,"667"]}]},"stats":{"seriesFetched": "667","executionTimeMsec":19}}
    ```
 
    667 has to match, the instances of the month that pushed traffic. A smaller
@@ -341,7 +342,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
    ```
 
    ```json
-   {"status":"success","data":{"resultType":"vector","result":[]},"stats":{"seriesFetched": "0","executionTimeMsec":0}}
+   {"status":"success","data":{"resultType":"vector","result":[]},"stats":{"seriesFetched": "0","executionTimeMsec":3}}
    ```
 
    An empty answer within 30 seconds of the push is the store's latency offset
@@ -373,7 +374,7 @@ says. `make simulator-up` writes `tally-ca.crt` again if the file is missing.
 turns the month you just ingested into rated usage.
 
 It starts from the state this lesson leaves behind: everything lesson 1 left,
-plus the compose stack running with the simulator holding 84 notifications, so
+plus the compose stack running with the simulator holding 96 notifications, so
 `GET /clock` answers `holding` true, the collector idle with an empty outbox,
 and the reporting database holding the month of seed 1 on `os-sim` minus that
 held share. The project registry is empty. Nothing of this lesson registers the

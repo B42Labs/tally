@@ -4,11 +4,11 @@ description: Release the notifications the simulator held back, see the engine f
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-10-05 from commit ecb6b69 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-06 from commit 553104c with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Book the late events as a credit note
 
-In this lesson you let the simulator publish the 84 notifications it held back,
+In this lesson you let the simulator publish the 96 notifications it held back,
 see the engine find them as late arrivals, book them as a correction of the
 month you closed, read the credit notes the correction writes, and close the
 correction.
@@ -30,7 +30,7 @@ This lesson takes about 5 minutes.
   - `2026-07` finalized on `RUN_ID`;
   - the three export directories `~/tally-tutorial/2026-07-final`,
     `2026-07-final-again` and `2026-07-final-csv`;
-  - the simulator still holding its 84 notifications.
+  - the simulator still holding its 96 notifications.
 
 - The shell that holds the port-forward Meter and rate your first month
   started: a correction meters the month again and reads the egress counter
@@ -67,10 +67,10 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":84,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T00:46:36Z","factor":0,"published":15645,"total":15741,"held":96,"holding":true,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
-   `factor` 0, `published` 15657, `total` 15741, `held` 84 and `holding` true
+   `factor` 0, `published` 15645, `total` 15741, `held` 96 and `holding` true
    have to match, the state Simulate a month of OpenStack left the simulator
    in. `virtual_now` is your own.
 
@@ -81,15 +81,15 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```json
-   {"virtual_now":"2026-07-02T02:35:42Z","factor":0,"published":15657,"total":15741,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
+   {"virtual_now":"2026-07-02T00:46:36Z","factor":0,"published":15645,"total":15741,"held":0,"holding":false,"period_from":"2026-07-01T00:00:00Z","period_to":"2026-08-01T00:00:00Z"}
    ```
 
    The route answers with the document as it stood the moment before the
    release, with `held` 0 and `holding` false, the two members the release
-   changed. `published` 15657, `total` 15741, `held` 0 and `holding` false have
+   changed. `published` 15645, `total` 15741, `held` 0 and `holding` false have
    to match, and `virtual_now` is your own.
 
-   The 84 notifications go onto the bus at once, each under the July timestamp
+   The 96 notifications go onto the bus at once, each under the July timestamp
    it always carried. That is what a late arrival at the Reporting API is: an
    event inside July received after the run that billed July read the month.
    `held-back` is the switch that kept them off the bus:
@@ -117,11 +117,11 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   consumed 1812 skipped 13929 unparseable 0 depth 0
+   consumed 2201 skipped 13540 unparseable 0 depth 0
    ```
 
-   Repeat the read until `depth` reads 0. The four numbers have to match. 1812
-   is the 1728 Simulate a month of OpenStack counted plus the 84, 13929 is
+   Repeat the read until `depth` reads 0. The four numbers have to match. 2201
+   is the 2105 Simulate a month of OpenStack counted plus the 96, 13540 is
    unchanged because the held share carried only billable transitions, and a
    depth of 0 is the outbox drained into the Reporting API.
 
@@ -153,25 +153,25 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run 923dc7cb-09da-44bf-9203-18140e0ac759 read 2026-07 at 2026-10-05T08:21:53Z
-   os-sim/openstack/floating_ip/c8d4f029-050e-488c-a7d3-6e93f99561ff: 1 late events, last received 2026-10-05T08:22:24Z
-   os-sim/openstack/floating_ip/e04358d1-1601-403c-b0d8-25f6f708c8ba: 1 late events, last received 2026-10-05T08:22:24Z
-   os-sim/openstack/image/6a493a19-c938-461b-883f-5444a7310e78: 1 late events, last received 2026-10-05T08:22:24Z
+   run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 read 2026-07 at 2026-11-06T12:41:27Z
+   os-sim/openstack/floating_ip/c29ed24a-4466-41ec-a969-21793769b2b6: 1 late events, last received 2026-11-06T12:47:24Z
+   os-sim/openstack/instance/01775514-2a32-4ba5-8b1e-4e2aeac85b8c: 1 late events, last received 2026-11-06T12:47:24Z
+   os-sim/openstack/instance/06783d7e-c628-42f0-8337-2d9e5eae8328: 1 late events, last received 2026-11-06T12:47:24Z
    ```
 
-   77 more lines of the same shape follow, one per resource, and the report
+   89 more lines of the same shape follow, one per resource, and the report
    ends with these two lines:
 
    ```text
-   os-sim/openstack/volume/f74f35a4-f24f-49e3-8952-21554eefbebe: 1 late events, last received 2026-10-05T08:22:24Z
+   os-sim/openstack/volume/fdbc62fe-247e-467d-bba7-bca4f04f5f49: 1 late events, last received 2026-11-06T12:47:24Z
    book them with tally-engine correct --period 2026-07
    ```
 
-   The report names 81 resources, 78 of them with one late event and 3 with
-   two, which is the 84: 62 instances, 15 volumes, 2 floating IPs, 1 image and
-   1 load balancer. The resource ids and their counts are the seed's and have
-   to match, while the run id, which is `RUN_ID`, the snapshot and every
-   `last received` instant are your own.
+   The report names 93 resources, 90 of them with one late event and 3 with
+   two, which is the 96: 64 instances, 28 volumes and 1 floating IP. The
+   resource ids and their counts are the seed's and have to match, while the
+   run id, which is `RUN_ID`, the snapshot and every `last received` instant
+   are your own.
 
    A late event is one whose `received_at` is after the instant the finalized
    run read the month and whose timestamp is inside July. The report reads and
@@ -192,13 +192,13 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run e855f2f2-3e8c-4d21-a0be-17592aeb898a completed as a correction of run 923dc7cb-09da-44bf-9203-18140e0ac759 for 2026-07 with pricing model 2026-03
-   metered 871 candidates into 990 usage records and 3241 rated records
-   184 deltas and 5 adjustment deltas in 6 credit notes
+   run 5acb4d80-f83c-4ba5-a35e-30e6a84f72ba completed as a correction of run 2eb6724e-4139-4337-bc85-b7a04f07a1a2 for 2026-07 with pricing model 2026-03
+   metered 871 candidates into 1373 usage records and 3630 rated records
+   183 deltas and 5 adjustment deltas in 6 credit notes
    warnings recorded in runs.stats: 0 metering, 0 counter, 0 attribution, 0 adjustment, 2 unpriced resource types, 0 unreadable fields, 0 unregistered projects
    ```
 
-   The `metered` line, `184 deltas and 5 adjustment deltas in 6 credit notes`
+   The `metered` line, `183 deltas and 5 adjustment deltas in 6 credit notes`
    and the warnings line have to match. Both run ids are your own, the second
    being `RUN_ID`.
 
@@ -207,13 +207,13 @@ A connection error from any `go run` command means the cluster is not up, and
    amounts against the finalized run per resource, project and dimension, and
    stores the non-zero deltas. The finalized run stays as it is.
 
-   The counts moved because the 84 notifications changed the histories. There
-   are 871 candidates rather than 867: the four new ones are resources whose
-   create and delete were both held, so the finalized run never saw them. The
-   usage records are 990 and the rated records 3241, rather than 940 and 3081.
-   The warnings line reads `0 metering`: the 38
+   The counts moved because the 96 notifications changed the histories. There
+   are 871 candidates rather than 869: the two new ones are resources whose
+   create was held and that had no other event in July, so the finalized run
+   never saw them. The usage records are 1373 and the rated records 3630,
+   rather than 1303 and 3440. The warnings line reads `0 metering`: the 32
    `history_starts_without_create` warnings of Meter and rate your first month
-   are gone because every create is in the history now. The 184 deltas reach
+   are gone because every create is in the history now. The 183 deltas reach
    every one of the six projects, and all five adjustment lines of the month
    moved with their bases, which is the `5 adjustment deltas`.
 
@@ -222,14 +222,14 @@ A connection error from any `go run` command means the cluster is not up, and
    to the end of the month, and the correction credits the hours after the
    delete. A held create left it without the resource's start, so it billed
    nothing before the first event it had, and the correction debits the hours
-   the resource lived. Both are among the 84: of the CI tenant's 37 runners in
-   its note, 20 are credits and 17 are debits, and across all six notes 35 line
-   items are credits and 36 debits.
+   the resource lived. Both are among the 96: of the CI tenant's 37 runners in
+   its note, 22 are credits and 15 are debits, and across all six notes 43 line
+   items are credits and 26 debits.
 
 2. Put the first id on the first line of your own output in place of this one:
 
    ```sh
-   export CORRECTION_ID=e855f2f2-3e8c-4d21-a0be-17592aeb898a
+   export CORRECTION_ID=5acb4d80-f83c-4ba5-a35e-30e6a84f72ba
    ```
 
    Every command below reads `CORRECTION_ID`.
@@ -258,7 +258,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run e855f2f2-3e8c-4d21-a0be-17592aeb898a exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-notes
+   run 5acb4d80-f83c-4ba5-a35e-30e6a84f72ba exported for 2026-07 as json into /Users/berendt/tally-tutorial/2026-07-notes
    wrote run.json and 6 credit notes
    wrote kickbacks.json with 1 kickback deltas
    ```
@@ -297,21 +297,20 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   garden-sim/alpha	-513.91
-   garden-sim/beta	10.21
-   os-sim/018504a6cc10019a40e3f9eef4dae529	-2.58
-   os-sim/10e287d5788957a2a331cabd1b5dccdf	-580.49
-   os-sim/34e991db9fc6466f8ca69b43f70fce65	18.28
-   os-sim/d5a8024946ddf673277b9e2490643a2c	225.72
+   garden-sim/alpha	-328.87
+   garden-sim/beta	7.84
+   os-sim/018504a6cc10019a40e3f9eef4dae529	-5.18
+   os-sim/10e287d5788957a2a331cabd1b5dccdf	-435.59
+   os-sim/34e991db9fc6466f8ca69b43f70fce65	-0.40
+   os-sim/d5a8024946ddf673277b9e2490643a2c	-8.70
    ```
 
    One signed total per note, a negative one a credit and a positive one a
    debit. All six have to match. The CI tenant's is the largest credit,
-   `alpha`'s the next, and the classic project
-   `d5a8024946ddf673277b9e2490643a2c` carries the largest debit. The CI tenant,
-   `alpha`, `beta` and that classic project are the four tenants the 38
-   warnings of Meter and rate your first month named, and the two other Acme
-   members got a note as well, from held transitions of their own.
+   `alpha`'s the next, and `beta` carries the only debit. The CI tenant,
+   `alpha` and `beta` are the three tenants the 32 warnings of Meter and rate
+   your first month named, and the three Acme members got a note as well, from
+   held transitions of their own.
 
 4. Read the head of the CI tenant's note:
 
@@ -321,46 +320,46 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```json
    {
-     "corrects_run_id": "923dc7cb-09da-44bf-9203-18140e0ac759",
+     "corrects_run_id": "2eb6724e-4139-4337-bc85-b7a04f07a1a2",
      "items": 37,
-     "base_delta": -682.93,
+     "base_delta": -512.46,
      "adjustments": [
        {
          "type": "discount",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+         "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
          "scope": "all",
          "rate": 0.150000,
-         "old": -104.74,
+         "old": -79.17,
          "new": -2.30,
-         "delta": 102.44
+         "delta": 76.87
        },
        {
          "type": "kickback",
          "relation_type": "managed_by",
          "relation_target": "cloudhouse",
-         "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+         "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
          "scope": "all",
          "rate": 0.100000,
-         "old": 59.36,
+         "old": 44.87,
          "new": 1.31,
-         "delta": -58.05
+         "delta": -43.56
        }
      ],
-     "net_delta": -580.49,
-     "kickback_delta": -58.05,
-     "total": -580.49
+     "net_delta": -435.59,
+     "kickback_delta": -43.56,
+     "total": -435.59
    }
    ```
 
    `corrects_run_id` is `RUN_ID` and is your own, and the rest has to match.
-   The note carries 37 line items and a `base_delta` of -682.93, the corrected
-   base cost being 15.36 in place of 698.29. Each `adjustments` entry carries
-   `old`, `new` and `delta`: the discount moves from -104.74 to -2.30, fifteen
-   percent of the corrected base, so its delta is 102.44; the kickback moves
-   from 59.36 to 1.31, ten percent of the corrected net of 13.06, so its delta
-   is -58.05. `net_delta` -580.49 is the base delta plus the discount delta,
+   The note carries 37 line items and a `base_delta` of -512.46, the corrected
+   base cost being 15.36 in place of 527.82. Each `adjustments` entry carries
+   `old`, `new` and `delta`: the discount moves from -79.17 to -2.30, fifteen
+   percent of the corrected base, so its delta is 76.87; the kickback moves
+   from 44.87 to 1.31, ten percent of the corrected net of 13.06, so its delta
+   is -43.56. `net_delta` -435.59 is the base delta plus the discount delta,
    `kickback_delta` is the kickback's delta, and `total` is the net delta.
 
 5. Read the first line item of that note:
@@ -372,13 +371,13 @@ A connection error from any `go run` command means the cluster is not up, and
    ```json
    {
      "resource_type": "instance",
-     "resource_id": "06306b76-171b-4a72-a8d9-1c4b13583ed6",
+     "resource_id": "06783d7e-c628-42f0-8337-2d9e5eae8328",
      "platform": "openstack",
      "dimensions": {
        "disk_gb": {
          "old": 0.00,
-         "new": 0.02,
-         "delta": 0.02
+         "new": 0.01,
+         "delta": 0.01
        },
        "egress_gb": {
          "old": 0.00,
@@ -392,16 +391,16 @@ A connection error from any `go run` command means the cluster is not up, and
        },
        "vcpus": {
          "old": 0.00,
-         "new": 0.02,
-         "delta": 0.02
+         "new": 0.01,
+         "delta": 0.01
        }
      },
-     "total": 0.06
+     "total": 0.04
    }
    ```
 
    One runner with its four `dimensions`, each as `old`, `new` and `delta`, and
-   a total of 0.06. Every `old` is 0.00 because the finalized run had this
+   a total of 0.04. Every `old` is 0.00 because the finalized run had this
    runner's delete and not its create, so it billed nothing for it, and the
    correction debits the minutes it lived. The document has to match.
 
@@ -418,16 +417,16 @@ A connection error from any `go run` command means the cluster is not up, and
        {
          "relation_type": "infrastructure_tenant",
          "project_id": "005be5adeef3d87e280d03d9d57c38b4",
-         "items": 27,
-         "total": -513.91
+         "items": 24,
+         "total": -328.87
        }
      ],
-     "total": -513.91
+     "total": -328.87
    }
    ```
 
-   `alpha`'s note carries its tenant's 27 deltas under `related_costs` with the
-   total -513.91, and the note's total is that. The document has to match. The
+   `alpha`'s note carries its tenant's 24 deltas under `related_costs` with the
+   total -328.87, and the note's total is that. The document has to match. The
    correction attributes the way the run did: the tenant's deltas stand on the
    Gardener project's note and nowhere else.
 
@@ -439,26 +438,26 @@ A connection error from any `go run` command means the cluster is not up, and
 
    ```json
    {
-     "run_id": "e855f2f2-3e8c-4d21-a0be-17592aeb898a",
+     "run_id": "5acb4d80-f83c-4ba5-a35e-30e6a84f72ba",
      "kind": "correction",
-     "corrects_run_id": "923dc7cb-09da-44bf-9203-18140e0ac759",
+     "corrects_run_id": "2eb6724e-4139-4337-bc85-b7a04f07a1a2",
      "period_from": "2026-07-01T00:00:00Z",
      "period_to": "2026-08-01T00:00:00Z",
      "beneficiaries": [
        {
          "beneficiary": "cloudhouse",
          "currency": "EUR",
-         "kickback_total": -58.05,
+         "kickback_total": -43.56,
          "projects": 1,
          "breakdown": [
            {
              "cloud": "os-sim",
              "project_id": "10e287d5788957a2a331cabd1b5dccdf",
-             "relation_id": "04489747-96ab-45c1-9654-1d02f8f3152f",
+             "relation_id": "3d74d601-5029-4e07-b82f-1c55999a54ca",
              "scope": "all",
              "rate": 0.100000,
-             "base": -580.49,
-             "amount": -58.05
+             "base": -435.59,
+             "amount": -43.56
            }
          ]
        }
@@ -467,8 +466,8 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    `kind` `correction`, `corrects_run_id` naming the finalized run, one
-   beneficiary `cloudhouse` with `kickback_total` -58.05, `projects` 1 and one
-   `breakdown` entry with `base` -580.49 and `amount` -58.05 have to match. The
+   beneficiary `cloudhouse` with `kickback_total` -43.56, `projects` 1 and one
+   `breakdown` entry with `base` -435.59 and `amount` -43.56 have to match. The
    ids are your own. A correction named with `--run` reports the differences to
    the run it corrects, so this is what `cloudhouse` is owed less than the
    settlement of Pay a reseller a kickback said.
@@ -482,7 +481,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   correction run e855f2f2-3e8c-4d21-a0be-17592aeb898a finalized for 2026-07
+   correction run 5acb4d80-f83c-4ba5-a35e-30e6a84f72ba finalized for 2026-07
    ```
 
    The line has to match with your own correction id in it. A correction closes
@@ -495,11 +494,12 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   2026-07 finalized finalized_run=923dc7cb-09da-44bf-9203-18140e0ac759 finalized_at=2026-10-05T08:22:09Z
+   2026-07 finalized finalized_run=2eb6724e-4139-4337-bc85-b7a04f07a1a2 finalized_at=2026-11-06T12:44:32Z
+   2026-10 grace
    ```
 
    `finalized_run` still names `RUN_ID`, the regular run that closed the month,
-   and not the correction. `finalized_at` and the `2026-08` line are your own.
+   and not the correction. `finalized_at` and the `2026-10` line are your own.
 
 3. Ask the month what arrived late once more:
 
@@ -508,7 +508,7 @@ A connection error from any `go run` command means the cluster is not up, and
    ```
 
    ```text
-   run e855f2f2-3e8c-4d21-a0be-17592aeb898a read 2026-07 at 2026-10-05T08:22:39Z
+   run 5acb4d80-f83c-4ba5-a35e-30e6a84f72ba read 2026-07 at 2026-11-06T12:47:52Z
    no events arrived later
    ```
 
