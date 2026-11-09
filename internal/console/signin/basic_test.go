@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +52,7 @@ func newTestBasic(t *testing.T) (*Basic, *bytes.Buffer) {
 	t.Helper()
 
 	logger, logged := recorded()
-	basic, err := NewBasic(testUser+":"+hashOf(t, testPassword), logger)
+	basic, err := NewBasic(testUser+":"+hashOf(t, testPassword), logger, nil)
 	if err != nil {
 		t.Fatalf("NewBasic: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestNewBasicAccepts(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
-			basic, err := NewBasic(c.input, nil)
+			basic, err := NewBasic(c.input, nil, nil)
 			if err != nil {
 				t.Fatalf("NewBasic: %v", err)
 			}
@@ -168,7 +169,7 @@ func TestNewBasicAccepts(t *testing.T) {
 func TestNewBasicTakesANilLogger(t *testing.T) {
 	t.Parallel()
 
-	basic, err := NewBasic(testUser+":"+hashOf(t, testPassword), nil)
+	basic, err := NewBasic(testUser+":"+hashOf(t, testPassword), nil, nil)
 	if err != nil {
 		t.Fatalf("NewBasic: %v", err)
 	}
@@ -255,7 +256,7 @@ func TestNewBasicRefuses(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := NewBasic(c.input, nil)
+			_, err := NewBasic(c.input, nil, nil)
 			if err == nil {
 				t.Fatalf("NewBasic(%q) error = nil, want one containing %q", c.input, c.want)
 			}
@@ -342,7 +343,7 @@ func TestRequireSignsInAPasswordContainingAColon(t *testing.T) {
 	t.Parallel()
 
 	const password = "pass:with:colons"
-	basic, err := NewBasic(testUser+":"+hashOf(t, password), nil)
+	basic, err := NewBasic(testUser+":"+hashOf(t, password), nil, nil)
 	if err != nil {
 		t.Fatalf("NewBasic: %v", err)
 	}
@@ -630,6 +631,23 @@ func TestRequireCapsTheComparisons(t *testing.T) {
 		}
 	})
 
+	t.Run("a request whose context ends while both slots are held records cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		basic, reasons, _ := newRecordingBasic(t)
+		finish := holdBothSlots(t, basic)
+		t.Cleanup(finish)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		recorder, reached, _ := call(basic, signedIn(testUser, "wrong").WithContext(ctx))
+
+		assertRefused(t, recorder, reached)
+		// Read before the two held requests finish and record their own refusal.
+		assertRecorded(t, reasons, ReasonCancelled)
+	})
+
 	t.Run("a request whose wait runs out while both slots are held is answered busy", func(t *testing.T) {
 		t.Parallel()
 
@@ -740,4 +758,174 @@ func TestRequireCapsTheComparisons(t *testing.T) {
 			t.Errorf("busy lines after the step = %d, want 1:\n%s", got, logged)
 		}
 	})
+}
+
+// reasonRecorder collects what a sign-in reports. A request a test holds in a
+// comparison reports from another goroutine, so the list is guarded.
+type reasonRecorder struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *reasonRecorder) record(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.seen = append(r.seen, reason)
+}
+
+func (r *reasonRecorder) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return slices.Clone(r.seen)
+}
+
+// newRecordingBasic builds the sign-in over the fixture credential with a
+// recording callback.
+func newRecordingBasic(t *testing.T) (*Basic, *reasonRecorder, *bytes.Buffer) {
+	t.Helper()
+
+	reasons := &reasonRecorder{}
+	logger, logged := recorded()
+	basic, err := NewBasic(testUser+":"+hashOf(t, testPassword), logger, reasons.record)
+	if err != nil {
+		t.Fatalf("NewBasic: %v", err)
+	}
+	return basic, reasons, logged
+}
+
+// assertRecorded checks the reasons reported so far, in order.
+func assertRecorded(t *testing.T, reasons *reasonRecorder, want ...string) {
+	t.Helper()
+
+	if got := reasons.recorded(); !slices.Equal(got, want) {
+		t.Errorf("recorded reasons = %q, want %q", got, want)
+	}
+}
+
+func TestRequireRecordsTheReasonOfARefusal(t *testing.T) {
+	t.Parallel()
+
+	bearer := httptest.NewRequest(http.MethodGet, "/", nil)
+	bearer.Header.Set("Authorization", "Bearer x")
+
+	cases := []struct {
+		name    string
+		request *http.Request
+		compare func(hash, password []byte) error
+		want    string
+	}{
+		{name: "no header", request: httptest.NewRequest(http.MethodGet, "/", nil), want: ReasonNoCredential},
+		{name: "another scheme", request: bearer, want: ReasonNoCredential},
+		{name: "a wrong password", request: signedIn(testUser, "wrong"), want: ReasonWrongCredential},
+		{name: "a wrong user with the right password", request: signedIn("someone-else", testPassword), want: ReasonWrongCredential},
+		{
+			name:    "a comparison that fails with another error",
+			request: signedIn(testUser, testPassword),
+			compare: func(_, _ []byte) error { return errors.New("the hash went bad") },
+			want:    ReasonWrongCredential,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			basic, reasons, _ := newRecordingBasic(t)
+			if c.compare != nil {
+				basic.compare = c.compare
+			}
+
+			recorder, reached, _ := call(basic, c.request)
+
+			assertRefused(t, recorder, reached)
+			assertRecorded(t, reasons, c.want)
+		})
+	}
+}
+
+func TestRequireRecordsEveryBusyAnswer(t *testing.T) {
+	t.Parallel()
+
+	basic, reasons, logged := newRecordingBasic(t)
+	basic.waiting.Store(maxWaiting)
+
+	for range 2 {
+		recorder, reached, _ := call(basic, signedIn(testUser, "wrong"))
+		assertBusy(t, recorder, reached, logged)
+	}
+
+	if got := strings.Count(logged.String(), `msg="sign-in busy"`); got != 1 {
+		t.Fatalf("busy lines = %d, want 1, so that the second answer is a suppressed one:\n%s", got, logged)
+	}
+	assertRecorded(t, reasons, ReasonBusy, ReasonBusy)
+}
+
+func TestRequireRecordsNothingForACorrectCredential(t *testing.T) {
+	t.Parallel()
+
+	basic, reasons, _ := newRecordingBasic(t)
+	count := comparisonCounter(basic)
+
+	// The first request runs the comparison and the second is remembered.
+	for range 2 {
+		if _, reached, _ := call(basic, signedIn(testUser, testPassword)); !reached {
+			t.Fatal("the correct credential did not reach the next handler")
+		}
+	}
+
+	if got := count.Load(); got != 1 {
+		t.Errorf("comparisons = %d, want 1", got)
+	}
+	assertRecorded(t, reasons)
+}
+
+func TestNewBasicTakesANilCallback(t *testing.T) {
+	t.Parallel()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Both slots taken leave a cancelled request nothing but its context.
+	takeSlots := func(basic *Basic) {
+		for range maxComparisons {
+			basic.slots <- struct{}{}
+		}
+	}
+	fillQueue := func(basic *Basic) { basic.waiting.Store(maxWaiting) }
+
+	cases := []struct {
+		name    string
+		request *http.Request
+		prepare func(*Basic)
+		want    int
+	}{
+		{name: "no credential", request: httptest.NewRequest(http.MethodGet, "/", nil), want: http.StatusUnauthorized},
+		{name: "a wrong credential", request: signedIn(testUser, "wrong"), want: http.StatusUnauthorized},
+		{
+			name:    "a cancelled request",
+			request: signedIn(testUser, "wrong").WithContext(cancelled),
+			prepare: takeSlots,
+			want:    http.StatusUnauthorized,
+		},
+		{name: "a busy answer", request: signedIn(testUser, "wrong"), prepare: fillQueue, want: http.StatusServiceUnavailable},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			basic, _ := newTestBasic(t)
+			if c.prepare != nil {
+				c.prepare(basic)
+			}
+
+			recorder, _, _ := call(basic, c.request)
+
+			if recorder.Code != c.want {
+				t.Errorf("status = %d, want %d", recorder.Code, c.want)
+			}
+		})
+	}
 }

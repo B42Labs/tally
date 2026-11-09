@@ -50,6 +50,23 @@ const (
 	challenge = `Basic realm="Tally console", charset="UTF-8"`
 )
 
+// The reasons a request is refused, which name the samples of the console's
+// counter of refused sign-ins.
+const (
+	// ReasonNoCredential is a request that carried no HTTP Basic credential.
+	ReasonNoCredential = "no_credential"
+	// ReasonCancelled is a request whose context ended before a comparison ran.
+	ReasonCancelled = "cancelled"
+	// ReasonWrongCredential is a credential that was compared and did not match.
+	ReasonWrongCredential = "wrong_credential"
+	// ReasonBusy is a request answered 503 because no comparison was free.
+	ReasonBusy = "busy"
+)
+
+// Reasons holds every reason, so a counter can expose each at zero before the
+// first refusal.
+var Reasons = []string{ReasonNoCredential, ReasonCancelled, ReasonWrongCredential, ReasonBusy}
+
 // errNotBcrypt is the answer to every form of the hash other than bcrypt. It
 // names nothing of the line, because a misconfigured line can hold a plaintext
 // password.
@@ -77,6 +94,8 @@ type Basic struct {
 	slotWait   time.Duration
 	remembered atomic.Pointer[[sha256.Size]byte]
 	logger     *slog.Logger
+	// refused records the reason of every refusal.
+	refused func(reason string)
 	// lastBusyLog is when the last busy line was written, in Unix nanoseconds.
 	lastBusyLog atomic.Int64
 	// busySuppressed counts the busy answers since then that wrote no line.
@@ -86,10 +105,15 @@ type Basic struct {
 // NewBasic parses the credential: exactly one user:bcrypt-hash line in htpasswd
 // format, with blank lines and # comments ignored. The errors name the physical
 // line and never the user, the hash or a password. A nil logger falls back to
-// slog.Default().
-func NewBasic(htpasswd string, logger *slog.Logger) (*Basic, error) {
+// slog.Default(). refused is called with the reason of every refusal, and a nil
+// one records nothing. It is a function so that this package stays free of the
+// metrics library.
+func NewBasic(htpasswd string, logger *slog.Logger, refused func(reason string)) (*Basic, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if refused == nil {
+		refused = func(string) {}
 	}
 
 	user, hash, err := parseCredential(htpasswd, bcrypt.CompareHashAndPassword)
@@ -110,6 +134,7 @@ func NewBasic(htpasswd string, logger *slog.Logger) (*Basic, error) {
 		slots:    make(chan struct{}, maxComparisons),
 		slotWait: maxSlotWait,
 		logger:   logger,
+		refused:  refused,
 	}, nil
 }
 
@@ -191,7 +216,7 @@ func (b *Basic) Require(next http.Handler) http.Handler {
 		if !ok {
 			// Every browser's first request carries no credential, so this is
 			// no sign of anything.
-			b.refuse(w, r, slog.LevelDebug)
+			b.refuse(w, r, ReasonNoCredential)
 			return
 		}
 
@@ -207,11 +232,11 @@ func (b *Basic) Require(next http.Handler) http.Handler {
 				return
 			}
 			if !compared {
-				b.refuse(w, r, slog.LevelDebug)
+				b.refuse(w, r, ReasonCancelled)
 				return
 			}
 			if err != nil || !userOK {
-				b.refuse(w, r, slog.LevelWarn)
+				b.refuse(w, r, ReasonWrongCredential)
 				return
 			}
 			b.remembered.Store(&digest)
@@ -258,22 +283,30 @@ func (b *Basic) compareInSlot(ctx context.Context, password string) (compared bo
 	return true, b.compare(b.hash, []byte(password))
 }
 
-// refuse answers 401 and logs the request. A caller who has not signed in gets
-// no navigation, so the answer is plain text rather than the error page. The
-// line never carries the sent user name, because people type passwords into
+// refuse answers 401, logs the request and records the reason. Only a credential
+// that was compared and is wrong logs at WARN. A caller who has not signed in
+// gets no navigation, so the answer is plain text rather than the error page.
+// The line never carries the sent user name, because people type passwords into
 // that field.
-func (b *Basic) refuse(w http.ResponseWriter, r *http.Request, level slog.Level) {
+func (b *Basic) refuse(w http.ResponseWriter, r *http.Request, reason string) {
+	level := slog.LevelDebug
+	if reason == ReasonWrongCredential {
+		level = slog.LevelWarn
+	}
 	b.logger.Log(r.Context(), level, "sign-in refused",
 		"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+	b.refused(reason)
 	w.Header().Set("WWW-Authenticate", challenge)
 	http.Error(w, "sign-in required", http.StatusUnauthorized)
 }
 
-// busy answers 503 and logs the request, at most one line per busyLogInterval.
-// Each line counts the busy answers that wrote no line since the one before it.
+// busy answers 503, records the reason for every answer and logs the request,
+// at most one line per busyLogInterval. Each line counts the busy answers that
+// wrote no line since the one before it.
 // A 401 would have a browser ask again for a password nobody has checked, so
 // this answer carries no challenge.
 func (b *Basic) busy(w http.ResponseWriter, r *http.Request) {
+	b.refused(ReasonBusy)
 	// UnixNano carries no monotonic reading, so a clock stepped back makes elapsed
 	// negative. That counts as run out, or the step would silence the line for
 	// its own length. last is read before the clock so that a line another
