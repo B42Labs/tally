@@ -21,8 +21,8 @@
 // Nothing here writes to either side. The pages read the Reporting API for
 // projects, resources, lifecycles, stats and refused events, and the engine
 // database for everything monetary. A failure of either side reaches the
-// viewer as one error page naming what failed, and the same wrapped error goes
-// to the log.
+// viewer as an error page naming the side, and the wrapped error goes to the
+// log alone.
 //
 // Every route sits behind the sign-in the router is given, the stylesheet and
 // the answers to an unknown path or a wrong method included.
@@ -42,6 +42,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
+	"github.com/b42labs/tally/internal/console/metrics"
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/store"
 	"github.com/b42labs/tally/internal/engine/export"
@@ -57,6 +58,9 @@ type Options struct {
 	// access log through signin.WithOperator. The router does not build without
 	// one, so forgetting it cannot produce an open console.
 	SignIn func(http.Handler) http.Handler
+	// Metrics counts the requests that passed the sign-in. A nil Metrics records
+	// nothing.
+	Metrics *metrics.Metrics
 	// API reads the Reporting API and Store the engine database. The console
 	// serves no page without both.
 	API   API
@@ -151,12 +155,13 @@ func NewRouter(opts Options) (http.Handler, error) {
 
 	r := chi.NewRouter()
 	// Global middleware also wraps the not-found and method-not-allowed
-	// handlers, so nothing answers without the sign-in. The access log sits
+	// handlers, so nothing answers without the sign-in. The security headers sit
+	// outside the sign-in, so that a 401 carries them too. The access log sits
 	// inside the sign-in, where the operator is known, and outside Recoverer, so
 	// a panicking handler is logged with the 500 Recoverer wrote. A panic is the
 	// one failure that does not reach fail, and a demo console answering nothing
 	// at all is worse than one answering 500.
-	r.Use(opts.SignIn, accessLog(logger), middleware.Recoverer)
+	r.Use(secureHeaders, opts.SignIn, accessLog(logger, opts.Metrics), middleware.Recoverer)
 
 	r.Get("/", h.overview)
 	r.Get("/projects", h.projects)
