@@ -97,12 +97,8 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("building the router: %w", err)
 	}
 
-	// The address is the loopback one and not a configured interface. The pages
-	// ask nobody who they are and the process carries an admin token, so a
-	// listener on 0.0.0.0 would hand every reader of the network everything that
-	// token reads.
 	server := &http.Server{
-		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.HTTPPort)),
+		Addr:              net.JoinHostPort(cfg.HTTPAddr, strconv.Itoa(cfg.HTTPPort)),
 		Handler:           router,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -113,7 +109,7 @@ func run(ctx context.Context) error {
 	// The channel is buffered so that the serving goroutine ends even when the
 	// shutdown path stops reading from it.
 	serveErr := make(chan error, 1)
-	url := "http://127.0.0.1:" + strconv.Itoa(cfg.HTTPPort) + "/"
+	url := "http://" + server.Addr + "/"
 	logger.Info("listening", "url", url)
 	go func() { serveErr <- server.ListenAndServe() }()
 

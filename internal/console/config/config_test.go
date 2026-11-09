@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,7 +15,11 @@ import (
 // fieldNames are the Go names of Config's fields. No error may quote one: an
 // operator fixes an environment variable, and a field name is not something
 // they can set.
-var fieldNames = []string{"LogLevel", "HTTPPort", "ReportingURL", "APIToken", "CAFile", "EngineDBURL"}
+var fieldNames = []string{"LogLevel", "HTTPAddr", "HTTPPort", "ReportingURL", "APIToken", "CAFile", "EngineDBURL", "Htpasswd"}
+
+// testHtpasswd is an operator credential. Load checks only that it is present,
+// so it does not have to parse.
+const testHtpasswd = "operator:hash"
 
 // setEnv applies vars and blanks every other variable the package reads, so a
 // test never inherits a value from the developer's shell. A variable set to the
@@ -32,7 +37,7 @@ func setEnv(t *testing.T, vars map[string]string) {
 	}
 }
 
-// validEnv is the smallest environment Load accepts: the three values that have
+// validEnv is the smallest environment Load accepts: the four values that have
 // no default. A case that exercises one variable starts from it and changes
 // that one.
 func validEnv() map[string]string {
@@ -40,6 +45,7 @@ func validEnv() map[string]string {
 		"TALLY_CONSOLE_REPORTING_URL": "https://api.example.com",
 		"TALLY_CONSOLE_API_TOKEN":     "s3cr3t",
 		"TALLY_CONSOLE_ENGINE_DB_URL": "postgres://tally:tally@127.0.0.1:1/tally_engine",
+		"TALLY_CONSOLE_HTPASSWD":      testHtpasswd,
 	}
 }
 
@@ -70,13 +76,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "the defaults apply when only the required variables are set",
 			env:  func(*testing.T) map[string]string { return validEnv() },
-			want: config.Config{
-				LogLevel:     "INFO",
-				HTTPPort:     8095,
-				ReportingURL: "https://api.example.com",
-				APIToken:     "s3cr3t",
-				EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
-			},
+			want: wantLoaded(func(*config.Config) {}),
 		},
 		{
 			name: "a lower-case log level is refused",
@@ -148,13 +148,7 @@ func TestLoad(t *testing.T) {
 				vars["TALLY_CONSOLE_REPORTING_URL"] = "http://127.0.0.1:8080"
 				return vars
 			},
-			want: config.Config{
-				LogLevel:     "INFO",
-				HTTPPort:     8095,
-				ReportingURL: "http://127.0.0.1:8080",
-				APIToken:     "s3cr3t",
-				EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
-			},
+			want: wantLoaded(func(c *config.Config) { c.ReportingURL = "http://127.0.0.1:8080" }),
 		},
 		{
 			name: "a plaintext localhost URL is accepted",
@@ -163,13 +157,7 @@ func TestLoad(t *testing.T) {
 				vars["TALLY_CONSOLE_REPORTING_URL"] = "http://localhost:8080"
 				return vars
 			},
-			want: config.Config{
-				LogLevel:     "INFO",
-				HTTPPort:     8095,
-				ReportingURL: "http://localhost:8080",
-				APIToken:     "s3cr3t",
-				EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
-			},
+			want: wantLoaded(func(c *config.Config) { c.ReportingURL = "http://localhost:8080" }),
 		},
 		{
 			name: "the API token is required",
@@ -188,13 +176,7 @@ func TestLoad(t *testing.T) {
 				vars["TALLY_CONSOLE_API_TOKEN_FILE"] = writeSecret(t, "file-token\n")
 				return vars
 			},
-			want: config.Config{
-				LogLevel:     "INFO",
-				HTTPPort:     8095,
-				ReportingURL: "https://api.example.com",
-				APIToken:     "file-token",
-				EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
-			},
+			want: wantLoaded(func(c *config.Config) { c.APIToken = "file-token" }),
 		},
 		{
 			name: "an API token given inline and in a file is refused",
@@ -222,13 +204,90 @@ func TestLoad(t *testing.T) {
 				vars["TALLY_CONSOLE_ENGINE_DB_URL_FILE"] = writeSecret(t, "postgres://tally@127.0.0.1:1/from_file\n")
 				return vars
 			},
-			want: config.Config{
-				LogLevel:     "INFO",
-				HTTPPort:     8095,
-				ReportingURL: "https://api.example.com",
-				APIToken:     "s3cr3t",
-				EngineDBURL:  "postgres://tally@127.0.0.1:1/from_file",
+			want: wantLoaded(func(c *config.Config) { c.EngineDBURL = "postgres://tally@127.0.0.1:1/from_file" }),
+		},
+		{
+			name: "an address set to the empty string is the loopback one",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_ADDR"] = ""
+				return vars
 			},
+			want: wantLoaded(func(*config.Config) {}),
+		},
+		{
+			name: "the IPv4 wildcard address is accepted",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_ADDR"] = "0.0.0.0"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.HTTPAddr = "0.0.0.0" }),
+		},
+		{
+			name: "the IPv6 wildcard address is accepted",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_ADDR"] = "::"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.HTTPAddr = "::" }),
+		},
+		{
+			name: "a host name is refused as the address",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_ADDR"] = "console.example.com"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_HTTP_ADDR", "must be an IP address", `"console.example.com"`},
+		},
+		{
+			name: "a host and port pair is refused as the address",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_ADDR"] = "127.0.0.1:8095"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_HTTP_ADDR", "must be an IP address"},
+		},
+		{
+			name: "the operator credential is required",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				delete(vars, "TALLY_CONSOLE_HTPASSWD")
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_HTPASSWD: must be set"},
+		},
+		{
+			name: "the operator credential is read from the file its companion names",
+			env: func(t *testing.T) map[string]string {
+				vars := validEnv()
+				delete(vars, "TALLY_CONSOLE_HTPASSWD")
+				vars["TALLY_CONSOLE_HTPASSWD_FILE"] = writeSecret(t, "file-operator:hash\n")
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.Htpasswd = "file-operator:hash" }),
+		},
+		{
+			name: "an operator credential given inline and in a file is refused",
+			env: func(t *testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTPASSWD_FILE"] = writeSecret(t, "file-operator:hash\n")
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_HTPASSWD", "TALLY_CONSOLE_HTPASSWD_FILE", "not both"},
+		},
+		{
+			name: "an empty file for the operator credential is refused",
+			env: func(t *testing.T) map[string]string {
+				vars := validEnv()
+				delete(vars, "TALLY_CONSOLE_HTPASSWD")
+				vars["TALLY_CONSOLE_HTPASSWD_FILE"] = writeSecret(t, "")
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_HTPASSWD_FILE", "is empty"},
 		},
 	}
 
@@ -262,6 +321,50 @@ func TestLoad(t *testing.T) {
 				t.Errorf("Load() = %+v, want %+v", cfg, tt.want)
 			}
 		})
+	}
+}
+
+// wantLoaded is what Load returns for validEnv, changed by adjust.
+func wantLoaded(adjust func(*config.Config)) config.Config {
+	want := config.Config{
+		LogLevel:     "INFO",
+		HTTPAddr:     "127.0.0.1",
+		HTTPPort:     8095,
+		ReportingURL: "https://api.example.com",
+		APIToken:     "s3cr3t",
+		EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
+		Htpasswd:     testHtpasswd,
+	}
+	adjust(&want)
+	return want
+}
+
+// TestLoadDefaultsAnUnsetAddressToLoopback removes the variable itself, because
+// setEnv blanks a variable instead of removing it.
+func TestLoadDefaultsAnUnsetAddressToLoopback(t *testing.T) {
+	setEnv(t, validEnv())
+	if err := os.Unsetenv("TALLY_CONSOLE_HTTP_ADDR"); err != nil {
+		t.Fatalf("Unsetenv: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.HTTPAddr != "127.0.0.1" {
+		t.Errorf("Load() address = %q, want 127.0.0.1", cfg.HTTPAddr)
+	}
+}
+
+func TestLoadWrapsAMissingCredentialFile(t *testing.T) {
+	vars := validEnv()
+	delete(vars, "TALLY_CONSOLE_HTPASSWD")
+	vars["TALLY_CONSOLE_HTPASSWD_FILE"] = filepath.Join(t.TempDir(), "absent")
+	setEnv(t, vars)
+
+	_, err := config.Load()
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Load() error = %v, want one wrapping os.ErrNotExist", err)
 	}
 }
 

@@ -99,6 +99,12 @@ SIM_METRICS_INTERVAL ?= 300s
 # 8091 are the compose stack's.
 CONSOLE_PORT ?= 8095
 
+# The bcrypt line of the development credential `console` starts with: user
+# tally, password tally-dev-console-password. The hash and the password move
+# together, so this is := and not ?=: an override of one could not update the
+# other.
+CONSOLE_HTPASSWD := tally:$$2y$$10$$ozNeOXtuRimnpsNE.5KbUuSGhsattbYTZttj5kimYhssYd.Gjr22K
+
 COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
@@ -721,11 +727,13 @@ console:
 	echo && \
 	echo 'Demo console:' && \
 	echo '  http://127.0.0.1:$(CONSOLE_PORT)/' && \
+	echo '  sign in as tally / tally-dev-console-password' && \
 	echo && \
 	TALLY_CONSOLE_REPORTING_URL=https://api.tally.127-0-0-1.nip.io:8443 \
 	TALLY_CONSOLE_CA_FILE=tally-ca.crt \
 	TALLY_CONSOLE_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' \
 	TALLY_CONSOLE_HTTP_PORT='$(CONSOLE_PORT)' \
+	TALLY_CONSOLE_HTPASSWD='$(CONSOLE_HTPASSWD)' \
 	TALLY_CONSOLE_API_TOKEN="$$token" \
 	go run ./cmd/tally-console
 
