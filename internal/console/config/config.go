@@ -24,11 +24,13 @@ import (
 // quote them: an operator gets the variable to fix, not a Go field name.
 const (
 	envLogLevel     = "TALLY_LOG_LEVEL"
+	envHTTPAddr     = "TALLY_CONSOLE_HTTP_ADDR"
 	envHTTPPort     = "TALLY_CONSOLE_HTTP_PORT"
 	envReportingURL = "TALLY_CONSOLE_REPORTING_URL"
 	envAPIToken     = "TALLY_CONSOLE_API_TOKEN"
 	envCAFile       = "TALLY_CONSOLE_CA_FILE"
 	envEngineDBURL  = "TALLY_CONSOLE_ENGINE_DB_URL"
+	envHtpasswd     = "TALLY_CONSOLE_HTPASSWD"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -36,6 +38,7 @@ const (
 // developer's shell never reaches the code under test.
 var EnvNames = []string{
 	envLogLevel,
+	envHTTPAddr,
 	envHTTPPort,
 	envReportingURL,
 	envAPIToken,
@@ -43,6 +46,8 @@ var EnvNames = []string{
 	envCAFile,
 	envEngineDBURL,
 	envEngineDBURL + envsecret.Suffix,
+	envHtpasswd,
+	envHtpasswd + envsecret.Suffix,
 }
 
 // logLevels maps the accepted values of TALLY_LOG_LEVEL to their slog level.
@@ -61,9 +66,12 @@ var logLevels = map[string]slog.Level{
 type Config struct {
 	// LogLevel is the slog threshold, one of DEBUG, INFO, WARN, or ERROR.
 	LogLevel string `env:"TALLY_LOG_LEVEL" envDefault:"INFO"`
-	// HTTPPort is the port the console listens on, bound to the loopback
-	// address only. The default is 8095 because 8090 and 8091 are taken by the
-	// simulator compose stack.
+	// HTTPAddr is the IP address the console binds. The default keeps the
+	// console on the machine it runs on. A deployment behind a Gateway sets
+	// 0.0.0.0.
+	HTTPAddr string `env:"TALLY_CONSOLE_HTTP_ADDR" envDefault:"127.0.0.1"`
+	// HTTPPort is the port the console listens on. The default is 8095 because
+	// 8090 and 8091 are taken by the simulator compose stack.
 	HTTPPort int `env:"TALLY_CONSOLE_HTTP_PORT" envDefault:"8095"`
 	// ReportingURL is the base URL of the Reporting API without the /api/v1
 	// suffix. It has to be set, and it has to be https unless its host is
@@ -79,6 +87,9 @@ type Config struct {
 	// EngineDBURL is the PostgreSQL connection string of the engine database,
 	// opened for reads only. It has to be set. Supports the *_FILE convention.
 	EngineDBURL string `env:"TALLY_CONSOLE_ENGINE_DB_URL"`
+	// Htpasswd is the one operator allowed to sign in, as one user:bcrypt-hash
+	// line in htpasswd format. It has to be set. Supports the *_FILE convention.
+	Htpasswd string `env:"TALLY_CONSOLE_HTPASSWD"`
 }
 
 // Load reads the environment, resolves the file-backed secrets, and checks
@@ -95,6 +106,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.EngineDBURL, err = envsecret.Resolve(envEngineDBURL, cfg.EngineDBURL); err != nil {
+		return Config{}, err
+	}
+	if cfg.Htpasswd, err = envsecret.Resolve(envHtpasswd, cfg.Htpasswd); err != nil {
 		return Config{}, err
 	}
 
@@ -130,6 +144,12 @@ func Load() (Config, error) {
 	}
 	if cfg.EngineDBURL == "" {
 		return Config{}, fmt.Errorf("%s: must be set", envEngineDBURL)
+	}
+	if cfg.Htpasswd == "" {
+		return Config{}, fmt.Errorf("%s: must be set", envHtpasswd)
+	}
+	if net.ParseIP(cfg.HTTPAddr) == nil {
+		return Config{}, fmt.Errorf("%s: %q must be an IP address", envHTTPAddr, cfg.HTTPAddr)
 	}
 
 	return cfg, nil

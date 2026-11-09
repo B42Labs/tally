@@ -461,11 +461,13 @@ holding a path whose content becomes the value, applied by
 | Variable | Type | Default | File-backed | Governs |
 | --- | --- | --- | --- | --- |
 | `TALLY_LOG_LEVEL` | string | `INFO` | no | LogLevel is the slog threshold, one of DEBUG, INFO, WARN, or ERROR. |
-| `TALLY_CONSOLE_HTTP_PORT` | integer | `8095` | no | HTTPPort is the port the console listens on, bound to the loopback address only. The default is 8095 because 8090 and 8091 are taken by the simulator compose stack. |
+| `TALLY_CONSOLE_HTTP_ADDR` | string | `127.0.0.1` | no | HTTPAddr is the IP address the console binds. The default keeps the console on the machine it runs on. A deployment behind a Gateway sets 0.0.0.0. |
+| `TALLY_CONSOLE_HTTP_PORT` | integer | `8095` | no | HTTPPort is the port the console listens on. The default is 8095 because 8090 and 8091 are taken by the simulator compose stack. |
 | `TALLY_CONSOLE_REPORTING_URL` | string | none | no | ReportingURL is the base URL of the Reporting API without the /api/v1 suffix. It has to be set, and it has to be https unless its host is loopback, because the API token rides on every call. |
 | `TALLY_CONSOLE_API_TOKEN` | string | none | yes (`TALLY_CONSOLE_API_TOKEN_FILE`) | APIToken is the bearer token the console reads the Reporting API with. It has to carry the admin role, because the dead-letter list the overview reads is admin-only. It has to be set. Supports the *_FILE convention. |
 | `TALLY_CONSOLE_CA_FILE` | string | none | no | CAFile is a PEM file holding the CA that signed the Reporting API's certificate. Empty trusts the system store. |
 | `TALLY_CONSOLE_ENGINE_DB_URL` | string | none | yes (`TALLY_CONSOLE_ENGINE_DB_URL_FILE`) | EngineDBURL is the PostgreSQL connection string of the engine database, opened for reads only. It has to be set. Supports the *_FILE convention. |
+| `TALLY_CONSOLE_HTPASSWD` | string | none | yes (`TALLY_CONSOLE_HTPASSWD_FILE`) | Htpasswd is the one operator allowed to sign in, as one user:bcrypt-hash line in htpasswd format. It has to be set. Supports the *_FILE convention. |
 <!-- refdoc:end settings -->
 
 ## The token

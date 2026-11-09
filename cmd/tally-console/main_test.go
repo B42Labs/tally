@@ -24,6 +24,14 @@ import (
 // machine.
 const startupTimeout = 10 * time.Second
 
+// The operator credential the running console is started with. The hash has the
+// lowest cost the console accepts, so the sign-in does not slow the tests down.
+const (
+	testOperator = "test-operator"
+	testPassword = "test-password"
+	testHtpasswd = testOperator + ":$2y$10$TaXj3/P4n/MRdv90G7yxa.9R.9hbOAqM9LXxAeK83g8pUS4Px4Hr."
+)
+
 // setEnv applies vars and blanks every other variable the console reads, so a
 // test never inherits a value from the developer's shell. A variable set to the
 // empty string falls back to its default exactly as an unset one does.
@@ -51,6 +59,7 @@ func serverEnv(port int, reportingURL string) map[string]string {
 		"TALLY_CONSOLE_REPORTING_URL": reportingURL,
 		"TALLY_CONSOLE_API_TOKEN":     "test-token",
 		"TALLY_CONSOLE_ENGINE_DB_URL": "postgres://tally:tally@127.0.0.1:1/tally_engine",
+		"TALLY_CONSOLE_HTPASSWD":      testHtpasswd,
 	}
 }
 
