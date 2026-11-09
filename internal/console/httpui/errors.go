@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/b42labs/tally/internal/console/reporting"
+	apiproblem "github.com/b42labs/tally/internal/reporting/httpapi/problem"
 )
 
 // paramError is a query parameter a page cannot be built without: one that was
@@ -102,9 +103,13 @@ func (e lookupError) Unwrap() error { return e.err }
 // nothingRegistered tags err as a lookup that found nothing.
 func nothingRegistered(err error) error { return lookupError{err: err} }
 
+// loggedNotice is the message of every page answered 500 or above. What failed
+// underneath names database hosts and API addresses, so it stays in the log.
+const loggedNotice = "the details are in the log of the console"
+
 // failFrom answers a failed page by what the error is tagged as. The tag
 // decides the status and the heading; the error itself, wrapped as the handler
-// wrapped it, is what the page and the log carry.
+// wrapped it, is what the log carries.
 func (h *handlers) failFrom(w http.ResponseWriter, r *http.Request, err error, src sources) {
 	var param *paramError
 	if errors.As(err, &param) {
@@ -116,14 +121,26 @@ func (h *handlers) failFrom(w http.ResponseWriter, r *http.Request, err error, s
 	if errors.As(err, &fromAPI) {
 		var problem *reporting.ProblemError
 		if errors.As(err, &problem) {
-			switch problem.Status {
-			case http.StatusNotFound:
+			switch {
+			case problem.Status == http.StatusNotFound:
 				h.fail(w, r, http.StatusNotFound, "the Reporting API holds nothing under that id", err, src)
 				return
-			case http.StatusUnauthorized:
+			case problem.Status == http.StatusUnauthorized || problem.Status == http.StatusForbidden:
 				// The console cannot fix its own credential, so the failure is
 				// this deployment's rather than the request's.
 				h.fail(w, r, http.StatusBadGateway, "the Reporting API refused the configured token", err, src)
+				return
+			case problem.Type == apiproblem.TypeHistoryTooLong || problem.Type == apiproblem.TypeResultTooLarge:
+				// A bound of the API that no request of the viewer gets under, so
+				// the page stays broken for this resource or project until the
+				// deployment changes.
+				h.fail(w, r, http.StatusBadGateway, "the Reporting API refuses a read this large", err, src)
+				return
+			case problem.Status == http.StatusBadRequest || problem.Status == http.StatusUnprocessableEntity:
+				// The two statuses the viewer's request can cause, a mistyped cursor
+				// for example, and the API's text says what to fix. Any other 4xx
+				// describes the console's own call and is answered 502 below.
+				h.fail(w, r, problem.Status, "the Reporting API refused the request", err, src)
 				return
 			}
 		}
@@ -156,18 +173,20 @@ func (h *handlers) failFrom(w http.ResponseWriter, r *http.Request, err error, s
 	h.fail(w, r, http.StatusInternalServerError, "the page could not be built", err, src)
 }
 
-// errorData is what the error page renders: the whole wrapped error as text.
+// errorData is what the error page renders: the wrapped error below status 500
+// and loggedNotice from there on.
 type errorData struct {
 	Message string
 }
 
 // fail answers one failed page and is the only path that writes a failure to
-// the viewer. The error text is on the page rather than behind a correlation
-// id: this console has one viewer, that viewer runs the demo, and the fastest
-// way to tell them what broke is to print it.
+// the viewer. Below status 500 the page says what to fix in the request. From
+// 500 up the heading names the side that failed and the message is loggedNotice,
+// one rule by status that a new call site cannot get wrong.
 //
-// The same error goes to the log whole, at ERROR for a failure of the console
-// or the sides it reads, at WARN for a request that asked for something wrong.
+// The error goes to the log whole at every status, at ERROR for a failure of
+// the console or the sides it reads, at WARN for a request that asked for
+// something wrong.
 func (h *handlers) fail(
 	w http.ResponseWriter, r *http.Request, status int, heading string, err error, src sources,
 ) {
@@ -184,8 +203,13 @@ func (h *handlers) fail(
 		return
 	}
 
+	message := err.Error()
+	if status >= http.StatusInternalServerError {
+		message = loggedNotice
+	}
+
 	var body bytes.Buffer
-	p := page{Title: heading, Sources: src, Data: errorData{Message: err.Error()}}.forRequest(r)
+	p := page{Title: heading, Sources: src, Data: errorData{Message: message}}.forRequest(r)
 	// The error page is what every other page falls back to, so it cannot fall
 	// back to itself. What is left when it fails is the status and one line.
 	if execErr := tpl.ExecuteTemplate(&body, "layout", p); execErr != nil {
