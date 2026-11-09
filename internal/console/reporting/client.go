@@ -56,7 +56,7 @@ type Client struct {
 //
 // The URL is taken as given. Whether it may carry the token is decided at
 // startup by internal/console/config, which refuses one that is neither https
-// nor loopback.
+// nor loopback unless TALLY_CONSOLE_REPORTING_INSECURE allows it.
 //
 // An empty caFile trusts the system store. A named one is trusted instead of
 // it, which is what reaches a dev cluster whose certificates come from a CA the
