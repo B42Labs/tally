@@ -1,6 +1,6 @@
 ---
 title: Demo console (tally-console)
-description: "What the read-only demo console serves, the admin token it needs, and how make console starts it."
+description: "What the read-only demo console serves, how an operator signs in to it, the admin token it needs, and how make console starts it."
 quadrant: reference
 audience: operator
 ---
@@ -11,9 +11,9 @@ audience: operator
 the projects, resources and lifecycles the Reporting API serves, and the
 billing periods, runs, statements and pricing catalogs the engine stored. It is
 a demo instrument. It runs on a developer's machine, writes nothing on either
-side, is deployed nowhere, and has no sign-in, so whoever reaches its port reads
-everything its token reads. Every page is HTML the process rendered; it ships no
-JavaScript and loads one stylesheet. The process is assembled in
+side, is deployed nowhere, and answers one signed-in operator. Every page is
+HTML the process rendered; it ships no JavaScript and loads one stylesheet. The
+process is assembled in
 [`cmd/tally-console/main.go`](https://github.com/B42Labs/tally/blob/main/cmd/tally-console/main.go).
 
 ## Invocation
@@ -450,9 +450,31 @@ the engine rounds them to. A catalog price is rendered with the digits the
 pricing document carries, because a price of `0.00005` per unit hour rounded to
 a money scale would print as zero.
 
+## Sign-in
+
+Every route needs the one operator credential, checked with HTTP Basic against
+one bcrypt line in htpasswd format. `TALLY_CONSOLE_HTPASSWD` holds that line,
+which `htpasswd -nBC 12 <user>` makes. `htpasswd -n` without `-B` writes an MD5
+hash and `htpasswd -nB` without `-C` a bcrypt cost of 5, and the console refuses
+both.
+
+Without the credential every route answers 401 with
+`WWW-Authenticate: Basic realm="Tally console", charset="UTF-8"`, the stylesheet
+and unknown paths included.
+
+A credential the console has not verified yet takes one of two bcrypt
+comparisons. A request that finds 32 requests waiting for or inside one, or that
+has waited 5 seconds, is answered 503 with `Retry-After: 5` and no challenge.
+
+The credential is read at startup, so rotating it means restarting the process.
+HTTP Basic has no sign-out, so a browser holds the credential until it closes.
+
+The process speaks plain HTTP, so a listener beyond loopback belongs behind
+something that terminates TLS.
+
 ## Environment
 
-Every setting comes from the environment. The two secrets accept the `*_FILE`
+Every setting comes from the environment. The three secrets accept the `*_FILE`
 companion the rest of Tally uses, the variable's name plus the suffix `_FILE`
 holding a path whose content becomes the value, applied by
 [`internal/core/envsecret`](https://github.com/B42Labs/tally/blob/main/internal/core/envsecret/envsecret.go).
@@ -479,9 +501,8 @@ console makes takes `read_all` or `project`, so the dead-letter list alone
 decides the role. Such a token is issued by
 [`tally-reporting-admin create-api-token`](/reference/command-line/tally-reporting-admin).
 
-The console sends nothing but GET and binds the loopback address. That is what
-makes an admin token acceptable here, and why the process belongs on a laptop
-rather than in a deployment.
+The console sends nothing but GET to the Reporting API, and every page it serves
+sits behind the sign-in.
 
 ## Startup
 
@@ -489,22 +510,31 @@ rather than in a deployment.
 with `tally-reporting-admin create-api-token --role admin`, writes the dev CA to
 `tally-ca.crt`, and runs the process against
 `https://api.tally.127-0-0-1.nip.io:8443` and the dev engine database, printing
-`http://127.0.0.1:8095/`. The token is issued fresh per run and comes before the
-CA, so on a machine without a dev cluster the target fails on the admin CLI's
-connection error.
+`http://127.0.0.1:8095/` and the development credential, user `tally` and
+password `tally-dev-console-password`. The token is issued fresh per run and
+comes before the CA, so on a machine without a dev cluster the target fails on
+the admin CLI's connection error.
 
-The process binds `127.0.0.1` on `TALLY_CONSOLE_HTTP_PORT`, so the console is
-reachable from the machine it runs on and nowhere else. The engine pool connects
-lazily, so the process comes up while that database is unavailable and the pages
-reading it report the outage.
+The process binds `TALLY_CONSOLE_HTTP_ADDR` on `TALLY_CONSOLE_HTTP_PORT`. The
+default address `127.0.0.1` keeps the console reachable from the machine it runs
+on and nowhere else, and a listener on every interface sets `0.0.0.0`. The
+engine pool connects lazily, so the process comes up while that database is
+unavailable and the pages reading it report the outage.
 
 A configuration the console cannot honor exits 1 before the port is bound, with
 the message naming the variable. `TALLY_CONSOLE_REPORTING_URL`,
-`TALLY_CONSOLE_API_TOKEN` and `TALLY_CONSOLE_ENGINE_DB_URL` have to be set. A
-reporting URL that is not `https` and whose host is not loopback is refused,
-because the token rides on every call and would travel in cleartext. A
-`TALLY_CONSOLE_CA_FILE` holding no PEM certificate is refused with the file
-named.
+`TALLY_CONSOLE_API_TOKEN`, `TALLY_CONSOLE_ENGINE_DB_URL` and
+`TALLY_CONSOLE_HTPASSWD` have to be set. A reporting URL that is not `https` and
+whose host is not loopback is refused, because the token rides on every call and
+would travel in cleartext. A `TALLY_CONSOLE_CA_FILE` holding no PEM certificate
+is refused with the file named. A `TALLY_CONSOLE_HTTP_ADDR` that is not an IP
+address is refused, a host name and a `host:port` pair included.
+
+`TALLY_CONSOLE_HTPASSWD` is refused unless it holds exactly one `user:hash` line,
+blank lines and `#` comments aside. A line that is not bcrypt, a plain password
+or an MD5 or SHA1 hash for example, is refused, and so are a bcrypt cost below 10
+or above 17 and the hash of the empty password. The message names the line by
+its number and carries nothing of its content.
 
 ## Signals and exit status
 
@@ -526,3 +556,13 @@ error it shows, at WARN for a request that asked for something wrong and at
 ERROR for a failure of the console or of a side it reads. A stored row whose
 amount is not a number is left out of the listing that read it and logged at
 WARN, naming the query and the row's key columns.
+
+Every request that passes the sign-in writes one `request` line at INFO with
+`operator`, `method`, `path`, `query`, `status` and `duration_ms`. A refused
+request writes one `sign-in refused` line with `method`, `path` and `remote`, at
+WARN for a credential that was sent and wrong and at DEBUG otherwise, because
+every browser's first request carries none. That line never carries the user
+name that was sent. A request answered 503 because the comparisons are taken
+writes a `sign-in busy` line at WARN with the same three fields and
+`suppressed`, at most one line per 10 seconds. `suppressed` is the number of
+503 answers that wrote no line since the line before it.
