@@ -35,6 +35,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/pricing"
 	"github.com/b42labs/tally/internal/engine/statements"
 	"github.com/b42labs/tally/internal/reporting/httpapi"
+	apiproblem "github.com/b42labs/tally/internal/reporting/httpapi/problem"
 )
 
 // testNow is the instant every page under test is rendered at, so a windowed
@@ -447,6 +448,23 @@ func TestNewRouterRefusesToBuildWithoutASignIn(t *testing.T) {
 	_, err := NewRouter(Options{API: &fakeAPI{}, Store: &fakeStore{}})
 	if err == nil || !strings.Contains(err.Error(), "sign-in") {
 		t.Fatalf("NewRouter error = %v, want one naming the sign-in", err)
+	}
+}
+
+// assertLoggedOnly checks a page answered 500 or above: it names the failed side
+// and says where the details are, and it carries none of hidden.
+func assertLoggedOnly(t *testing.T, label, body, heading string, hidden ...string) {
+	t.Helper()
+
+	for _, want := range []string{heading, loggedNotice} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%s: the page does not carry %q:\n%s", label, want, body)
+		}
+	}
+	for _, unwanted := range hidden {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("%s: the page carries %q:\n%s", label, unwanted, body)
+		}
 	}
 }
 
@@ -1387,9 +1405,7 @@ func TestProjectPage(t *testing.T) {
 		if status != http.StatusBadGateway {
 			t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
 		}
-		if !strings.Contains(body, endpoint) {
-			t.Errorf("the page does not name the endpoint:\n%s", body)
-		}
+		assertLoggedOnly(t, "the project page", body, "the Reporting API call failed", endpoint, "connection refused")
 		if !strings.Contains(logged.String(), "connection refused") {
 			t.Errorf("the log does not carry the wrapped error:\n%s", logged.String())
 		}
@@ -2202,48 +2218,57 @@ func TestMetaProjectRollup(t *testing.T) {
 		refused := errors.New("connection refused")
 		endpoint := "http://127.0.0.1:1/api/v1/projects/"
 		cases := []struct {
-			name   string
-			fail   func(api *fakeAPI, engine *fakeStore)
-			status int
-			wants  []string
+			name    string
+			fail    func(api *fakeAPI, engine *fakeStore)
+			status  int
+			heading string
+			logged  string
+			wants   []string
 		}{
 			{
-				name:   "the billing periods",
-				fail:   func(_ *fakeAPI, engine *fakeStore) { engine.periodsErr = errors.New("ListPeriods: connection refused") },
-				status: http.StatusServiceUnavailable,
-				wants:  []string{"ListPeriods: connection refused"},
+				name:    "the billing periods",
+				fail:    func(_ *fakeAPI, engine *fakeStore) { engine.periodsErr = errors.New("ListPeriods: connection refused") },
+				status:  http.StatusServiceUnavailable,
+				heading: "the engine database could not be read",
+				logged:  "ListPeriods: connection refused",
 			},
 			{
 				name: "the membership",
 				fail: func(api *fakeAPI, _ *fakeStore) {
 					api.membershipsErr = fmt.Errorf("calling %s: %w", endpoint+testProjectID.String()+"/relations", refused)
 				},
-				status: http.StatusBadGateway,
-				wants:  []string{"connection refused", "relation_type=member_of"},
+				status:  http.StatusBadGateway,
+				heading: "the Reporting API call failed",
+				logged:  "connection refused",
+				wants:   []string{"relation_type=member_of"},
 			},
 			{
 				name: "a member project",
 				fail: func(api *fakeAPI, _ *fakeStore) {
 					api.memberErr = fmt.Errorf("calling %s: %w", endpoint+testSourceID.String(), refused)
 				},
-				status: http.StatusBadGateway,
-				wants:  []string{"connection refused", "GET /api/v1/projects/" + testSourceID.String()},
+				status:  http.StatusBadGateway,
+				heading: "the Reporting API call failed",
+				logged:  "connection refused",
+				wants:   []string{"GET /api/v1/projects/" + testSourceID.String()},
 			},
 			{
 				name: "the runs of the period",
 				fail: func(_ *fakeAPI, engine *fakeStore) {
 					engine.periodRunsErr = errors.New("ListRunsForPeriod: connection refused")
 				},
-				status: http.StatusServiceUnavailable,
-				wants:  []string{"ListRunsForPeriod: connection refused"},
+				status:  http.StatusServiceUnavailable,
+				heading: "the engine database could not be read",
+				logged:  "ListRunsForPeriod: connection refused",
 			},
 			{
 				name: "the export of a run",
 				fail: func(_ *fakeAPI, engine *fakeStore) {
 					engine.runExportErrs = map[uuid.UUID]error{testRunID: errors.New("LoadRunExport: connection refused")}
 				},
-				status: http.StatusServiceUnavailable,
-				wants:  []string{"LoadRunExport: connection refused"},
+				status:  http.StatusServiceUnavailable,
+				heading: "the engine database could not be read",
+				logged:  "LoadRunExport: connection refused",
 			},
 		}
 		for _, tc := range cases {
@@ -2260,8 +2285,9 @@ func TestMetaProjectRollup(t *testing.T) {
 					t.Errorf("%s: the page does not name %q:\n%s", tc.name, want, body)
 				}
 			}
-			if !strings.Contains(logged.String(), tc.wants[0]) {
-				t.Errorf("%s: the log does not carry %q:\n%s", tc.name, tc.wants[0], logged.String())
+			assertLoggedOnly(t, tc.name, body, tc.heading, tc.logged)
+			if !strings.Contains(logged.String(), tc.logged) {
+				t.Errorf("%s: the log does not carry %q:\n%s", tc.name, tc.logged, logged.String())
 			}
 		}
 	})
@@ -2717,10 +2743,7 @@ func TestStatementPage(t *testing.T) {
 			if status != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d for %s, want %d", status, document, http.StatusServiceUnavailable)
 			}
-			want := fmt.Sprintf("reading the statement of %s in run %s", testKey, testRunID)
-			if !strings.Contains(body, want) {
-				t.Errorf("the page for %s does not carry %q:\n%s", document, want, body)
-			}
+			assertLoggedOnly(t, document, body, "the stored document could not be read", "reading the statement of")
 			if !strings.Contains(logged.String(), "reading the statement of") {
 				t.Errorf("the log for %s does not carry the failure:\n%s", document, logged.String())
 			}
@@ -3032,11 +3055,8 @@ func TestCreditNote(t *testing.T) {
 		if status != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusServiceUnavailable, body)
 		}
-		want := fmt.Sprintf("reading the credit note of %s in run %s: not a credit note document",
-			testKey, testCorrectionRunID)
-		if !strings.Contains(body, want) {
-			t.Errorf("the page does not carry %q:\n%s", want, body)
-		}
+		assertLoggedOnly(t, "the credit note", body, "the stored document could not be read",
+			"reading the credit note of", "not a credit note document")
 		if !strings.Contains(logged.String(), "not a credit note document") {
 			t.Errorf("the log does not carry the failure:\n%s", logged.String())
 		}
@@ -3045,15 +3065,17 @@ func TestCreditNote(t *testing.T) {
 	t.Run("a document that is no JSON", func(t *testing.T) {
 		t.Parallel()
 
-		handler, _ := serve(t, fullAPI(t), noteStore(t, "not json at all"), testNow)
+		handler, logged := serve(t, fullAPI(t), noteStore(t, "not json at all"), testNow)
 
 		status, body, _ := get(t, handler, notePath)
 		if status != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusServiceUnavailable, body)
 		}
+		assertLoggedOnly(t, "the credit note", body, "the stored document could not be read",
+			"reading the credit note of", "invalid character")
 		for _, want := range []string{"reading the credit note of", "invalid character"} {
-			if !strings.Contains(body, want) {
-				t.Errorf("the page does not carry %q:\n%s", want, body)
+			if !strings.Contains(logged.String(), want) {
+				t.Errorf("the log does not carry %q:\n%s", want, logged.String())
 			}
 		}
 	})
@@ -3511,8 +3533,9 @@ func TestStatementExport(t *testing.T) {
 		if code != http.StatusServiceUnavailable {
 			t.Errorf("route status = %d, want %d", code, http.StatusServiceUnavailable)
 		}
-		if !strings.Contains(body, "invoice_number") || !strings.Contains(logged.String(), "invoice_number") {
-			t.Errorf("the refusal did not reach the page and the log:\n%s\n%s", body, logged.String())
+		assertLoggedOnly(t, "the export route", body, "the stored document could not be read", "invoice_number")
+		if !strings.Contains(logged.String(), "invoice_number") {
+			t.Errorf("the refusal did not reach the log:\n%s", logged.String())
 		}
 	})
 
@@ -3848,9 +3871,7 @@ func TestRunExport(t *testing.T) {
 			if code != http.StatusServiceUnavailable {
 				t.Errorf("%s status = %d, want %d", route, code, http.StatusServiceUnavailable)
 			}
-			if !strings.Contains(body, "invoice_number") {
-				t.Errorf("%s does not carry the refusal:\n%s", route, body)
-			}
+			assertLoggedOnly(t, route, body, "the stored document could not be read", "invoice_number")
 		}
 		if !strings.Contains(logged.String(), "invoice_number") {
 			t.Errorf("the refusal did not reach the log:\n%s", logged.String())
@@ -4001,9 +4022,7 @@ func TestCatalogPage(t *testing.T) {
 		if status != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want %d", status, http.StatusServiceUnavailable)
 		}
-		if !strings.Contains(body, "reading the pricing catalog 2026-03") {
-			t.Errorf("the page does not name the version it failed on:\n%s", body)
-		}
+		assertLoggedOnly(t, "the catalog", body, "the stored document could not be read", "reading the pricing catalog 2026-03")
 		if !strings.Contains(logged.String(), "reading the pricing catalog") {
 			t.Errorf("the log does not carry the failure:\n%s", logged.String())
 		}
@@ -5456,16 +5475,17 @@ func TestHistoryWithoutCreate(t *testing.T) {
 		// What the client returns for a first_event_at that is not an instant.
 		api.resourcesErr = fmt.Errorf("decoding the answer of %s: %w", endpoint, errors.New(
 			`parsing time "yesterday" as "2006-01-02T15:04:05Z07:00": cannot parse "yesterday" as "2006"`))
-		handler, _ := serve(t, api, fullStore(t), testNow)
+		handler, logged := serve(t, api, fullStore(t), testNow)
 
 		for _, path := range []string{"/resources", "/project?id=" + testProjectID.String()} {
 			status, body, _ := get(t, handler, path)
-			if status != http.StatusBadGateway || !strings.Contains(body, "the Reporting API call failed") {
+			if status != http.StatusBadGateway {
 				t.Errorf("%s: status = %d, body:\n%s", path, status, body)
 			}
-			if !strings.Contains(body, endpoint) {
-				t.Errorf("%s: the page does not name the endpoint:\n%s", path, body)
-			}
+			assertLoggedOnly(t, path, body, "the Reporting API call failed", endpoint)
+		}
+		if !strings.Contains(logged.String(), endpoint) {
+			t.Errorf("the log does not name the endpoint:\n%s", logged.String())
 		}
 	})
 
@@ -5714,4 +5734,266 @@ func TestRequestCounter(t *testing.T) {
 			t.Errorf("status = %d, want %d", status, http.StatusOK)
 		}
 	})
+}
+
+func TestErrorPageShowsTextBelow500Only(t *testing.T) {
+	t.Parallel()
+
+	problem := func(status int, detail string) error {
+		return &reporting.ProblemError{Status: status, Type: "about:blank", Title: "refused", Detail: detail}
+	}
+	projectPage := "/project?id=" + testProjectID.String()
+	const hiddenDetail = "the detail of the problem"
+
+	cases := []struct {
+		name    string
+		path    string
+		fail    func(api *fakeAPI, engine *fakeStore)
+		status  int
+		heading string
+		// page is what the page has to carry beside the heading, and hidden what
+		// it may not. logged is what the log has to carry.
+		page, hidden, logged []string
+	}{
+		{
+			name: "a transport failure of the API",
+			path: projectPage,
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.projectErr = fmt.Errorf("calling http://127.0.0.1:1/api/v1/projects/%s: %w",
+					testProjectID, errors.New("connection refused"))
+			},
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API call failed",
+			page:    []string{loggedNotice},
+			hidden:  []string{"127.0.0.1:1", "connection refused"},
+			logged:  []string{"127.0.0.1:1", "connection refused"},
+		},
+		{
+			name: "an engine read, which stays in the provenance panel",
+			path: "/",
+			fail: func(_ *fakeAPI, engine *fakeStore) {
+				engine.periodsErr = errors.New("ListPeriods: connection refused")
+			},
+			status:  http.StatusServiceUnavailable,
+			heading: "the engine database could not be read",
+			page:    []string{loggedNotice, "ListPeriods"},
+			hidden:  []string{"connection refused"},
+			logged:  []string{"ListPeriods: connection refused"},
+		},
+		{
+			name: "a stored document that is no JSON",
+			path: "/statement?run=" + testRunID.String() + "&key=" + url.QueryEscape(testKey),
+			fail: func(_ *fakeAPI, engine *fakeStore) {
+				engine.statement = store.Statement{Document: []byte("not json at all"), Currency: "EUR"}
+			},
+			status:  http.StatusServiceUnavailable,
+			heading: "the stored document could not be read",
+			page:    []string{loggedNotice},
+			hidden:  []string{"invalid character"},
+			logged:  []string{"invalid character"},
+		},
+		{
+			name:    "an API problem of status 401",
+			path:    projectPage,
+			fail:    func(api *fakeAPI, _ *fakeStore) { api.projectErr = problem(http.StatusUnauthorized, hiddenDetail) },
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API refused the configured token",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name:    "an API problem of status 403",
+			path:    projectPage,
+			fail:    func(api *fakeAPI, _ *fakeStore) { api.projectErr = problem(http.StatusForbidden, hiddenDetail) },
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API refused the configured token",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name: "an API problem of status 500",
+			path: projectPage,
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.projectErr = problem(http.StatusInternalServerError, hiddenDetail)
+			},
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API call failed",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name: "an API problem of status 400 keeps its status and its text",
+			path: projectPage,
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.projectErr = problem(http.StatusBadRequest, "the cursor is not valid")
+			},
+			status:  http.StatusBadRequest,
+			heading: "the Reporting API refused the request",
+			page:    []string{"the cursor is not valid"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"the cursor is not valid"},
+		},
+		{
+			name: "an API problem of status 422 keeps its status and its text",
+			path: projectPage,
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.projectErr = problem(http.StatusUnprocessableEntity, "the window is too wide")
+			},
+			status:  http.StatusUnprocessableEntity,
+			heading: "the Reporting API refused the request",
+			page:    []string{"the window is too wide"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"the window is too wide"},
+		},
+		{
+			name: "a resource history above the API's bound",
+			path: "/resource?cloud=os-sim&type=instance&id=vm-1",
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.lifecycleErr = &reporting.ProblemError{
+					Status: http.StatusUnprocessableEntity, Type: apiproblem.TypeHistoryTooLong,
+					Title: "History too long", Detail: hiddenDetail,
+				}
+			},
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API refuses a read this large",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name: "an event grouping above the API's bound",
+			path: "/",
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.eventStatsErr = &reporting.ProblemError{
+					Status: http.StatusUnprocessableEntity, Type: apiproblem.TypeResultTooLarge,
+					Title: "Result too large", Detail: hiddenDetail,
+				}
+			},
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API refuses a read this large",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name: "an API problem of status 405, which only the console's own call causes",
+			path: projectPage,
+			fail: func(api *fakeAPI, _ *fakeStore) {
+				api.projectErr = problem(http.StatusMethodNotAllowed, hiddenDetail)
+			},
+			status:  http.StatusBadGateway,
+			heading: "the Reporting API call failed",
+			page:    []string{loggedNotice},
+			hidden:  []string{hiddenDetail},
+			logged:  []string{hiddenDetail},
+		},
+		{
+			name:    "an API problem of status 404 keeps its text",
+			path:    projectPage,
+			fail:    func(api *fakeAPI, _ *fakeStore) { api.projectErr = problem(http.StatusNotFound, "no such project") },
+			status:  http.StatusNotFound,
+			heading: "the Reporting API holds nothing under that id",
+			page:    []string{"no such project"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"no such project"},
+		},
+		{
+			name:    "a missing parameter is named",
+			path:    "/project",
+			status:  http.StatusBadRequest,
+			heading: "a required parameter is missing or unreadable",
+			page:    []string{"the parameter id is missing"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"the parameter id is missing"},
+		},
+		{
+			name: "a run id nothing is stored under keeps the store's message",
+			path: "/run?id=" + testRunID.String(),
+			fail: func(_ *fakeAPI, engine *fakeStore) {
+				engine.runErr = fmt.Errorf("GetRun: %w", pgx.ErrNoRows)
+			},
+			status:  http.StatusNotFound,
+			heading: "nothing is stored under that key",
+			page:    []string{"GetRun: no rows in result set"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"GetRun: no rows in result set"},
+		},
+		{
+			name:    "an unknown path is named",
+			path:    "/nowhere",
+			status:  http.StatusNotFound,
+			heading: "no such page",
+			page:    []string{"the path /nowhere is not part of the console"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"the path /nowhere is not part of the console"},
+		},
+		{
+			name:    "a wrong method is named",
+			path:    themeRoute,
+			status:  http.StatusMethodNotAllowed,
+			heading: "the method is not allowed",
+			page:    []string{"does not answer GET"},
+			hidden:  []string{loggedNotice},
+			logged:  []string{"does not answer GET"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			api, engine := fullAPI(t), fullStore(t)
+			if c.fail != nil {
+				c.fail(api, engine)
+			}
+			handler, logged := serve(t, api, engine, testNow)
+
+			status, body, _ := get(t, handler, c.path)
+
+			if status != c.status {
+				t.Errorf("status = %d, want %d:\n%s", status, c.status, body)
+			}
+			for _, want := range append([]string{c.heading}, c.page...) {
+				if !strings.Contains(body, want) {
+					t.Errorf("the page does not carry %q:\n%s", want, body)
+				}
+			}
+			for _, unwanted := range c.hidden {
+				if strings.Contains(body, unwanted) {
+					t.Errorf("the page carries %q:\n%s", unwanted, body)
+				}
+			}
+			for _, want := range c.logged {
+				if !strings.Contains(logged.String(), want) {
+					t.Errorf("the log does not carry %q:\n%s", want, logged.String())
+				}
+			}
+		})
+	}
+}
+
+// TestErrorPageHidesTheTextAtExactly500 holds the line where the text goes: no
+// route under test reaches fail with 500, but an untagged failure, a missing
+// template and an unreadable stylesheet all do.
+func TestErrorPageHidesTheTextAtExactly500(t *testing.T) {
+	t.Parallel()
+
+	pages, err := parsePages()
+	if err != nil {
+		t.Fatalf("parsing the pages: %v", err)
+	}
+	h := &handlers{logger: slog.New(slog.DiscardHandler), pages: pages}
+
+	rec := httptest.NewRecorder()
+	h.failFrom(rec, httptest.NewRequest(http.MethodGet, "/", nil),
+		errors.New("dial tcp db.internal:5432: connection refused"), nil)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	assertLoggedOnly(t, "the untagged failure", rec.Body.String(), "the page could not be built",
+		"db.internal", "connection refused")
 }
