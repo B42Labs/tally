@@ -449,7 +449,9 @@ line, as in `make up WAIT_ATTEMPTS=12`.
   and the `DEMO_` set belongs to `demo` and is in the table under
   [the demo](#the-demo).
 - `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
-  127.0.0.1, and the port of the URL it prints.
+  127.0.0.1, and the port of the URL it prints. `make console` also binds
+  127.0.0.1:8096 for the probes and metrics, and `TALLY_CONSOLE_OPS_PORT` in the
+  environment moves it.
 - `PROD_CONTEXT` (no default) is the kubectl context `prod-addons` and
   `prod-up` act on; each of them refuses to run while it is empty.
 - `PROD_MIGRATE_WAIT_S` (`1800`) is how many seconds `prod-up` waits for the
