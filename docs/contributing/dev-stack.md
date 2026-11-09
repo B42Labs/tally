@@ -351,7 +351,8 @@ lessons take them.
 5. The held-back notifications are released and delivered, and what arrived
    after the finalized run read the period is booked as a correction, which is
    finalized in its turn.
-6. `make console` serves the result until Ctrl-C. The console starts again with
+6. `make console` serves the result until Ctrl-C. Sign in as `tally` with the
+   password `tally-dev-console-password`. The console starts again with
    `make console` alone, which touches none of the above.
 
 The steps between the two `make` calls are four targets of their own,
