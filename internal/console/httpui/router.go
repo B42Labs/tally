@@ -23,10 +23,14 @@
 // database for everything monetary. A failure of either side reaches the
 // viewer as one error page naming what failed, and the same wrapped error goes
 // to the log.
+//
+// Every route sits behind the sign-in the router is given, the stylesheet and
+// the answers to an unknown path or a wrong method included.
 package httpui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -46,9 +50,13 @@ import (
 
 // Options is what the console needs to serve its pages.
 type Options struct {
-	// Logger takes one line per failed page. A nil logger falls back to
-	// slog.Default().
+	// Logger takes one line per failed page and one per request that passed
+	// the sign-in. A nil logger falls back to slog.Default().
 	Logger *slog.Logger
+	// SignIn decides who may read the console and names the operator for the
+	// access log through signin.WithOperator. The router does not build without
+	// one, so forgetting it cannot produce an open console.
+	SignIn func(http.Handler) http.Handler
 	// API reads the Reporting API and Store the engine database. The console
 	// serves no page without both.
 	API   API
@@ -116,10 +124,15 @@ type handlers struct {
 	pages  map[string]*template.Template
 }
 
-// NewRouter parses the pages and assembles the console. It fails when a
+// NewRouter parses the pages and assembles the console. It fails without a
+// sign-in, so a forgotten one cannot produce an open console, and when a
 // template does not parse, which keeps a broken build from starting a server
 // whose pages only fail once someone opens them.
 func NewRouter(opts Options) (http.Handler, error) {
+	if opts.SignIn == nil {
+		return nil, errors.New("the console cannot be built without a sign-in")
+	}
+
 	pages, err := parsePages()
 	if err != nil {
 		return nil, err
@@ -137,9 +150,13 @@ func NewRouter(opts Options) (http.Handler, error) {
 	h := &handlers{logger: logger, api: opts.API, store: opts.Store, now: now, pages: pages}
 
 	r := chi.NewRouter()
-	// A panic is the one failure that does not reach fail, and a demo console
-	// answering nothing at all is worse than one answering 500.
-	r.Use(middleware.Recoverer)
+	// Global middleware also wraps the not-found and method-not-allowed
+	// handlers, so nothing answers without the sign-in. The access log sits
+	// inside the sign-in, where the operator is known, and outside Recoverer, so
+	// a panicking handler is logged with the 500 Recoverer wrote. A panic is the
+	// one failure that does not reach fail, and a demo console answering nothing
+	// at all is worse than one answering 500.
+	r.Use(opts.SignIn, accessLog(logger), middleware.Recoverer)
 
 	r.Get("/", h.overview)
 	r.Get("/projects", h.projects)

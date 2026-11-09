@@ -1,11 +1,11 @@
 // Command tally-console serves the read-only demo console.
 //
 // It reads its configuration from the environment, refuses a configuration it
-// cannot honor, and then serves the console's pages on the configured port,
-// bound to the loopback address alone. The process holds an admin token and has
-// no sign-in of its own, so whoever reaches the port reads everything the token
-// reads. The token has to carry the admin role, because the dead-letter list
-// the overview reads is admin-only.
+// cannot honor, and then serves the console's pages on the configured address
+// and port. Every page needs the operator credential, because the process holds
+// an admin token and whoever signs in reads everything the token reads. The
+// token has to carry the admin role, because the dead-letter list the overview
+// reads is admin-only.
 //
 // The pages come from two places: the Reporting API over HTTP, and the engine
 // database, which is opened for reads only. Its pool connects lazily, so the
@@ -33,6 +33,7 @@ import (
 	"github.com/b42labs/tally/internal/console/config"
 	"github.com/b42labs/tally/internal/console/httpui"
 	"github.com/b42labs/tally/internal/console/reporting"
+	"github.com/b42labs/tally/internal/console/signin"
 	"github.com/b42labs/tally/internal/console/store"
 )
 
@@ -81,6 +82,11 @@ func run(ctx context.Context) error {
 		Level: cfg.SlogLevel(),
 	})).With("service", "tally-console")
 
+	basic, err := signin.NewBasic(cfg.Htpasswd, logger)
+	if err != nil {
+		return fmt.Errorf("TALLY_CONSOLE_HTPASSWD: %w", err)
+	}
+
 	api, err := reporting.New(cfg.ReportingURL, cfg.APIToken, cfg.CAFile)
 	if err != nil {
 		return fmt.Errorf("building the reporting client: %w", err)
@@ -92,7 +98,7 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 
-	router, err := httpui.NewRouter(httpui.Options{Logger: logger, API: api, Store: db})
+	router, err := httpui.NewRouter(httpui.Options{Logger: logger, SignIn: basic.Require, API: api, Store: db})
 	if err != nil {
 		return fmt.Errorf("building the router: %w", err)
 	}
