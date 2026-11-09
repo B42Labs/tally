@@ -31,6 +31,10 @@ const (
 	envCAFile       = "TALLY_CONSOLE_CA_FILE"
 	envEngineDBURL  = "TALLY_CONSOLE_ENGINE_DB_URL"
 	envHtpasswd     = "TALLY_CONSOLE_HTPASSWD"
+
+	envOpsPort           = "TALLY_CONSOLE_OPS_PORT"
+	envMetricsEnabled    = "TALLY_METRICS_ENABLED"
+	envReportingInsecure = "TALLY_CONSOLE_REPORTING_INSECURE"
 )
 
 // EnvNames is every variable this package reads, including the *_FILE
@@ -48,6 +52,9 @@ var EnvNames = []string{
 	envEngineDBURL + envsecret.Suffix,
 	envHtpasswd,
 	envHtpasswd + envsecret.Suffix,
+	envOpsPort,
+	envMetricsEnabled,
+	envReportingInsecure,
 }
 
 // logLevels maps the accepted values of TALLY_LOG_LEVEL to their slog level.
@@ -73,10 +80,23 @@ type Config struct {
 	// HTTPPort is the port the console listens on. The default is 8095 because
 	// 8090 and 8091 are taken by the simulator compose stack.
 	HTTPPort int `env:"TALLY_CONSOLE_HTTP_PORT" envDefault:"8095"`
+	// OpsPort is the port the probes and the metrics are served on, at the
+	// address the console binds. It differs from the page port so that a route
+	// publishing the pages cannot reach them.
+	OpsPort int `env:"TALLY_CONSOLE_OPS_PORT" envDefault:"8096"`
+	// MetricsEnabled set to false makes GET /metrics answer 404. The variable has
+	// no CONSOLE infix because roadmap section 8 lists it among the common
+	// variables.
+	MetricsEnabled bool `env:"TALLY_METRICS_ENABLED" envDefault:"true"`
 	// ReportingURL is the base URL of the Reporting API without the /api/v1
 	// suffix. It has to be set, and it has to be https unless its host is
-	// loopback, because the API token rides on every call.
+	// loopback or ReportingInsecure allows a plaintext one, because the API token
+	// rides on every call.
 	ReportingURL string `env:"TALLY_CONSOLE_REPORTING_URL"`
+	// ReportingInsecure allows an http Reporting API on a host that is not
+	// loopback. It exists for a console and an API in the same namespace.
+	// Anywhere else it puts the API token on the wire in cleartext.
+	ReportingInsecure bool `env:"TALLY_CONSOLE_REPORTING_INSECURE" envDefault:"false"`
 	// APIToken is the bearer token the console reads the Reporting API with. It
 	// has to carry the admin role, because the dead-letter list the overview
 	// reads is admin-only. It has to be set. Supports the *_FILE convention.
@@ -118,6 +138,12 @@ func Load() (Config, error) {
 	if cfg.HTTPPort < 1 || cfg.HTTPPort > 65535 {
 		return Config{}, fmt.Errorf("%s: %d must be between 1 and 65535", envHTTPPort, cfg.HTTPPort)
 	}
+	if cfg.OpsPort < 1 || cfg.OpsPort > 65535 {
+		return Config{}, fmt.Errorf("%s: %d must be between 1 and 65535", envOpsPort, cfg.OpsPort)
+	}
+	if cfg.OpsPort == cfg.HTTPPort {
+		return Config{}, fmt.Errorf("%s: %d must differ from %s", envOpsPort, cfg.OpsPort, envHTTPPort)
+	}
 
 	if cfg.ReportingURL == "" {
 		return Config{}, fmt.Errorf("%s: must be set", envReportingURL)
@@ -131,12 +157,19 @@ func Load() (Config, error) {
 	if parsed.Scheme == "" || parsed.Hostname() == "" {
 		return Config{}, fmt.Errorf("%s: %q is not a URL", envReportingURL, cfg.ReportingURL)
 	}
+	// Any other scheme would pass the check below on loopback or with the switch
+	// on, and then fail on every request.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return Config{}, fmt.Errorf("%s: %q must be an http or https URL", envReportingURL, cfg.ReportingURL)
+	}
 	// The token rides on every call, so a plaintext base URL puts an admin
 	// credential on the wire in the clear. Loopback is exempt: that is where a
-	// test's server and a port-forwarded cluster listen. This rule lives here
-	// and only here, so the client the console builds takes the URL as given.
-	if parsed.Scheme != "https" && !isLoopback(parsed.Hostname()) {
-		return Config{}, fmt.Errorf("%s: %q is not https, so the token in %s would travel in cleartext", envReportingURL, cfg.ReportingURL, envAPIToken)
+	// test's server and a port-forwarded cluster listen. So is a URL the operator
+	// allowed with TALLY_CONSOLE_REPORTING_INSECURE. This rule lives here and only
+	// here, so the client the console builds takes the URL as given.
+	if parsed.Scheme != "https" && !isLoopback(parsed.Hostname()) && !cfg.ReportingInsecure {
+		return Config{}, fmt.Errorf("%s: %q is not https, so the token in %s would travel in cleartext; set %s=true to allow plaintext",
+			envReportingURL, cfg.ReportingURL, envAPIToken, envReportingInsecure)
 	}
 
 	if cfg.APIToken == "" {

@@ -15,7 +15,7 @@ import (
 // fieldNames are the Go names of Config's fields. No error may quote one: an
 // operator fixes an environment variable, and a field name is not something
 // they can set.
-var fieldNames = []string{"LogLevel", "HTTPAddr", "HTTPPort", "ReportingURL", "APIToken", "CAFile", "EngineDBURL", "Htpasswd"}
+var fieldNames = []string{"LogLevel", "HTTPAddr", "HTTPPort", "ReportingURL", "APIToken", "CAFile", "EngineDBURL", "Htpasswd", "OpsPort", "MetricsEnabled", "ReportingInsecure"}
 
 // testHtpasswd is an operator credential. Load checks only that it is present,
 // so it does not have to parse.
@@ -158,6 +158,132 @@ func TestLoad(t *testing.T) {
 				return vars
 			},
 			want: wantLoaded(func(c *config.Config) { c.ReportingURL = "http://localhost:8080" }),
+		},
+		{
+			name: "the three operations settings fall back to their defaults when blank",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_OPS_PORT"] = ""
+				vars["TALLY_METRICS_ENABLED"] = ""
+				vars["TALLY_CONSOLE_REPORTING_INSECURE"] = ""
+				return vars
+			},
+			want: wantLoaded(func(*config.Config) {}),
+		},
+		{
+			name: "ops port zero is refused",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_OPS_PORT"] = "0"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_OPS_PORT", "1 and 65535"},
+		},
+		{
+			name: "an ops port past the last one is refused",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_OPS_PORT"] = "65536"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_OPS_PORT", "1 and 65535"},
+		},
+		{
+			name: "an ops port equal to the default page port is refused",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_OPS_PORT"] = "8095"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_OPS_PORT", "must differ from", "TALLY_CONSOLE_HTTP_PORT"},
+		},
+		{
+			name: "a page port equal to the default ops port is refused",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_PORT"] = "8096"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_OPS_PORT", "must differ from", "TALLY_CONSOLE_HTTP_PORT"},
+		},
+		{
+			name: "an ops port and a page port of their own are accepted",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_HTTP_PORT"] = "9000"
+				vars["TALLY_CONSOLE_OPS_PORT"] = "9001"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.HTTPPort, c.OpsPort = 9000, 9001 }),
+		},
+		{
+			name: "the plaintext switch allows an http URL off the loopback",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_URL"] = "http://reporting-api"
+				vars["TALLY_CONSOLE_REPORTING_INSECURE"] = "true"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) {
+				c.ReportingURL = "http://reporting-api"
+				c.ReportingInsecure = true
+			}),
+		},
+		{
+			name: "an http URL off the loopback is refused with the switch unset",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_URL"] = "http://reporting-api"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_API_TOKEN", "cleartext", "set TALLY_CONSOLE_REPORTING_INSECURE=true"},
+		},
+		{
+			name: "an http URL off the loopback is refused with the switch false",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_URL"] = "http://reporting-api"
+				vars["TALLY_CONSOLE_REPORTING_INSECURE"] = "false"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_API_TOKEN", "cleartext", "set TALLY_CONSOLE_REPORTING_INSECURE=true"},
+		},
+		{
+			name: "an https URL loads with the switch on",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_INSECURE"] = "true"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.ReportingInsecure = true }),
+		},
+		{
+			name: "an ftp URL on the loopback is refused",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_URL"] = "ftp://127.0.0.1"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_REPORTING_URL", "must be an http or https URL"},
+		},
+		{
+			name: "an ftp URL is refused with the switch on",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_CONSOLE_REPORTING_URL"] = "ftp://reporting-api"
+				vars["TALLY_CONSOLE_REPORTING_INSECURE"] = "true"
+				return vars
+			},
+			wantErr: []string{"TALLY_CONSOLE_REPORTING_URL", "must be an http or https URL"},
+		},
+		{
+			name: "the metrics route can be switched off",
+			env: func(*testing.T) map[string]string {
+				vars := validEnv()
+				vars["TALLY_METRICS_ENABLED"] = "false"
+				return vars
+			},
+			want: wantLoaded(func(c *config.Config) { c.MetricsEnabled = false }),
 		},
 		{
 			name: "the API token is required",
@@ -327,13 +453,15 @@ func TestLoad(t *testing.T) {
 // wantLoaded is what Load returns for validEnv, changed by adjust.
 func wantLoaded(adjust func(*config.Config)) config.Config {
 	want := config.Config{
-		LogLevel:     "INFO",
-		HTTPAddr:     "127.0.0.1",
-		HTTPPort:     8095,
-		ReportingURL: "https://api.example.com",
-		APIToken:     "s3cr3t",
-		EngineDBURL:  "postgres://tally:tally@127.0.0.1:1/tally_engine",
-		Htpasswd:     testHtpasswd,
+		LogLevel:       "INFO",
+		HTTPAddr:       "127.0.0.1",
+		HTTPPort:       8095,
+		OpsPort:        8096,
+		MetricsEnabled: true,
+		ReportingURL:   "https://api.example.com",
+		APIToken:       "s3cr3t",
+		EngineDBURL:    "postgres://tally:tally@127.0.0.1:1/tally_engine",
+		Htpasswd:       testHtpasswd,
 	}
 	adjust(&want)
 	return want
@@ -353,6 +481,49 @@ func TestLoadDefaultsAnUnsetAddressToLoopback(t *testing.T) {
 	}
 	if cfg.HTTPAddr != "127.0.0.1" {
 		t.Errorf("Load() address = %q, want 127.0.0.1", cfg.HTTPAddr)
+	}
+}
+
+// TestLoadDefaultsTheUnsetOperationsSettings removes the variables themselves,
+// for the reason the test above gives.
+func TestLoadDefaultsTheUnsetOperationsSettings(t *testing.T) {
+	setEnv(t, validEnv())
+	for _, name := range []string{"TALLY_CONSOLE_OPS_PORT", "TALLY_METRICS_ENABLED", "TALLY_CONSOLE_REPORTING_INSECURE"} {
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("Unsetenv: %v", err)
+		}
+	}
+
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if want := wantLoaded(func(*config.Config) {}); got != want {
+		t.Errorf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+// TestLoadReportsAnUnparsableValue stays out of the TestLoad table, because the
+// library names the Go field here and the table forbids that.
+func TestLoadReportsAnUnparsableValue(t *testing.T) {
+	cases := []struct {
+		name, variable, value string
+	}{
+		{name: "a metrics switch that is no bool", variable: "TALLY_METRICS_ENABLED", value: "maybe"},
+		{name: "an ops port that is no number", variable: "TALLY_CONSOLE_OPS_PORT", value: "http"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			vars := validEnv()
+			vars[c.variable] = c.value
+			setEnv(t, vars)
+
+			_, err := config.Load()
+			if err == nil || !strings.Contains(err.Error(), "parsing the environment") {
+				t.Errorf("Load() error = %v, want one containing %q", err, "parsing the environment")
+			}
+		})
 	}
 }
 
