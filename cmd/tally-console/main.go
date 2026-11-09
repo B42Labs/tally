@@ -7,12 +7,16 @@
 // token has to carry the admin role, because the dead-letter list the overview
 // reads is admin-only.
 //
+// A second listener on the same address serves /healthz, /readyz and /metrics
+// without a credential, for a kubelet and a scraper. It has a port of its own
+// so that a route publishing the pages cannot reach them.
+//
 // The pages come from two places: the Reporting API over HTTP, and the engine
 // database, which is opened for reads only. Its pool connects lazily, so the
 // process comes up while the database is unavailable and the pages that read it
 // report the outage.
 //
-// SIGINT and SIGTERM begin a graceful shutdown: the server stops accepting
+// SIGINT and SIGTERM begin a graceful shutdown: both listeners stop accepting
 // connections, in-flight requests get a bounded budget to finish, and the
 // process exits zero.
 package main
@@ -21,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -30,8 +35,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/b42labs/tally/internal/console/config"
 	"github.com/b42labs/tally/internal/console/httpui"
+	"github.com/b42labs/tally/internal/console/metrics"
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/signin"
 	"github.com/b42labs/tally/internal/console/store"
@@ -69,7 +77,7 @@ func main() {
 	}
 }
 
-// run assembles the console and serves it until ctx is cancelled or the server
+// run assembles the console and serves it until ctx is cancelled or a server
 // stops on its own. It returns nil for a shutdown that completed, so a signal
 // leaves a zero exit status, and an error for everything else.
 func run(ctx context.Context) error {
@@ -82,7 +90,10 @@ func run(ctx context.Context) error {
 		Level: cfg.SlogLevel(),
 	})).With("service", "tally-console")
 
-	basic, err := signin.NewBasic(cfg.Htpasswd, logger, nil)
+	promReg := prometheus.NewRegistry()
+	m := metrics.New(promReg)
+
+	basic, err := signin.NewBasic(cfg.Htpasswd, logger, m.SignInRefused)
 	if err != nil {
 		return fmt.Errorf("TALLY_CONSOLE_HTPASSWD: %w", err)
 	}
@@ -98,43 +109,116 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 
-	router, err := httpui.NewRouter(httpui.Options{Logger: logger, SignIn: basic.Require, API: api, Store: db})
+	router, err := httpui.NewRouter(httpui.Options{Logger: logger, SignIn: basic.Require, Metrics: m, API: api, Store: db})
 	if err != nil {
 		return fmt.Errorf("building the router: %w", err)
 	}
 
-	server := &http.Server{
-		Addr:              net.JoinHostPort(cfg.HTTPAddr, strconv.Itoa(cfg.HTTPPort)),
-		Handler:           router,
+	pageAddr := net.JoinHostPort(cfg.HTTPAddr, strconv.Itoa(cfg.HTTPPort))
+	opsAddr := net.JoinHostPort(cfg.HTTPAddr, strconv.Itoa(cfg.OpsPort))
+
+	// Both ports are bound before either server serves. That makes a taken port
+	// a startup error, and it is what makes /readyz true: the probe answers only
+	// once both are bound.
+	pageListener, err := net.Listen("tcp", pageAddr)
+	if err != nil {
+		return fmt.Errorf("listening for the pages on %s: %w", pageAddr, err)
+	}
+	opsListener, err := net.Listen("tcp", opsAddr)
+	if err != nil {
+		_ = pageListener.Close()
+		return fmt.Errorf("listening for the probes and metrics on %s: %w", opsAddr, err)
+	}
+
+	pages := newServer(router)
+	ops := newServer(newOpsMux(cfg.MetricsEnabled, m))
+
+	// The channel holds one result per server, so that a serving goroutine ends
+	// even when the shutdown path has stopped reading from it.
+	serveErr := make(chan error, 2)
+	url := "http://" + pageAddr + "/"
+	opsURL := "http://" + opsAddr + "/"
+	logger.Info("listening", "url", url, "ops_url", opsURL)
+	go func() { serveErr <- pages.Serve(pageListener) }()
+	go func() { serveErr <- ops.Serve(opsListener) }()
+
+	return awaitStop(ctx, logger, serveErr, pages, ops)
+}
+
+// newServer builds one server with the timeouts every listener of the console
+// runs under.
+func newServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 	}
+}
 
-	// The channel is buffered so that the serving goroutine ends even when the
-	// shutdown path stops reading from it.
-	serveErr := make(chan error, 1)
-	url := "http://" + server.Addr + "/"
-	logger.Info("listening", "url", url)
-	go func() { serveErr <- server.ListenAndServe() }()
-
+// awaitStop waits for ctx to end or a server to stop on its own, and then shuts
+// both servers down, the pages first. A server that ended with anything but
+// http.ErrServerClosed and a shutdown that failed are both reported, so neither
+// hides the other.
+func awaitStop(
+	ctx context.Context, logger *slog.Logger, serveErr <-chan error, pages, ops *http.Server,
+) error {
+	var served error
 	select {
-	case err := <-serveErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return fmt.Errorf("serving HTTP: %w", err)
+	case served = <-serveErr:
 	case <-ctx.Done():
 	}
 
 	logger.Info("shutting down")
-	// The shutdown runs on its own context: ctx is already cancelled, and the
+	// The shutdown runs on its own context: ctx may be cancelled already, and the
 	// budget belongs to the in-flight requests, not to the signal.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutting down: %w", err)
+	pagesErr := pages.Shutdown(shutdownCtx)
+	opsErr := ops.Shutdown(shutdownCtx)
+
+	var failed error
+	if served != nil && !errors.Is(served, http.ErrServerClosed) {
+		failed = fmt.Errorf("serving HTTP: %w", served)
 	}
-	return nil
+	if err := errors.Join(pagesErr, opsErr); err != nil {
+		failed = errors.Join(failed, fmt.Errorf("shutting down: %w", err))
+	}
+	return failed
+}
+
+// newOpsMux builds the three routes of the second listener. None of them
+// carries a credential, which is what the conventions ask of every service
+// (roadmap/00-conventions.md section 7). The listener has no access log either,
+// because a probe every few seconds would bury the request lines.
+func newOpsMux(metricsEnabled bool, m *metrics.Metrics) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// A probe answers in plain text. What reads it is an orchestrator that looks
+	// at the status, so there is no error format to match.
+	probe := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "ok")
+	}
+
+	// Liveness reads neither the engine database nor the Reporting API, because
+	// restarting the pod mends neither side.
+	mux.HandleFunc("GET /healthz", probe)
+
+	// Readiness reads neither side either. Taking the pod out of the Service
+	// would replace the error page that names the failed side with the Gateway's
+	// own 503, and restarting the pod mends neither side.
+	mux.HandleFunc("GET /readyz", probe)
+
+	// The switch decides the route and not the recording: the instruments keep
+	// counting either way. A console serving no metrics answers 404 rather than
+	// an empty exposition, which would read as a console nobody opened.
+	if metricsEnabled {
+		mux.Handle("GET /metrics", m.Handler())
+	} else {
+		mux.HandleFunc("GET /metrics", http.NotFound)
+	}
+
+	return mux
 }
