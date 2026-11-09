@@ -20,11 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/console/reporting"
+	"github.com/b42labs/tally/internal/console/signin"
 	"github.com/b42labs/tally/internal/console/store"
 	"github.com/b42labs/tally/internal/core/money"
 	"github.com/b42labs/tally/internal/engine/export"
@@ -371,6 +373,23 @@ func (f *fakeStore) LoadRunExport(_ context.Context, id uuid.UUID) (export.Run, 
 	return f.runExport, f.runExportErr
 }
 
+// testOperator is who the admitting sign-in says signed in.
+const testOperator = "test-operator"
+
+// admit is a sign-in that lets every request through.
+func admit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(signin.WithOperator(r.Context(), testOperator)))
+	})
+}
+
+// refuse is a sign-in that lets nothing through.
+func refuse(http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+}
+
 // serve builds the console over two fakes and hands back the log it writes, so
 // a test can assert that a failed page reached the operator as well as the
 // viewer.
@@ -380,6 +399,7 @@ func serve(t *testing.T, api API, engine Store, now time.Time) (http.Handler, *b
 	logged := &bytes.Buffer{}
 	handler, err := NewRouter(Options{
 		Logger: slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		SignIn: admit,
 		API:    api,
 		Store:  engine,
 		Now:    func() time.Time { return now },
@@ -410,13 +430,201 @@ func get(t *testing.T, handler http.Handler, path string) (status int, body, con
 func TestTemplatesParse(t *testing.T) {
 	t.Parallel()
 
-	handler, err := NewRouter(Options{API: &fakeAPI{}, Store: &fakeStore{}})
+	handler, err := NewRouter(Options{SignIn: admit, API: &fakeAPI{}, Store: &fakeStore{}})
 	if err != nil {
 		t.Fatalf("parsing the console templates: %v", err)
 	}
 	if handler == nil {
 		t.Fatal("NewRouter returned no handler")
 	}
+}
+
+func TestNewRouterRefusesToBuildWithoutASignIn(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewRouter(Options{API: &fakeAPI{}, Store: &fakeStore{}})
+	if err == nil || !strings.Contains(err.Error(), "sign-in") {
+		t.Fatalf("NewRouter error = %v, want one naming the sign-in", err)
+	}
+}
+
+// statusFor sends one request with no body and returns the status it answered.
+func statusFor(handler http.Handler, method, path string) int {
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(method, path, nil))
+	return recorder.Code
+}
+
+// TestEveryRouteSitsBehindTheSignIn walks what the router registered, so a route
+// added later is covered without touching this test.
+func TestEveryRouteSitsBehindTheSignIn(t *testing.T) {
+	t.Parallel()
+
+	handler, err := NewRouter(Options{SignIn: refuse, API: &fakeAPI{}, Store: &fakeStore{}})
+	if err != nil {
+		t.Fatalf("building the console: %v", err)
+	}
+	routes, ok := handler.(chi.Routes)
+	if !ok {
+		t.Fatalf("the router is a %T, which does not list its routes", handler)
+	}
+
+	visited := map[string]bool{}
+	walk := func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		visited[method+" "+route] = true
+		if status := statusFor(handler, method, route); status != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want %d", method, route, status, http.StatusUnauthorized)
+		}
+		return nil
+	}
+	if err := chi.Walk(routes, walk); err != nil {
+		t.Fatalf("walking the routes: %v", err)
+	}
+
+	// The two the walk could not pass without: the one asset, which a page needs
+	// before anybody looks at it, and the one route that is not a GET.
+	for _, want := range []string{"GET /static/console.css", "POST " + themeRoute} {
+		if !visited[want] {
+			t.Errorf("the walk did not visit %s", want)
+		}
+	}
+}
+
+func TestPathsTheRouterDoesNotServeSitBehindTheSignIn(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		path         string
+		wantAdmitted int
+	}{
+		{name: "an unknown path", path: "/nowhere", wantAdmitted: http.StatusNotFound},
+		{name: "a wrong method", path: themeRoute, wantAdmitted: http.StatusMethodNotAllowed},
+	}
+
+	refusing, err := NewRouter(Options{SignIn: refuse, API: &fakeAPI{}, Store: &fakeStore{}})
+	if err != nil {
+		t.Fatalf("building the console: %v", err)
+	}
+	admitting, _ := serve(t, &fakeAPI{}, &fakeStore{}, testNow)
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			if status := statusFor(refusing, http.MethodGet, c.path); status != http.StatusUnauthorized {
+				t.Errorf("through a refusing sign-in = %d, want %d", status, http.StatusUnauthorized)
+			}
+			if status := statusFor(admitting, http.MethodGet, c.path); status != c.wantAdmitted {
+				t.Errorf("through an admitting sign-in = %d, want %d", status, c.wantAdmitted)
+			}
+		})
+	}
+}
+
+// requestLines are the access-log lines of a log, one per request logged.
+func requestLines(logged string) []string {
+	var lines []string
+	for line := range strings.Lines(logged) {
+		if strings.Contains(line, "msg=request") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// panickingAPI fails the projects page the one way that does not reach fail.
+type panickingAPI struct{ *fakeAPI }
+
+func (panickingAPI) ListProjects(
+	context.Context, reporting.ProjectsQuery,
+) (httpapi.ProjectList, reporting.Request, error) {
+	panic("the API client broke")
+}
+
+func TestAccessLog(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a served page is one line with the values of its request", func(t *testing.T) {
+		t.Parallel()
+
+		handler, logged := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		status, body, _ := get(t, handler, "/projects?platform=openstack")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d:\n%s", status, http.StatusOK, body)
+		}
+
+		lines := requestLines(logged.String())
+		if len(lines) != 1 {
+			t.Fatalf("logged %d request lines, want 1:\n%s", len(lines), logged)
+		}
+		for _, want := range []string{
+			"operator=" + testOperator,
+			"method=GET",
+			"path=/projects",
+			`query="platform=openstack"`,
+			"status=200",
+			"duration_ms=",
+		} {
+			if !strings.Contains(lines[0], want) {
+				t.Errorf("the line does not carry %q:\n%s", want, lines[0])
+			}
+		}
+	})
+
+	t.Run("a page that fails logs the status it answered", func(t *testing.T) {
+		t.Parallel()
+
+		engine := fullStore(t)
+		engine.pricingDocument.Document = []byte(`{"nope":true}`)
+		handler, logged := serve(t, fullAPI(t), engine, testNow)
+
+		if status := statusFor(handler, http.MethodGet, "/catalog?version=2026-03"); status != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d", status, http.StatusServiceUnavailable)
+		}
+
+		lines := requestLines(logged.String())
+		if len(lines) != 1 || !strings.Contains(lines[0], "status=503") {
+			t.Errorf("want one request line with status=503:\n%s", logged)
+		}
+	})
+
+	t.Run("a panicking handler logs the 500 it was answered with", func(t *testing.T) {
+		t.Parallel()
+
+		handler, logged := serve(t, panickingAPI{fakeAPI: &fakeAPI{}}, &fakeStore{}, testNow)
+
+		if status := statusFor(handler, http.MethodGet, "/projects"); status != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", status, http.StatusInternalServerError)
+		}
+
+		lines := requestLines(logged.String())
+		if len(lines) != 1 || !strings.Contains(lines[0], "status=500") {
+			t.Errorf("want one request line with status=500:\n%s", logged)
+		}
+	})
+
+	t.Run("a refused request is no access-log line", func(t *testing.T) {
+		t.Parallel()
+
+		logged := &bytes.Buffer{}
+		handler, err := NewRouter(Options{
+			Logger: slog.New(slog.NewTextHandler(logged, nil)),
+			SignIn: refuse,
+			API:    &fakeAPI{},
+			Store:  &fakeStore{},
+		})
+		if err != nil {
+			t.Fatalf("building the console: %v", err)
+		}
+
+		statusFor(handler, http.MethodGet, "/projects")
+
+		if lines := requestLines(logged.String()); len(lines) != 0 {
+			t.Errorf("logged a request line for a refused request:\n%s", logged)
+		}
+	})
 }
 
 func TestUnknownPathIs404(t *testing.T) {
@@ -436,7 +644,8 @@ func TestUnknownPathIs404(t *testing.T) {
 			t.Errorf("the page does not carry %q:\n%s", want, body)
 		}
 	}
-	if !strings.Contains(logged.String(), "/nowhere") {
+	// The failure's own text, because the access-log line names the path too.
+	if !strings.Contains(logged.String(), "the path /nowhere is not part of the console") {
 		t.Errorf("the log does not name the path:\n%s", logged.String())
 	}
 }

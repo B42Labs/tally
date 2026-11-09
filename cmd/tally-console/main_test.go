@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -124,6 +125,82 @@ func TestRunServesTheConsoleOnTheLoopbackAddress(t *testing.T) {
 	assertReturnsCleanly(t, done)
 }
 
+// TestRunRequiresTheCredential holds the assembled process to its sign-in,
+// including for the one asset, which reveals nothing but still needs it.
+func TestRunRequiresTheCredential(t *testing.T) {
+	port := freePort(t)
+	setEnv(t, serverEnv(port, stubAPI(t).URL))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	waitForStylesheet(t, port, done)
+
+	front := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	stylesheet := fmt.Sprintf("http://127.0.0.1:%d/static/console.css", port)
+
+	cases := []struct {
+		name           string
+		url            string
+		user, password string
+		want           int
+	}{
+		{name: "the front page without the credential", url: front, want: http.StatusUnauthorized},
+		{name: "the stylesheet without the credential", url: stylesheet, want: http.StatusUnauthorized},
+		{
+			name: "the stylesheet with a wrong password",
+			url:  stylesheet, user: testOperator, password: "wrong-password",
+			want: http.StatusUnauthorized,
+		},
+		{
+			name: "the stylesheet with a wrong user",
+			url:  stylesheet, user: "someone-else", password: testPassword,
+			want: http.StatusUnauthorized,
+		},
+		{
+			name: "the stylesheet with the credential",
+			url:  stylesheet, user: testOperator, password: testPassword,
+			want: http.StatusOK,
+		},
+	}
+
+	for _, c := range cases {
+		if _, status, _ := fetch(t, c.url, c.user, c.password); status != c.want {
+			t.Errorf("%s = %d, want %d", c.name, status, c.want)
+		}
+	}
+
+	cancel()
+	assertReturnsCleanly(t, done)
+}
+
+// TestRunListensOnTheConfiguredAddress is the other half of what the loopback
+// test rules out: an address that was asked for is the one the console binds.
+func TestRunListensOnTheConfiguredAddress(t *testing.T) {
+	port := freePort(t)
+	env := serverEnv(port, stubAPI(t).URL)
+	env["TALLY_CONSOLE_HTTP_ADDR"] = "0.0.0.0"
+	setEnv(t, env)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	waitForStylesheet(t, port, done)
+
+	if address := externalIPv4(t); address != "" {
+		assertStylesheetAnswersOn(t, address, port)
+	} else {
+		t.Log("this machine has no non-loopback IPv4 address, so only the loopback half is checked")
+	}
+
+	cancel()
+	assertReturnsCleanly(t, done)
+}
+
 // TestRunReadsTheTokenFromItsFile follows one file-backed secret all the way to
 // the wire: what the companion variable points at is what the Reporting API is
 // called with, without the newline the file ends on.
@@ -194,6 +271,22 @@ func TestRunRefusesToStart(t *testing.T) {
 		setEnv(t, env)
 
 		assertRunFails(t, "TALLY_CONSOLE_ENGINE_DB_URL")
+	})
+
+	t.Run("when the operator credential is unset", func(t *testing.T) {
+		env := serverEnv(freePort(t), unusedAPI)
+		env["TALLY_CONSOLE_HTPASSWD"] = ""
+		setEnv(t, env)
+
+		assertRunFails(t, "TALLY_CONSOLE_HTPASSWD")
+	})
+
+	t.Run("when the operator credential holds a plain password", func(t *testing.T) {
+		env := serverEnv(freePort(t), unusedAPI)
+		env["TALLY_CONSOLE_HTPASSWD"] = "operator:a-plain-password"
+		setEnv(t, env)
+
+		assertRunFails(t, "TALLY_CONSOLE_HTPASSWD", "line 1")
 	})
 }
 
@@ -347,12 +440,60 @@ func externalIPv4(t *testing.T) string {
 	return ""
 }
 
-// get reads one URL off the running server and returns the body, the status it
-// answered with, and the content type it declared.
+// assertStylesheetAnswersOn asks an address of this machine for the stylesheet.
+// The server has already answered on the loopback address, so a request that
+// times out here was held up by a host firewall, which does that to a binary it
+// does not know and says nothing about what the console binds. A refused
+// connection does say, and fails the test.
+func assertStylesheetAnswersOn(t *testing.T, address string, port int) {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s:%d/static/console.css", address, port)
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(newRequest(t, url, testOperator, testPassword))
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Logf("a firewall holds up connections to %s, so only the loopback half is checked", address)
+		return
+	}
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	// Drained before the close for the reason waitForStylesheet gives.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET %s = %d, want %d", url, resp.StatusCode, http.StatusOK)
+	}
+}
+
+// get reads one URL off the running server as the operator.
 func get(t *testing.T, url string) (string, int, string) {
 	t.Helper()
 
-	resp, err := (&http.Client{Timeout: startupTimeout}).Get(url)
+	return fetch(t, url, testOperator, testPassword)
+}
+
+// newRequest builds a GET for url. An empty user sends no credential at all.
+func newRequest(t *testing.T, url, user, password string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("building the request for %s: %v", url, err)
+	}
+	if user != "" {
+		req.SetBasicAuth(user, password)
+	}
+	return req
+}
+
+// fetch reads one URL off the running server and returns the body, the status
+// it answered with, and the content type it declared.
+func fetch(t *testing.T, url, user, password string) (string, int, string) {
+	t.Helper()
+
+	resp, err := (&http.Client{Timeout: startupTimeout}).Do(newRequest(t, url, user, password))
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -373,6 +514,7 @@ func waitForStylesheet(t *testing.T, port int, done <-chan error) {
 
 	client := &http.Client{Timeout: startupTimeout}
 	url := fmt.Sprintf("http://127.0.0.1:%d/static/console.css", port)
+	req := newRequest(t, url, testOperator, testPassword)
 
 	for deadline := time.Now().Add(startupTimeout); time.Now().Before(deadline); {
 		select {
@@ -381,7 +523,7 @@ func waitForStylesheet(t *testing.T, port int, done <-chan error) {
 		default:
 		}
 
-		resp, err := client.Get(url)
+		resp, err := client.Do(req)
 		if err != nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
