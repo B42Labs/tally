@@ -82,7 +82,7 @@ func run(ctx context.Context) error {
 		Level: cfg.SlogLevel(),
 	})).With("service", "tally-console")
 
-	basic, err := signin.NewBasic(cfg.Htpasswd, logger)
+	basic, err := signin.NewBasic(cfg.Htpasswd, logger, nil)
 	if err != nil {
 		return fmt.Errorf("TALLY_CONSOLE_HTPASSWD: %w", err)
 	}
