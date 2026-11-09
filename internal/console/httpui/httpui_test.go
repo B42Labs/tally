@@ -23,8 +23,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/shopspring/decimal"
 
+	"github.com/b42labs/tally/internal/console/metrics"
 	"github.com/b42labs/tally/internal/console/reporting"
 	"github.com/b42labs/tally/internal/console/signin"
 	"github.com/b42labs/tally/internal/console/store"
@@ -5515,6 +5517,201 @@ func TestHistoryWithoutCreate(t *testing.T) {
 		if !strings.Contains(body, "<dt>created</dt><dd>unknown</dd>") ||
 			!strings.Contains(body, "<dt>lifetime</dt><dd>unknown</dd>") {
 			t.Errorf("the page guesses at a history it does not have:\n%s", body)
+		}
+	})
+}
+
+// wantSecurityHeaders is what every response of the page port carries, written
+// out here so that a change of a value has to change this test.
+var wantSecurityHeaders = map[string]string{
+	"Cache-Control":           "no-store",
+	"Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+	"X-Content-Type-Options":  "nosniff",
+	"X-Frame-Options":         "DENY",
+	"Referrer-Policy":         "no-referrer",
+}
+
+// assertSecurityHeaders checks one answer against wantSecurityHeaders.
+func assertSecurityHeaders(t *testing.T, name string, header http.Header) {
+	t.Helper()
+
+	for key, want := range wantSecurityHeaders {
+		if got := header.Get(key); got != want {
+			t.Errorf("%s: %s = %q, want %q", name, key, got, want)
+		}
+	}
+}
+
+// TestEveryRouteCarriesTheSecurityHeaders walks what the router registered, so
+// a route added later is covered without touching this test.
+func TestEveryRouteCarriesTheSecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+	routes, ok := handler.(chi.Routes)
+	if !ok {
+		t.Fatalf("the router is a %T, which does not list its routes", handler)
+	}
+
+	walked := 0
+	walk := func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		walked++
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(method, route, nil))
+		assertSecurityHeaders(t, method+" "+route, recorder.Header())
+		return nil
+	}
+	if err := chi.Walk(routes, walk); err != nil {
+		t.Fatalf("walking the routes: %v", err)
+	}
+	if walked == 0 {
+		t.Fatal("the walk visited no route")
+	}
+}
+
+func TestEveryAnswerCarriesTheSecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	refusing, err := NewRouter(Options{SignIn: refuse, API: &fakeAPI{}, Store: &fakeStore{}})
+	if err != nil {
+		t.Fatalf("building the console: %v", err)
+	}
+	admitting, _ := serve(t, &fakeAPI{}, &fakeStore{}, testNow)
+	panicking, _ := serve(t, panickingAPI{fakeAPI: &fakeAPI{}}, &fakeStore{}, testNow)
+	form := strings.NewReader(url.Values{"theme": {"dark"}, "back": {"/"}}.Encode())
+
+	cases := []struct {
+		name    string
+		handler http.Handler
+		request *http.Request
+		want    int
+	}{
+		{"a refused request", refusing, httptest.NewRequest(http.MethodGet, "/", nil), http.StatusUnauthorized},
+		{"an unknown path", admitting, httptest.NewRequest(http.MethodGet, "/nowhere", nil), http.StatusNotFound},
+		{"a wrong method", admitting, httptest.NewRequest(http.MethodGet, themeRoute, nil), http.StatusMethodNotAllowed},
+		{"a redirect", admitting, httptest.NewRequest(http.MethodPost, themeRoute, form), http.StatusSeeOther},
+		{"a panic", panicking, httptest.NewRequest(http.MethodGet, "/projects", nil), http.StatusInternalServerError},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			if c.request.Method == http.MethodPost {
+				c.request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			recorder := httptest.NewRecorder()
+			c.handler.ServeHTTP(recorder, c.request)
+
+			if recorder.Code != c.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, c.want)
+			}
+			assertSecurityHeaders(t, c.name, recorder.Header())
+		})
+	}
+}
+
+// countingRouter builds the console over a counter a test can scrape.
+func countingRouter(t *testing.T, signIn func(http.Handler) http.Handler, api API) (http.Handler, *metrics.Metrics) {
+	t.Helper()
+
+	m := metrics.New(prometheus.NewRegistry())
+	handler, err := NewRouter(Options{
+		Logger:  slog.New(slog.DiscardHandler),
+		SignIn:  signIn,
+		Metrics: m,
+		API:     api,
+		Store:   fullStore(t),
+		Now:     func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("building the console: %v", err)
+	}
+	return handler, m
+}
+
+// scrape reads the exposition of m.
+func scrape(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+
+	recorder := httptest.NewRecorder()
+	m.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("scrape status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	return recorder.Body.String()
+}
+
+func TestRequestCounter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a served page counts under its route and carries no part of the query", func(t *testing.T) {
+		t.Parallel()
+
+		handler, m := countingRouter(t, admit, fullAPI(t))
+
+		if status := statusFor(handler, http.MethodGet, "/project?id="+testProjectID.String()); status != http.StatusOK {
+			t.Fatalf("status = %d, want %d", status, http.StatusOK)
+		}
+
+		got := scrape(t, m)
+		if want := `tally_console_requests_total{route="/project",status="200"} 1`; !strings.Contains(got, want) {
+			t.Errorf("the scrape does not carry %q:\n%s", want, got)
+		}
+		if strings.Contains(got, testProjectID.String()) {
+			t.Errorf("the scrape carries the id of the query:\n%s", got)
+		}
+	})
+
+	unmatched := []struct {
+		name, path, want string
+	}{
+		{"an unknown path", "/nowhere", `tally_console_requests_total{route="unmatched",status="404"} 1`},
+		{"a wrong method", themeRoute, `tally_console_requests_total{route="unmatched",status="405"} 1`},
+	}
+	for _, c := range unmatched {
+		t.Run(c.name+" counts as unmatched", func(t *testing.T) {
+			t.Parallel()
+
+			handler, m := countingRouter(t, admit, fullAPI(t))
+			statusFor(handler, http.MethodGet, c.path)
+
+			if got := scrape(t, m); !strings.Contains(got, c.want) {
+				t.Errorf("the scrape does not carry %q:\n%s", c.want, got)
+			}
+		})
+	}
+
+	t.Run("a panic counts under its route", func(t *testing.T) {
+		t.Parallel()
+
+		handler, m := countingRouter(t, admit, panickingAPI{fakeAPI: &fakeAPI{}})
+		statusFor(handler, http.MethodGet, "/projects")
+
+		want := `tally_console_requests_total{route="/projects",status="500"} 1`
+		if got := scrape(t, m); !strings.Contains(got, want) {
+			t.Errorf("the scrape does not carry %q:\n%s", want, got)
+		}
+	})
+
+	t.Run("a refused request adds no sample", func(t *testing.T) {
+		t.Parallel()
+
+		handler, m := countingRouter(t, refuse, fullAPI(t))
+		statusFor(handler, http.MethodGet, "/projects")
+
+		if got := scrape(t, m); strings.Contains(got, "tally_console_requests_total{") {
+			t.Errorf("the scrape carries a sample for a refused request:\n%s", got)
+		}
+	})
+
+	t.Run("a router without metrics serves its pages", func(t *testing.T) {
+		t.Parallel()
+
+		handler, _ := serve(t, fullAPI(t), fullStore(t), testNow)
+
+		if status := statusFor(handler, http.MethodGet, "/projects"); status != http.StatusOK {
+			t.Errorf("status = %d, want %d", status, http.StatusOK)
 		}
 	})
 }
