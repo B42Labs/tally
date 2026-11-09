@@ -7,15 +7,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	consolemetrics "github.com/b42labs/tally/internal/console/metrics"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	reportingmetrics "github.com/b42labs/tally/internal/reporting/metrics"
 )
 
-// The number of series each of the two services of this repository owns. A
+// The number of series each of the three services of this repository owns. A
 // series added without a row on the page is noticed here.
 const (
 	reportingSeries = 10
 	collectorSeries = 7
+	consoleSeries   = 2
 )
 
 // newFixtureRegistry builds a registry carrying every shape a row is rendered
@@ -170,6 +172,29 @@ func TestMetricsRendersTheCollectorInstruments(t *testing.T) {
 	for _, want := range []string{
 		"| `tally_collector_consumed_total` | counter | `cloud`, `platform`, `event_type` |",
 		"| `tally_collector_oldest_buffered_seconds` | gauge | `cloud`, `platform` |",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the rendering does not carry %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestMetricsRendersTheConsoleInstruments(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := consolemetrics.New(reg)
+	m.Request("/project", 200)
+	m.SignInRefused("wrong_credential")
+
+	got, err := Metrics(reg)
+	if err != nil {
+		t.Fatalf("Metrics() error = %v, want nil", err)
+	}
+	if n := countRows(got); n != consoleSeries {
+		t.Errorf("the console rendered %d series, want %d:\n%s", n, consoleSeries, got)
+	}
+	for _, want := range []string{
+		"| `tally_console_requests_total` | counter | `route`, `status` |",
+		"| `tally_console_sign_in_refusals_total` | counter | `reason` |",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the rendering does not carry %q:\n%s", want, got)

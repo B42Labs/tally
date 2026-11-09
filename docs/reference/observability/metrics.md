@@ -1,30 +1,36 @@
 ---
 title: Metrics
-description: Every Prometheus series the Reporting API and the OpenStack collector expose, by name, type, labels and meaning, and the scrape jobs that read them.
+description: Every Prometheus series the Reporting API, the OpenStack collector and the demo console expose, by name, type, labels and meaning, and the scrape jobs that read them.
 quadrant: reference
 audience: operator
 ---
 
 # Metrics
 
-The Reporting API and the OpenStack collector each serve their instruments in
-the Prometheus exposition format at `GET /metrics`, on the port the service
-listens on and without a credential. Every series either of them owns is named
-`tally_`. The Go runtime and the process collectors are registered beside them,
-so a scrape carries the `go_` and `process_` series as well. Those report the
-process rather than the product and are not listed below.
+The Reporting API, the OpenStack collector and the demo console each serve
+their instruments in the Prometheus exposition format at `GET /metrics`, without
+a credential. The Reporting API and the collector serve the route on the port
+the service listens on. The console serves it on the port
+`TALLY_CONSOLE_OPS_PORT` names rather than on its page port. Every series any
+of them owns is named `tally_`. The Go runtime and the process collectors are
+registered beside them, so a scrape carries the `go_` and `process_` series as
+well. Those report the process rather than the product and are not listed
+below.
 
 `TALLY_METRICS_ENABLED=false` makes the route answer 404 instead of an
-exposition. On the Reporting API it also stops the gauge refresher. The two
+exposition. On the Reporting API it also stops the gauge refresher. The three
 settings pages,
-[Reporting API settings](/reference/configuration/tally-reporting) and
-[OpenStack collector settings](/reference/configuration/tally-openstack-collector),
+[Reporting API settings](/reference/configuration/tally-reporting),
+[OpenStack collector settings](/reference/configuration/tally-openstack-collector)
+and the
+[console's environment](/reference/command-line/tally-console#environment),
 carry the variable with its default.
 
-Both services bound one scrape the same way, in
-[`internal/reporting/metrics/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/reporting/metrics/metrics.go)
+All three services bound one scrape the same way, in
+[`internal/reporting/metrics/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/reporting/metrics/metrics.go),
+[`internal/providers/openstack/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/metrics.go)
 and
-[`internal/providers/openstack/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/providers/openstack/metrics.go).
+[`internal/console/metrics/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/console/metrics/metrics.go).
 Three scrapes are served at once, and a fourth arriving while those three run
 is answered 503. A scrape that outlives the budget of 10 seconds is cut off.
 
@@ -111,6 +117,38 @@ neither counts here.
 
 `tally_collector_oldest_buffered_seconds` is 0 while the outbox is empty and
 NaN while the buffer cannot be read.
+
+## Console
+
+<!-- refdoc:begin console -->
+| Metric | Type | Labels | Help |
+| --- | --- | --- | --- |
+| `tally_console_requests_total` | counter | `route`, `status` | Requests that passed the sign-in, by route and status code. |
+| `tally_console_sign_in_refusals_total` | counter | `reason` | Requests the sign-in refused, by reason. |
+<!-- refdoc:end console -->
+
+The instruments are declared in
+[`internal/console/metrics/metrics.go`](https://github.com/B42Labs/tally/blob/main/internal/console/metrics/metrics.go).
+
+A request counts once: in `tally_console_sign_in_refusals_total` when the
+sign-in refused it, and in `tally_console_requests_total` when it passed. A
+refused request is not in `tally_console_requests_total`.
+
+`route` is the route pattern of the table under
+[What it serves](/reference/command-line/tally-console#what-it-serves) on the
+console page, or `unmatched` for a path or method the console does not serve.
+It carries no identifier, because every identifier travels in the query.
+
+`status` is the status code. 502 is a failed Reporting API call, and 503 a
+failed engine read or a stored document that does not decode.
+
+`reason` is one of four values, each exposed at 0 from the first scrape:
+
+- `no_credential` counts a request that carried no HTTP Basic credential.
+- `cancelled` counts a request whose context ended while it waited for a bcrypt
+  comparison.
+- `wrong_credential` counts a credential that was compared and did not match.
+- `busy` counts a request answered 503 because no comparison was free.
 
 ## OpenStack simulator
 

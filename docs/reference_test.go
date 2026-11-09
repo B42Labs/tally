@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	consoleconfig "github.com/b42labs/tally/internal/console/config"
+	consolemetrics "github.com/b42labs/tally/internal/console/metrics"
 	engineconfig "github.com/b42labs/tally/internal/engine/config"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
@@ -321,11 +322,13 @@ func TestReferencePagesAreCurrent(t *testing.T) {
 	t.Run("observability/metrics.md", func(t *testing.T) {
 		reportingAPI, reportingErr := refdoc.Metrics(recordedReportingRegistry())
 		collector, collectorErr := refdoc.Metrics(recordedCollectorRegistry())
+		console, consoleErr := refdoc.Metrics(recordedConsoleRegistry())
 		jobs, jobsErr := refdoc.ScrapeJobs(readSource(t, scrapeSource))
 
 		refdoc.Verify(t, referencePage("observability/metrics.md"), map[string]string{
 			"reporting-api": render(t, reportingAPI, reportingErr),
 			"collector":     render(t, collector, collectorErr),
+			"console":       render(t, console, consoleErr),
 			"scrape-jobs":   render(t, jobs, jobsErr),
 		})
 	})
@@ -388,6 +391,16 @@ func recordedCollectorRegistry() *prometheus.Registry {
 	c.Unparseable()
 	c.Delivered(1)
 	c.DeliveryError()
+	return reg
+}
+
+// recordedConsoleRegistry is the console's registry, recorded the same way.
+func recordedConsoleRegistry() *prometheus.Registry {
+	reg := prometheus.NewRegistry()
+	m := consolemetrics.New(reg)
+
+	m.Request("/project", 200)
+	m.SignInRefused("wrong_credential")
 	return reg
 }
 
