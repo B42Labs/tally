@@ -1,6 +1,6 @@
 ---
 title: Demo console (tally-console)
-description: "What the read-only demo console serves, how an operator signs in to it, the admin token it needs, and how make console starts it."
+description: "What the read-only demo console serves, how an operator signs in to it, its probes and metrics, the admin token it needs, and how make console starts it."
 quadrant: reference
 audience: operator
 ---
@@ -436,14 +436,28 @@ Reporting API request as its method and path with the query string, and each
 engine read under the name its query carries in
 [`internal/console/store/queries.sql`](https://github.com/B42Labs/tally/blob/main/internal/console/store/queries.sql).
 
-A failure renders one error page carrying the wrapped error: 400 for a parameter
-that is missing or unreadable, 404 for a lookup that found nothing, for an API
-404 and for a file of a statement or of a run whose run is not exported, 502
-for a Reporting API call that failed or that the API refused the token for, and
-503 for an engine query that failed, a stored document that does not decode or
-that the export refuses, and the files of a run whose statements the export
-refuses. A path the console has no page for is answered 404 on
-that same error page, and a route asked with a method it does not answer 405.
+A failure renders one error page: 400 for a parameter that is missing or
+unreadable, 404 for a lookup that found nothing, for an API 404 and for a file
+of a statement or of a run whose run is not exported, 502 for a Reporting API
+call that failed, that the API refused the token for or that asked for more than
+the API reads at once, and 503 for an engine
+query that failed, a stored document that does not decode or that the export
+refuses, and the files of a run whose statements the export refuses. A path the
+console has no page for is answered 404 on that same error page, and a route
+asked with a method it does not answer 405.
+
+A page answered below 500 carries the wrapped error. A page answered 500 or
+above names the side that failed and says
+`the details are in the log of the console`. An API 400 or 422 is answered with
+the API's status and its text, under the heading
+`the Reporting API refused the request`. A 422 of type
+`urn:tally:error:history_too_long` or `urn:tally:error:result_too_large` is the
+exception: no request of the viewer gets under that bound, so it is answered 502
+under the heading `the Reporting API refuses a read this large`. An API 401 or
+403 is answered 502 under the heading
+`the Reporting API refused the configured token`. Any other API 4xx but 404
+describes the console's own call and is answered 502 under the heading
+`the Reporting API call failed`.
 
 Amounts are rendered at two decimal places and quantities at four, the scales
 the engine rounds them to. A catalog price is rendered with the digits the
@@ -471,6 +485,37 @@ HTTP Basic has no sign-out, so a browser holds the credential until it closes.
 
 The process speaks plain HTTP, so a listener beyond loopback belongs behind
 something that terminates TLS.
+
+## Probes and metrics
+
+A second listener serves three routes on the port `TALLY_CONSOLE_OPS_PORT`
+names, at the address `TALLY_CONSOLE_HTTP_ADDR` names. None of them needs a
+credential.
+
+| Route | Answer |
+| --- | --- |
+| `GET /healthz` | 200 with the body `ok`. |
+| `GET /readyz` | 200 with the body `ok`. |
+| `GET /metrics` | The [metrics](/reference/observability/metrics#console) in the Prometheus exposition format, or 404 when `TALLY_METRICS_ENABLED=false`. |
+
+Both probes answer 200 `ok` for as long as the process serves, and they check
+neither the engine database nor the Reporting API. An outage of either side
+reaches the viewer as the error page naming it.
+
+The page port answers 401 for these three paths, because every route there
+needs the credential, and the second listener serves no page.
+
+## Response headers
+
+Every response of the page port carries these five headers, a 401 included.
+
+| Header | Value |
+| --- | --- |
+| `Cache-Control` | `no-store` |
+| `Content-Security-Policy` | `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `no-referrer` |
 
 ## Environment
 
@@ -518,18 +563,22 @@ password `tally-dev-console-password`. The token is issued fresh per run and
 comes before the CA, so on a machine without a dev cluster the target fails on
 the admin CLI's connection error.
 
-The process binds `TALLY_CONSOLE_HTTP_ADDR` on `TALLY_CONSOLE_HTTP_PORT`. The
-default address `127.0.0.1` keeps the console reachable from the machine it runs
-on and nowhere else, and a listener on every interface sets `0.0.0.0`. The
-engine pool connects lazily, so the process comes up while that database is
+The process binds `TALLY_CONSOLE_HTTP_ADDR` on `TALLY_CONSOLE_HTTP_PORT` for the
+pages and on `TALLY_CONSOLE_OPS_PORT` for the probes and metrics. The default
+address `127.0.0.1` keeps both listeners reachable from the machine they run on
+and nowhere else, and a listener on every interface sets `0.0.0.0`. The engine
+pool connects lazily, so the process comes up while that database is
 unavailable and the pages reading it report the outage.
 
-A configuration the console cannot honor exits 1 before the port is bound, with
+A configuration the console cannot honor exits 1 before the ports are bound, with
 the message naming the variable. `TALLY_CONSOLE_REPORTING_URL`,
 `TALLY_CONSOLE_API_TOKEN`, `TALLY_CONSOLE_ENGINE_DB_URL` and
-`TALLY_CONSOLE_HTPASSWD` have to be set. A reporting URL that is not `https` and
-whose host is not loopback is refused, because the token rides on every call and
-would travel in cleartext. A `TALLY_CONSOLE_CA_FILE` holding no PEM certificate
+`TALLY_CONSOLE_HTPASSWD` have to be set. A `TALLY_CONSOLE_OPS_PORT` outside 1 to
+65535 or equal to `TALLY_CONSOLE_HTTP_PORT` is refused. A reporting URL whose
+scheme is neither `http` nor `https` is refused. A plain `http` reporting URL
+whose host is not loopback is refused unless
+`TALLY_CONSOLE_REPORTING_INSECURE=true`, because the token rides on every call
+and would travel in cleartext. A `TALLY_CONSOLE_CA_FILE` holding no PEM certificate
 is refused with the file named. A `TALLY_CONSOLE_HTTP_ADDR` that is not an IP
 address is refused, a host name and a `host:port` pair included.
 
@@ -541,27 +590,29 @@ its number and carries nothing of its content.
 
 ## Signals and exit status
 
-SIGINT and SIGTERM begin a graceful shutdown. The server stops accepting
+SIGINT and SIGTERM begin a graceful shutdown. Both listeners stop accepting
 connections and in-flight requests get 10 seconds to finish. The process then
 exits 0.
 
 Every other failure exits 1: a configuration that was refused, a Reporting API
 client that could not be built, an engine pool that could not be opened, a
-router that could not be built, and a listener that ended with anything but a
-closed server.
+router that could not be built, a port that could not be bound, and a listener
+that ended with anything but a closed server.
 
 ## Logging
 
 The process writes JSON lines to stdout. Every line carries
 `service=tally-console`, and the level is the one `TALLY_LOG_LEVEL` names:
-`DEBUG`, `INFO`, `WARN` or `ERROR`. Every error page is logged with the wrapped
-error it shows, at WARN for a request that asked for something wrong and at
-ERROR for a failure of the console or of a side it reads. A stored row whose
+`DEBUG`, `INFO`, `WARN` or `ERROR`. The `listening` line carries `url` and
+`ops_url`. Every error page is logged with the whole wrapped error, whether or
+not the page prints it, at WARN for a request that asked for something wrong and
+at ERROR for a failure of the console or of a side it reads. A stored row whose
 amount is not a number is left out of the listing that read it and logged at
 WARN, naming the query and the row's key columns.
 
 Every request that passes the sign-in writes one `request` line at INFO with
-`operator`, `method`, `path`, `query`, `status` and `duration_ms`. A refused
+`operator`, `method`, `path`, `query`, `status` and `duration_ms`. The second
+listener writes no `request` line. A refused
 request writes one `sign-in refused` line with `method`, `path` and `remote`, at
 WARN for a credential that was sent and wrong and at DEBUG otherwise, because
 every browser's first request carries none. That line never carries the user
