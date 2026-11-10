@@ -172,10 +172,10 @@ steps below say, and each of them names the time range its panels need.
    went out, by 524 events and about six seconds on the run, and both read 0
    once the outbox has drained. `Projection replays` draws nothing.
 
-   `Scrape health` lists five targets. `reporting-api`, `otel-collector` and
-   `openstack-collector` are up (1), and `ceilometer` is down (0), which is the
-   designed dev state, a placeholder target for an exporter that runs beside a
-   real control plane. `openstack-db-exporter` is up (1), because the holding
+   `Scrape health` lists six targets. `reporting-api`, `otel-collector`,
+   `openstack-collector` and `console` are up (1), and `ceilometer` is down
+   (0), which is the designed dev state, a placeholder target for an exporter
+   that runs beside a real control plane. `openstack-db-exporter` is up (1), because the holding
    simulator still serves its inventory, which that job scrapes over the
    `kind` network. Between simulator runs it and `openstack-collector` read 0.
 

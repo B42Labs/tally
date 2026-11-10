@@ -4,7 +4,7 @@ description: Stop the simulator stack, delete the kind cluster, and remove the f
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-10 from commit ce0b506 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Tear down your local Tally
 
@@ -28,7 +28,7 @@ databases, because that is where they live. You remove the CA file
 `tally-ca.crt` at the repository root and the export directory
 `~/tally-tutorial` by hand.
 
-What stays is the four `tally-*:dev` images in Docker, the Go build and module
+What stays is the five `tally-*:dev` images in Docker, the Go build and module
 caches under your home directory, and the clone.
 
 This lesson takes about 5 minutes.
@@ -180,13 +180,14 @@ This lesson takes about 5 minutes.
 
    ```text
    IMAGE                           ID             DISK USAGE   CONTENT SIZE   EXTRA
-   tally-engine:dev                5411e0bd59f9       15.3MB             0B        
-   tally-openstack-collector:dev   d879c5ca78ff       15.9MB             0B        
-   tally-openstack-simulator:dev   6527cde4f567       17.6MB             0B        
-   tally-reporting:dev             cf2be4a2bd30       19.3MB             0B        
+   tally-console:dev               7ea8b01b0297       22.2MB             0B        
+   tally-engine:dev                b5d6a98442d7       15.5MB             0B        
+   tally-openstack-collector:dev   dc4f029574a7       16.1MB             0B        
+   tally-openstack-simulator:dev   4dae4aa01d44       17.8MB             0B        
+   tally-reporting:dev             e3431a3e8ddd       19.5MB             0B        
    ```
 
-   The four `:dev` images are what `make up` built, and their names have to
+   The five `:dev` images are what `make up` built, and their names have to
    match. The ids, the sizes and the column layout are Docker's own. Beside the
    images stay Docker's build cache from the image builds, which
    `docker builder prune` removes, the Go build and module caches under your
@@ -195,11 +196,11 @@ This lesson takes about 5 minutes.
 2. Remove the images if you want the disk back:
 
    ```sh
-   docker image rm tally-reporting:dev tally-engine:dev tally-openstack-collector:dev tally-openstack-simulator:dev
+   docker image rm tally-reporting:dev tally-engine:dev tally-console:dev tally-openstack-collector:dev tally-openstack-simulator:dev
    ```
 
-   This is your choice and not a step of the track: the four images cost about
-   70 MB, and the next `make up` builds them again.
+   This is your choice and not a step of the track: the five images cost about
+   90 MB, and the next `make up` builds them again.
 
 ## What you learned
 
@@ -209,8 +210,8 @@ This lesson takes about 5 minutes.
 - The collector's outbox is a volume of the compose stack, and
   `make simulator-down` drops it with the stack:
   [the outbox on disk](/explanation/how-the-collector-consumes-a-bus#the-outbox-on-disk).
-- The four images are four of the six binaries, built by `make up` and rebuilt
-  by the next one:
+- Four of the five images are four of the six binaries, and the fifth is the
+  console's. `make up` builds them and the next one rebuilds them:
   [the six binaries](/explanation/architecture-and-the-provider-pattern#the-six-binaries).
 - A second run of this track renders the same month, byte for byte, because the
   seed decides what the simulated world does:
