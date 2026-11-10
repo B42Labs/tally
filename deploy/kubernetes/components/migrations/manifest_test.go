@@ -1,10 +1,12 @@
 // This file pins the migration Job's contract with the two binaries, with the
-// Secret it reads both connection strings from and with the Service of the
-// base it waits for. It fails quietly: the engine chain applied first runs
-// before the reporting chain it reads through, a *_FILE path that stopped
-// matching its mount fails every retry on a file the process cannot read, and a
-// deadline kills a build migration 9 runs outside a transaction, which leaves
-// an index the operator drops by hand. None of it stops kustomize or an apply.
+// Secret it reads both connection strings from, with the Secret of the
+// console's password and with the Service of the base it waits for. It fails
+// quietly: the engine chain applied first runs before the reporting chain it
+// reads through, the role step run before the engine chain grants a group role
+// that is not there yet, a *_FILE path that stopped matching its mount fails
+// every retry on a file the process cannot read, and a deadline kills a build
+// migration 9 runs outside a transaction, which leaves an index the operator
+// drops by hand. None of it stops kustomize or an apply.
 // The tests read the YAML from disk and need neither a cluster nor kustomize.
 package migrations_test
 
@@ -30,6 +32,12 @@ const (
 	// The Job, and the Secret both connection strings are mounted from.
 	job      = "tally-migrate"
 	dbSecret = "tally-db"
+
+	// The container that sets the console's login role, and the Secret of its
+	// password. The Secret is not tally-db, which TimescaleDB mounts, so that a
+	// rotation does not roll the database.
+	consoleRole   = "console-role"
+	consoleSecret = "tally-console-db"
 
 	// The file of the base that declares the Service the Job waits for.
 	timescaleDBFile = "../../base/timescaledb/timescaledb.yaml"
@@ -186,19 +194,20 @@ func TestTheReportingChainIsAppliedBeforeTheEngineChain(t *testing.T) {
 	// them, so their order is the order of the chains. The reporting chain goes
 	// first, as make migrate applies it, and both go after the wait: a chain
 	// that starts before the database answers fails the pod, and the Job
-	// spends a retry on it.
+	// spends a retry on it. The role step runs last, because it grants the
+	// group role engine migration 3 creates.
 	pod := podOf(t)
 
 	var names []string
 	for _, c := range pod.InitContainers {
 		names = append(names, c.Name)
 	}
-	if want := []string{"wait-for-timescaledb", chains[0].container}; !slices.Equal(names, want) {
-		t.Errorf("the init containers are %v, want %v in that order: the wait, then the reporting chain", names, want)
+	if want := []string{"wait-for-timescaledb", chains[0].container, chains[1].container}; !slices.Equal(names, want) {
+		t.Errorf("the init containers are %v, want %v in that order: the wait, then the reporting chain, then the engine chain", names, want)
 	}
-	if len(pod.Containers) != 1 || pod.Containers[0].Name != chains[1].container {
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != consoleRole {
 		t.Errorf("the Job runs %d containers, the first named %q, want the one container %s, which runs after every init container",
-			len(pod.Containers), nameOfFirst(pod.Containers), chains[1].container)
+			len(pod.Containers), nameOfFirst(pod.Containers), consoleRole)
 	}
 
 	for _, chain := range chains {
@@ -268,11 +277,78 @@ func TestDatabaseSecretsReachTheVariablesThatNameThem(t *testing.T) {
 	}
 }
 
+func TestTheConsoleRoleIsSetFromItsOwnSecret(t *testing.T) {
+	// The role step reads the engine's connection string from tally-db, as the
+	// engine chain does, and the console's password from a Secret of its own.
+	// The same three things have to agree for the password as for a connection
+	// string, and the plain variable beside its *_FILE companion is refused.
+	pod := podOf(t)
+	c := containerNamed(t, pod, consoleRole)
+
+	if c.Image != "tally-engine:dev" {
+		t.Errorf("container %s runs %q, want tally-engine:dev, the image an overlay's images entry maps to the release", c.Name, c.Image)
+	}
+	if want := []string{"ensure-console-role"}; !slices.Equal(c.Args, want) || len(c.Command) != 0 {
+		t.Errorf("container %s runs the command %v with the arguments %v, want the image's entrypoint with %v",
+			c.Name, c.Command, c.Args, want)
+	}
+
+	for _, tc := range []struct {
+		secret, variable, plain, key string
+		keys                         []string
+	}{
+		{dbSecret, "TALLY_ENGINE_DB_URL_FILE", "TALLY_ENGINE_DB_URL", "engine-db-url", []string{"db-url", "engine-db-url"}},
+		{consoleSecret, "TALLY_ENGINE_CONSOLE_PASSWORD_FILE", "TALLY_ENGINE_CONSOLE_PASSWORD", "password", []string{"password"}},
+	} {
+		t.Run(tc.variable, func(t *testing.T) {
+			i := slices.IndexFunc(pod.Volumes, func(v volume) bool { return v.Secret.SecretName == tc.secret })
+			if i < 0 {
+				t.Fatalf("the pod declares no volume backed by secret %s", tc.secret)
+			}
+			v := pod.Volumes[i]
+
+			var keys []string
+			for _, item := range v.Secret.Items {
+				keys = append(keys, item.Key)
+			}
+			if !slices.Equal(keys, tc.keys) {
+				t.Errorf("the %s volume carries the keys %v, want exactly %v", tc.secret, keys, tc.keys)
+			}
+
+			if _, set := envValue(c, tc.plain); set {
+				t.Errorf("%s is set, which the binary refuses beside %s", tc.plain, tc.variable)
+			}
+
+			j := slices.IndexFunc(v.Secret.Items, func(item secretItem) bool { return item.Key == tc.key })
+			if j < 0 {
+				t.Fatalf("the %s volume carries no key %s", tc.secret, tc.key)
+			}
+			k := slices.IndexFunc(c.VolumeMounts, func(m volumeMount) bool { return m.Name == v.Name })
+			if k < 0 {
+				t.Fatalf("container %s mounts %v and not volume %q, so secret %s reaches no path", c.Name, c.VolumeMounts, v.Name, tc.secret)
+			}
+			mount := c.VolumeMounts[k]
+			if !mount.ReadOnly {
+				t.Errorf("container %s mounts secret %s at %s, and not read-only", c.Name, tc.secret, mount.MountPath)
+			}
+
+			value, set := envValue(c, tc.variable)
+			if !set {
+				t.Fatalf("no %s on container %s, so the binary looks for the value in the environment, where this Job does not put it",
+					tc.variable, c.Name)
+			}
+			if want := path.Join(mount.MountPath, v.Secret.Items[j].Path); value != want {
+				t.Errorf("%s = %q, want %q, which is where the %s volume mounts key %s", tc.variable, value, want, tc.secret, tc.key)
+			}
+		})
+	}
+}
+
 func TestTheJobWaitsForTheServiceTheBaseDeclares(t *testing.T) {
 	// The Postgres entrypoint listens on TCP only after its initdb scripts ran,
 	// so an open port means the engine's database and the reader roles exist. A
 	// wait on a name or a port the base no longer declares never ends, and the
-	// pod sits in Init:0/2 with nothing failing.
+	// pod sits in Init:0/3 with nothing failing.
 	c := containerNamed(t, podOf(t), "wait-for-timescaledb")
 
 	m := waitRe.FindStringSubmatch(strings.Join(c.Command, " "))
@@ -327,8 +403,8 @@ func TestAFailedMigrationIsRetriedAndNeverKilled(t *testing.T) {
 func TestTheJobIsConfinedToWhatItNeeds(t *testing.T) {
 	// The images end in distroless nonroot with USER nonroot:nonroot, which
 	// names an identity and nothing else. This pod mounts the connection
-	// strings of both database owners, so what a bug in a binary reaches is
-	// what these fields decide. Without a request the pod is BestEffort, and an
+	// strings of both database owners and the console's password, so what a
+	// bug in a binary reaches is what these fields decide. Without a request the pod is BestEffort, and an
 	// eviction in the middle of migration 9 leaves the index the how-to drops by
 	// hand.
 	pod := podOf(t)
@@ -349,8 +425,8 @@ func TestTheJobIsConfinedToWhatItNeeds(t *testing.T) {
 	}
 
 	all := append(slices.Clone(pod.InitContainers), pod.Containers...)
-	if len(all) != 3 {
-		t.Fatalf("the pod runs %d containers, want the wait and the two chains", len(all))
+	if len(all) != 4 {
+		t.Fatalf("the pod runs %d containers, want the wait, the two chains and the role step", len(all))
 	}
 	for _, c := range all {
 		t.Run(c.Name, func(t *testing.T) {

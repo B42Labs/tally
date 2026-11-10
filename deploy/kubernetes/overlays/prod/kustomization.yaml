@@ -6,9 +6,10 @@
 # consumes the notifications of the cloud collector.env names from a broker
 # outside the cluster and posts them to the Reporting API. The cluster migrates,
 # rates and reconciles by itself: Job tally-migrate applies both migration
-# chains on every apply, the hourly CronJob tally-engine rates a month once a
-# pricing catalog prices it, and CronJob tally-sync reconciles the cloud every
-# ten minutes. Nothing that answers without a credential is published.
+# chains and sets tally_console, the login role the console reads the engine
+# database as, on every apply, the hourly CronJob tally-engine rates a month
+# once a pricing catalog prices it, and CronJob tally-sync reconciles the cloud
+# every ten minutes. Nothing that answers without a credential is published.
 #
 # issuers.yaml is deliberately not listed here; see the comment in that file.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -35,11 +36,11 @@ resources:
 #
 # The second component is the collector: a Deployment with its outbox on a
 # claim. The third is Job tally-migrate, which applies both migration chains
-# with the CLIs of the release, and the fourth is CronJob tally-sync with the
-# mount of the two files the Reporting API reconciles with. The
-# kustomization.yaml of each states what an overlay has to supply, which the
-# images, secretGenerator and configMapGenerator entries below do, all but the
-# Secret of the ingest token.
+# with the CLIs of the release and sets the console's login role, and the
+# fourth is CronJob tally-sync with the mount of the two files the Reporting
+# API reconciles with. The kustomization.yaml of each states what an overlay
+# has to supply, which the images, secretGenerator and configMapGenerator
+# entries below do, all but the Secret of the ingest token.
 components:
   - ../../components/envoy-gateway
   - ../../components/openstack-collector
@@ -87,6 +88,9 @@ secretGenerator:
   - name: tally-db
     envs:
       - secrets/tally-db.env
+  - name: tally-console-db
+    envs:
+      - secrets/tally-console-db.env
   - name: tally-internal-token
     envs:
       - secrets/tally-internal-token.env

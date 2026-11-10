@@ -234,7 +234,7 @@ replaces the add-on and the deploy steps.
 
 ## Write the secrets
 
-1. Copy the six examples and make the copies readable by you alone:
+1. Copy the seven examples and make the copies readable by you alone:
 
    ```sh
    for f in deploy/kubernetes/overlays/prod/secrets/*.env.example; do cp "$f" "${f%.example}"; done
@@ -244,7 +244,9 @@ replaces the add-on and the deploy steps.
    Git ignores the `.env` files, so they are the only copy of these values.
    Keep them: TimescaleDB takes both database passwords on the first start of
    its empty volume and keeps them, so a regenerated `tally-db.env` no longer
-   matches the database.
+   matches the database. The password in `tally-console-db.env` is different:
+   the migration Job sets it again on every deploy, so you can change it and
+   deploy again to rotate it.
 
 2. Fill in each key after its `=`, unquoted:
 
@@ -255,6 +257,7 @@ replaces the add-on and the deploy steps.
    | `tally-db.env` | `db-url` | the example URL with the value of `password` in place of `<password>` |
    | `tally-db.env` | `engine-db-url` | the example URL with the value of `password` in place of `<password>` |
    | `tally-db.env` | `engine-reporting-db-url` | the example URL with the value of `engine-password` in place of `<engine-password>` |
+   | `tally-console-db.env` | `password` | `openssl rand -hex 32`, a value of its own |
    | `tally-internal-token.env` | `token` | `openssl rand -hex 32` |
    | `tally-grafana.env` | `admin-password` | `openssl rand -hex 32` |
    | `tally-vm-admin.env` | `delete-auth-key` | `openssl rand -hex 32` |
@@ -314,9 +317,11 @@ replaces the add-on and the deploy steps.
    deploy and applies the overlay, which creates the Job again. It waits for
    every rollout but the collector's and for the LoadBalancer address of the
    Gateway, then for the Job, whose log it prints. The reporting chain is
-   applied first, in an init container, and the engine chain after it. Then it
-   waits for the Reporting API and prints where the Gateway answers. On the
-   first deploy the output ends with these lines:
+   applied first, in an init container, and the engine chain after it, in the
+   last init container. The Job's container then creates `tally_console`, the
+   login role the console reads the engine database as, or sets its password.
+   Then it waits for the Reporting API and prints where the Gateway answers.
+   On the first deploy the output ends with these lines:
 
    ```text
    ==> waiting for the migration Job
@@ -334,6 +339,8 @@ replaces the add-on and the deploy steps.
    [pod/tally-migrate-twtkd/reporting] applied migration 12
    [pod/tally-migrate-twtkd/engine] applied migration 1
    [pod/tally-migrate-twtkd/engine] applied migration 2
+   [pod/tally-migrate-twtkd/engine] applied migration 3
+   [pod/tally-migrate-twtkd/console-role] created the login role tally_console
    deployment "reporting-api" successfully rolled out
 
    ==> the Gateway answers on 203.0.113.10
@@ -734,8 +741,10 @@ that the catalog is missing.
     ```
 
     The Job is created again, and both chains at their head apply nothing.
-    Every other object is reported `unchanged`, so no Deployment or
-    StatefulSet rolls.
+    The Job sets the password of `tally_console` again and prints
+    `updated the login role tally_console`, which the filter leaves out. Every
+    other object is reported `unchanged`, so no Deployment or StatefulSet
+    rolls.
 
 ## Deploy from a pipeline
 

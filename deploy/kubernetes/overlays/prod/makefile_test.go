@@ -128,6 +128,8 @@ func TestProdUpRefusesASecretThatIsNotFilledIn(t *testing.T) {
 		name, file, content, want string
 	}{
 		{"a missing file", "tally-grafana.env", "", "tally-grafana.env is missing"},
+		// The file a deployment from before the console's login role lacks.
+		{"a missing console password", "tally-console-db.env", "", "tally-console-db.env is missing"},
 		{"an empty value", "tally-grafana.env", "admin-password=\n", "tally-grafana.env leaves admin-password empty or on a placeholder"},
 		{"a value of blanks", "tally-vm-admin.env", "delete-auth-key=  \n", "tally-vm-admin.env leaves delete-auth-key empty or on a placeholder"},
 		{
