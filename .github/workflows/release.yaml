@@ -101,7 +101,7 @@ jobs:
 
   # The release images, pushed once the release exists: a tag whose release
   # failed publishes no image, and a moved tag stops at gh release create above
-  # or, on a re-run, at the tag check of the push step. Two of the four are not
+  # or, on a re-run, at the tag check of the push step. Two of the five are not
   # services: tally-openstack-collector consumes from a broker, and
   # tally-reporting-admin is a command line. The entrypoint of each image is its
   # binary, so the admin image takes the subcommand as its arguments. A job of
@@ -144,7 +144,7 @@ jobs:
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           # GHCR takes lower-case names only, and the owner is B42Labs.
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for name in tally-reporting tally-engine tally-openstack-collector tally-reporting-admin; do
+          for name in tally-reporting tally-engine tally-console tally-openstack-collector tally-reporting-admin; do
             image="ghcr.io/${owner}/${name}:${GITHUB_REF_NAME}"
             # imagetools answers a 404 with not found and any other status with
             # that status. docker manifest inspect reports a registry it cannot
