@@ -80,8 +80,8 @@ job scrapes. What the pull path collects and what it cannot is in
    unreported. The dev overlay's
    [`victoriametrics/scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/overlays/dev/victoriametrics/scrape-rules.yaml)
    differs from the base's: its `openstack-collector` job reads the compose
-   collector as a static target, so the file names `reporting-api` and
-   `otel-collector` alone.
+   collector as a static target, so the file names `reporting-api`,
+   `otel-collector` and `console` alone.
 
    Every job you keep is one `TallyScrapeTargetDown` reports when a target of
    it answers nothing. A collector run with `TALLY_METRICS_ENABLED=false`
@@ -267,7 +267,8 @@ job scrapes. What the pull path collects and what it cannot is in
    curl --cacert tally-ca.crt 'https://vm.tally.127-0-0-1.nip.io:8443/targets'
    ```
 
-2. Five jobs are listed. `reporting-api` and `otel-collector` are up.
+2. Six jobs are listed. `reporting-api`, `otel-collector` and `console` are
+   up.
    `ceilometer` is down with an unresolved-host error, because its target
    exists in no dev cluster. `openstack-db-exporter` and `openstack-collector`
    are down between simulator runs, when no container answers to

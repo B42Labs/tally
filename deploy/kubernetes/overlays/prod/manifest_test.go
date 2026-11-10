@@ -850,10 +850,10 @@ func TestTheCollectorSettingsNameTheCloud(t *testing.T) {
 func TestScrapeConfigKeepsOnlyTheInClusterJobs(t *testing.T) {
 	// The OpenStack jobs of the base scrape placeholder addresses, and on a
 	// cluster with no such exporter they keep TallyScrapeTargetDown firing.
-	// The three discovered jobs stay and nothing else is added: the Reporting
-	// API, the OTel Collector and the OpenStack collector the collector
-	// component runs, which TallyScrapeJobMissing names in the rules file
-	// beside this one.
+	// The four discovered jobs stay and nothing else is added: the Reporting
+	// API, the OTel Collector, the OpenStack collector the collector component
+	// runs and the console the console component runs, which
+	// TallyScrapeJobMissing names in the rules file beside this one.
 	overlay := scrapeConfigOf(t, scrapeFile)
 	base := scrapeConfigOf(t, baseScrapeFile)
 
@@ -861,11 +861,11 @@ func TestScrapeConfigKeepsOnlyTheInClusterJobs(t *testing.T) {
 	for _, job := range overlay.ScrapeConfigs {
 		names = append(names, job.JobName)
 	}
-	if want := []string{"reporting-api", "otel-collector", "openstack-collector"}; !slices.Equal(names, want) {
+	if want := []string{"reporting-api", "otel-collector", "openstack-collector", "console"}; !slices.Equal(names, want) {
 		t.Fatalf("%s declares jobs %v, want %v", scrapeFile, names, want)
 	}
 
-	// The three jobs are copies of the base's, which the rules and the comments
+	// The four jobs are copies of the base's, which the rules and the comments
 	// of the base file are written against. A copy that drifted, such as a
 	// relabel rule keeping another port, scrapes the wrong endpoint or none,
 	// and the file stays legal YAML.

@@ -300,9 +300,9 @@ store any invoice is derived from puts invented usage into the billing record.
    set to that month rather than to the hour the run took. The second part stays
    the way to fill the panels without a run.
 
-3. The scrape-health stat lists the targets of the five jobs. `ceilometer`
-   reports `up == 0` while `reporting-api` and `otel-collector` report
-   `up == 1`. `openstack-db-exporter` and `openstack-collector` report
+3. The scrape-health stat lists the targets of the six jobs. `ceilometer`
+   reports `up == 0` while `reporting-api`, `otel-collector` and `console`
+   report `up == 1`. `openstack-db-exporter` and `openstack-collector` report
    `up == 0` as well between simulator runs, and `up == 1` while one publishes.
    That is the designed dev state described under
    [scrape jobs](/reference/observability/metrics#scrape-jobs), not a failure.

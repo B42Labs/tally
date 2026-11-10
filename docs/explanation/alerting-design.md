@@ -138,14 +138,15 @@ not.
 would have the healthy target's series answer for the silent one, and any other
 producer of a series by one of those names would suppress the alert for good.
 
-`TallyScrapeJobMissing` covers what `TallyScrapeTargetDown` cannot see. The
-three discovered jobs of the base, `reporting-api`, `otel-collector` and
-`openstack-collector`, find their targets through the endpointslices of the
-namespace, so a job that resolves to no targets emits no `up` series at all and
-the `up == 0` rule stays silent. A Deployment scaled to zero, a renamed Service
-or port, a removed RoleBinding, and an unreachable API server all land in the
-`absent()` rule. The rule is the one piece of the rules whose content is a
-property of the scrape config, one clause per discovered job, so it lives in
+`TallyScrapeJobMissing` covers what `TallyScrapeTargetDown` cannot see. The four
+discovered jobs of the base, `reporting-api`, `otel-collector`,
+`openstack-collector` and `console`, find their targets through the
+endpointslices of the namespace, so a job that resolves to no targets emits no
+`up` series at all and the `up == 0` rule stays silent. A Deployment scaled to
+zero, a renamed Service or port, a removed RoleBinding, and an unreachable API
+server all land in the `absent()` rule. The rule is the one piece of the rules
+whose content is a property of the scrape config, one clause per discovered job,
+so it lives in
 [`scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/scrape-rules.yaml)
 rather than in `rules.yaml`. An overlay that replaces the scrape config replaces
 that file with it, and a clause for a job the overlay does not scrape would fire

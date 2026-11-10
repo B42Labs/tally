@@ -25,7 +25,7 @@ groups:
       # renamed Service or port, a removed RoleBinding, or an unreachable API
       # server all land here rather than there.
       - alert: TallyScrapeJobMissing
-        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"})
+        expr: absent(up{job="reporting-api"}) or absent(up{job="otel-collector"}) or absent(up{job="console"})
         for: 5m
         labels:
           severity: critical
