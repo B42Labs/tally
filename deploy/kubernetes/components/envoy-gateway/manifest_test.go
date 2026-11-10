@@ -1,11 +1,12 @@
 // This file pins what the stack takes from Envoy Gateway: the GatewayClass, the
-// rate limit on the OTLP routes, and the two rules that answer a request with a
-// 403. Every mismatch it looks for fails quietly. A policy whose target names
-// no route leaves both OTLP hostnames unlimited, a JSON patch whose target the
-// base does not declare is applied to nothing, and neither stops kustomize. A
-// deny rule that references a filter no file declares renders as well, and the
-// Gateway rejects the route on the cluster. The tests read the YAML from disk
-// and need neither a cluster nor kustomize.
+// rate limits on the OTLP routes and on the console route, and the two rules
+// that answer a request with a 403. Every mismatch it looks for fails quietly.
+// A policy whose target names no route leaves both OTLP hostnames or the
+// console's sign-in unlimited, a JSON patch whose target the base does not
+// declare is applied to nothing, and neither stops kustomize. A deny rule that
+// references a filter no file declares renders as well, and the Gateway
+// rejects the route on the cluster. The tests read the YAML from disk and need
+// neither a cluster nor kustomize.
 package envoygateway_test
 
 import (
@@ -24,6 +25,7 @@ const (
 	kustomizationFile    = "kustomization.yaml"
 	gatewayClassFile     = "gatewayclass.yaml"
 	rateLimitFile        = "otlp-rate-limit.yaml"
+	consoleRateLimitFile = "console-rate-limit.yaml"
 	grafanaDenyFile      = "grafana-deny.yaml"
 	alertmanagerDenyFile = "alertmanager-deny.yaml"
 
@@ -33,6 +35,9 @@ const (
 	baseCollectorFile    = "../../base/otel-collector/otel-collector.yaml"
 	baseGrafanaFile      = "../../base/grafana/grafana.yaml"
 	baseAlertmanagerFile = "../../base/alertmanager/alertmanager.yaml"
+
+	// The component that declares the console route the second limit targets.
+	consoleFile = "../console/console.yaml"
 
 	// The API group of the routes, and the group of Envoy Gateway's own kinds.
 	routeGroup = "gateway.networking.k8s.io"
@@ -127,15 +132,15 @@ type routeMatch struct {
 
 func TestComponentDeclaresTheEnvoyObjects(t *testing.T) {
 	// An overlay lists this directory under components, and kustomize refuses
-	// a Kustomization there. The four files are everything the base leaves to
-	// Envoy Gateway: one dropped from resources stays in the repository and
-	// reaches no cluster, and both overlays still render.
+	// a Kustomization there. The five files are everything the base and the
+	// console component leave to Envoy Gateway: one dropped from resources stays
+	// in the repository and reaches no cluster, and both overlays still render.
 	k := kustomizationOf(t)
 
 	if k.Kind != "Component" {
 		t.Errorf("%s has kind %q, want Component, which is what an overlay's components entry takes", kustomizationFile, k.Kind)
 	}
-	want := []string{gatewayClassFile, rateLimitFile, grafanaDenyFile, alertmanagerDenyFile}
+	want := []string{gatewayClassFile, rateLimitFile, consoleRateLimitFile, grafanaDenyFile, alertmanagerDenyFile}
 	if !slices.Equal(k.Resources, want) {
 		t.Fatalf("%s lists the resources %v, want exactly %v", kustomizationFile, k.Resources, want)
 	}
@@ -152,6 +157,7 @@ func TestComponentDeclaresTheEnvoyObjects(t *testing.T) {
 		t.Errorf("GatewayClass %s names the controller %q, want %q", className, got, controller)
 	}
 	objectNamed(t, rateLimitFile, "BackendTrafficPolicy", "otel-collector-otlp")
+	objectNamed(t, consoleRateLimitFile, "BackendTrafficPolicy", "console")
 	objectNamed(t, grafanaDenyFile, "HTTPRouteFilter", "grafana-deny-datasource-proxy")
 	objectNamed(t, alertmanagerDenyFile, "HTTPRouteFilter", "alertmanager-deny-writes")
 }
@@ -186,10 +192,41 @@ func TestRateLimitTargetsTheOtlpRoutes(t *testing.T) {
 	}
 }
 
+func TestRateLimitTargetsTheConsoleRoute(t *testing.T) {
+	// The console answers every request with a bcrypt comparison as well, and
+	// a target that names nothing is accepted by kustomize and by the API
+	// server alike. It leaves one address free to guess passwords as fast as
+	// the sign-in compares them.
+	policy := objectNamed(t, consoleRateLimitFile, "BackendTrafficPolicy", "console")
+
+	want := []targetRef{{routeGroup, "HTTPRoute", "console"}}
+	if !slices.Equal(policy.Spec.TargetRefs, want) {
+		t.Fatalf("BackendTrafficPolicy console in %s targets %+v, want exactly %+v", consoleRateLimitFile, policy.Spec.TargetRefs, want)
+	}
+	if route := objectNamed(t, consoleFile, "HTTPRoute", "console"); !inGroup(route, routeGroup) {
+		t.Errorf("HTTPRoute console in %s has apiVersion %q, want the group %s the policy targets", consoleFile, route.APIVersion, routeGroup)
+	}
+}
+
 func TestRateLimitCountsPerClientAddress(t *testing.T) {
-	// A policy that targets both routes and carries no limit is accepted as
+	// A policy that targets its routes and carries no limit is accepted as
 	// well, and so is one whose rules share a bucket or leave a source out.
-	limit := objectNamed(t, rateLimitFile, "BackendTrafficPolicy", "otel-collector-otlp").Spec.RateLimit
+	for _, p := range []struct{ file, name string }{
+		{rateLimitFile, "otel-collector-otlp"},
+		{consoleRateLimitFile, "console"},
+	} {
+		t.Run(p.name, func(t *testing.T) {
+			assertPerClientAddress(t, objectNamed(t, p.file, "BackendTrafficPolicy", p.name))
+		})
+	}
+}
+
+// assertPerClientAddress holds one policy to a Local limit per second with a
+// bucket per client address and a route default beside it.
+func assertPerClientAddress(t *testing.T, policy object) {
+	t.Helper()
+
+	limit := policy.Spec.RateLimit
 	if limit.Type != "Local" {
 		t.Fatalf("the policy has the rate limit type %q, want Local; without a limit every request reaches the bcrypt comparison", limit.Type)
 	}
@@ -200,7 +237,7 @@ func TestRateLimitCountsPerClientAddress(t *testing.T) {
 			t.Errorf("rule %d limits to %d requests, want a positive number", i, rule.Limit.Requests)
 		}
 		if rule.Limit.Unit != "Second" {
-			t.Errorf("rule %d counts per %q, want Second; a longer window answers a publisher 429 once it has spent the window's requests", i, rule.Limit.Unit)
+			t.Errorf("rule %d counts per %q, want Second; a longer window answers a client 429 once it has spent the window's requests", i, rule.Limit.Unit)
 		}
 		if len(rule.ClientSelectors) == 0 {
 			routeDefault = true
@@ -215,7 +252,7 @@ func TestRateLimitCountsPerClientAddress(t *testing.T) {
 		}
 	}
 	if !perAddress {
-		t.Errorf("no rule selects a Distinct sourceCIDR over 0.0.0.0/0, so every publisher outside the range draws from one bucket and emptying it takes no credential")
+		t.Errorf("no rule selects a Distinct sourceCIDR over 0.0.0.0/0, so every client outside the range draws from one bucket and emptying it takes no credential")
 	}
 	if !routeDefault {
 		t.Errorf("no rule is without clientSelectors, so a source no selector matches, an IPv6 client for one, is unlimited")
