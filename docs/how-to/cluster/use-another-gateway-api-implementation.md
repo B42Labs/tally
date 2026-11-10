@@ -39,14 +39,15 @@ certificate issuance through the listener, OTLP traffic or a LoadBalancer.
 ## Take the component out of the overlay
 
 1. In `deploy/kubernetes/overlays/prod/kustomization.yaml`, remove the
-   `envoy-gateway` line of the `components` entry and keep the other three:
-   the collector, the migration Job and the sync:
+   `envoy-gateway` line of the `components` entry and keep the other four:
+   the collector, the migration Job, the sync and the console:
 
    ```yaml
    components:
      - ../../components/openstack-collector
      - ../../components/migrations
      - ../../components/reconciliation
+     - ../../components/console
    ```
 
 2. In the same file, remove the patch that deletes
@@ -133,11 +134,18 @@ certificate issuance through the listener, OTLP traffic or a LoadBalancer.
    [What the route publishes](/explanation/grafana-and-the-read-only-proxy#what-the-route-publishes)
    says what the refusal is for.
 
+3. Limit the console's hostname, `console.`, to 10 requests a second per client
+   address, with the means of your implementation. The console compares a
+   password with bcrypt on every request, and
+   [in a cluster](/reference/command-line/tally-console#in-a-cluster) says what
+   the limit bounds.
+
 The component's other two objects need no replacement: the cluster declares
 the GatewayClass, and the overlay does not publish Alertmanager.
 
-Nothing else on this page fails without the two steps. Checks 4 to 6 under
-[Check the result](#check-the-result) are what shows that both are in place.
+Nothing else on this page fails without the three steps. Checks 4 to 7 under
+[Check the result](#check-the-result) are what shows that all three are in
+place.
 
 ## Deploy
 
@@ -145,7 +153,7 @@ Nothing else on this page fails without the two steps. Checks 4 to 6 under
 Envoy Gateway, and the second waits on the LoadBalancer Service Envoy Gateway
 creates.
 
-1. Check that each of the six `.env` files carries every key of its example,
+1. Check that each of the eight `.env` files carries every key of its example,
    and that no value is empty or still a placeholder. `make prod-up` refuses
    such a file, and `kubectl apply -k` applies it: the pod that mounts a key
    the Secret lacks does not start, and with an empty `admin-password` Grafana
@@ -254,7 +262,12 @@ creates.
    credential needs the migrated database of the step before, and nothing of
    the Gateway.
 
-8. Point the domain at the address your implementation publishes the Gateway
+8. Issue the console's token into the Secret the console waits for, as
+   [issue the console's token](/how-to/cluster/deploy-the-collecting-stack#issue-the-console-s-token)
+   shows. The console pod stays in `ContainerCreating` until then. The token
+   needs the migrated database as well, and nothing of the Gateway.
+
+9. Point the domain at the address your implementation publishes the Gateway
    on, and wait for the certificate, as
    [point the domain at the cluster](/how-to/cluster/deploy-the-collecting-stack#point-the-domain-at-the-cluster)
    shows.
@@ -354,3 +367,23 @@ creates.
 
    `401` is Grafana's own answer to that request, and means the prefix is
    published.
+
+7. The console's hostname answers a burst from one address with 429. The
+   command sends 40 requests at once, without a credential:
+
+   ```sh
+   seq 40 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+     https://console.tally.demo.b42labs.com/ | sort | uniq -c
+   ```
+
+   The dev stack, behind Envoy Gateway and the component's limit, prints:
+
+   ```text
+     10 401
+     30 429
+   ```
+
+   `401` is the console's own answer to a request without a credential. An
+   output without `429` means the hostname has no limit and every request
+   reached the sign-in. Check 5 shows the way to tell a limit per client
+   address from one bucket for the hostname; run it against this URL as well.

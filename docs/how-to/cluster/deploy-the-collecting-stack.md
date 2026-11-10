@@ -1,6 +1,6 @@
 ---
 title: Deploy the stack to a cluster
-description: "Put the Reporting API, the OTLP endpoint, Grafana, the OpenStack collector, the scheduler and the sync on a dedicated cluster that migrates, rates and reconciles by itself, behind Let's Encrypt certificates, with the secrets kept out of the repository."
+description: "Put the Reporting API, the OTLP endpoint, Grafana, the console, the OpenStack collector, the scheduler and the sync on a dedicated cluster that migrates, rates and reconciles by itself, behind Let's Encrypt certificates, with the secrets kept out of the repository."
 quadrant: how-to
 audience: operator
 ---
@@ -9,16 +9,17 @@ audience: operator
 
 This guide deploys Tally to a dedicated Kubernetes cluster: the Reporting API
 with TimescaleDB, VictoriaMetrics, the OTel Collector, Grafana, vmalert and
-Alertmanager, the OpenStack collector, the metering scheduler and the sync of
-the cloud. The collector consumes the notifications of one cloud from a broker
-outside the cluster and posts them to the Reporting API. The cluster migrates,
-rates and reconciles by itself: Job `tally-migrate` applies both migration
-chains on every deploy, the hourly CronJob `tally-engine` rates a month once a
-pricing catalog prices it, and CronJob `tally-sync` reconciles the cloud every
-10 minutes. The Gateway publishes `api.`, `otlp.`, `otlp-grpc.` and `grafana.`
-over HTTPS, behind a certificate Let's Encrypt signs, and the store, vmalert
-and Alertmanager are reached through port-forwards. The deploy runs from a
-checkout on your machine with two make targets, `make prod-addons` and
+Alertmanager, the console, the OpenStack collector, the metering scheduler and
+the sync of the cloud. The collector consumes the notifications of one cloud
+from a broker outside the cluster and posts them to the Reporting API. The
+cluster migrates, rates and reconciles by itself: Job `tally-migrate` applies
+both migration chains on every deploy, the hourly CronJob `tally-engine` rates
+a month once a pricing catalog prices it, and CronJob `tally-sync` reconciles
+the cloud every 10 minutes. The Gateway publishes `api.`, `otlp.`,
+`otlp-grpc.`, `grafana.` and `console.` over HTTPS, behind a certificate Let's
+Encrypt signs, and the store, vmalert and Alertmanager are reached through
+port-forwards. The deploy runs from a checkout on your machine with two make
+targets, `make prod-addons` and
 `make prod-up`, and no CI job touches the cluster;
 [deploy from a pipeline](#deploy-from-a-pipeline) says what a pipeline runs in
 their place. What the prod overlay changes against the dev overlay is in
@@ -34,11 +35,12 @@ replaces the add-on and the deploy steps.
   default StorageClass. The commands below write it as `<ctx>`, and every prod
   target refuses to run while `PROD_CONTEXT` is empty. The LoadBalancer has to
   pass the client's address on to the Gateway rather than proxy the
-  connection: the OTLP endpoint limits requests per client address, and behind
-  a proxying LoadBalancer every publisher shares one limit.
+  connection: the OTLP endpoint and the console limit requests per client
+  address, and behind a proxying LoadBalancer every client shares one limit.
 - `helm`, which `make prod-addons` installs the add-ons with.
-- Go at the version `go.mod` states, because the ingest credential and the
-  pricing catalog are written with `go run` from the checkout.
+- Go at the version `go.mod` states, because the ingest credential, the
+  console's token and the pricing catalog are written with `go run` from the
+  checkout.
 - `nc`, for the check of the database port at the end.
 - `openssl` from OpenSSL 3 and `htpasswd`, for the secrets and the certificate
   check. The LibreSSL that macOS ships has no `x509 -ext`.
@@ -65,9 +67,9 @@ replaces the add-on and the deploy steps.
 ## Cut the release that publishes the images
 
 1. Tag the commit and push the tag. The `release` workflow runs on every tag
-   matching `v*` and pushes four images to `ghcr.io/b42labs`, each at
-   `<tag>`: `tally-reporting`, `tally-engine`, `tally-openstack-collector` and
-   `tally-reporting-admin`:
+   matching `v*` and pushes five images to `ghcr.io/b42labs`, each at
+   `<tag>`: `tally-reporting`, `tally-engine`, `tally-console`,
+   `tally-openstack-collector` and `tally-reporting-admin`:
 
    ```sh
    git tag <tag>
@@ -77,7 +79,7 @@ replaces the add-on and the deploy steps.
    Wait until the run of the tag has finished on the repository's Actions tab.
    [Releases](/contributing/toolchain#releases) describes what the run builds.
 
-2. Check that the four images the overlay deploys pull without a login, which
+2. Check that the five images the overlay deploys pull without a login, which
    is how the cluster's nodes pull them:
 
    ```sh
@@ -86,17 +88,19 @@ replaces the add-on and the deploy steps.
    docker pull ghcr.io/b42labs/tally-openstack-collector:<tag>
    docker pull ghcr.io/b42labs/tally-engine:<tag>
    docker pull ghcr.io/b42labs/tally-reporting-admin:<tag>
+   docker pull ghcr.io/b42labs/tally-console:<tag>
    ```
 
 3. When a pull is denied, the package is still private: the first push of an
    image creates its package that way. An organisation admin opens the B42Labs
    organisation on GitHub, then Packages, the `tally-reporting` package and
    Package settings, and makes the package public under "Change visibility".
-   The same goes for `tally-openstack-collector`, `tally-engine` and
-   `tally-reporting-admin`. A public package cannot be made private again. Run
+   The same goes for `tally-openstack-collector`, `tally-engine`,
+   `tally-reporting-admin` and `tally-console`. A public package cannot be made
+   private again. Run
    the pulls of step 2 again afterwards.
 
-4. Check out the tag, and set the four `newTag` values in
+4. Check out the tag, and set the five `newTag` values in
    `deploy/kubernetes/overlays/prod/kustomization.yaml` to it when they name
    another one:
 
@@ -118,6 +122,9 @@ replaces the add-on and the deploy steps.
      - name: tally-reporting-admin
        newName: ghcr.io/b42labs/tally-reporting-admin
        newTag: <tag>
+     - name: tally-console
+       newName: ghcr.io/b42labs/tally-console
+       newTag: <tag>
    ```
 
    The overlay deploys one release, so `make prod-up` refuses two different
@@ -125,7 +132,7 @@ replaces the add-on and the deploy steps.
 
 ## Set the domain
 
-1. Edit the six values in `deploy/kubernetes/overlays/prod/hosts.yaml`. It is
+1. Edit the seven values in `deploy/kubernetes/overlays/prod/hosts.yaml`. It is
    the one file that names the domain, and kustomize copies each value into the
    route, the certificate and the external URL that use it:
 
@@ -137,6 +144,7 @@ replaces the add-on and the deploy steps.
      grafana: grafana.tally.demo.b42labs.com
      vmalert: vmalert.tally.demo.b42labs.com
      alertmanager: alertmanager.tally.demo.b42labs.com
+     console: console.tally.demo.b42labs.com
    ```
 
    Each value is a full hostname. Keep each line one unquoted key at two spaces
@@ -234,7 +242,7 @@ replaces the add-on and the deploy steps.
 
 ## Write the secrets
 
-1. Copy the seven examples and make the copies readable by you alone:
+1. Copy the eight examples and make the copies readable by you alone:
 
    ```sh
    for f in deploy/kubernetes/overlays/prod/secrets/*.env.example; do cp "$f" "${f%.example}"; done
@@ -258,13 +266,15 @@ replaces the add-on and the deploy steps.
    | `tally-db.env` | `engine-db-url` | the example URL with the value of `password` in place of `<password>` |
    | `tally-db.env` | `engine-reporting-db-url` | the example URL with the value of `engine-password` in place of `<engine-password>` |
    | `tally-console-db.env` | `password` | `openssl rand -hex 32`, a value of its own |
+   | `tally-console-db.env` | `db-url` | the example URL with the value of `password` in place of `<password>` |
+   | `tally-console-auth.env` | `htpasswd` | the line of step 4 |
    | `tally-internal-token.env` | `token` | `openssl rand -hex 32` |
    | `tally-grafana.env` | `admin-password` | `openssl rand -hex 32` |
    | `tally-vm-admin.env` | `delete-auth-key` | `openssl rand -hex 32` |
    | `tally-otlp-auth.env` | `htpasswd` | the line of step 3 |
    | `tally-collector-amqp.env` | `amqp-url` | the example URL with the broker account, its password and the broker's host in place of the placeholders |
 
-   A hex value needs no encoding in the three URLs. Grafana's `admin` user
+   A hex value needs no encoding in the four URLs. Grafana's `admin` user
    signs in with `admin-password`.
 
 3. Hash the OTLP password. `htpasswd` prompts for it, so it stays out of the
@@ -285,7 +295,27 @@ replaces the add-on and the deploy steps.
    end of this guide send the password. Why the line has this form is in
    [set the credential](/how-to/observability/publish-metrics-over-otlp#set-the-credential).
 
-4. Copy the example of the credential the Reporting API reconciles the cloud
+4. Hash the console's operator credential. The console's hostname is public,
+   so generate the password rather than choosing one, and give it to
+   `htpasswd` at its prompt:
+
+   ```sh
+   openssl rand -base64 24
+   htpasswd -nBC 12 <operator>
+   ```
+
+   ```text
+   New password:
+   Re-type new password:
+   <operator>:$2y$12$<bcrypt hash>
+   ```
+
+   Paste the last line after `htpasswd=` in `tally-console-auth.env`, unquoted.
+   The console takes one such line, at a bcrypt cost of 10 to 17, and refuses
+   to start on another. Keep the password: the browser asks for it on the
+   console's first page.
+
+5. Copy the example of the credential the Reporting API reconciles the cloud
    with, make the copy readable by you alone, and fill in every `<...>` value:
 
    ```sh
@@ -308,20 +338,21 @@ replaces the add-on and the deploy steps.
    make prod-up PROD_CONTEXT=<ctx>
    ```
 
-   It checks that every `.env` file exists with each key of its example and
-   each value filled in, that `collector.env` names a cloud, that
-   `secrets/clouds.yaml` carries no placeholder, that `clouds-config.yaml`
-   names the cloud of `collector.env` and an `os_cloud`, and that the checkout
-   is at the tag every `newTag` value names. Then it applies the `letsencrypt`
+   It checks that every `.env` file exists with each key of its example and each
+   value filled in, that the `db-url` of `tally-console-db.env` carries its
+   `password`, that `collector.env` names a cloud, that
+   `secrets/clouds.yaml` carries no placeholder, that `clouds-config.yaml` names
+   the cloud of `collector.env` and an `os_cloud`, and that the checkout is at
+   the tag every `newTag` value names. Then it applies the `letsencrypt`
    ClusterIssuer, deletes the migration Job `tally-migrate` of the previous
    deploy and applies the overlay, which creates the Job again. It waits for
-   every rollout but the collector's and for the LoadBalancer address of the
-   Gateway, then for the Job, whose log it prints. The reporting chain is
-   applied first, in an init container, and the engine chain after it, in the
-   last init container. The Job's container then creates `tally_console`, the
-   login role the console reads the engine database as, or sets its password.
-   Then it waits for the Reporting API and prints where the Gateway answers.
-   On the first deploy the output ends with these lines:
+   every rollout but the collector's and the console's and for the LoadBalancer
+   address of the Gateway, then for the Job, whose log it prints. The reporting
+   chain is applied first, in an init container, and the engine chain after it,
+   in the last init container. The Job's container then creates `tally_console`,
+   the login role the console reads the engine database as, or sets its
+   password. Then it waits for the Reporting API and prints where the Gateway
+   answers. On the first deploy the output ends with these lines:
 
    ```text
    ==> waiting for the migration Job
@@ -351,6 +382,7 @@ replaces the add-on and the deploy steps.
          grafana.tally.demo.b42labs.com  (grafana)
          vmalert.tally.demo.b42labs.com  (vmalert)
          alertmanager.tally.demo.b42labs.com  (alertmanager)
+         console.tally.demo.b42labs.com  (console)
 
    Point *.tally.demo.b42labs.com at that address, then: kubectl --context <ctx> -n tally wait certificate/tally-wildcard --for=condition=Ready --timeout=10m
 
@@ -362,6 +394,9 @@ replaces the add-on and the deploy steps.
    ==> the collector starts once the Secret tally-collector-token exists, and is Ready once it holds its broker session:
        kubectl --context <ctx> -n tally rollout status deployment/openstack-collector
 
+   ==> the console starts once the Secret tally-console-token exists:
+       kubectl --context <ctx> -n tally rollout status deployment/console
+
    ==> the scheduler rates a month once a pricing catalog prices it; until then its hourly Job fails:
        kubectl --context <ctx> -n tally get cronjob tally-engine tally-sync
    ```
@@ -369,7 +404,10 @@ replaces the add-on and the deploy steps.
    The address is a hostname when the LoadBalancer hands out one. The
    collector pod stays in `ContainerCreating` until
    [issue an ingest credential](#issue-an-ingest-credential) has created its
-   token Secret, and starts by itself afterwards.
+   token Secret, and starts by itself afterwards. The console pod waits in
+   `ContainerCreating` the same way, until
+   [issue the console's token](#issue-the-console-s-token) has created its
+   token Secret.
 
 2. When a wait runs out, `make prod-up` stops there and names the command that
    shows why. It is safe to run again.
@@ -406,7 +444,7 @@ replaces the add-on and the deploy steps.
    certificate.cert-manager.io/tally-wildcard condition met
    ```
 
-   cert-manager proves each of the four published hostnames to Let's Encrypt
+   cert-manager proves each of the five published hostnames to Let's Encrypt
    over HTTP-01 on the Gateway's http listener, so the certificate is issued
    only once the record resolves. Until the certificate is Ready the https
    listener answers nothing. When the wait runs out,
@@ -424,11 +462,11 @@ replaces the add-on and the deploy steps.
    ```text
    issuer=C=US, O=Let's Encrypt, CN=R12
    X509v3 Subject Alternative Name:
-       DNS:api.tally.demo.b42labs.com, DNS:grafana.tally.demo.b42labs.com, DNS:otlp-grpc.tally.demo.b42labs.com, DNS:otlp.tally.demo.b42labs.com
+       DNS:api.tally.demo.b42labs.com, DNS:console.tally.demo.b42labs.com, DNS:grafana.tally.demo.b42labs.com, DNS:otlp-grpc.tally.demo.b42labs.com, DNS:otlp.tally.demo.b42labs.com
    ```
 
    The `CN` of the issuer names whichever Let's Encrypt intermediate signed the
-   certificate. The leaf lists the four published hostnames and no other.
+   certificate. The leaf lists the five published hostnames and no other.
 
 ## Issue an ingest credential
 
@@ -502,7 +540,7 @@ replaces the add-on and the deploy steps.
    of the broker.
 
 4. Leave the port-forward running for
-   [import a pricing catalog](#import-a-pricing-catalog).
+   [issue the console's token](#issue-the-console-s-token).
 
 To replace the token, forward the database as in step 1, delete the Secret
 with `kubectl --context <ctx> -n tally delete secret tally-collector-token` and
@@ -513,6 +551,56 @@ The collector reads the file at its start only, so the running pod keeps the
 old token until the restart. Revoke the old credential afterwards, as
 [issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials#revoke-a-credential)
 shows.
+
+## Issue the console's token
+
+The console reads the Reporting API with an API token of the role `read_all`,
+which reads every route the console renders and changes nothing.
+
+1. Issue the token from the checkout through the port-forward of
+   [issue an ingest credential](#issue-an-ingest-credential), and pipe it into
+   the Secret the console mounts. The connection string reads the password out
+   of `tally-db.env`, so the password stays out of the shell's history:
+
+   ```sh
+   kubectl --context <ctx> -n tally create secret generic tally-console-token \
+     --from-literal=api-token=probe --dry-run=server >/dev/null \
+     && token="$(TALLY_REPORTING_DB_URL="postgres://tally:$(sed -n 's/^password=//p' deploy/kubernetes/overlays/prod/secrets/tally-db.env)@127.0.0.1:15432/tally_reporting?sslmode=disable" \
+     go run ./cmd/tally-reporting-admin create-api-token \
+     --role read_all --description 'in-cluster console')" \
+     && printf '%s' "$token" | kubectl --context <ctx> -n tally create secret generic tally-console-token \
+       --from-file=api-token=/dev/stdin
+   unset token
+   ```
+
+   ```text
+   created api_tokens ecb7a49c-3837-4eee-886c-63d3b56a8d1e
+   the token above is printed this one time: store it now, it will not be shown again
+   secret/tally-console-token created
+   ```
+
+   The dry run and the two `&&` guard the command the way they guard the
+   ingest credential's: a second run issues nothing and replaces nothing, and
+   a failed issue creates no Secret. If the second `kubectl create` fails all
+   the same, the token of the id printed above is issued and gone. Revoke it
+   with `tally-reporting-admin revoke-api-token <id>`, as
+   [issue and revoke credentials](/how-to/openstack/issue-and-revoke-credentials)
+   shows for every token.
+
+2. Wait for the console. The pod has been waiting for the Secret, and the
+   kubelet starts it without a further step:
+
+   ```sh
+   kubectl --context <ctx> -n tally rollout status deployment/console
+   ```
+
+   ```text
+   Waiting for deployment "console" rollout to finish: 0 of 1 updated replicas are available...
+   deployment "console" successfully rolled out
+   ```
+
+3. Leave the port-forward running for
+   [import a pricing catalog](#import-a-pricing-catalog).
 
 ## Import a pricing catalog
 
@@ -668,11 +756,23 @@ that the catalog is missing.
    ```
 
    The job discovers the collector pod through the Service
-   `openstack-collector`. The three discovered jobs of the prod scrape config,
-   `reporting-api`, `otel-collector` and `openstack-collector`, are the three
+   `openstack-collector`. Read the `console` target the same way; it reads
+   `up` as well:
+
+   ```sh
+   curl -s http://127.0.0.1:8428/api/v1/targets \
+     | jq -r '.data.activeTargets[] | select(.labels.job == "console") | .health'
+   ```
+
+   ```text
+   up
+   ```
+
+   The four discovered jobs of the prod scrape config, `reporting-api`,
+   `otel-collector`, `openstack-collector` and `console`, are the four
    `absent` clauses of
    `deploy/kubernetes/overlays/prod/victoriametrics/scrape-rules.yaml`, so
-   `TallyScrapeJobMissing` stays quiet while all three resolve to targets.
+   `TallyScrapeJobMissing` stays quiet while all four resolve to targets.
 
 9. The migration Job has completed:
 
@@ -726,7 +826,41 @@ that the catalog is missing.
     the next multiple of 10 minutes for `tally-sync` and the next full hour
     for `tally-engine`.
 
-12. A second deploy changes nothing but the migration Job. The filter keeps
+12. The console asks for the operator's credential. Without one it answers
+    `401`, and with it `200`. curl prompts for the password you gave
+    `htpasswd`:
+
+    ```sh
+    curl -sS -o /dev/null -w '%{http_code}\n' https://console.tally.demo.b42labs.com/
+    curl -sS -o /dev/null -w '%{http_code}\n' -u <operator> https://console.tally.demo.b42labs.com/
+    ```
+
+    ```text
+    401
+    200
+    ```
+
+13. The Gateway answers a burst from one address with `429`. The command
+    sends 40 requests at once, without a credential:
+
+    ```sh
+    seq 40 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+      https://console.tally.demo.b42labs.com/ | sort | uniq -c
+    ```
+
+    The dev stack prints:
+
+    ```text
+      10 401
+      30 429
+    ```
+
+    `401` is the console's own answer, a sign-in it refused. A bucket refills
+    while the burst arrives, so a slower path gets a few more. An output
+    without `429` means the hostname has no limit and every request reached
+    the sign-in.
+
+14. A second deploy changes nothing but the migration Job. The filter keeps
     the lines of `kubectl apply` that report a change and the answers of the
     two chains:
 
@@ -745,6 +879,58 @@ that the catalog is missing.
     `updated the login role tally_console`, which the filter leaves out. Every
     other object is reported `unchanged`, so no Deployment or StatefulSet
     rolls.
+
+## Rotate the console's credentials
+
+The console reads three credentials, and each is replaced on its own.
+
+1. The operator's credential. Hash a new password as step 4 of
+   [write the secrets](#write-the-secrets) does, put the line after
+   `htpasswd=` in `tally-console-auth.env`, and deploy:
+
+   ```sh
+   make prod-up PROD_CONTEXT=<ctx>
+   ```
+
+   The Secret is generated under a name that carries a hash of its content, so
+   the new line renames it and the console Deployment rolls onto it. The old
+   password is refused once the new pod serves.
+
+2. The database password. Generate a new one with `openssl rand -hex 32`, put
+   it after `password=` in `tally-console-db.env` and in place of the old one
+   inside `db-url`, and deploy with `make prod-up` as above. Job
+   `tally-migrate` sets the role's password while the console Deployment rolls
+   in the same apply, so a page that reads the engine database can answer 503
+   with `the engine database could not be read` until the Job has finished.
+
+3. The API token. Forward the database as step 1 of
+   [issue an ingest credential](#issue-an-ingest-credential) does, delete the
+   Secret, and run the command of step 1 of
+   [issue the console's token](#issue-the-console-s-token) again, which issues
+   a new token and creates the Secret from it:
+
+   ```sh
+   kubectl --context <ctx> -n tally delete secret tally-console-token
+   ```
+
+   Then restart the console and revoke the old token:
+
+   ```sh
+   kubectl --context <ctx> -n tally rollout restart deployment/console
+   TALLY_REPORTING_DB_URL="postgres://tally:$(sed -n 's/^password=//p' deploy/kubernetes/overlays/prod/secrets/tally-db.env)@127.0.0.1:15432/tally_reporting?sslmode=disable" \
+     go run ./cmd/tally-reporting-admin revoke-api-token <old id>
+   ```
+
+   ```text
+   deployment.apps/console restarted
+   revoked api_tokens <old id>
+   ```
+
+   The console reads the token at its start only, so the running pod keeps
+   the old one until the restart. The old id is the one the earlier issue
+   printed. `SELECT id, created_at FROM api_tokens WHERE description =
+   'in-cluster console' AND revoked_at IS NULL` lists the console's tokens
+   that are not revoked.
 
 ## Deploy from a pipeline
 
@@ -798,5 +984,6 @@ and the shipped clouds config ends the Reporting API at startup with
 `clouds[0]: cloud must be set`. The checks `make prod-up` runs first are the
 commands
 [use another Gateway API implementation](/how-to/cluster/use-another-gateway-api-implementation#deploy)
-prints, and a pipeline runs them before it applies. The ingest credential and
-the pricing catalog stay one-time steps from a checkout.
+prints, and a pipeline runs them before it applies. The ingest credential,
+the console's token and the pricing catalog stay one-time steps from a
+checkout.
