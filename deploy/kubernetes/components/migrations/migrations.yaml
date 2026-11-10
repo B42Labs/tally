@@ -1,8 +1,9 @@
 # The migrations of both databases. The Reporting API answers its readiness
 # probe with 503 until the reporting chain is at the version its build expects,
 # and `tally-engine tick` refuses an older engine schema, so a deploy is done
-# once this Job has completed. Neither binary runs DDL on its own: the two
-# migrate subcommands below are the only thing that does.
+# once this Job has completed. Neither binary changes a schema on its own: the
+# two migrate subcommands below are the only thing that does, and the role step
+# after them creates the console's login role or sets its password.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -13,7 +14,8 @@ spec:
   # A database that restarts under the Job fails it, which is what happens on
   # the deploy that changes the tally-db Secret: its generated name changes and
   # the StatefulSet rolls. A retry runs the same command an operator would, and
-  # it is idempotent: a chain already at its head prints "nothing to apply".
+  # it is idempotent: a chain already at its head prints "nothing to apply",
+  # and the role step sets the same password again.
   #
   # There is no activeDeadlineSeconds. Migration 9 of the reporting chain builds
   # an index outside a transaction, and a build that is killed leaves the state
@@ -44,8 +46,9 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
       # Init containers run one after the other and the main container after
-      # them, which is what orders the two chains in one pod. The reporting
-      # chain goes first, in the order of `make migrate`.
+      # them, which is what orders the steps in one pod. The reporting chain
+      # goes first, in the order of `make migrate`, then the engine chain, then
+      # the role step, which grants the group role engine migration 3 creates.
       initContainers:
         # The wait the Reporting API uses. The Postgres entrypoint listens on
         # TCP only after its initdb scripts ran, so an open port means the
@@ -58,9 +61,10 @@ spec:
             - "until nc -z timescaledb 5432; do echo waiting for timescaledb; sleep 2; done"
           # What the block above does not reach. These four are per-container
           # and every one of them defaults the permissive way. None of the
-          # three containers needs any of it: each opens a connection and
+          # four containers needs any of it: each opens a connection and
           # writes to neither the filesystem nor a port. Both connection
-          # strings carry the password of a database owner, which is what the
+          # strings carry the password of a database owner, and the role step
+          # holds the console's password besides, which is what the
           # confinement is worth.
           securityContext:
             allowPrivilegeEscalation: false
@@ -105,7 +109,6 @@ spec:
               memory: 64Mi
             limits:
               memory: 256Mi
-      containers:
         - name: engine
           image: tally-engine:dev
           args: ["migrate"]
@@ -129,6 +132,40 @@ spec:
               memory: 64Mi
             limits:
               memory: 256Mi
+      containers:
+        # Creates tally_console, the login role the console reads the engine
+        # database as, or sets its password, on every apply. The password comes
+        # from a Secret of its own rather than from tally-db: TimescaleDB mounts
+        # tally-db, so a change there rolls the database, and rotating this
+        # password must not.
+        - name: console-role
+          image: tally-engine:dev
+          args: ["ensure-console-role"]
+          env:
+            - name: TALLY_ENGINE_DB_URL_FILE
+              value: /run/secrets/tally/engine-db-url
+            - name: TALLY_ENGINE_CONSOLE_PASSWORD_FILE
+              value: /run/secrets/tally-console/password
+          volumeMounts:
+            - name: db-credentials
+              mountPath: /run/secrets/tally
+              readOnly: true
+            - name: console-credentials
+              mountPath: /run/secrets/tally-console
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
       volumes:
         - name: db-credentials
           secret:
@@ -138,3 +175,9 @@ spec:
                 path: db-url
               - key: engine-db-url
                 path: engine-db-url
+        - name: console-credentials
+          secret:
+            secretName: tally-console-db
+            items:
+              - key: password
+                path: password

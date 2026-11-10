@@ -247,10 +247,12 @@ mismatch that would otherwise fail quietly.
   that a Job still running is never deleted, that a finished one is deleted
   before the apply, and that a failed one stops the run with its log.
 - `deploy/kubernetes/components/migrations/manifest_test.go` pins the
-  migration Job's contract with the two binaries and with Secret `tally-db`.
-  The engine chain applied before the reporting chain, a `*_FILE` path that
-  stopped matching its mount, or a deadline that kills migration 9 inside its
-  index build all render and apply.
+  migration Job's contract with the two binaries, with Secret `tally-db` and
+  with Secret `tally-console-db`, which the `console-role` container reads the
+  console's password from after both chains. The engine chain applied before
+  the reporting chain, the role step run before the engine chain, a `*_FILE`
+  path that stopped matching its mount, or a deadline that kills migration 9
+  inside its index build all render and apply.
 - `deploy/kubernetes/components/reconciliation/manifest_test.go` pins the sync
   CronJob's contract with the Reporting API, with the collector's settings and
   with the internal token, and the patch's contract with the clouds files. A
