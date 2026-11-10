@@ -51,8 +51,13 @@ spec:
               drop: [ALL]
             seccompProfile:
               type: RuntimeDefault
-          # Without a request the pod is BestEffort and first in line for
-          # eviction, and the operator meets the Gateway's 503 instead of a page.
+          # The numbers rest on one reading. On the dev cluster the process
+          # stood at 33 MiB resident after it served
+          # /resources?status=all&mode=window and one statement page of the
+          # demo month ten times each. The limit is more than twice that, for
+          # a longer fleet listing than the demo month carries. Without a
+          # request the pod is BestEffort and first in line for eviction, and
+          # the operator meets the Gateway's 503 instead of a page.
           resources:
             requests:
               cpu: 50m
