@@ -1,4 +1,4 @@
-// Package reporting is the demo console's read client for the Reporting API.
+// Package reporting is the console's read client for the Reporting API.
 // It follows cmd/tally-vertical-slice/client.go: the same bearer header on
 // every call, the same bounded body, and the same reading of a refused answer
 // as the problem document the API answered with.
@@ -42,8 +42,8 @@ const (
 )
 
 // Client reads the Reporting API for the console. It is deliberately minimal:
-// no retries, and one flat timeout rather than a policy, because a demo page
-// that fails is reloaded by the reader looking at it.
+// no retries, and one flat timeout rather than a policy, because a page that
+// fails is reloaded by the reader looking at it.
 type Client struct {
 	baseURL string
 	token   string

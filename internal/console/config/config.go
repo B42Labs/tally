@@ -1,4 +1,4 @@
-// Package config parses the demo console's environment configuration. The
+// Package config parses the console's environment configuration. The
 // console reads the Reporting API over HTTP and the engine database directly,
 // so it needs an address and a credential for each.
 //
@@ -67,7 +67,7 @@ var logLevels = map[string]slog.Level{
 	"ERROR": slog.LevelError,
 }
 
-// Config is the demo console's resolved configuration. Every field is final by
+// Config is the console's resolved configuration. Every field is final by
 // the time Load returns: file-backed secrets hold their content, and the values
 // the console cannot run without are present.
 type Config struct {

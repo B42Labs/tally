@@ -1,4 +1,4 @@
-// Package store is the demo console's read-only seam over the engine database.
+// Package store is the console's read-only seam over the engine database.
 // The console renders billing periods, runs, statements, pricing versions and
 // correction deltas; the engine exposes no read API for them, so the console
 // opens that database directly. Nothing in this package writes: queries.sql
@@ -37,7 +37,7 @@ import (
 	"github.com/b42labs/tally/internal/engine/export"
 )
 
-// poolMaxConns bounds the pool. A demo console serves one viewer clicking
+// poolMaxConns bounds the pool. The console serves one operator clicking
 // through pages, so a handful of connections covers every page it renders at
 // once, and the engine database keeps the rest for the runs that write it.
 const poolMaxConns = 4
