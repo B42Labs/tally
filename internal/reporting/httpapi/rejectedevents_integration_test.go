@@ -33,8 +33,8 @@ const refusedEventType = "volume-create"
 var beforeAnyRefusal = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // TestListRejectedEventsOverHTTP drives GET /api/v1/rejected-events through the
-// whole stack: the contract validator, the admin guard, and the rows ingestion
-// dead-lettered behind them.
+// whole stack: the contract validator, the read_all guard, and the rows
+// ingestion dead-lettered behind them.
 //
 // The subtests share one database and run in order. The first describes the
 // whole table while nothing has been refused yet, and the ones after it refuse
@@ -44,6 +44,19 @@ func TestListRejectedEventsOverHTTP(t *testing.T) {
 	a := newAPI(t, db.Store)
 
 	_, adminToken := seedAPIToken(t, a.queries, auth.RoleAdmin, nil)
+	_, readAllToken := seedAPIToken(t, a.queries, auth.RoleReadAll, nil)
+
+	t.Run("serves a read_all token the empty table", func(t *testing.T) {
+		rec := a.call(t, http.MethodGet, rejectedEventsRoute, readAllToken, nil)
+
+		if got := rec.Code; got != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", got, http.StatusOK, rec.Body)
+		}
+		want := `{"items":[],"next_cursor":null}`
+		if got := strings.TrimSpace(rec.Body.String()); got != want {
+			t.Errorf("body = %s, want %s", got, want)
+		}
+	})
 
 	t.Run("keeps a refused item reviewable with the reason ingest reported", func(t *testing.T) {
 		const cloud = "os-dead-review"
@@ -259,23 +272,32 @@ func TestListRejectedEventsOverHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("serves the admin role alone", func(t *testing.T) {
-		_, readAllToken := seedAPIToken(t, a.queries, auth.RoleReadAll, nil)
-		project := seedProject(t, a, "os-dead-scope", "p-dead")
-		_, projectToken := seedAPIToken(t, a.queries, auth.RoleProject, []uuid.UUID{project})
+	t.Run("serves read_all and above", func(t *testing.T) {
+		t.Run("a read_all token reads what an admin token reads", func(t *testing.T) {
+			admin := deadLetterListOf(t, a.call(t, http.MethodGet,
+				rejectedEventsRoute+"?limit=1000", adminToken, nil))
 
-		// A refused item has no project to be scoped by, so a token below the admin
-		// role is refused rather than served a narrowed page.
-		for name, token := range map[string]string{
-			"a read_all token": readAllToken,
-			"a project token":  projectToken,
-		} {
-			t.Run(name, func(t *testing.T) {
-				rec := a.call(t, http.MethodGet, rejectedEventsRoute, token, nil)
+			list := deadLetterListOf(t, a.call(t, http.MethodGet,
+				rejectedEventsRoute+"?limit=1000", readAllToken, nil))
 
-				assertProblem(t, rec, http.StatusForbidden, problem.TypeForbidden)
-			})
-		}
+			if len(admin.Items) == 0 {
+				t.Fatal("an admin token reads no item, want the rows the subtests above refused")
+			}
+			if got, want := deadLetterEventIDs(t, list.Items), deadLetterEventIDs(t, admin.Items); !slices.Equal(got, want) {
+				t.Errorf("served items = %v, want the %v an admin token reads", got, want)
+			}
+		})
+
+		// A refused item has no project to be scoped by, so a token below read_all
+		// is refused rather than served a narrowed page.
+		t.Run("a project token", func(t *testing.T) {
+			project := seedProject(t, a, "os-dead-scope", "p-dead")
+			_, projectToken := seedAPIToken(t, a.queries, auth.RoleProject, []uuid.UUID{project})
+
+			rec := a.call(t, http.MethodGet, rejectedEventsRoute, projectToken, nil)
+
+			assertProblem(t, rec, http.StatusForbidden, problem.TypeForbidden)
+		})
 
 		t.Run("no token at all", func(t *testing.T) {
 			rec := a.call(t, http.MethodGet, rejectedEventsRoute, "", nil)

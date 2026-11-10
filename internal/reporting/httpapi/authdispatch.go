@@ -91,10 +91,10 @@ func newAuthDispatch(opts Options) MiddlewareFunc {
 		http.MethodGet + " /api/v1/stats/events":    auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodGet + " " + projectSummaryRoute:  auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 
-		// The dead-letter list is admin-only like the two writes above and the
-		// registration below: a refused item carries whatever a collector sent,
-		// which no project scope narrows.
-		http.MethodGet + " /api/v1/rejected-events": auth.Query(opts.Authenticator, auth.RoleAdmin, opts.AuthMode, Logger),
+		// The dead-letter list takes read_all, so a project token is refused: a
+		// refused item carries whatever a collector sent, which no project scope
+		// narrows, so a token that reads the list reads all of it.
+		http.MethodGet + " /api/v1/rejected-events": auth.Query(opts.Authenticator, auth.RoleReadAll, opts.AuthMode, Logger),
 
 		http.MethodGet + " /api/v1/resource-types": auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),
 		http.MethodGet + " " + resourceTypeRoute:   auth.Query(opts.Authenticator, auth.RoleProject, opts.AuthMode, Logger),

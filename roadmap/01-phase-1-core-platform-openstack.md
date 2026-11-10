@@ -603,7 +603,7 @@ GET /api/v1/resources/{cloud}/{resource_type}/{resource_id}/lifecycle
 GET /api/v1/resources?cloud=&platform=&project_id=&resource_type=&state=&status=active|deleted|all&limit=&cursor=
     → projection rows; status=active ⇒ state != 'deleted' (default), deleted ⇒ state = 'deleted'
 
-GET /api/v1/rejected-events?from=&to=&limit=&cursor=      (role: admin)   -- dead-letter review
+GET /api/v1/rejected-events?from=&to=&limit=&cursor=      (role: read_all)   -- dead-letter review
 ```
 
 All query endpoints enforce QueryAuth; `project`-role tokens get a mandatory `project_id`

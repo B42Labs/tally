@@ -1351,9 +1351,10 @@ paths:
         presenting it together with other filters is well defined: the filters
         of that call apply from that position onwards.
 
-        The operation is admin-only: callers below the admin role are answered
-        403. No project scope applies, because the raw JSON of a refused item
-        carries no reliable project attribution.
+        The operation takes `read_all`: a `project` token is answered 403. No
+        project scope applies, because the raw JSON of a refused item carries
+        no reliable project attribution, so a token that reads this list reads
+        what every collector submitted.
       security:
         - apiToken: []
       parameters:
