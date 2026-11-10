@@ -4,7 +4,7 @@ description: Create a kind cluster with the Tally dev overlay, trust its certifi
 quadrant: tutorial
 audience: all
 ---
-<!-- Shown output captured on 2026-09-07 from commit 789d782 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.1 on macOS 15.7.4. -->
+<!-- Shown output captured on 2026-11-10 from commit ce0b506 with kind v0.32.0, kubectl v1.36.1, Docker Desktop 4.86.0, Go 1.27.3 on macOS 15.7.4. -->
 
 # Set up your local Tally
 
@@ -109,16 +109,18 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    The target creates the kind cluster `tally` and says so with
    `==> creating kind cluster tally`, installs cert-manager v1.21.1 and Envoy
    Gateway v1.8.3 and waits for their rollouts, applies the dev certificate
-   authority, builds the four images (`tally-reporting`, `tally-engine`,
-   `tally-openstack-collector` and `tally-openstack-simulator`), puts
-   `tally-reporting` and `tally-engine` and the eight images the stack runs on
-   the node, applies the dev overlay, and applies the two migration chains, the
-   reporting one and the engine one.
+   authority, builds the five images (`tally-reporting`, `tally-engine`,
+   `tally-console`, `tally-openstack-collector` and
+   `tally-openstack-simulator`), puts `tally-reporting`, `tally-engine` and
+   `tally-console` and the eight images the stack runs on the node, applies the
+   dev overlay, and applies the two migration chains, the reporting one and the
+   engine one.
    Several hundred lines go by. These are the last ones:
 
    ```text
    Stack is up:
      https://api.tally.127-0-0-1.nip.io:8443/api/v1        Reporting API
+     https://console.tally.127-0-0-1.nip.io:8443           Console, sign in as tally / tally-dev-console-password
      https://vm.tally.127-0-0-1.nip.io:8443                VictoriaMetrics
      https://grafana.tally.127-0-0-1.nip.io:8443           Grafana
      https://vmalert.tally.127-0-0-1.nip.io:8443/vmalert/  vmalert
@@ -129,16 +131,20 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    Trust the dev CA with: make -s ca > tally-ca.crt
    ```
 
-   The seven URLs and the last line have to match exactly. Everything above
-   them differs in timing and in the ids Kubernetes hands out.
+   The eight URLs and the last line have to match exactly. Everything above
+   them differs in timing and in the ids Kubernetes hands out. After the
+   migration chains `make up` issues the token the console reads the Reporting
+   API with, which `==> issuing a read_all api token for the console` above the
+   block announces, and the console line names the sign-in its pages ask for.
 
 2. Leave it alone while it moves the images. A new node carries none of them,
-   so the step before the overlay puts all ten there: `tally-reporting` and
-   `tally-engine` of the four built above, and the eight the stack runs. The
-   collector and the simulator images stay off the node: they run in compose
-   beside the cluster, which lesson 2 starts. An image your Docker already
-   holds is copied straight onto the node, and only an image it lacks is
-   fetched from the network, which is what the `==> pulling` lines are:
+   so the step before the overlay puts all eleven there: `tally-reporting`,
+   `tally-engine` and `tally-console` of the five built above, and the eight
+   the stack runs. The collector and the simulator images stay off the node:
+   they run in compose beside the cluster, which lesson 2 starts. An image
+   your Docker already holds is copied straight onto the node, and only an
+   image it lacks is fetched from the network, which is what the
+   `==> pulling` lines are:
 
    ```text
    ==> pulling busybox:1.37
@@ -176,25 +182,28 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    make: *** [up] Error 1
    ```
 
-5. Wait until every pod but `reporting-api` reads `Running` before the next
-   call:
+5. Wait until every pod but `reporting-api` and `console` reads `Running`
+   before the next call:
 
    ```sh
    kubectl --context kind-tally -n tally get pods
    ```
 
    ```text
-   NAME                             READY   STATUS    RESTARTS   AGE
-   alertmanager-0                   1/1     Running   0          37m
-   grafana-6c58589c8b-fg4tm         2/2     Running   0          37m
-   otel-collector-599c64db4-vbh2z   1/1     Running   0          37m
-   reporting-api-6b8ffd9598-smsw8   0/1     Running   0          37m
-   timescaledb-0                    1/1     Running   0          37m
-   victoriametrics-0                1/1     Running   0          37m
-   vmalert-7699459f4-gf2nc          1/1     Running   0          37m
+   NAME                             READY   STATUS              RESTARTS   AGE
+   alertmanager-0                   1/1     Running             0          37m
+   console-5c7d9b8f64-zq2xk         0/1     ContainerCreating   0          37m
+   grafana-6c58589c8b-fg4tm         2/2     Running             0          37m
+   otel-collector-599c64db4-vbh2z   1/1     Running             0          37m
+   reporting-api-6b8ffd9598-smsw8   0/1     Running             0          37m
+   timescaledb-0                    1/1     Running             0          37m
+   victoriametrics-0                1/1     Running             0          37m
+   vmalert-7699459f4-gf2nc          1/1     Running             0          37m
    ```
 
    The names carry ids of their own and the ages are your machine's.
+   `console` reads `ContainerCreating`: the pod waits for the Secret of its
+   token, and `make up` issues that token only after the migration step.
    `reporting-api` reads `0/1` here, and waiting does not change it: a
    `make up` that stopped on a rollout never reached its migration step, and
    the API holds itself unready while its database carries no schema. Its log
@@ -228,23 +237,25 @@ This lesson takes about 30 minutes, most of it `make up` moving images.
    ```
 
    ```text
-   NAME                             READY   STATUS      RESTARTS   AGE
-   alertmanager-0                   1/1     Running     0          41m
-   grafana-6c58589c8b-fg4tm         2/2     Running     0          41m
-   otel-collector-599c64db4-vbh2z   1/1     Running     0          41m
-   reporting-api-6b8ffd9598-smsw8   1/1     Running     0          41m
-   tally-engine-29813460-mhpnt      0/1     Completed   0          4m18s
-   timescaledb-0                    1/1     Running     0          41m
-   victoriametrics-0                1/1     Running     0          41m
-   vmalert-7699459f4-gf2nc          1/1     Running     0          41m
+   NAME                             READY   STATUS    RESTARTS   AGE
+   alertmanager-0                   1/1     Running   0          41s
+   console-6bdf9fb578-n9qfq         1/1     Running   0          25s
+   grafana-554554f6dd-xt62h         2/2     Running   0          41s
+   otel-collector-599c64db4-w5j6l   1/1     Running   0          41s
+   reporting-api-65779f457f-d9bpx   1/1     Running   0          41s
+   timescaledb-0                    1/1     Running   0          41s
+   victoriametrics-0                1/1     Running   0          41s
+   vmalert-76458d5bb4-74fsx         1/1     Running   0          41s
    ```
 
    `reporting-api` reads `1/1` now: the chain that call applied gave the
-   readiness probe the schema it asks for. Every other long-running pod reads
-   `Running`. The `tally-engine-<id>` pod is a Job of the hourly scheduler and
-   appears once the clock has passed an hour mark. Its first tick moves the
-   month that has ended into its grace window and reads `Completed`; a later
-   tick meters that month, finds no pricing model and reads `Error`, which is
+   readiness probe the schema it asks for. `console` reads `1/1` as well, and
+   it is younger than the rest because `make up` restarted it once it had
+   issued its token. Every other long-running pod reads `Running`. A
+   `tally-engine-<id>` pod joins the list once the clock has passed an hour
+   mark: it is a Job of the hourly scheduler. Its first tick moves the month
+   that has ended into its grace window and reads `Completed`; a later tick
+   meters that month, finds no pricing model and reads `Error`, which is
    expected until lesson 3 imports one.
 
 ## Trust the dev CA
