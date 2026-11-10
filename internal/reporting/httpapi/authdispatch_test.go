@@ -64,7 +64,7 @@ func TestAuthDispatch(t *testing.T) {
 	})
 
 	t.Run("puts the dead-letter list behind a credential", func(t *testing.T) {
-		// The route is the admin-only one of the query class. What the table is
+		// The route is the query-class one that takes read_all. What the table is
 		// keyed with is the pattern, so a request carrying no credential meets the
 		// guard rather than being refused as a route no rule covers; which role it
 		// demands is the integration test's business.

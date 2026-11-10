@@ -270,7 +270,7 @@ Returns every ingest item this API refused server-side, with the reason it was r
 
 One call answers one page. `items` carries the items, and `next_cursor` is what the next call passes as `cursor`; a null `next_cursor` is the end of the walk. The cursor holds a position and nothing else, so presenting it together with other filters is well defined: the filters of that call apply from that position onwards.
 
-The operation is admin-only: callers below the admin role are answered 403. No project scope applies, because the raw JSON of a refused item carries no reliable project attribution.
+The operation takes `read_all`: a `project` token is answered 403. No project scope applies, because the raw JSON of a refused item carries no reliable project attribution, so a token that reads this list reads what every collector submitted.
 
 Security: `apiToken`
 

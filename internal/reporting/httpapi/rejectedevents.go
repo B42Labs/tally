@@ -27,7 +27,7 @@ const deadLetterDetail = "the dead-lettered events could not be read"
 // is served, which is what trimPage turns into the cursor decision.
 //
 // Nothing here reads a principal or resolves a scope. The dispatch table puts
-// the route behind the admin role, so every request that arrives may read the
+// the route behind the read_all role, so every request that arrives may read the
 // whole table, and a refused item has no project to be scoped by: its raw JSON
 // is whatever a collector sent, which is what made the item refusable in the
 // first place.
