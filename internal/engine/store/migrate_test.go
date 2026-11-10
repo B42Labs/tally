@@ -2,10 +2,14 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/b42labs/tally/internal/engine/store"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
@@ -35,6 +39,10 @@ var wantTables = []string{
 	"runs",
 	"usage_records",
 }
+
+// belowConsoleReaderRole is the version below migration 0003, so a rollback to
+// it runs that migration's Down and a run up from it creates the role.
+const belowConsoleReaderRole = 2
 
 // The period every seeded run meters. The month is the concept's worked
 // example, which nothing here depends on beyond being a valid half-open month.
@@ -66,6 +74,9 @@ func TestMigrate(t *testing.T) {
 		if tables := publicTables(t, s); !slices.Equal(tables, wantTables) {
 			t.Errorf("tables = %v, want the eight of the schema %v", tables, wantTables)
 		}
+		// The role is there from the database the container was migrated with,
+		// so this chain met it already created and has to grant all the same.
+		assertConsoleReaderGrants(t, s)
 	})
 
 	t.Run("a second run applies nothing", func(t *testing.T) {
@@ -76,6 +87,71 @@ func TestMigrate(t *testing.T) {
 		if len(applied) != 0 {
 			t.Errorf("Migrate() = %v, want nothing applied to a database already on the chain", applied)
 		}
+	})
+
+	t.Run("the chain gives the console's reader role SELECT and nothing else", func(t *testing.T) {
+		// The role the console reads through, without a login of its own:
+		// tally-engine ensure-console-role makes tally_console a member of it.
+		var canLogin bool
+		err := db.Store.Pool().QueryRow(t.Context(),
+			`SELECT rolcanlogin FROM pg_roles WHERE rolname = 'tally_console_reader'`).Scan(&canLogin)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			t.Fatal("the chain left no role tally_console_reader, so the console has nothing to read the engine database through")
+		case err != nil:
+			t.Fatalf("querying pg_roles: %v", err)
+		case canLogin:
+			t.Error("tally_console_reader may log in, want a group role whose password nobody has to keep")
+		}
+
+		assertConsoleReaderGrants(t, db.Store)
+		if consoleReaderMay(t, db.Store, "goose_db_version_engine", "SELECT") {
+			t.Error("tally_console_reader may read goose_db_version_engine, want the chain's bookkeeping left out of the grant")
+		}
+		for _, table := range wantTables {
+			if consoleReaderMay(t, db.Store, table, "INSERT, UPDATE, DELETE, TRUNCATE") {
+				t.Errorf("tally_console_reader may change %s, want SELECT and nothing else", table)
+			}
+		}
+	})
+
+	t.Run("a rollback below the console's reader role revokes its grants and keeps the role", func(t *testing.T) {
+		above := chainVersions[belowConsoleReaderRole:]
+
+		rolledBack, err := store.MigrateDownTo(t.Context(), db.URL, belowConsoleReaderRole)
+		if err != nil {
+			t.Fatalf("MigrateDownTo(%d) error = %v, want nil", belowConsoleReaderRole, err)
+		}
+		want := slices.Clone(above)
+		slices.Reverse(want)
+		if !slices.Equal(rolledBack, want) {
+			t.Errorf("MigrateDownTo(%d) = %v, want %v", belowConsoleReaderRole, rolledBack, want)
+		}
+
+		// Another database of the server may hold memberships in the role, so the
+		// rollback leaves it where it is.
+		var kept bool
+		if err := db.Store.Pool().QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tally_console_reader')`).Scan(&kept); err != nil {
+			t.Fatalf("querying pg_roles: %v", err)
+		}
+		if !kept {
+			t.Error("the rollback dropped tally_console_reader, want it revoked and kept")
+		}
+		for _, table := range wantTables {
+			if consoleReaderMay(t, db.Store, table, "SELECT") {
+				t.Errorf("tally_console_reader still reads %s after the rollback, want the grant revoked", table)
+			}
+		}
+
+		applied, err := store.Migrate(t.Context(), db.URL)
+		if err != nil {
+			t.Fatalf("Migrate() error = %v, want nil", err)
+		}
+		if !slices.Equal(applied, above) {
+			t.Errorf("Migrate() = %v, want %v", applied, above)
+		}
+		assertConsoleReaderGrants(t, db.Store)
 	})
 
 	t.Run("the chain rolls down to zero and up again", func(t *testing.T) {
@@ -110,6 +186,174 @@ func TestMigrate(t *testing.T) {
 			t.Errorf("tables after migrating up again = %v, want %v", tables, wantTables)
 		}
 	})
+}
+
+// TestMigrateDownWithoutTheConsoleReaderRole covers the branch of 0003's
+// rollback guard the rollbacks above cannot reach: they roll down with
+// tally_console_reader in place, while the guard is there for the server where
+// someone dropped the role by hand.
+//
+// Roles are server-wide, so the drop reaches every database of the server. It
+// runs in a container of its own for that reason.
+func TestMigrateDownWithoutTheConsoleReaderRole(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	// The operator's own DROP, which takes the grants of this database with it.
+	for _, stmt := range []string{
+		"DROP OWNED BY tally_console_reader",
+		"DROP ROLE tally_console_reader",
+	} {
+		if _, err := db.Store.Pool().Exec(t.Context(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	if _, err := store.MigrateDownTo(t.Context(), db.URL, belowConsoleReaderRole); err != nil {
+		t.Fatalf("MigrateDownTo(%d) error = %v, want the rollback to tolerate the role that is gone",
+			belowConsoleReaderRole, err)
+	}
+}
+
+// TestMigrateUpAgainstAConcurrentConsoleRoleCreation covers the race 0003's
+// guard names: two chains on the same server reaching that migration together.
+// Roles are server-wide while goose's advisory lock is not, so nothing
+// serializes them, and the loser has to read the role the winner created as its
+// own rather than failing the deployment it is halfway through.
+//
+// The other session is held uncommitted rather than raced, so the outcome is
+// the same on every run. It is what makes the loser's error unique_violation
+// and not duplicate_object: CREATE ROLE reports duplicate_object from a catalog
+// lookup, which cannot see a role no session has committed yet, so this chain
+// walks past it into the unique index over pg_authid.rolname, waits there for
+// the other transaction, and fails on the index when it commits.
+func TestMigrateUpAgainstAConcurrentConsoleRoleCreation(t *testing.T) {
+	db := storetest.NewDB(t)
+
+	if _, err := store.MigrateDownTo(t.Context(), db.URL, belowConsoleReaderRole); err != nil {
+		t.Fatalf("MigrateDownTo(%d): %v", belowConsoleReaderRole, err)
+	}
+	if _, err := db.Store.Pool().Exec(t.Context(), "DROP ROLE tally_console_reader"); err != nil {
+		t.Fatalf("dropping the role the run below creates: %v", err)
+	}
+
+	// The other chain, on another database of the same server.
+	other, err := pgx.Connect(t.Context(), db.NewSiblingDB(t, "concurrent_console_role"))
+	if err != nil {
+		t.Fatalf("connecting to the sibling database: %v", err)
+	}
+	defer func() { _ = other.Close(t.Context()) }()
+
+	tx, err := other.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("opening the other session's transaction: %v", err)
+	}
+	if _, err := tx.Exec(t.Context(), "CREATE ROLE tally_console_reader NOLOGIN"); err != nil {
+		t.Fatalf("creating the role in the other session: %v", err)
+	}
+
+	migrated := make(chan error, 1)
+	go func() {
+		_, err := store.Migrate(t.Context(), db.URL)
+		migrated <- err
+	}()
+
+	waitForTheBlockedRoleCreation(t, db.Store.Pool(), migrated)
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing the other session: %v", err)
+	}
+	if err := <-migrated; err != nil {
+		t.Fatalf("Migrate() error = %v, want the chain to read the role the other session created as its own", err)
+	}
+
+	// The grant is the point of the migration, and it runs after the guard, so
+	// a swallowed error that left the chain short of it would pass the check
+	// above.
+	assertConsoleReaderGrants(t, db.Store)
+}
+
+// TestMigrateUpWithoutCreateRole is a migrating role hardened down to the
+// owner of its database: without CREATEROLE the chain stops at the role
+// migration 3 creates, naming the statement to run beforehand, and once someone
+// who may has run it the chain applies over the role that is there.
+//
+// Roles are server-wide, so the drop below reaches every database of the
+// server. It runs in a container of its own for that reason.
+func TestMigrateUpWithoutCreateRole(t *testing.T) {
+	const (
+		owner         = "engine_owner"
+		ownerPassword = "engine-owner-password"
+	)
+
+	db := storetest.NewDB(t)
+	for _, stmt := range []string{
+		"DROP OWNED BY tally_console_reader",
+		"DROP ROLE tally_console_reader",
+		"CREATE ROLE " + owner + " LOGIN NOCREATEROLE PASSWORD '" + ownerPassword + "'",
+	} {
+		if _, err := db.Store.Pool().Exec(t.Context(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	hardened := db.NewSiblingDB(t, "hardened_engine")
+	if _, err := db.Store.Pool().Exec(t.Context(), "ALTER DATABASE hardened_engine OWNER TO "+owner); err != nil {
+		t.Fatalf("handing the database to %s: %v", owner, err)
+	}
+	ownerURL := storetest.URLAs(t, hardened, owner, ownerPassword)
+
+	_, err := store.Migrate(t.Context(), ownerURL)
+	if want := "creating the role tally_console_reader: permission denied to create role"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Migrate() error = %v, want it to name %q", err, want)
+	}
+
+	// The statement the error names, run by a role that may create roles.
+	if _, err := db.Store.Pool().Exec(t.Context(), "CREATE ROLE tally_console_reader NOLOGIN"); err != nil {
+		t.Fatalf("creating the role beforehand: %v", err)
+	}
+
+	applied, err := store.Migrate(t.Context(), ownerURL)
+	if err != nil {
+		t.Fatalf("Migrate() error = %v, want the chain to apply over the role made beforehand", err)
+	}
+	if want := chainVersions[belowConsoleReaderRole:]; !slices.Equal(applied, want) {
+		t.Errorf("Migrate() = %v, want %v", applied, want)
+	}
+
+	s, err := store.New(t.Context(), ownerURL)
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer s.Close()
+	assertConsoleReaderGrants(t, s)
+}
+
+// waitForTheBlockedRoleCreation blocks until a backend is waiting for another
+// transaction to end, which is where the call under test sits once it reaches
+// the unique index the other session already wrote to. done is where that call
+// reports its end: a call that ends before it blocks fails the test with its
+// error, and so does a wait of 30s.
+func waitForTheBlockedRoleCreation(t *testing.T, pool *pgxpool.Pool, done <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("the call under test returned %v before it waited on the other session's role", err)
+		default:
+		}
+		var waiting bool
+		if err := pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			                WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid')`).Scan(&waiting); err != nil {
+			t.Fatalf("reading pg_stat_activity: %v", err)
+		}
+		if waiting {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no backend waited on the other transaction within 30s, so the call did not reach the role creation")
 }
 
 func TestMigrationStatus(t *testing.T) {
@@ -352,6 +596,32 @@ func publicTables(t *testing.T, s *store.Store) []string {
 		t.Fatalf("reading the table names: %v", err)
 	}
 	return tables
+}
+
+// assertConsoleReaderGrants checks that tally_console_reader may read every
+// table of the schema.
+func assertConsoleReaderGrants(t *testing.T, s *store.Store) {
+	t.Helper()
+
+	for _, table := range wantTables {
+		if !consoleReaderMay(t, s, table, "SELECT") {
+			t.Errorf("tally_console_reader holds no SELECT on %s, want every table of the chain granted", table)
+		}
+	}
+}
+
+// consoleReaderMay reports whether tally_console_reader holds any of the
+// comma-separated privileges on table.
+func consoleReaderMay(t *testing.T, s *store.Store, table, privileges string) bool {
+	t.Helper()
+
+	var held bool
+	if err := s.Pool().QueryRow(t.Context(),
+		`SELECT has_table_privilege('tally_console_reader', $1::text, $2::text)`,
+		table, privileges).Scan(&held); err != nil {
+		t.Fatalf("reading the privileges of tally_console_reader on %s: %v", table, err)
+	}
+	return held
 }
 
 // triggerFunctions counts the two functions the immutability triggers run.

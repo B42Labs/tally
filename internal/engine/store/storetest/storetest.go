@@ -125,6 +125,19 @@ func (d DB) NewSiblingDB(t *testing.T, name string) string {
 	return parsed.String()
 }
 
+// URLAs is dbURL with its user and password replaced, for a test that connects
+// as another role.
+func URLAs(t *testing.T, dbURL, user, password string) string {
+	t.Helper()
+
+	parsed, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("parsing the database url: %v", err)
+	}
+	parsed.User = url.UserPassword(user, password)
+	return parsed.String()
+}
+
 // dbURL is the connection string of the containerized database at host:port.
 func dbURL(host, port string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
