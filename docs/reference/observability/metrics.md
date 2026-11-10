@@ -1,15 +1,15 @@
 ---
 title: Metrics
-description: Every Prometheus series the Reporting API, the OpenStack collector and the demo console expose, by name, type, labels and meaning, and the scrape jobs that read them.
+description: Every Prometheus series the Reporting API, the OpenStack collector and the console expose, by name, type, labels and meaning, and the scrape jobs that read them.
 quadrant: reference
 audience: operator
 ---
 
 # Metrics
 
-The Reporting API, the OpenStack collector and the demo console each serve
-their instruments in the Prometheus exposition format at `GET /metrics`, without
-a credential. The Reporting API and the collector serve the route on the port
+The Reporting API, the OpenStack collector and the console each serve their
+instruments in the Prometheus exposition format at `GET /metrics`, without a
+credential. The Reporting API and the collector serve the route on the port
 the service listens on. The console serves it on the port
 `TALLY_CONSOLE_OPS_PORT` names rather than on its page port. Every series any
 of them owns is named `tally_`. The Go runtime and the process collectors are

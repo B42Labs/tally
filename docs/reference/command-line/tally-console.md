@@ -1,18 +1,19 @@
 ---
-title: Demo console (tally-console)
-description: "What the read-only demo console serves, how an operator signs in to it, its probes and metrics, the token and the database role it needs, and how make console starts it."
+title: Console (tally-console)
+description: "What the read-only console serves, how an operator signs in to it, its probes and metrics, the token and the database role it needs, how a cluster runs it and how make console starts it."
 quadrant: reference
 audience: operator
 ---
 
-# Demo console (tally-console)
+# Console (tally-console)
 
 `tally-console` is a read-only web console over the data Tally already holds:
 the projects, resources and lifecycles the Reporting API serves, and the
-billing periods, runs, statements and pricing catalogs the engine stored. It is
-a demo instrument. It runs on a developer's machine, writes nothing on either
-side, is deployed nowhere, and answers one signed-in operator. Every page is
-HTML the process rendered; it ships no JavaScript and loads one stylesheet. The
+billing periods, runs, statements and pricing catalogs the engine stored. It
+runs in the cluster from the released image, writes nothing on either side,
+and answers one signed-in operator. `make console` also runs it on a
+developer's machine. Every page is HTML the process rendered; it ships no
+JavaScript and loads one stylesheet. The
 process is assembled in
 [`cmd/tally-console/main.go`](https://github.com/B42Labs/tally/blob/main/cmd/tally-console/main.go).
 
@@ -566,6 +567,8 @@ bookkeeping table and a CREATE TABLE with SQLSTATE `42501`.
 creates the role or sets its password. Job `tally-migrate` runs it on every
 production deploy, with the password from Secret `tally-console-db`, and
 `make migrate` runs it in the dev stack with the password `tally-dev-password`.
+The console in a cluster reads its connection string from the key `db-url` of
+the same Secret.
 
 The console does not check what its role may do. The pool connects lazily, and
 whoever writes the connection string decides the role.
@@ -612,6 +615,44 @@ blank lines and `#` comments aside. A line that is not bcrypt, a plain password
 or an MD5 or SHA1 hash for example, is refused, and so are a bcrypt cost below 10
 or above 17 and the hash of the empty password. The message names the line by
 its number and carries nothing of its content.
+
+## In a cluster
+
+The kustomize component
+[`deploy/kubernetes/components/console`](https://github.com/B42Labs/tally/tree/main/deploy/kubernetes/components/console)
+runs the console as Deployment `console` with one replica, and both overlays
+list it. The container sets eight variables:
+
+| Variable | Value |
+| --- | --- |
+| `TALLY_CONSOLE_HTTP_ADDR` | `0.0.0.0` |
+| `TALLY_CONSOLE_HTTP_PORT` | `8095` |
+| `TALLY_CONSOLE_OPS_PORT` | `8096` |
+| `TALLY_CONSOLE_REPORTING_URL` | `http://reporting-api`, the Service of the Reporting API in the namespace |
+| `TALLY_CONSOLE_REPORTING_INSECURE` | `true` |
+| `TALLY_CONSOLE_API_TOKEN_FILE` | `/run/secrets/tally-console-token/api-token` |
+| `TALLY_CONSOLE_ENGINE_DB_URL_FILE` | `/run/secrets/tally-console-db/db-url` |
+| `TALLY_CONSOLE_HTPASSWD_FILE` | `/run/secrets/tally-console-auth/htpasswd` |
+
+The three files are keys of three Secrets, each mounted read-only:
+
+| Secret | Key | Holds | Created by |
+| --- | --- | --- | --- |
+| `tally-console-auth` | `htpasswd` | the operator's bcrypt line | the dev overlay from a literal; the prod overlay from `secrets/tally-console-auth.env` |
+| `tally-console-db` | `db-url` | the connection string as `tally_console` | the dev overlay from a literal; the prod overlay from `secrets/tally-console-db.env` |
+| `tally-console-token` | `api-token` | the `read_all` token | `make up` in the dev stack; the operator in production, as [issue the console's token](/how-to/cluster/deploy-the-collecting-stack#issue-the-console-s-token) shows |
+
+The pod waits in `ContainerCreating` until `tally-console-token` exists. Service
+`console` carries the port `http` 8095 for the pages and the port `ops` 8096 for
+the probes and metrics. HTTPRoute `console` publishes the port `http` alone, on
+`console.tally.127-0-0-1.nip.io:8443` in the dev stack and on the `console`
+value of `hosts.yaml` in production, so the probes and the metrics stay off the
+hostname. On that hostname the Gateway answers 429 once one client address
+sends more than 10 requests a second, before the request reaches the sign-in.
+The store scrapes the port `ops` as job `console`.
+
+Behind the Gateway, `remote` in the `sign-in refused` and `sign-in busy` lines
+names the Gateway's proxy pod rather than the browser.
 
 ## Signals and exit status
 

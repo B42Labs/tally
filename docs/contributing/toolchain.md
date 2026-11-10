@@ -44,7 +44,7 @@ generated blocks of the site.
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/reporting`, `internal/reporting/store/queries.sql` | `internal/reporting/store/sqlcgen` |
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/engine`, `internal/engine/store/queries.sql` | `internal/engine/store/sqlcgen` |
 | sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/reporting`, `internal/engine/source/queries.sql` | `internal/engine/source/sqlcgen`, the engine's read view over the reporting chain |
-| sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/engine`, `internal/console/store/queries.sql` | `internal/console/store/sqlcgen`, the demo console's read view over the engine chain |
+| sqlc | `SQLC_VERSION` (`v1.31.1`) | `migrations/engine`, `internal/console/store/queries.sql` | `internal/console/store/sqlcgen`, the console's read view over the engine chain |
 | the doc tests under `TALLY_UPDATE_DOCS=1` | the module's own toolchain | `docs/reference_test.go`, `docs/contributing_test.go`, the `cmd` packages' `TestReferencePageIsCurrent` | the generated blocks of the reference pages and of the handbook |
 
 Generated code is committed, so a plain `go build` needs no generator. Every
@@ -91,14 +91,15 @@ has two stages: the first compiles a static binary with `CGO_ENABLED=0`,
 prod run the same image.
 
 The Makefile keeps four lists of images. `SERVICES` is what `make up` loads
-into kind, `tally-reporting` and `tally-engine`;
+into kind, `tally-reporting`, `tally-engine` and `tally-console`;
 [The dev stack](/contributing/dev-stack) is that cluster. `IMAGES` is what
 `make images` builds. It adds `tally-openstack-collector` and
 `tally-openstack-simulator`, which the dev stack runs in compose beside a
-broker. `RELEASE_IMAGES` is what a release pushes to GHCR: the two `SERVICES`
-images, `tally-openstack-collector`, which the `openstack-collector` kustomize
-component runs in a cluster, and `tally-reporting-admin`, which the
-`migrations` component runs beside `tally-engine`. The admin CLI is in no other
+broker. `RELEASE_IMAGES` is what a release pushes to GHCR: the three `SERVICES`
+images, `tally-console` among them, which the `console` kustomize component
+runs, `tally-openstack-collector`, which the `openstack-collector` component
+runs in a cluster, and `tally-reporting-admin`, which the `migrations`
+component runs beside `tally-engine`. The admin CLI is in no other
 list, because the dev stack runs it with `go run`.
 [Releases](#releases) says how the push works. `SIM_IMAGES` is what
 `make simulator-up` builds, the collector and the simulator alone;
@@ -214,8 +215,9 @@ than at a tag: it reaches the token of its job, and its owner can move a tag.
 The `images` job runs once the `release` job has succeeded, so a tag whose
 release failed publishes no image. It holds `contents: read` and
 `packages: write` alone, logs into `ghcr.io` with the workflow's token, and
-builds the four `RELEASE_IMAGES` from the `Dockerfile`, then pushes each:
+builds the five `RELEASE_IMAGES` from the `Dockerfile`, then pushes each:
 `ghcr.io/b42labs/tally-reporting:<tag>`, `ghcr.io/b42labs/tally-engine:<tag>`,
+`ghcr.io/b42labs/tally-console:<tag>`,
 `ghcr.io/b42labs/tally-openstack-collector:<tag>` and
 `ghcr.io/b42labs/tally-reporting-admin:<tag>`. The entrypoint of each image is
 its binary, so the admin image takes the subcommand as its arguments.
