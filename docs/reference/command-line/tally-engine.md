@@ -18,7 +18,9 @@ It is also the only thing that runs DDL on the engine database. `migrate`
 applies the embedded goose chain, `migrate-status` reports which of it a
 database carries, and `migrate-down-to` runs the chain's down migrations.
 Nothing else migrates as a side effect, so a schema change stays an operator's
-decision rather than something a scheduled run brings along. The tree is built
+decision rather than something a scheduled run brings along.
+`ensure-console-role` creates `tally_console`, the login role the console reads
+the engine database as, or sets its password. The tree is built
 in
 [`cmd/tally-engine/main.go`](https://github.com/B42Labs/tally/blob/main/cmd/tally-engine/main.go)
 and its subcommands in
@@ -34,11 +36,28 @@ needs no configuration at all.
 How much of it a subcommand needs differs, and each gate refuses a missing value
 before the first query rather than at it.
 
-`migrate`, `migrate-status`, `migrate-down-to`, `periods list`, `finalize`,
-`pricing import`, `pricing list`, `kickbacks` and an `export` without `--rollup`
-ask for the engine database alone, through `TALLY_ENGINE_DB_URL`. A pool opens
-on a database carrying an older schema as happily as on a migrated one, so every
-subcommand but the three migration ones checks the schema before it works.
+`migrate`, `migrate-status`, `migrate-down-to`, `ensure-console-role`,
+`periods list`, `finalize`, `pricing import`, `pricing list`, `kickbacks` and an
+`export` without `--rollup` ask for the engine database alone, through
+`TALLY_ENGINE_DB_URL`. A pool opens on a database carrying an older schema as
+happily as on a migrated one, so every subcommand but the three migration ones
+checks the schema before it works.
+
+`ensure-console-role` also asks for `TALLY_ENGINE_CONSOLE_PASSWORD`, which has
+to be printable ASCII without spaces. It refuses a database below the chain's
+head with
+`the database is on schema version <n>, this build needs <n>: run tally-engine migrate`
+before it creates anything, because the role it grants is created by engine
+migration 3. The connection has to be a superuser, or hold CREATEROLE and
+ADMIN OPTION on `tally_console_reader` and `tally_console`; a role with
+CREATEROLE holds that option on the roles it created itself. A `tally_console`
+that is there already is refused before it gets a login or a password when it
+holds an attribute such as SUPERUSER or CREATEDB, a membership other than
+`tally_console_reader` or ADMIN OPTION on that one, when
+`tally_console_reader` holds an attribute, a login or a membership, when a role
+other than the connection's and `tally_console` is a member of either, with or
+without ADMIN OPTION, or when either owns an object in any database on the
+server.
 
 `detect-late` and `export --rollup` ask for both databases: the engine one and
 the reporting one, through `TALLY_ENGINE_REPORTING_DB_URL`. The resources, the
@@ -113,6 +132,11 @@ A month the walk's cap left out prints
 `<n> months before <month> were skipped, and are billed with tally-engine run --period`.
 A tick that moved nothing prints `nothing due`.
 
+`ensure-console-role` prints `created the login role tally_console` when it
+created the role and `updated the login role tally_console` when the role was
+there already. Either way it has set the password and granted
+`tally_console_reader`, and the password appears on neither line.
+
 `kickbacks` writes the settlement document alone. Nothing else reaches stdout,
 so the report pipes into a file or a partner mailer as it is.
 
@@ -134,6 +158,10 @@ means the same model after parsing, as `Model.Equal` in
 [`internal/engine/pricing/pricing.go`](https://github.com/B42Labs/tally/blob/main/internal/engine/pricing/pricing.go)
 compares them: a price respelled as `0.50` for `0.5` is the same model, a
 reordered dimension list is not.
+
+`ensure-console-role` exits 0 both when it created the role and when it updated
+it, so running it on every deploy is safe. A run that failed halfway leaves a
+role a second run completes.
 
 SIGINT and SIGTERM cancel the context the tree runs on, which reaches the
 database calls a run spends its minutes in. The bookkeeping of an interrupted
@@ -193,6 +221,7 @@ tally-engine
 | --- | --- |
 | `correct` | Meter a finalized billing period again as a correction |
 | `detect-late` | Report the events that reached a metered period late |
+| `ensure-console-role` | Create the login role the console reads the engine database as, or set its password |
 | `export` | Export the project statements of a run |
 | `finalize` | Finalize a completed run and close its billing period |
 | `kickbacks` | Report the kickbacks a run owes its partners |
@@ -237,6 +266,20 @@ tally-engine detect-late [flags]
 | Flag | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `--period` | string | none | yes | billing month to check, YYYY-MM |
+
+### `tally-engine ensure-console-role`
+
+Create the login role the console reads the engine database as, or set its password
+
+Create the login role the console reads the engine database as, or set its password.
+
+The role is tally_console, a member of tally_console_reader, which engine migration 3 grants SELECT on the engine tables and nothing else. The password comes from TALLY_ENGINE_CONSOLE_PASSWORD and reaches the server as a SCRAM-SHA-256 verifier. Every run sets it, so running this on every deploy is safe and a new value rotates the password.
+
+```text
+tally-engine ensure-console-role
+```
+
+This command takes no flags.
 
 ### `tally-engine export`
 
@@ -299,7 +342,7 @@ Apply the pending migrations of the engine database
 
 Apply the pending migrations of the engine database.
 
-No other subcommand runs DDL, so this is what brings a database to the schema the engine expects.
+No other subcommand changes the schema, so this is what brings a database to the schema the engine expects.
 
 ```text
 tally-engine migrate

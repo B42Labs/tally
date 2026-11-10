@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 
 	"github.com/b42labs/tally/internal/engine/config"
@@ -53,6 +56,7 @@ func TestHelpNeedsNoEnvironment(t *testing.T) {
 		{"migrate", []string{"migrate"}},
 		{"migrate-status", []string{"migrate-status"}},
 		{"migrate-down-to", []string{"migrate-down-to"}},
+		{"ensure-console-role", []string{"ensure-console-role"}},
 		{"periods list", []string{"periods", "list"}},
 		{"run", []string{"run"}},
 		{"finalize", []string{"finalize"}},
@@ -196,6 +200,124 @@ func TestMigrateCLI(t *testing.T) {
 			t.Fatal("migrate error = nil, want the connection failure")
 		}
 	})
+}
+
+// TestEnsureConsoleRoleCLI runs the role step the way Job tally-migrate and
+// make migrate do. The subtests share one server, and roles are server-wide, so
+// the refusals run before the subtest that creates the role.
+func TestEnsureConsoleRoleCLI(t *testing.T) {
+	const password = "console-cli-password"
+
+	db := storetest.NewDB(t)
+
+	t.Run("refuses a configuration without the password", func(t *testing.T) {
+		useDatabase(t, db.URL)
+
+		_, _, err := runCLI(t, "ensure-console-role")
+		if err == nil {
+			t.Fatal("ensure-console-role error = nil, want the missing password reported")
+		}
+		if want := "checking the configuration: TALLY_ENGINE_CONSOLE_PASSWORD: must be set"; err.Error() != want {
+			t.Errorf("ensure-console-role error = %q, want %q", err, want)
+		}
+	})
+
+	t.Run("refuses a database without the chain before it creates the role", func(t *testing.T) {
+		useDatabase(t, db.NewSiblingDB(t, "console_role_cli"))
+		t.Setenv("TALLY_ENGINE_CONSOLE_PASSWORD", password)
+
+		if roles := consoleRoles(t, db); roles != 0 {
+			t.Fatalf("pg_roles holds %d tally_console before the run, want none", roles)
+		}
+
+		_, _, err := runCLI(t, "ensure-console-role")
+		if err == nil {
+			t.Fatal("ensure-console-role error = nil, want the database without the chain refused")
+		}
+		want := fmt.Sprintf("the database is on schema version 0, this build needs %d: run tally-engine migrate",
+			enginemigrations.Version)
+		if err.Error() != want {
+			t.Errorf("ensure-console-role error = %q, want %q", err, want)
+		}
+		if roles := consoleRoles(t, db); roles != 0 {
+			t.Errorf("pg_roles holds %d tally_console after the refusal, want none", roles)
+		}
+	})
+
+	t.Run("creates the role and then updates it", func(t *testing.T) {
+		useDatabase(t, db.URL)
+		t.Setenv("TALLY_ENGINE_CONSOLE_PASSWORD", password)
+
+		for _, want := range []string{
+			"created the login role tally_console\n",
+			"updated the login role tally_console\n",
+		} {
+			stdout, stderr, err := runCLI(t, "ensure-console-role")
+			if err != nil {
+				t.Fatalf("ensure-console-role error = %v, want nil (stderr %q)", err, stderr)
+			}
+			if stdout != want {
+				t.Errorf("stdout = %q, want %q", stdout, want)
+			}
+			assertConsoleConnects(t, db, password)
+		}
+	})
+
+	t.Run("reads the password from TALLY_ENGINE_CONSOLE_PASSWORD_FILE", func(t *testing.T) {
+		const filePassword = "console-cli-file-password"
+
+		useDatabase(t, db.URL)
+		// The file ends in the newline openssl rand -hex 32 > file writes, which
+		// is not part of the password.
+		file := filepath.Join(t.TempDir(), "password")
+		if err := os.WriteFile(file, []byte(filePassword+"\n"), 0o600); err != nil {
+			t.Fatalf("writing the password file: %v", err)
+		}
+		t.Setenv("TALLY_ENGINE_CONSOLE_PASSWORD_FILE", file)
+
+		stdout, stderr, err := runCLI(t, "ensure-console-role")
+		if err != nil {
+			t.Fatalf("ensure-console-role error = %v, want nil (stderr %q)", err, stderr)
+		}
+		if want := "updated the login role tally_console\n"; stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+		assertConsoleConnects(t, db, filePassword)
+
+		old, err := pgx.Connect(t.Context(), storetest.URLAs(t, db.URL, "tally_console", password))
+		if err == nil {
+			_ = old.Close(context.Background())
+			t.Fatal("the password set before still connects, want it replaced by the file's")
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "28P01" {
+			t.Errorf("connecting with the password set before: %v, want SQLSTATE 28P01", err)
+		}
+	})
+}
+
+// assertConsoleConnects checks that tally_console connects to db with password,
+// which is what the console's connection string carries.
+func assertConsoleConnects(t *testing.T, db storetest.DB, password string) {
+	t.Helper()
+
+	conn, err := pgx.Connect(t.Context(), storetest.URLAs(t, db.URL, "tally_console", password))
+	if err != nil {
+		t.Fatalf("connecting as tally_console: %v", err)
+	}
+	_ = conn.Close(context.Background())
+}
+
+// consoleRoles counts the roles named tally_console on db's server.
+func consoleRoles(t *testing.T, db storetest.DB) int {
+	t.Helper()
+
+	var roles int
+	if err := db.Store.Pool().QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_roles WHERE rolname = 'tally_console'`).Scan(&roles); err != nil {
+		t.Fatalf("querying pg_roles: %v", err)
+	}
+	return roles
 }
 
 func TestPeriodsList(t *testing.T) {

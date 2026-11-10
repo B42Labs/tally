@@ -33,7 +33,7 @@ func newMigrateCmd() *cobra.Command {
 		Use:   "migrate",
 		Short: "Apply the pending migrations of the engine database",
 		Long: "Apply the pending migrations of the engine database.\n\n" +
-			"No other subcommand runs DDL, so this is what brings a database to the schema the engine expects.",
+			"No other subcommand changes the schema, so this is what brings a database to the schema the engine expects.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig()
@@ -138,6 +138,44 @@ func newMigrateDownToCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&confirmed, "yes", false, "confirm that the data of the rolled-back migrations may be dropped")
 	return cmd
+}
+
+// newEnsureConsoleRoleCmd builds the ensure-console-role subcommand.
+func newEnsureConsoleRoleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ensure-console-role",
+		Short: "Create the login role the console reads the engine database as, or set its password",
+		Long: "Create the login role the console reads the engine database as, or set its password.\n\n" +
+			"The role is tally_console, a member of tally_console_reader, which engine migration 3 grants SELECT " +
+			"on the engine tables and nothing else. The password comes from TALLY_ENGINE_CONSOLE_PASSWORD and " +
+			"reaches the server as a SCRAM-SHA-256 verifier. Every run sets it, so running this on every deploy " +
+			"is safe and a new value rotates the password.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if err := cfg.ValidateConsoleRole(); err != nil {
+				return fmt.Errorf("checking the configuration: %w", err)
+			}
+
+			db, err := openEngine(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			created, err := db.EnsureConsoleRole(cmd.Context(), cfg.ConsolePassword)
+			if err != nil {
+				return err
+			}
+			if created {
+				return write(cmd.OutOrStdout(), "created the login role "+store.ConsoleRole)
+			}
+			return write(cmd.OutOrStdout(), "updated the login role "+store.ConsoleRole)
+		},
+	}
 }
 
 // newPeriodsListCmd builds the periods list subcommand.
