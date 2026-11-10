@@ -243,6 +243,13 @@ TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.i
 # The engine's database, on the same listener beside the reporting one.
 TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 
+# The password `make migrate` sets on tally_console and `make console` connects
+# with. It goes into a URL unencoded, so keep it to letters, digits and -_.~
+TALLY_DEV_CONSOLE_DB_PASSWORD ?= tally-dev-password
+
+# The engine's database as tally_console, the role that only selects.
+TALLY_DEV_CONSOLE_ENGINE_DB_URL ?= postgres://tally_console:$(TALLY_DEV_CONSOLE_DB_PASSWORD)@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
+
 # What `demo` prepares. The month is the one the tutorials pin, so a console
 # demo shows the numbers the documentation describes, and it stays a past month
 # whatever today is, which is what the engine bills. It names the simulated
@@ -708,11 +715,15 @@ simulator-down:
 ca:
 	@$(KUBECTL) -n cert-manager get secret tally-dev-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
 
-# The console reads the dead-letter list, GET /api/v1/rejected-events, and that
-# route is admin-only, so the token below carries the admin role rather than
-# read_all. It is issued fresh on every run for the reason `simulator-up` issues
-# one fresh: the cluster may have been recreated since the last run, and a new
-# database knows none of the tokens the old one handed out.
+# Every route the console reads takes read_all or a lower role, the dead-letter
+# list GET /api/v1/rejected-events included, so the token below carries
+# read_all, which cannot change the registry. The console reads the engine's
+# database as tally_console, which only selects; `make migrate` creates it, so
+# a cluster that has not run `make migrate` since the role was introduced fails
+# the engine's pages until it does. The token is issued fresh on every run for
+# the reason `simulator-up` issues one fresh: the cluster may have been
+# recreated since the last run, and a new database knows none of the tokens the
+# old one handed out.
 #
 # The token comes before the CA, so a machine with no dev cluster fails here,
 # with the admin CLI's connection error, rather than on the kubectl call `ca`
@@ -720,8 +731,8 @@ ca:
 # the simulator's, which compose reads out of deploy/compose/.env.
 ## console: run the demo console against the dev cluster
 console:
-	@echo '==> issuing an admin api token for the demo console'
-	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-api-token --role admin --description 'demo console')" && \
+	@echo '==> issuing a read_all api token for the demo console'
+	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-api-token --role read_all --description 'demo console')" && \
 	echo '==> writing the dev CA to tally-ca.crt' && \
 	$(MAKE) -s ca > tally-ca.crt && \
 	echo && \
@@ -731,7 +742,7 @@ console:
 	echo && \
 	TALLY_CONSOLE_REPORTING_URL=https://api.tally.127-0-0-1.nip.io:8443 \
 	TALLY_CONSOLE_CA_FILE=tally-ca.crt \
-	TALLY_CONSOLE_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' \
+	TALLY_CONSOLE_ENGINE_DB_URL='$(TALLY_DEV_CONSOLE_ENGINE_DB_URL)' \
 	TALLY_CONSOLE_HTTP_PORT='$(CONSOLE_PORT)' \
 	TALLY_CONSOLE_HTPASSWD='$(CONSOLE_HTPASSWD)' \
 	TALLY_CONSOLE_API_TOKEN="$$token" \
@@ -1019,11 +1030,14 @@ check-alerting:
 # by the initdb script the timescaledb ConfigMap carries, and Postgres runs
 # initdb only against an empty data directory, so a dev cluster created before
 # that ConfigMap existed needs one `make down && make up` before the second line
-# below succeeds.
-## migrate: apply the reporting and the engine migration chains
+# below succeeds. The third line creates tally_console, the role the console
+# reads the engine's database as, or sets its password; it needs engine
+# migration 3, which the line before it applies.
+## migrate: apply the reporting and the engine migration chains and set the console's database role
 migrate:
 	TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin migrate
 	TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' go run ./cmd/tally-engine migrate
+	TALLY_ENGINE_DB_URL='$(TALLY_DEV_ENGINE_DB_URL)' TALLY_ENGINE_CONSOLE_PASSWORD='$(TALLY_DEV_CONSOLE_DB_PASSWORD)' go run ./cmd/tally-engine ensure-console-role
 
 # prod-addons installs the two add-ons from their Helm charts, at the versions
 # `up` applies the release manifests of. Envoy Gateway goes first: its chart

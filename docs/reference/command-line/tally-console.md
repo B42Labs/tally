@@ -1,6 +1,6 @@
 ---
 title: Demo console (tally-console)
-description: "What the read-only demo console serves, how an operator signs in to it, its probes and metrics, the admin token it needs, and how make console starts it."
+description: "What the read-only demo console serves, how an operator signs in to it, its probes and metrics, the token and the database role it needs, and how make console starts it."
 quadrant: reference
 audience: operator
 ---
@@ -534,34 +534,59 @@ holding a path whose content becomes the value, applied by
 | `TALLY_METRICS_ENABLED` | boolean | `true` | no | MetricsEnabled set to false makes GET /metrics answer 404. The variable has no CONSOLE infix because roadmap section 8 lists it among the common variables. |
 | `TALLY_CONSOLE_REPORTING_URL` | string | none | no | ReportingURL is the base URL of the Reporting API without the /api/v1 suffix. It has to be set, and it has to be https unless its host is loopback or ReportingInsecure allows a plaintext one, because the API token rides on every call. |
 | `TALLY_CONSOLE_REPORTING_INSECURE` | boolean | `false` | no | ReportingInsecure allows an http Reporting API on a host that is not loopback. It exists for a console and an API in the same namespace. Anywhere else it puts the API token on the wire in cleartext. |
-| `TALLY_CONSOLE_API_TOKEN` | string | none | yes (`TALLY_CONSOLE_API_TOKEN_FILE`) | APIToken is the bearer token the console reads the Reporting API with. It has to carry the admin role, because the dead-letter list the overview reads is admin-only. It has to be set. Supports the *_FILE convention. |
+| `TALLY_CONSOLE_API_TOKEN` | string | none | yes (`TALLY_CONSOLE_API_TOKEN_FILE`) | APIToken is the bearer token the console reads the Reporting API with. It has to carry read_all, the lowest role every route the console reads accepts. It has to be set. Supports the *_FILE convention. |
 | `TALLY_CONSOLE_CA_FILE` | string | none | no | CAFile is a PEM file holding the CA that signed the Reporting API's certificate. Empty trusts the system store. |
-| `TALLY_CONSOLE_ENGINE_DB_URL` | string | none | yes (`TALLY_CONSOLE_ENGINE_DB_URL_FILE`) | EngineDBURL is the PostgreSQL connection string of the engine database, opened for reads only. It has to be set. Supports the *_FILE convention. |
+| `TALLY_CONSOLE_ENGINE_DB_URL` | string | none | yes (`TALLY_CONSOLE_ENGINE_DB_URL_FILE`) | EngineDBURL is the PostgreSQL connection string of the engine database, opened for reads only. Its role is meant to be tally_console, the member of tally_console_reader that tally-engine ensure-console-role provisions. It has to be set. Supports the *_FILE convention. |
 | `TALLY_CONSOLE_HTPASSWD` | string | none | yes (`TALLY_CONSOLE_HTPASSWD_FILE`) | Htpasswd is the one operator allowed to sign in, as one user:bcrypt-hash line in htpasswd format. It has to be set. Supports the *_FILE convention. |
 <!-- refdoc:end settings -->
 
 ## The token
 
-`TALLY_CONSOLE_API_TOKEN` has to carry the `admin` role. The overview reads
-`GET /api/v1/rejected-events`, the dead-letter list, and that route is
-admin-only: a `read_all` token is answered 403 there. Every other read the
-console makes takes `read_all` or `project`, so the dead-letter list alone
-decides the role. Such a token is issued by
+`TALLY_CONSOLE_API_TOKEN` has to carry the `read_all` role. Every read the
+console makes takes `read_all` or `project`, and `read_all` is the lowest role
+that all of them accept. The overview reads `GET /api/v1/rejected-events`, the
+dead-letter list, which a `project` token is answered 403 on: a refused item
+has no project to be scoped by, so the list is served whole to `read_all` and
+above. A `read_all` token cannot change the registry. Such a token is issued by
 [`tally-reporting-admin create-api-token`](/reference/command-line/tally-reporting-admin).
 
 The console sends nothing but GET to the Reporting API, and every page it serves
 sits behind the sign-in.
 
+## The database role
+
+`TALLY_CONSOLE_ENGINE_DB_URL` is meant to connect as `tally_console`. That login
+role is a member of `tally_console_reader`, which engine migration 3
+([`migrations/engine/0003_console_reader_role.sql`](https://github.com/B42Labs/tally/blob/main/migrations/engine/0003_console_reader_role.sql))
+grants SELECT on the eight engine tables and nothing else. The database answers
+an INSERT, UPDATE, DELETE or TRUNCATE on them, a read of the chain's
+bookkeeping table and a CREATE TABLE with SQLSTATE `42501`.
+
+[`tally-engine ensure-console-role`](/reference/command-line/tally-engine)
+creates the role or sets its password. Job `tally-migrate` runs it on every
+production deploy, with the password from Secret `tally-console-db`, and
+`make migrate` runs it in the dev stack with the password `tally-dev-password`.
+
+The console does not check what its role may do. The pool connects lazily, and
+whoever writes the connection string decides the role.
+
 ## Startup
 
 `make console` starts the console against the dev cluster. It issues a token
-with `tally-reporting-admin create-api-token --role admin`, writes the dev CA to
-`tally-ca.crt`, and runs the process against
-`https://api.tally.127-0-0-1.nip.io:8443` and the dev engine database, printing
-`http://127.0.0.1:8095/` and the development credential, user `tally` and
-password `tally-dev-console-password`. The token is issued fresh per run and
-comes before the CA, so on a machine without a dev cluster the target fails on
-the admin CLI's connection error.
+with `tally-reporting-admin create-api-token --role read_all`, writes the dev CA
+to `tally-ca.crt`, and runs the process against
+`https://api.tally.127-0-0-1.nip.io:8443` and the dev engine database, which it
+reads as `tally_console` through the URL in the Makefile variable
+`TALLY_DEV_CONSOLE_ENGINE_DB_URL`. It prints `http://127.0.0.1:8095/` and the
+development credential, user `tally` and password `tally-dev-console-password`.
+The token is issued fresh per run and comes before the CA, so on a machine
+without a dev cluster the target fails on the admin CLI's connection error.
+
+`make console` runs neither `make up` nor `make migrate`. On a dev cluster where
+neither ran since the console's role was introduced, the pages that read the
+engine database answer 503 with `the engine database could not be read`, and the
+console's log carries `password authentication failed for user "tally_console"`
+(SQLSTATE `28P01`). `make migrate` creates the role.
 
 The process binds `TALLY_CONSOLE_HTTP_ADDR` on `TALLY_CONSOLE_HTTP_PORT` for the
 pages and on `TALLY_CONSOLE_OPS_PORT` for the probes and metrics. The default

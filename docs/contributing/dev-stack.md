@@ -119,9 +119,11 @@ rather than starting over. In order, it installs:
 7. A readiness wait per component and one on the Gateway's `Programmed`
    condition.
 8. `make migrate`, which applies the reporting and the engine chains through
-   the Gateway. The Reporting API never migrates on its own and its readiness
-   probe answers 503 for as long as its database carries no schema, so the
-   chain runs before the last rollout wait.
+   the Gateway and then runs `tally-engine ensure-console-role`, which creates
+   `tally_console`, the role the console reads the engine database as, or sets
+   its password to `tally-dev-password`. The Reporting API never migrates on
+   its own and its readiness probe answers 503 for as long as its database
+   carries no schema, so the chain runs before the last rollout wait.
 
 Each wait runs under `WAIT_TIMEOUT` (`300s`), and a rollout gets
 `WAIT_ATTEMPTS` (`6`) of them; the product is the budget. An expired wait is
@@ -196,13 +198,15 @@ the engine where to measure the egress counter the simulator pushes. Each
 generated name carries a hash of its content, so editing one of these files
 re-rolls the pod that mounts it.
 
-Two Makefile variables carry the URLs a `psql` on the host takes. Both reach
-TimescaleDB through the Gateway's TCP listener, which is the path the migration
-chains take as well.
+Three Makefile variables carry the URLs a `psql` on the host takes. All three
+reach TimescaleDB through the Gateway's TCP listener, which is the path the
+migration chains take as well. The third connects as `tally_console`, which
+only selects, and is what `make console` reads the engine database through.
 
 ```text
-TALLY_DEV_DB_URL        postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
-TALLY_DEV_ENGINE_DB_URL postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
+TALLY_DEV_DB_URL                postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
+TALLY_DEV_ENGINE_DB_URL         postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
+TALLY_DEV_CONSOLE_ENGINE_DB_URL postgres://tally_console:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 ```
 
 ## The Tilt loop
@@ -352,8 +356,12 @@ lessons take them.
    after the finalized run read the period is booked as a correction, which is
    finalized in its turn.
 6. `make console` serves the result until Ctrl-C. Sign in as `tally` with the
-   password `tally-dev-console-password`. The console starts again with
-   `make console` alone, which touches none of the above.
+   password `tally-dev-console-password`. The console reads the Reporting API
+   with a `read_all` token it issues on every run and the engine database as
+   `tally_console`. It starts again with `make console` alone, which touches
+   none of the above. A cluster that has not run `make migrate` since
+   `tally_console` was introduced answers the engine's pages with 503 until
+   `make migrate` has created the role.
 
 The steps between the two `make` calls are four targets of their own,
 `demo-drain`, `demo-registry`, `demo-bill` and `demo-correct`, the first of
@@ -405,7 +413,7 @@ The table below is rendered from the `## target: description` comments of the
 | `lint` | run golangci-lint |
 | `fmt` | format every Go file with gofumpt, through golangci-lint's formatter |
 | `check-alerting` | validate the alert rules and the Alertmanager config |
-| `migrate` | apply the reporting and the engine migration chains |
+| `migrate` | apply the reporting and the engine migration chains and set the console's database role |
 | `prod-addons` | install Envoy Gateway and cert-manager on the cluster PROD_CONTEXT names |
 | `prod-up` | deploy the prod overlay to the cluster PROD_CONTEXT names and wait for its migration Job |
 | `generate` | run the code generators and refresh the generated blocks of the reference pages and the handbook |

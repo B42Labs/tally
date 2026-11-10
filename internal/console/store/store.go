@@ -2,7 +2,9 @@
 // The console renders billing periods, runs, statements, pricing versions and
 // correction deltas; the engine exposes no read API for them, so the console
 // opens that database directly. Nothing in this package writes: queries.sql
-// holds SELECTs alone, and every method here reads.
+// holds SELECTs alone, and every method here reads. The connection is meant to
+// be tally_console, a member of tally_console_reader, which engine migration 3
+// grants SELECT and nothing else, so the database refuses a write as well.
 //
 // It is also the seam a read API of the engine would be swapped in at. The
 // pages call these methods and see plain Go values rather than pgx types, so
