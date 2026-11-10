@@ -3,8 +3,11 @@
 //
 // Opening a Store does not dial the database. The connection is established on
 // the first query, so a subcommand that only parses its flags fails on the flags
-// rather than on the database. The engine never runs DDL outside the migrate
-// subcommands of its CLI: a schema change is an operator's decision.
+// rather than on the database. The engine never changes the schema outside the
+// migrate subcommands of its CLI: a schema change is an operator's decision.
+// EnsureConsoleRole is the one other place that runs DDL: its CREATE ROLE,
+// ALTER ROLE and GRANT provision the login role the console reads this
+// database as, and change no table.
 //
 // The static queries in queries.sql are compiled by sqlc into the sqlcgen
 // subpackage, which takes the pool as its DBTX. `make generate` rewrites that
