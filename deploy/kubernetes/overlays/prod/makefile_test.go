@@ -5,10 +5,13 @@
 // too, and the pod that mounts the Secret does not start. An empty cloud
 // applies, and the collector exits in a pod no step of the target waits on. A
 // clouds config that names another cloud than the collector applies as well,
-// and every sync is answered 404. Two images at two tags leave one of them
-// under the manifests of another release. The targets run in a throwaway Git
-// repository with an empty kubeconfig and a context nothing names, so a guard
-// that lets one through fails at kubectl rather than at a cluster.
+// and every sync is answered 404. A console connection string without the
+// password the migration Job sets on the console's role applies too, and every
+// page that reads the engine database answers 503. Two images at two tags
+// leave one of them under the manifests of another release. The targets run in
+// a throwaway Git repository with an empty kubeconfig and a context nothing
+// names, so a guard that lets one through fails at kubectl rather than at a
+// cluster.
 //
 // What prod-up does with the migration Job runs against a stand-in for
 // kubectl: a shell script that logs every call and answers a get of the Job
@@ -130,6 +133,11 @@ func TestProdUpRefusesASecretThatIsNotFilledIn(t *testing.T) {
 		{"a missing file", "tally-grafana.env", "", "tally-grafana.env is missing"},
 		// The file a deployment from before the console's login role lacks.
 		{"a missing console password", "tally-console-db.env", "", "tally-console-db.env is missing"},
+		// The files a deployment from before the console ran in the cluster
+		// lacks: the operator's credential, and the console's connection
+		// beside the role's password.
+		{"a missing console credential", "tally-console-auth.env", "", "tally-console-auth.env is missing"},
+		{"a console connection missing", "tally-console-db.env", "password=0a1b\n", "tally-console-db.env lacks db-url"},
 		{"an empty value", "tally-grafana.env", "admin-password=\n", "tally-grafana.env leaves admin-password empty or on a placeholder"},
 		{"a value of blanks", "tally-vm-admin.env", "delete-auth-key=  \n", "tally-vm-admin.env leaves delete-auth-key empty or on a placeholder"},
 		{
@@ -177,6 +185,77 @@ func TestProdUpRefusesASecretThatIsNotFilledIn(t *testing.T) {
 			t.Errorf("make prod-up did not get past its checks to %q:\n%s", prodUpPassed, out)
 		}
 	})
+}
+
+func TestProdUpRefusesAConsoleConnectionWithoutItsPassword(t *testing.T) {
+	// Job tally-migrate sets the password of tally_console from password, and
+	// the console connects with db-url. A db-url with another password applies,
+	// the console reports Ready because its probes do not read the database,
+	// and every page that reads the engine database answers 503. A password a
+	// URL has to encode fails the same way, because db-url carries it
+	// unencoded.
+	const file = "tally-console-db.env"
+	content := func(password, inURL string) string {
+		return "password=" + password + "\n" +
+			"db-url=postgres://tally_console:" + inURL + "@timescaledb:5432/tally_engine?sslmode=disable\n"
+	}
+	const (
+		notTheURL = "tally-console-db.env carries a db-url that is not postgres://tally_console:<password>@... with the value of password"
+		encoded   = "tally-console-db.env holds a password with a character db-url would have to encode"
+	)
+	cases := []struct {
+		name, content, want string
+	}{
+		{"another password in db-url", content("0a1b", "0a1c"), notTheURL},
+		{"a longer password in db-url", content("0a1b", "0a1b2c"), notTheURL},
+		{
+			"another role in db-url",
+			"password=0a1b\ndb-url=postgres://tally:0a1b@timescaledb:5432/tally_engine?sslmode=disable\n",
+			notTheURL,
+		},
+		{
+			"a db-url in keyword/value form",
+			"password=0a1b\ndb-url=host=timescaledb user=tally_console password=0a1b dbname=tally_engine\n",
+			notTheURL,
+		},
+		{"a slash in the password", content("0a/1b", "0a/1b"), encoded},
+		{"an at sign in the password", content("0a@1b", "0a@1b"), encoded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := prodOverlay(t, release)
+			if err := os.WriteFile(filepath.Join(overlay, "secrets", file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			out, code := runMake(t, checkout(t, release), "prod-up", overlay)
+			if code == 0 || !strings.Contains(out, tc.want) {
+				t.Errorf("make prod-up exited %d, want a refusal carrying %q:\n%s", code, tc.want, out)
+			}
+			if strings.Contains(out, prodUpPassed) {
+				t.Errorf("make prod-up went on to the cluster after the refusal:\n%s", out)
+			}
+		})
+	}
+
+	passes := []struct{ name, content string }{
+		{"a password of the characters a URL leaves unencoded", content("0a-1b.2c_3d~4E", "0a-1b.2c_3d~4E")},
+		{
+			"the postgresql scheme in db-url",
+			"password=0a1b\ndb-url=postgresql://tally_console:0a1b@db.example.net:5432/tally_engine?sslmode=require\n",
+		},
+	}
+	for _, tc := range passes {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := prodOverlay(t, release)
+			if err := os.WriteFile(filepath.Join(overlay, "secrets", file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, _ := runMake(t, checkout(t, release), "prod-up", overlay); !strings.Contains(out, prodUpPassed) {
+				t.Errorf("make prod-up did not get past its checks to %q:\n%s", prodUpPassed, out)
+			}
+		})
+	}
 }
 
 func TestProdUpRefusesACollectorWithoutACloud(t *testing.T) {

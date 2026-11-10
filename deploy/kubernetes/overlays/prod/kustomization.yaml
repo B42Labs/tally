@@ -1,7 +1,7 @@
 # The dedicated cluster: the stack on a public domain.
 #
-# The Reporting API, the OTLP collector, the store, the alerting pair and
-# Grafana run here, under the hostnames hosts.yaml names and behind a
+# The Reporting API, the OTLP collector, the store, the alerting pair, Grafana
+# and the console run here, under the hostnames hosts.yaml names and behind a
 # certificate Let's Encrypt signs. The OpenStack collector runs here too: it
 # consumes the notifications of the cloud collector.env names from a broker
 # outside the cluster and posts them to the Reporting API. The cluster migrates,
@@ -20,10 +20,10 @@ namespace: tally
 # hosts.yaml is read by the replacements at the end of this file and never
 # emitted. There is no envoyproxy.yaml: Envoy Gateway's default Service type is
 # LoadBalancer, which is what this cluster provides. That LoadBalancer has to
-# pass the client's address on: the OTLP rate limit of the envoy-gateway
-# component keeps one bucket per address, and behind a LoadBalancer that
-# proxies connections every publisher draws from the bucket of the
-# LoadBalancer's own address.
+# pass the client's address on: the OTLP and the console rate limits of the
+# envoy-gateway component keep one bucket per address, and behind a
+# LoadBalancer that proxies connections every client draws from the bucket of
+# the LoadBalancer's own address.
 resources:
   - namespace.yaml
   - ../../base
@@ -36,26 +36,29 @@ resources:
 #
 # The second component is the collector: a Deployment with its outbox on a
 # claim. The third is Job tally-migrate, which applies both migration chains
-# with the CLIs of the release and sets the console's login role, and the
-# fourth is CronJob tally-sync with the mount of the two files the Reporting
-# API reconciles with. The kustomization.yaml of each states what an overlay
-# has to supply, which the images, secretGenerator and configMapGenerator
-# entries below do, all but the Secret of the ingest token.
+# with the CLIs of the release and sets the console's login role, the fourth
+# is CronJob tally-sync with the mount of the two files the Reporting API
+# reconciles with, and the fifth is the console with its route. The
+# kustomization.yaml of each states what an overlay has to supply, which the
+# images, secretGenerator and configMapGenerator entries below and hosts.yaml
+# do, all but the Secrets of the ingest token and of the console's token.
 components:
   - ../../components/envoy-gateway
   - ../../components/openstack-collector
   - ../../components/migrations
   - ../../components/reconciliation
+  - ../../components/console
 
-# The four images the release workflow publishes: the Reporting API, the
-# collector, the engine the scheduler and the migration Job run, and the admin
-# CLI the migration Job applies the reporting chain with. The overlay deploys
-# one release, so every entry carries one tag: the operator moves all four on
-# every release, `make prod-up` refuses two different ones, and the tag has to
-# exist in the registry before it runs. The release workflow publishes the
-# collector and the admin image from the first release after v0.3.0 on: at
-# v0.3.0 itself no registry holds them, and a deployment moves every tag to a
-# later release.
+# The five images the release workflow publishes: the Reporting API, the
+# collector, the engine the scheduler and the migration Job run, the admin CLI
+# the migration Job applies the reporting chain with, and the console. The
+# overlay deploys one release, so every entry carries one tag: the operator
+# moves all five on every release, `make prod-up` refuses two different ones,
+# and the tag has to exist in the registry before it runs. The release
+# workflow publishes the collector and the admin image from the first release
+# after v0.3.0 on, and the console from the first release after v0.7.0 on: at
+# those releases themselves no registry holds them, and a deployment moves
+# every tag to a later release.
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
@@ -68,6 +71,9 @@ images:
     newTag: v0.7.0
   - name: tally-reporting-admin
     newName: ghcr.io/b42labs/tally-reporting-admin
+    newTag: v0.7.0
+  - name: tally-console
+    newName: ghcr.io/b42labs/tally-console
     newTag: v0.7.0
 
 # The credentials of this cluster. Each file is untracked and copied from the
@@ -84,6 +90,10 @@ images:
 # the operator creates the Secret with kubectl from the output of
 # `tally-reporting-admin create-ingest-credential` after the first
 # `make prod-up`. The collector pod waits in ContainerCreating until then.
+# tally-console-token, the Secret of the console's read_all token, is created
+# by the operator the same way, from the output of
+# `tally-reporting-admin create-api-token`, and the console pod waits the same
+# way.
 secretGenerator:
   - name: tally-db
     envs:
@@ -109,6 +119,9 @@ secretGenerator:
   - name: tally-reconciliation-auth
     files:
       - secrets/clouds.yaml
+  - name: tally-console-auth
+    envs:
+      - secrets/tally-console-auth.env
 
 # The scrape config of this cluster, in place of the base's, and the rule over
 # the jobs it discovers, which is replaced together with it because the absent
@@ -210,7 +223,7 @@ patches:
         path: /spec/listeners/2
 
   # Let's Encrypt issues a wildcard only over DNS-01, so the certificate names
-  # the four published hostnames instead. The entries are the keys of
+  # the five published hostnames instead. The entries are the keys of
   # hosts.yaml, which the replacements below overwrite with their values. The
   # Certificate keeps the base's name and secretName, which the https listener
   # references.
@@ -226,6 +239,7 @@ patches:
           - otlp
           - otlp-grpc
           - grafana
+          - console
       - op: replace
         path: /spec/issuerRef/name
         value: letsencrypt
@@ -307,6 +321,22 @@ replacements:
         options:
           delimiter: "://"
           index: 1
+
+  - source:
+      kind: ConfigMap
+      name: tally-hosts
+      fieldPath: data.console
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: console
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: Certificate
+          name: tally-wildcard
+        fieldPaths:
+          - spec.dnsNames.4
 
   - source:
       kind: ConfigMap

@@ -1110,6 +1110,15 @@ prod-addons:
 # then lacks the key, and the pod that mounts it does not start; that is what
 # an upgrade that adds a key to an example meets.
 #
+# The console's database password is in tally-console-db.env twice: Job
+# tally-migrate sets it on tally_console from password, and the console
+# connects with db-url. A db-url with another password applies, the console
+# reports Ready because its probes do not read the database, and every page
+# that reads the engine database answers 503. A password with a character a
+# URL has to encode fails the same way, because db-url carries it unencoded.
+# Both are refused. The check reads db-url as a postgres:// or postgresql://
+# URL as tally_console, so a db-url in keyword/value form is refused too.
+#
 # The cloud of the collector is checked the same way, because an empty one
 # applies quietly too: the pod exits with "checking the configuration:
 # TALLY_OSC_CLOUD: must be set", and nothing in the run says so. So is the
@@ -1118,10 +1127,11 @@ prod-addons:
 # YAML, does not. A clouds config that names another cloud than
 # collector.env applies and runs, and every sync is answered 404; one that
 # leaves os_cloud empty fails every sync with a 500. The two lines are read as
-# text, which is what the header of clouds-config.yaml asks of them. The
-# collector's rollout is not waited on. Its readiness depends on a broker
-# outside the cluster and on a Secret the operator creates after this run, so
-# the target prints the command that shows it instead.
+# text, which is what the header of clouds-config.yaml asks of them. Neither
+# the collector's nor the console's rollout is waited on. Each waits for a
+# Secret the operator creates after this run, and the collector's readiness
+# depends on a broker outside the cluster as well, so the target prints the
+# command that shows each instead.
 #
 # The migrations run in Job tally-migrate, which the apply creates. A Job's pod
 # template is immutable, so the finished Job of the previous run is deleted
@@ -1146,6 +1156,14 @@ prod-up:
 		keys="$$({ grep -E '^[^#=]+=([[:space:]]*$$|.*<[a-z-]+>)' "$$file" || [ $$? -eq 1 ]; } | cut -d= -f1 | tr '\n' ' ')"; \
 		[ -z "$$keys" ] || { echo "ERROR: $$file leaves $${keys% } empty or on a placeholder; fill every value" >&2; exit 1; }; \
 	done
+	@file='$(PROD_OVERLAY)/secrets/tally-console-db.env'; \
+	password="$$(sed -n 's/^password=//p' "$$file")"; \
+	url="$$(sed -n 's/^db-url=//p' "$$file")"; \
+	case "$$password" in *[!A-Za-z0-9._~-]*) echo "ERROR: $$file holds a password with a character db-url would have to encode; generate it with openssl rand -hex 32" >&2; exit 1 ;; esac; \
+	case "$$url" in \
+		postgres://tally_console:"$$password"@*|postgresql://tally_console:"$$password"@*) ;; \
+		*) echo "ERROR: $$file carries a db-url that is not postgres://tally_console:<password>@... with the value of password; Job tally-migrate sets that value on tally_console and the console connects with db-url, so put it in both" >&2; exit 1 ;; \
+	esac
 	@settings='$(PROD_OVERLAY)/collector.env'; \
 	[ -f "$$settings" ] || { echo "ERROR: $$settings is missing; it names the cloud the collector reports under" >&2; exit 1; }; \
 	grep -Eq '^TALLY_OSC_CLOUD=[^[:space:]]+$$' "$$settings" || { echo "ERROR: $$settings leaves TALLY_OSC_CLOUD empty or with whitespace around it; set it to the cloud the ingest credential is issued for" >&2; exit 1; }
@@ -1215,6 +1233,9 @@ prod-up:
 	echo; \
 	echo '==> the collector starts once the Secret tally-collector-token exists, and is Ready once it holds its broker session:'; \
 	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) rollout status deployment/openstack-collector'; \
+	echo; \
+	echo '==> the console starts once the Secret $(CONSOLE_TOKEN_SECRET) exists:'; \
+	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) rollout status deployment/console'; \
 	echo; \
 	echo '==> the scheduler rates a month once a pricing catalog prices it; until then its hourly Job fails:'; \
 	echo '    kubectl --context $(PROD_CONTEXT) -n $(NAMESPACE) get cronjob tally-engine tally-sync'
