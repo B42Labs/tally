@@ -10,20 +10,26 @@ audience: operator
 This guide brings both databases to the schema their binaries expect and rolls
 one chain back again. `tally-reporting-admin` owns the reporting chain,
 `tally-engine` owns the engine chain, and no other subcommand of either binary
-runs DDL.
+changes a schema.
 
 The prod overlay applies both chains on every deploy with Job `tally-migrate`
-of the `migrations` kustomize component: an init container runs
-`tally-reporting-admin migrate` and the Job's container `tally-engine migrate`
-after it, as
+of the `migrations` kustomize component: one init container runs
+`tally-reporting-admin migrate`, the next `tally-engine migrate`, and the Job's
+container `tally-engine ensure-console-role` after both, as
 [deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack#deploy-the-overlay)
-shows. The commands below are what the two containers run, and what an
-operator runs by hand for a rollback or a repair.
+shows. The last one creates `tally_console`, the login role the console reads
+the engine database as, or sets its password. The commands below are what the
+three containers run, and what an operator runs by hand for a rollback or a
+repair.
 
 ## Before you start
 
 - Both databases reachable from the machine you run the CLIs on, with a
-  connection string for a role that may run DDL on each.
+  connection string for a role that may run DDL on each. For
+  `ensure-console-role`, the role on the engine database also has to be a
+  superuser, or hold CREATEROLE and ADMIN OPTION on `tally_console_reader` and
+  `tally_console`. A role with CREATEROLE holds that option on the roles it
+  created itself, so it needs a grant only for a role another one created.
 - `tally-reporting-admin` and `tally-engine` at the version the deployment
   runs, with their subcommands on the
   [reporting admin CLI](/reference/command-line/tally-reporting-admin) and the
@@ -78,8 +84,32 @@ operator runs by hand for a rollback or a repair.
    ```
 
    ```text
-   applied migration 2
+   applied migration 3
    ```
+
+3. Create or update the console's login role. Write a password into a file only
+   you can read, and pass the file to `ensure-console-role`:
+
+   ```sh
+   (umask 077; openssl rand -hex 32 > console-db-password)
+   TALLY_ENGINE_CONSOLE_PASSWORD_FILE=console-db-password tally-engine ensure-console-role
+   ```
+
+   ```text
+   created the login role tally_console
+   ```
+
+   Every later run prints `updated the login role tally_console` and sets the
+   password from the file again, so a new value in the file rotates it. The
+   password has to be printable ASCII without spaces, which is what
+   `openssl rand -hex 32` prints. Keep the file: the console's connection
+   string carries the same password.
+
+   The role is a member of `tally_console_reader`, which engine migration 3
+   creates, so the subcommand refuses a database below the chain's head before
+   it creates anything, with
+   `the database is on schema version 2, this build needs 3: run tally-engine migrate`
+   on a database at version 2.
 
 ## When an apply fails
 
@@ -107,7 +137,12 @@ operator runs by hand for a rollback or a repair.
 
 A rollback runs the `Down` direction of every migration above the target, and
 those directions drop what their `Up` created. `tally-engine migrate-down-to 1`
-runs the down of `migrations/engine/0002_adjustment_records.sql`, which is
+first runs the down of `migrations/engine/0003_console_reader_role.sql`, which
+revokes the console's grants and keeps both `tally_console_reader` and
+`tally_console`. A console reading as `tally_console` is refused with
+`permission denied` until the `migrate` after the rollback grants again, and
+that needs no second `ensure-console-role`. It then runs the down of
+`migrations/engine/0002_adjustment_records.sql`, which is
 `DROP TABLE adjustment_records`: the applied pricing adjustments of every run,
 one row per adjustment with its rate, the base it was applied to, the signed
 amount it produced and the partner a kickback is paid to. The trigger that
@@ -166,8 +201,10 @@ says the rows are gone. The dump taken first is what they come back from.
    ```text
    cronjob.batch/tally-engine patched
    a tick is still there (tally-engine-29354280); waiting at 2026-07-09T14:22:00Z
+   rolled back migration 3
    rolled back migration 2
    applied migration 2
+   applied migration 3
    cronjob.batch/tally-engine patched
    ```
 
@@ -341,6 +378,7 @@ says the rows are gone. The dump taken first is what they come back from.
    migration 12 applied
    migration 1 applied
    migration 2 applied
+   migration 3 applied
    ```
 
 2. A rollback prints one `rolled back migration <n>` line per migration it
