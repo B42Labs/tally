@@ -9,7 +9,9 @@
 // subcommand applies the embedded goose chain, migrate-status reports which of
 // it a database carries, and migrate-down-to runs the chain's down migrations.
 // Nothing else migrates as a side effect, so a schema change stays an
-// operator's decision rather than something a scheduled run brings along.
+// operator's decision rather than something a scheduled run brings along. The
+// ensure-console-role subcommand creates the console's login role or sets its
+// password.
 //
 // Every subcommand of the tree is implemented.
 //
@@ -79,6 +81,7 @@ func newRootCmd() *cobra.Command {
 		newMigrateCmd(),
 		newMigrateStatusCmd(),
 		newMigrateDownToCmd(),
+		newEnsureConsoleRoleCmd(),
 		periods,
 		newRunCmd(),
 		newFinalizeCmd(),
