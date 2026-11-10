@@ -1,0 +1,29 @@
+# The console in a cluster: one stateless Deployment with its Service and the
+# HTTPRoute that publishes its pages. The console reads the Reporting API of its
+# own namespace with a read_all token and the engine database as tally_console,
+# and it answers one operator signed in with HTTP Basic.
+#
+# An overlay that lists this component has five things to supply:
+#
+#   - a Secret tally-console-auth with the key htpasswd, the one
+#     user:bcrypt-hash line of the operator
+#   - a Secret tally-console-db with the key db-url, the connection string of
+#     the engine database as tally_console; the migrations component reads the
+#     key password of the same Secret
+#   - a Secret tally-console-token with the key api-token, the token
+#     `tally-reporting-admin create-api-token --role read_all` prints. No
+#     generator carries it: a token can be issued only against the migrated
+#     database, and `make prod-up` refuses a secret file that is not filled in
+#   - an images entry that maps tally-console to a registry
+#   - the hostname of HTTPRoute console, which the manifest carries as
+#     console.tally.example.com, the base's placeholder domain
+#
+# The prod overlay generates the first two, and its operator creates the token
+# Secret with kubectl once the database is migrated
+# (docs/how-to/cluster/deploy-the-collecting-stack.md). The dev overlay
+# generates the first two from literals, and `make up` issues the token.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - console.yaml
