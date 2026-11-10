@@ -16,9 +16,12 @@ resources:
   - envoyproxy.yaml
 
 # The dev stack runs Envoy Gateway, so it lists what the base leaves to it: the
-# GatewayClass, the OTLP rate limit and the two 403 answers.
+# GatewayClass, the OTLP and the console rate limits and the two 403 answers.
+# The second component is the console, the same Deployment, Service and route a
+# release deploys; `make up` issues the token Secret it waits for.
 components:
   - ../../components/envoy-gateway
+  - ../../components/console
 
 # Dev credentials, in the clear on purpose: this database is reachable only
 # through a Gateway bound to 127.0.0.1 on the developer's own machine.
@@ -67,6 +70,19 @@ secretGenerator:
   - name: tally-reconciliation-auth
     files:
       - reconciliation/clouds.yaml
+  # The operator the console lets sign in: user tally, password
+  # tally-dev-console-password. The line is CONSOLE_HTPASSWD of the Makefile
+  # with its $$ unescaped. kustomize keeps every $ of a literal and adds no
+  # newline.
+  - name: tally-console-auth
+    literals:
+      - htpasswd=tally:$2y$10$ozNeOXtuRimnpsNE.5KbUuSGhsattbYTZttj5kimYhssYd.Gjr22K
+  # The engine database as tally_console, the role that only selects. `make
+  # migrate` sets its password to TALLY_DEV_CONSOLE_DB_PASSWORD, whose default
+  # this literal carries.
+  - name: tally-console-db
+    literals:
+      - db-url=postgres://tally_console:tally-dev-password@timescaledb:5432/tally_engine?sslmode=disable
 
 # What the Reporting API reconciles here. The file is mounted by the patch at the
 # end of this file, beside the clouds.yaml of the Secret above. Generating the
@@ -169,6 +185,15 @@ patches:
         path: /spec/hostnames/0
         value: alertmanager.tally.127-0-0-1.nip.io
 
+  - target:
+      group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: console
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: console.tally.127-0-0-1.nip.io
+
   # Serve that domain, signed by the dev CA.
   - target:
       group: cert-manager.io
@@ -226,6 +251,16 @@ patches:
     patch: |
       - op: add
         path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+
+  # The image is built locally and side-loaded with `kind load`, so pulling it
+  # would only ever fail.
+  - target:
+      kind: Deployment
+      name: console
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
 
   # The five strategic merge patches in this file. They merge env entries by
