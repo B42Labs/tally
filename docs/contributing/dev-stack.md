@@ -99,15 +99,16 @@ rather than starting over. In order, it installs:
    Certificate has to live in cert-manager's own namespace, and the overlay's
    namespace transformer would move it into `tally`, where cert-manager would
    never find the key it signs with.
-4. `make images`, which builds the four images `IMAGES` lists,
-   `tally-reporting`, `tally-engine`, `tally-openstack-collector` and
-   `tally-openstack-simulator`, each tagged `:dev`. The two `SERVICES`,
-   `tally-reporting` and `tally-engine`, then go onto the node as an archive of
-   one platform: `docker save --platform` writes the platform the node reports,
-   and `kind load image-archive` imports the archive. The containerd image store
+4. `make images`, which builds the five images `IMAGES` lists,
+   `tally-reporting`, `tally-engine`, `tally-console`,
+   `tally-openstack-collector` and `tally-openstack-simulator`, each tagged
+   `:dev`. The three `SERVICES`, `tally-reporting`, `tally-engine` and
+   `tally-console`, then go onto the node as an archive of one platform:
+   `docker save --platform` writes the platform the node reports, and
+   `kind load image-archive` imports the archive. The containerd image store
    holds one platform of a pulled image, and `kind load docker-image` imports
-   every platform the index names, so it fails on that store. The
-   `--platform` flag of `docker save` needs Docker Engine 28.0.
+   every platform the index names, so it fails on that store. The `--platform`
+   flag of `docker save` needs Docker Engine 28.0.
 5. The images the base runs, which `NODE_IMAGES` reads out of the manifests
    rather than pinning a second time in the Makefile. They go onto the node
    as an archive of one platform as well. The loop pulls only what
@@ -123,7 +124,17 @@ rather than starting over. In order, it installs:
    `tally_console`, the role the console reads the engine database as, or sets
    its password to `tally-dev-password`. The Reporting API never migrates on
    its own and its readiness probe answers 503 for as long as its database
-   carries no schema, so the chain runs before the last rollout wait.
+   carries no schema, so the chain runs before its rollout wait.
+9. The console's token. `define console_token` issues a `read_all` token with
+   `tally-reporting-admin create-api-token` into the Secret
+   `tally-console-token`, under the key `api-token`, and restarts the console.
+   It does so only while that Secret is absent: the Secret and the database
+   live and die with the cluster, so an existing one was issued against this
+   database, and a token per run would leave one `api_tokens` row per
+   `make up`. A stale token is mended with
+   `kubectl --context kind-tally -n tally delete secret tally-console-token`
+   and `make up`. The console pod waits in `ContainerCreating` for the Secret
+   until this step, and the last wait is the console's rollout.
 
 Each wait runs under `WAIT_TIMEOUT` (`300s`), and a rollout gets
 `WAIT_ATTEMPTS` (`6`) of them; the product is the budget. An expired wait is
@@ -131,11 +142,12 @@ repeated, because a pull outlasting one wait is the normal case on a slow line
 rather than a fault. A rollout that is genuinely stuck still ends the run once
 the budget is spent, with a message that says the stack is incomplete.
 
-The target ends by printing the seven addresses of the stack.
+The target ends by printing the eight addresses of the stack.
 
 | Address | What answers there |
 | --- | --- |
 | `https://api.tally.127-0-0-1.nip.io:8443/api/v1` | Reporting API |
+| `https://console.tally.127-0-0-1.nip.io:8443` | the console, which asks for user `tally` and the password `tally-dev-console-password` |
 | `https://vm.tally.127-0-0-1.nip.io:8443` | VictoriaMetrics |
 | `https://grafana.tally.127-0-0-1.nip.io:8443` | Grafana |
 | `https://vmalert.tally.127-0-0-1.nip.io:8443/vmalert/` | vmalert, which publishes that prefix and not the root |
@@ -165,8 +177,12 @@ The base is plain Gateway API and names no implementation. What needs Envoy
 Gateway is in the kustomize component
 [`deploy/kubernetes/components/envoy-gateway`](https://github.com/B42Labs/tally/tree/main/deploy/kubernetes/components/envoy-gateway),
 which the overlay lists under `components`: the GatewayClass `tally`, the rate
-limit on the two OTLP routes, and the rules that answer Grafana's
-`/api/datasources/proxy` and Alertmanager's write paths with a 403.
+limits on the two OTLP routes and on the console route, and the rules that
+answer Grafana's `/api/datasources/proxy` and Alertmanager's write paths with a
+403. The second component the overlay lists,
+[`deploy/kubernetes/components/console`](https://github.com/B42Labs/tally/tree/main/deploy/kubernetes/components/console),
+runs the console as Deployment, Service and HTTPRoute `console`, the manifest a
+release deploys.
 
 The overlay patches a nip.io hostname onto each HTTPRoute of the base, so every
 service answers under its own name below `*.tally.127-0-0-1.nip.io`, and points
@@ -174,7 +190,7 @@ the wildcard Certificate at the dev CA. `envoyproxy.yaml` pins the Envoy
 Service to the node ports `kind.yaml` publishes; without it Envoy Gateway
 allocates node ports at random and the host port mappings point at nothing.
 
-Six secrets are generated in the clear on purpose, because this database is
+Eight secrets are generated in the clear on purpose, because this database is
 reachable only through a Gateway bound to `127.0.0.1` on the developer's own
 machine:
 
@@ -187,6 +203,11 @@ machine:
 - `tally-reconciliation-auth`, the `clouds.yaml` the Reporting API
   authenticates the reconciled cloud with. It carries a cloud password, which
   is why it is a Secret rather than part of the ConfigMap below.
+- `tally-console-auth`, the console's operator: the bcrypt line of user
+  `tally` with the password `tally-dev-console-password`, the line of
+  `CONSOLE_HTPASSWD` in the Makefile.
+- `tally-console-db`, the console's connection to the engine database as
+  `tally_console`, with the password `make migrate` sets.
 
 Four ConfigMaps are generated beside them. `tally-reconciliation` holds what
 the Reporting API reconciles here. `victoriametrics-scrape` is marked
@@ -218,17 +239,17 @@ installs nothing for it. The
 `make up` created, and it needs that cluster: the add-ons and the dev CA are
 already in place when Tilt starts.
 
-Two `docker_build` calls build `tally-reporting` and `tally-engine` from the
-repository root. Each limits its context with
+Three `docker_build` calls build `tally-reporting`, `tally-engine` and
+`tally-console` from the repository root. Each limits its context with
 `only=['go.mod', 'go.sum', 'cmd', 'internal', 'migrations', 'Dockerfile']`,
 because only a Go change or a migration can alter a binary, which embeds the
 migration chain.
 
 `k8s_yaml(kustomize('deploy/kubernetes/overlays/dev'))` is what the loop
 deploys, so Tilt owns exactly what the overlay deploys and nothing beside it.
-Each resource carries a label, `tally` for the Reporting API and the engine and
-`infrastructure` for the rest, and a link to its real URL, so the Tilt UI opens
-the service itself rather than a port-forward.
+Each resource carries a label, `tally` for the Reporting API, the engine and the
+console and `infrastructure` for the rest, and a link to its real URL, so the
+Tilt UI opens the service itself rather than a port-forward.
 
 The collector and the simulator stay outside the loop. They run beside a broker
 rather than in the cluster, which is what the simulator stack is for.
@@ -472,27 +493,28 @@ section 2 of
 [`roadmap/00-conventions.md`](https://github.com/B42Labs/tally/blob/main/roadmap/00-conventions.md)
 reserves it for the first deployment to a real cluster.
 
-Against the dev overlay, the prod overlay takes its four images from `ghcr.io`
+Against the dev overlay, the prod overlay takes its five images from `ghcr.io`
 at one release tag instead of `kind load`: the Reporting API, the engine, the
-collector and the admin CLI. It lists three components beside
-`envoy-gateway`. `openstack-collector` runs the collector in the cluster; the
-dev stack keeps its collector in compose, beside its broker. `migrations` runs
-Job `tally-migrate`, which applies both migration chains on every deploy with
-the two CLIs of the release, where the dev stack runs `make migrate` with
-`go run`. `reconciliation` runs CronJob `tally-sync` and mounts the clouds
-files of the Reporting API; the dev stack syncs its simulated cloud from the
-loop of
+console, the collector and the admin CLI. Both overlays list `envoy-gateway` and
+`console`, and the prod overlay lists three components beside them.
+`openstack-collector` runs the collector in the cluster; the dev stack keeps its
+collector in compose, beside its broker. `migrations` runs Job `tally-migrate`,
+which applies both migration chains on every deploy with the two CLIs of the
+release, where the dev stack runs `make migrate` with `go run`. `reconciliation`
+runs CronJob `tally-sync` and mounts the clouds files of the Reporting API; the
+dev stack syncs its simulated cloud from the loop of
 [reconcile the simulated cloud](/how-to/simulator/reconcile-the-simulated-cloud),
-which tells each sync the instant of the simulated month. The engine CronJob
+which tells each sync the instant of the simulated month. The console's token
+Secret is created by the operator rather than by `make up`. The engine CronJob
 is kept as the base declares it. The certificate is signed by a Let's Encrypt
-ClusterIssuer over HTTP-01 and names the four published hostnames instead of a
+ClusterIssuer over HTTP-01 and names the five published hostnames instead of a
 wildcard from the dev CA. Every hostname comes from `hosts.yaml` through
 kustomize replacements, and the secrets come from untracked files instead of
 literals. The Gateway keeps the default LoadBalancer Service of Envoy Gateway
 instead of `envoyproxy.yaml`, and it has no `postgres` listener, so the admin
-CLI and the engine CLI reach the database through a port-forward. The routes
-of VictoriaMetrics, vmalert and Alertmanager are deleted. Grafana serves no
-`/metrics`. VictoriaMetrics scrapes the three in-cluster jobs only.
+CLI and the engine CLI reach the database through a port-forward. The routes of
+VictoriaMetrics, vmalert and Alertmanager are deleted. Grafana serves no
+`/metrics`. VictoriaMetrics scrapes the four in-cluster jobs only.
 [Deploy the stack to a cluster](/how-to/cluster/deploy-the-collecting-stack)
 walks the deployment through.
 

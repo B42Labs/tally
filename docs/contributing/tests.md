@@ -201,10 +201,11 @@ mismatch that would otherwise fail quietly.
   still evaluates every rule and still answers its probes while nothing is
   ever posted to Alertmanager.
 - `deploy/kubernetes/components/envoy-gateway/manifest_test.go` pins what the
-  stack takes from Envoy Gateway: the GatewayClass, the rate limit on the OTLP
-  routes, and the two rules that answer a request with a 403. A policy whose
-  target names no route leaves both OTLP hostnames unlimited, and a deny rule
-  that references a filter no file declares still renders.
+  stack takes from Envoy Gateway: the GatewayClass, the rate limits on the OTLP
+  routes and on the console route, each a bucket per client address, and the
+  two rules that answer a request with a 403. A policy whose target names no
+  route leaves both OTLP hostnames or the console's sign-in unlimited, and a
+  deny rule that references a filter no file declares still renders.
 - `deploy/kubernetes/components/openstack-collector/manifest_test.go` pins the
   collector Deployment's contract with the binary, with its two Secrets, with
   the claim its outbox lies on, with the Service of the Reporting API it posts
@@ -215,6 +216,19 @@ mismatch that would otherwise fail quietly.
   read, a URL naming a Service the base no longer declares leaves every event
   in the outbox, and a Service the scrape job does not keep leaves the outbox
   gauges unread. kustomize renders all five.
+- `deploy/kubernetes/components/console/manifest_test.go` pins the console
+  Deployment's contract with the binary, with its three Secrets, with the
+  Service of the Reporting API it reads, with the Gateway its route attaches
+  to and with the Service the store's `console` scrape job keeps. A pod not
+  confined to its user and a read-only root filesystem widens what a bug in
+  the binary reaches. A `*_FILE` path that matches no mount, a listen address
+  of `127.0.0.1` or a probe on the page port leaves the pod restarting, a URL
+  naming a Service the base no longer declares leaves every page on an error,
+  a route that reaches the `ops` port publishes the metrics without a
+  credential, and a Service the scrape job does not keep resolves the job to
+  no target. kustomize renders and applies all of them. An object of Envoy
+  Gateway's own group renders as well, and fails the apply on a cluster behind
+  another Gateway API implementation.
 - `deploy/kubernetes/overlays/dev/manifest_test.go` pins the three files this
   overlay adds to the metrics pipeline. A scrape config that dropped or
   renamed a job of the base leaves `TallyExporterServiceSilent` selecting a
@@ -222,26 +236,37 @@ mismatch that would otherwise fail quietly.
   clauses are not the discovered jobs of the overlay's scrape config leaves
   `TallyScrapeJobMissing` firing for a job nobody configured or silent on one
   that resolves to nothing. Neither the scrape nor the rules fail on their
-  own. It asserts that the overlay lists the `envoy-gateway` component too:
-  without the entry the overlay renders, and the cluster has no GatewayClass.
+  own. It asserts that the overlay lists the `envoy-gateway` and the `console`
+  components too: without an entry the overlay renders, and the cluster has no
+  GatewayClass or no console. It signs in with the development credential
+  `make up` prints against the generated `tally-console-auth` literal, which
+  the console refuses under bcrypt cost 10, holds that literal to the
+  `CONSOLE_HTPASSWD` line `make console` starts the console with, and holds
+  the `db-url` literal of `tally-console-db` to the role and the password
+  `make migrate` sets, without which every page that reads the engine
+  database answers 503.
 - `deploy/kubernetes/overlays/prod/manifest_test.go` pins where the prod
   overlay's names come from and what it keeps off the internet. A replacement
-  aimed at the wrong field, a delete patch lost in an edit, or a listener
-  index that no longer names `postgres` still renders a valid overlay, and the
-  first sign is a wrong hostname or an unauthenticated service on a public
-  address. The same goes for a `components` entry lost in an edit, which
-  leaves the cluster without a GatewayClass and without the OTLP rate limit,
-  without a collector, without migrations or without a sync. It holds the four
-  images to one release tag and to the names the containers carry, every
-  mounted Secret key to an example, the token Secret of the collector out of
-  every generator, `collector.env` to one `TALLY_OSC_CLOUD` line and to no
-  variable the component fixes, and `reconciliation/clouds-config.yaml` to
-  empty names on the lines `make prod-up` reads.
+  aimed at the wrong field, a delete patch lost in an edit, or a listener index
+  that no longer names `postgres` still renders a valid overlay, and the first
+  sign is a wrong hostname or an unauthenticated service on a public address.
+  The same goes for a `components` entry lost in an edit, which leaves the
+  cluster without a GatewayClass and without the OTLP rate limit, without a
+  collector, without migrations, without a sync or without the console. It holds
+  the five images to one release tag and to the names the containers carry,
+  every mounted Secret key to an example, the console's example `db-url` to
+  the role, host and database it connects to, the two token Secrets of the
+  collector and the console out of every generator, `collector.env` to one
+  `TALLY_OSC_CLOUD` line and to no variable the component fixes, and
+  `reconciliation/clouds-config.yaml` to empty names on the lines `make prod-up`
+  reads.
 - `deploy/kubernetes/overlays/prod/makefile_test.go` runs `make prod-up` up to
   the refusal of each guard, in a throwaway Git repository and against a
   kubeconfig that names no cluster. Without the guards an empty secret value
-  or a missing key applies, an empty `TALLY_OSC_CLOUD` ends the collector in a
-  pod nothing waits on, a clouds config naming another cloud syncs nothing,
+  or a missing key applies, a console `db-url` without the console's
+  `password` leaves every page that reads the engine database on a 503, an
+  empty `TALLY_OSC_CLOUD` ends the collector in a pod nothing waits on, a
+  clouds config naming another cloud syncs nothing,
   and two images at two tags deploy two releases. A shell script it writes
   stands in for kubectl and answers the state of the migration Job, which pins
   that a Job still running is never deleted, that a finished one is deleted
