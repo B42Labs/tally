@@ -1,0 +1,53 @@
+# The console's hostname is published on the internet, and its pages answer
+# every request with a bcrypt comparison before they can refuse it. The
+# console runs at most two comparisons at once and answers 503 once 32
+# requests wait for one. The password of an operator who signed in is
+# remembered and needs no comparison, so while the queue is full a right guess
+# answers 200 and a wrong one 503, and neither costs a comparison.
+#
+# This limit bounds what one client address can do against that: the password
+# guesses it makes a second, and with them the 503-against-200 difference a
+# full sign-in queue shows. A rejected request is answered with 429 by the
+# proxy and never reaches the console. Local means per proxy replica and needs
+# no rate limit service, and the Distinct selector keeps a bucket per client
+# address, as the OTLP limit beside this file does.
+#
+# What it leaves open is guessing spread over many addresses: a local limit
+# counts per address per proxy replica, and a total across them takes the
+# Global type and the rate limit service that comes with it. 10 a second is
+# three to five page views of one operator. A page view costs two or three
+# requests: the 401 challenge of a browser that has not signed in yet, the
+# page, and the stylesheet, which Cache-Control: no-store makes the browser
+# fetch again every time.
+#
+# The second rule is the route default, and it covers the sources the IPv4
+# matcher does not select, an IPv6 client being the one to expect. A rule set
+# with no rule without clientSelectors leaves everything that matches no
+# selector unlimited.
+#
+# The policy targets HTTPRoute console, which the component
+# deploy/kubernetes/components/console declares. On a cluster that lists this
+# component without that one it targets nothing and limits nothing.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: console
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: console
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        - clientSelectors:
+            - sourceCIDR:
+                value: 0.0.0.0/0
+                type: Distinct
+          limit:
+            requests: 10
+            unit: Second
+        - limit:
+            requests: 10
+            unit: Second
