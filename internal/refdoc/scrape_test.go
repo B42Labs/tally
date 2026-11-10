@@ -9,7 +9,7 @@ import (
 // number of jobs a page states. A job added without a row is noticed here.
 const (
 	realScrape     = "../../deploy/kubernetes/base/victoriametrics/scrape.yaml"
-	realScrapeJobs = 5
+	realScrapeJobs = 6
 )
 
 func TestScrapeJobs(t *testing.T) {
@@ -58,6 +58,8 @@ func TestScrapeJobsRendersTheJobsOfThisRepository(t *testing.T) {
 			"kept by `reporting-api;http` | none |",
 		"| `openstack-db-exporter` | `300s` | `60s` | `os-db-exporter:9180` | " +
 			"`cloud=os-prod-eu1`, `platform=openstack` |",
+		"| `console` | `30s` | none | discovered, role `endpointslice`, " +
+			"kept by `console;ops` | none |",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the rendering does not carry %q:\n%s", want, got)

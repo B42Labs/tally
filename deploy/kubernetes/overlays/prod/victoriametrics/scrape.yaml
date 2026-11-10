@@ -3,15 +3,16 @@
 # This file replaces the generated victoriametrics-scrape ConfigMap through the
 # behavior: replace generator in the overlay's kustomization.yaml, which is the
 # mechanism docs/how-to/observability/scrape-the-openstack-exporters.md
-# documents under "Replace the scrape targets". It holds the base's three
+# documents under "Replace the scrape targets". It holds the base's four
 # in-cluster jobs, copied unchanged, and nothing else: the Reporting API, the
-# OTel Collector and the OpenStack collector the collector component runs.
+# OTel Collector, the OpenStack collector the collector component runs and the
+# console the console component runs.
 #
 # The two OpenStack jobs of the base scrape placeholder addresses. Left in
 # place on a cluster with no such exporter, they would keep
 # TallyScrapeTargetDown firing for as long as the cluster runs.
-# scrape-rules.yaml beside this file names the three jobs below in
-# TallyScrapeJobMissing, the same three the base's names. The first cloud's
+# scrape-rules.yaml beside this file names the four jobs below in
+# TallyScrapeJobMissing, the same four the base's names. The first cloud's
 # exporters are added through the how-to above.
 #
 # The jobs, their intervals, and how the in-cluster jobs find their targets are
@@ -40,7 +41,7 @@ scrape_configs:
   # per-target series, so zero targets produce no up series at all rather than
   # up == 0: a Deployment scaled to zero, a renamed Service, a renamed port, a
   # removed RoleBinding, or an unreachable API server all take the job off
-  # /targets instead of turning it red. An alert on these three jobs therefore
+  # /targets instead of turning it red. An alert on these four jobs therefore
   # pairs up == 0 with absent(up{job="..."})
   # (roadmap/02-phase-2-reporting-dashboards.md).
   - job_name: reporting-api
@@ -90,6 +91,25 @@ scrape_configs:
           - __meta_kubernetes_service_name
           - __meta_kubernetes_endpointslice_port_name
         regex: openstack-collector;http
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  # The console the console component runs, on the port its Service carries
+  # for this job alone. The series are service metrics, its request and refused
+  # sign-in counters, and the interval is the Reporting API's. The job sets no
+  # static labels.
+  - job_name: console
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: console;ops
         action: keep
       - source_labels:
           - __meta_kubernetes_pod_name

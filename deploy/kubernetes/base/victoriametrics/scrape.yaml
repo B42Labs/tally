@@ -28,7 +28,7 @@ scrape_configs:
   # per-target series, so zero targets produce no up series at all rather than
   # up == 0: a Deployment scaled to zero, a renamed Service, a renamed port, a
   # removed RoleBinding, or an unreachable API server all take the job off
-  # /targets instead of turning it red. An alert on these three jobs therefore
+  # /targets instead of turning it red. An alert on these four jobs therefore
   # pairs up == 0 with absent(up{job="..."})
   # (roadmap/02-phase-2-reporting-dashboards.md).
   - job_name: reporting-api
@@ -95,6 +95,25 @@ scrape_configs:
           - __meta_kubernetes_service_name
           - __meta_kubernetes_endpointslice_port_name
         regex: openstack-collector;http
+        action: keep
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: instance
+  # The console the console component runs, on the port its Service carries
+  # for this job alone. The series are service metrics, its request and refused
+  # sign-in counters, and the interval is the Reporting API's. The job sets no
+  # static labels.
+  - job_name: console
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+      - role: endpointslice
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_service_name
+          - __meta_kubernetes_endpointslice_port_name
+        regex: console;ops
         action: keep
       - source_labels:
           - __meta_kubernetes_pod_name

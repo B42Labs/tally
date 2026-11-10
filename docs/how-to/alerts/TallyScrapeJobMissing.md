@@ -7,7 +7,7 @@ audience: operator
 
 # TallyScrapeJobMissing
 
-`absent(up{job="reporting-api"}) or absent(up{job="otel-collector"}) or absent(up{job="openstack-collector"})`,
+`absent(up{job="reporting-api"}) or absent(up{job="otel-collector"}) or absent(up{job="openstack-collector"}) or absent(up{job="console"})`,
 `for: 5m`, in
 [`scrape-rules.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/vmalert/scrape-rules.yaml),
 which an overlay replaces together with its scrape config. The expression above
@@ -31,8 +31,8 @@ target to see it by.
 1. The Deployment's replica count. A Deployment scaled to zero takes its job
    off the page.
 2. The Service name and the port name the relabel rule keeps,
-   `reporting-api;http`, `otel-collector;metrics` and `openstack-collector;http`
-   in
+   `reporting-api;http`, `otel-collector;metrics`, `openstack-collector;http`
+   and `console;ops` in
    [`scrape.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/kubernetes/base/victoriametrics/scrape.yaml).
    A rename on either side drops every endpoint of the job.
 3. The `victoriametrics-scrape` RoleBinding in
