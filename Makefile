@@ -104,7 +104,8 @@ CONSOLE_PORT ?= 8095
 # The bcrypt line of the development credential `console` starts with: user
 # tally, password tally-dev-console-password. The hash and the password move
 # together, so this is := and not ?=: an override of one could not update the
-# other.
+# other. deploy/kubernetes/overlays/dev/kustomization.yaml carries the same
+# line, unescaped, as the literal of tally-console-auth.
 CONSOLE_HTPASSWD := tally:$$2y$$10$$ozNeOXtuRimnpsNE.5KbUuSGhsattbYTZttj5kimYhssYd.Gjr22K
 
 COMPOSE := docker compose -f deploy/compose/compose.yaml
@@ -594,9 +595,14 @@ up:
 	@echo '==> applying the migration chain'
 	$(MAKE) migrate
 	$(call await,-n $(NAMESPACE) rollout status deployment/reporting-api,the Reporting API)
+	@# A token can be issued only against the migrated database, so the console
+	@# pod waits in ContainerCreating for its token Secret until this step.
+	@$(call console_token)
+	$(call await,-n $(NAMESPACE) rollout status deployment/console,the console)
 	@echo
 	@echo 'Stack is up:'
 	@echo '  https://api.tally.127-0-0-1.nip.io:8443/api/v1        Reporting API'
+	@echo '  https://console.tally.127-0-0-1.nip.io:8443           Console, sign in as tally / tally-dev-console-password'
 	@echo '  https://vm.tally.127-0-0-1.nip.io:8443                VictoriaMetrics'
 	@echo '  https://grafana.tally.127-0-0-1.nip.io:8443           Grafana'
 	@# vmalert is listed with its /vmalert/ prefix because the route publishes

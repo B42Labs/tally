@@ -14,12 +14,22 @@
 // same on a file the pod never carried. A Reporting API without the settle
 // window set to 0 keeps the default of 60 seconds, measured against the instant
 // a sync of the simulated month is told, and defers the month's last minute on
-// every run. The tests read the YAML from disk and need neither a cluster nor
-// kustomize.
+// every run.
+//
+// It also pins what the overlay hands the console. A component lost from the
+// list renders an overlay without the GatewayClass or without the console, a
+// development credential under bcrypt cost 10 is one the console refuses at
+// its start, and a connection string whose password is not the one `make
+// migrate` sets leaves every page that reads the engine database on a 503. The
+// tests read the YAML from disk and need neither a cluster nor kustomize.
 package dev_test
 
 import (
+	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,6 +40,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/b42labs/tally/internal/console/signin"
 	"github.com/b42labs/tally/internal/engine/counters"
 	"github.com/b42labs/tally/internal/providers/openstack"
 	"github.com/b42labs/tally/internal/providers/openstack/simulator"
@@ -91,9 +102,25 @@ const (
 	settleVariable      = "TALLY_REPORTING_SYNC_SETTLE_S"
 
 	// The kustomize component that declares what the stack needs Envoy Gateway
-	// for, as the overlay lists it.
+	// for, and the one that declares the console, as the overlay lists them.
 	envoyGatewayComponent = "../../components/envoy-gateway"
+	consoleComponent      = "../../components/console"
+
+	// The Secrets the overlay generates for the console, and the development
+	// credential `make up` prints.
+	consoleAuthSecret = "tally-console-auth"
+	consoleDBSecret   = "tally-console-db"
+	consoleUser       = "tally"
+	consolePassword   = "tally-dev-console-password"
 )
+
+// consolePasswordRe is the Makefile line that names the password `make
+// migrate` sets on tally_console.
+var consolePasswordRe = regexp.MustCompile(`(?m)^TALLY_DEV_CONSOLE_DB_PASSWORD \?= (\S+)$`)
+
+// consoleHtpasswdRe is the Makefile line that names the bcrypt line `make
+// console` starts the console with, its $ escaped as $$.
+var consoleHtpasswdRe = regexp.MustCompile(`(?m)^CONSOLE_HTPASSWD := (\S+)$`)
 
 // scrapeConfig is the part of a scrape file these tests assert over. yaml.v3
 // ignores every field not named here, so the discovered jobs decode to their
@@ -132,6 +159,7 @@ var absentJobRe = regexp.MustCompile(`absent\(up\{job="([^"]+)"\}\)`)
 // components it lists, what it generates and what it patches.
 type kustomization struct {
 	Components         []string    `yaml:"components"`
+	SecretGenerator    []generator `yaml:"secretGenerator"`
 	ConfigMapGenerator []generator `yaml:"configMapGenerator"`
 	Patches            []struct {
 		Patch string `yaml:"patch"`
@@ -142,6 +170,7 @@ type generator struct {
 	Name     string   `yaml:"name"`
 	Behavior string   `yaml:"behavior"`
 	Files    []string `yaml:"files"`
+	Literals []string `yaml:"literals"`
 }
 
 // cronJobPatch is one strategic merge patch against the scheduler CronJob.
@@ -588,18 +617,108 @@ func TestTheSettleWindowIsOffOnTheReportingAPI(t *testing.T) {
 	}
 }
 
-func TestTheEnvoyGatewayComponentIsListed(t *testing.T) {
+func TestTheComponentsAreListed(t *testing.T) {
 	// The base is plain Gateway API and names no implementation. The
-	// GatewayClass bound to Envoy Gateway's controller, the rate limit on the
-	// OTLP routes and the two 403 answers are the component's, and the dev
-	// stack runs Envoy Gateway. An entry lost in an edit is not an error to
-	// kustomize: the overlay renders, and the Gateway names a class nobody
-	// declares.
+	// GatewayClass bound to Envoy Gateway's controller, the rate limits on the
+	// OTLP and the console routes and the two 403 answers are the first
+	// component's, and the dev stack runs Envoy Gateway. The second runs the
+	// console, the Deployment a release deploys. An entry lost in an edit is not
+	// an error to kustomize: the overlay renders, and the Gateway names a class
+	// nobody declares or the cluster runs no console.
 	k := kustomizationOf(t)
 
-	if want := []string{envoyGatewayComponent}; !slices.Equal(k.Components, want) {
-		t.Errorf("%s lists the components %v, want %v; without the entry the cluster has no GatewayClass and no rate limit, and the overlay still renders",
+	if want := []string{envoyGatewayComponent, consoleComponent}; !slices.Equal(k.Components, want) {
+		t.Errorf("%s lists the components %v, want %v; without an entry the overlay still renders",
 			kustomizationFile, k.Components, want)
+	}
+}
+
+func TestTheDevCredentialSignsIn(t *testing.T) {
+	// The console refuses a line that is not bcrypt or is under cost 10 at its
+	// start, and a hash of another password leaves the credential `make up`
+	// prints answering 401. Neither stops kustomize or the apply.
+	htpasswd := secretLiteral(t, kustomizationOf(t), consoleAuthSecret, "htpasswd")
+
+	basic, err := signin.NewBasic(htpasswd, slog.New(slog.DiscardHandler), nil)
+	if err != nil {
+		t.Fatalf("the console refuses the htpasswd literal of %s, so it exits at its start: %v", consoleAuthSecret, err)
+	}
+	handler := basic.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tc := range []struct {
+		password string
+		want     int
+	}{
+		{consolePassword, http.StatusNoContent},
+		{consolePassword + "-wrong", http.StatusUnauthorized},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.SetBasicAuth(consoleUser, tc.password)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("signing in as %s with %q answers %d, want %d", consoleUser, tc.password, rec.Code, tc.want)
+		}
+	}
+
+	// make up prints the credential, so a password changed in one place and
+	// not the other is one the developer is told and refused.
+	raw, err := os.ReadFile(makefileFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", makefileFile, err)
+	}
+	_, recipe, found := strings.Cut(string(raw), "\nup:\n")
+	if !found {
+		t.Fatalf("%s declares no target up", makefileFile)
+	}
+	recipe, _, _ = strings.Cut(recipe, "\n## ")
+	if !strings.Contains(recipe, consolePassword) {
+		t.Errorf("the up recipe of %s does not print %s, the password the literal of %s is the hash of", makefileFile, consolePassword, consoleAuthSecret)
+	}
+
+	// make console signs in with CONSOLE_HTPASSWD, so a credential rotated
+	// there and not here leaves make console and the deployed console asking
+	// for two passwords.
+	m := consoleHtpasswdRe.FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("%s has no line matching %s", makefileFile, consoleHtpasswdRe)
+	}
+	if want := strings.ReplaceAll(string(m[1]), "$$", "$"); htpasswd != want {
+		t.Errorf("the htpasswd literal of %s is %q, want %q, CONSOLE_HTPASSWD of %s unescaped", consoleAuthSecret, htpasswd, want, makefileFile)
+	}
+}
+
+func TestTheConsoleConnectsAsTheRoleMakeMigrateSets(t *testing.T) {
+	// make migrate sets the password of tally_console to
+	// TALLY_DEV_CONSOLE_DB_PASSWORD. A literal with another password, another
+	// role or another database leaves every page that reads the engine database
+	// on a 503 while the pod reports ready.
+	raw := secretLiteral(t, kustomizationOf(t), consoleDBSecret, "db-url")
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("the db-url literal of %s is no URL: %v", consoleDBSecret, err)
+	}
+
+	makefile, err := os.ReadFile(makefileFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", makefileFile, err)
+	}
+	match := consolePasswordRe.FindSubmatch(makefile)
+	if match == nil {
+		t.Fatalf("%s has no line matching %s, which names the password make migrate sets", makefileFile, consolePasswordRe)
+	}
+
+	password, _ := u.User.Password()
+	for _, c := range []struct{ what, got, want string }{
+		{"role", u.User.Username(), "tally_console"},
+		{"password", password, string(match[1])},
+		{"host", u.Hostname(), "timescaledb"},
+		{"database", strings.TrimPrefix(u.Path, "/"), "tally_engine"},
+	} {
+		if c.got != c.want {
+			t.Errorf("the db-url literal of %s names the %s %q, want %q", consoleDBSecret, c.what, c.got, c.want)
+		}
 	}
 }
 
@@ -616,6 +735,25 @@ func kustomizationOf(t *testing.T) kustomization {
 		t.Fatalf("parsing %s, which kustomize refuses to build: %v", kustomizationFile, err)
 	}
 	return k
+}
+
+// secretLiteral returns the value of one key among the literals of one
+// generated Secret, failing when the overlay generates no such Secret or key.
+func secretLiteral(t *testing.T, k kustomization, name, key string) string {
+	t.Helper()
+
+	for _, g := range k.SecretGenerator {
+		if g.Name != name {
+			continue
+		}
+		for _, literal := range g.Literals {
+			if value, found := strings.CutPrefix(literal, key+"="); found {
+				return value
+			}
+		}
+	}
+	t.Fatalf("%s generates no secret %s with a literal for the key %s", kustomizationFile, name, key)
+	return ""
 }
 
 // decodeFile decodes one YAML file into v.
