@@ -19,8 +19,8 @@ const (
 	// themeAuto clears the cookie: the page follows the operating system
 	// again, which is what a page without the attribute does.
 	themeAuto = "auto"
-	// themeCookieAge is a year in seconds. A demo console outlives no laptop,
-	// and a choice that expired would fall back to the operating system's.
+	// themeCookieAge is a year in seconds. A choice that expired would fall
+	// back to the operating system's.
 	themeCookieAge = 365 * 24 * 60 * 60
 )
 

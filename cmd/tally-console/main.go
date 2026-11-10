@@ -1,4 +1,4 @@
-// Command tally-console serves the read-only demo console.
+// Command tally-console serves the read-only console.
 //
 // It reads its configuration from the environment, refuses a configuration it
 // cannot honor, and then serves the console's pages on the configured address
@@ -58,9 +58,9 @@ const (
 	// deadline entirely: idle connections would then pile up until the process
 	// runs out of file descriptors.
 	idleTimeout = 120 * time.Second
-	// shutdownTimeout is what in-flight requests get once a signal arrives. The
-	// console is started from a terminal rather than deployed, so this budget is
-	// all a Ctrl-C gives the pages still rendering before the process ends.
+	// shutdownTimeout is what in-flight requests get once a signal arrives. In a
+	// pod it stays inside the kubelet's default grace period of 30 seconds, so
+	// the pages still rendering finish before the kubelet kills the process.
 	shutdownTimeout = 10 * time.Second
 )
 

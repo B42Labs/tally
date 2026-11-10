@@ -1,4 +1,4 @@
-// Package httpui is the demo console's web layer: the router, the handlers, the
+// Package httpui is the console's web layer: the router, the handlers, the
 // templates they render, and the one stylesheet those templates load.
 //
 // Every page is HTML the handler wrote. The console ships no JavaScript, so no
@@ -159,8 +159,8 @@ func NewRouter(opts Options) (http.Handler, error) {
 	// outside the sign-in, so that a 401 carries them too. The access log sits
 	// inside the sign-in, where the operator is known, and outside Recoverer, so
 	// a panicking handler is logged with the 500 Recoverer wrote. A panic is the
-	// one failure that does not reach fail, and a demo console answering nothing
-	// at all is worse than one answering 500.
+	// one failure that does not reach fail, and a console answering nothing at
+	// all is worse than one answering 500.
 	r.Use(secureHeaders, opts.SignIn, accessLog(logger, opts.Metrics), middleware.Recoverer)
 
 	r.Get("/", h.overview)
