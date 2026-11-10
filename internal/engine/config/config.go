@@ -28,6 +28,7 @@ const (
 	envLogLevel         = "TALLY_LOG_LEVEL"
 	envDBURL            = "TALLY_ENGINE_DB_URL"
 	envReportingDBURL   = "TALLY_ENGINE_REPORTING_DB_URL"
+	envConsolePassword  = "TALLY_ENGINE_CONSOLE_PASSWORD"
 	envVMURL            = "TALLY_ENGINE_VM_URL"
 	envGraceHours       = "TALLY_ENGINE_GRACE_HOURS"
 	envAutoFinalize     = "TALLY_ENGINE_AUTO_FINALIZE"
@@ -46,6 +47,8 @@ var EnvNames = []string{
 	envDBURL + envsecret.Suffix,
 	envReportingDBURL,
 	envReportingDBURL + envsecret.Suffix,
+	envConsolePassword,
+	envConsolePassword + envsecret.Suffix,
 	envVMURL,
 	envGraceHours,
 	envAutoFinalize,
@@ -77,6 +80,12 @@ type Config struct {
 	// the four tables metering reads; a deployment connects as a login role that
 	// is a member of it. Supports the *_FILE convention.
 	ReportingDBURL string `env:"TALLY_ENGINE_REPORTING_DB_URL"`
+	// ConsolePassword is the password tally-engine ensure-console-role sets on
+	// tally_console, the login role the console reads the engine database as.
+	// It has to be printable ASCII without spaces, which openssl rand -hex 32
+	// produces, and it reaches the server only as a SCRAM-SHA-256 verifier. No
+	// other subcommand reads it. Supports the *_FILE convention.
+	ConsolePassword string `env:"TALLY_ENGINE_CONSOLE_PASSWORD"`
 	// VMURL is the base URL of the VictoriaMetrics instance the metricsql
 	// counter sources are queried against. It is needed only when the counter
 	// sources file declares metricsql sources. It has no default because the
@@ -133,6 +142,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ReportingDBURL, err = envsecret.Resolve(envReportingDBURL, cfg.ReportingDBURL); err != nil {
+		return Config{}, err
+	}
+	if cfg.ConsolePassword, err = envsecret.Resolve(envConsolePassword, cfg.ConsolePassword); err != nil {
 		return Config{}, err
 	}
 
@@ -207,6 +219,22 @@ func (c Config) ValidateDB() error {
 func (c Config) ValidateReporting() error {
 	if c.ReportingDBURL == "" {
 		return fmt.Errorf("%s: must be set", envReportingDBURL)
+	}
+	return nil
+}
+
+// ValidateConsoleRole is the gate of ensure-console-role. It refuses an empty
+// password, and one with a byte outside printable ASCII or a space: the
+// verifier is computed without SASLprep, which every client agrees with only
+// on such a password. Neither message carries the value.
+func (c Config) ValidateConsoleRole() error {
+	if c.ConsolePassword == "" {
+		return fmt.Errorf("%s: must be set", envConsolePassword)
+	}
+	for i := range len(c.ConsolePassword) {
+		if b := c.ConsolePassword[i]; b < 0x21 || b > 0x7e {
+			return fmt.Errorf("%s: must be printable ASCII without spaces", envConsolePassword)
+		}
 	}
 	return nil
 }

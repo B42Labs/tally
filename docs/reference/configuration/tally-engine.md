@@ -33,6 +33,7 @@ so a lower-case `info` is refused.
 | `TALLY_LOG_LEVEL` | string | `INFO` | no | LogLevel is the slog threshold, one of DEBUG, INFO, WARN, or ERROR. |
 | `TALLY_ENGINE_DB_URL` | string | none | yes (`TALLY_ENGINE_DB_URL_FILE`) | DBURL is the PostgreSQL connection string of the engine's own database, which holds the runs and their records. It has no default because a guessed database is worse than none. Supports the *_FILE convention. |
 | `TALLY_ENGINE_REPORTING_DB_URL` | string | none | yes (`TALLY_ENGINE_REPORTING_DB_URL_FILE`) | ReportingDBURL is the PostgreSQL connection string of the Reporting API's database, which the engine reads events and resources from. It has no default for the same reason as DBURL. Migration 0008 of the reporting chain creates the group role tally_engine_reader and grants it SELECT on the four tables metering reads; a deployment connects as a login role that is a member of it. Supports the *_FILE convention. |
+| `TALLY_ENGINE_CONSOLE_PASSWORD` | string | none | yes (`TALLY_ENGINE_CONSOLE_PASSWORD_FILE`) | ConsolePassword is the password tally-engine ensure-console-role sets on tally_console, the login role the console reads the engine database as. It has to be printable ASCII without spaces, which openssl rand -hex 32 produces, and it reaches the server only as a SCRAM-SHA-256 verifier. No other subcommand reads it. Supports the *_FILE convention. |
 | `TALLY_ENGINE_VM_URL` | string | none | no | VMURL is the base URL of the VictoriaMetrics instance the metricsql counter sources are queried against. It is needed only when the counter sources file declares metricsql sources. It has no default because the endpoint differs per deployment, and no gate here: the first subcommand that queries VictoriaMetrics adds its own. |
 | `TALLY_ENGINE_GRACE_HOURS` | integer | `72` | no | GraceHours is how long a run waits after its billing period ends before it executes, so events that arrive late still reach the run that bills them. Zero is a grace window of no hours, which runs the period the moment it closes. |
 | `TALLY_ENGINE_AUTO_FINALIZE` | boolean | `false` | no | AutoFinalize lets a completed run finalize itself. It defaults to false because a finalized run is immutable and its data may reach an ERP, so the step gets a human gate. |
@@ -44,8 +45,8 @@ so a lower-case `info` is refused.
 
 ## What is checked
 
-`Load` runs for every subcommand. It resolves the two file-backed secrets and
-then checks:
+`Load` runs for every subcommand. It resolves the three file-backed secrets
+and then checks:
 
 - `TALLY_LOG_LEVEL` is one of the four levels above.
 - `TALLY_ENGINE_GRACE_HOURS` is not negative. Zero is a grace window of no
@@ -68,6 +69,15 @@ database. It adds `TALLY_ENGINE_DB_URL` is set.
 
 `ValidateReporting` is the gate of the subcommands that read the Reporting
 API's database. It adds `TALLY_ENGINE_REPORTING_DB_URL` is set.
+
+`ValidateConsoleRole` is the gate of `ensure-console-role`. It refuses an empty
+or unset `TALLY_ENGINE_CONSOLE_PASSWORD` with
+`TALLY_ENGINE_CONSOLE_PASSWORD: must be set`, and a value with any byte outside
+`0x21` to `0x7E` with
+`TALLY_ENGINE_CONSOLE_PASSWORD: must be printable ASCII without spaces`. A space,
+a tab and a letter outside ASCII are all refused, because the SCRAM-SHA-256
+verifier is computed without the Unicode normalization a client would apply.
+Neither message carries the value. What `openssl rand -hex 32` prints passes.
 
 `TALLY_ENGINE_VM_URL` has no gate in this package. The subcommand that queries
 VictoriaMetrics brings its own.

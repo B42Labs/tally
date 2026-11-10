@@ -108,6 +108,36 @@ func TestLoadResolvesFileSecrets(t *testing.T) {
 		}
 	})
 
+	t.Run("the console password comes from the file with the trailing newline trimmed", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_CONSOLE_PASSWORD_FILE": writeSecret(t, "c0ns0le-secret\n"),
+		})
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v, want nil", err)
+		}
+		if want := "c0ns0le-secret"; cfg.ConsolePassword != want {
+			t.Errorf("ConsolePassword = %q, want %q", cfg.ConsolePassword, want)
+		}
+	})
+
+	t.Run("the console password and its file companion are mutually exclusive", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"TALLY_ENGINE_CONSOLE_PASSWORD":      "c0ns0le-secret",
+			"TALLY_ENGINE_CONSOLE_PASSWORD_FILE": writeSecret(t, "c0ns0le-other\n"),
+		})
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want an error")
+		}
+		want := "set TALLY_ENGINE_CONSOLE_PASSWORD or TALLY_ENGINE_CONSOLE_PASSWORD_FILE, not both"
+		if err.Error() != want {
+			t.Errorf("Load() error = %q, want %q", err, want)
+		}
+	})
+
 	t.Run("the variable and its file companion are mutually exclusive", func(t *testing.T) {
 		setEnv(t, map[string]string{
 			"TALLY_ENGINE_DB_URL":      "postgres://tally@localhost/engine",
@@ -456,6 +486,62 @@ func TestValidateReporting(t *testing.T) {
 			t.Errorf("ValidateReporting() error = %v, want nil", err)
 		}
 	})
+}
+
+func TestValidateConsoleRole(t *testing.T) {
+	const (
+		unset    = "must be set"
+		badBytes = "must be printable ASCII without spaces"
+	)
+	tests := []struct {
+		name string
+		vars map[string]string
+		// want is the message after the variable's name, or empty for a pass.
+		want string
+	}{
+		{name: "an unset variable", vars: nil, want: unset},
+		{name: "the empty value", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": ""}, want: unset},
+		{name: "a space", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "pass word"}, want: badBytes},
+		{name: "a letter outside ASCII", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "pässword"}, want: badBytes},
+		{name: "a tab", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "pass\tword"}, want: badBytes},
+		{name: "a control character", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "pass\x7fword"}, want: badBytes},
+		{
+			name: "what openssl rand -hex 32 prints",
+			vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": strings.Repeat("0f", 32)},
+		},
+		// The two ends of the accepted range, 0x21 and 0x7E.
+		{name: "an exclamation mark", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "!"}},
+		{name: "a tilde", vars: map[string]string{"TALLY_ENGINE_CONSOLE_PASSWORD": "~"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, tc.vars)
+
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want nil", err)
+			}
+
+			err = cfg.ValidateConsoleRole()
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("ValidateConsoleRole() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ValidateConsoleRole() error = nil, want an error")
+			}
+			if want := "TALLY_ENGINE_CONSOLE_PASSWORD: " + tc.want; err.Error() != want {
+				t.Errorf("ValidateConsoleRole() error = %q, want %q", err, want)
+			}
+			// The message goes to a log a password must never reach.
+			if value := cfg.ConsolePassword; value != "" && strings.Contains(err.Error(), value) {
+				t.Errorf("ValidateConsoleRole() error = %q, want it free of the value", err)
+			}
+		})
+	}
 }
 
 // TestEnvNamesCoversEveryField keeps the exported list and the struct tags from
