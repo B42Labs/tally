@@ -98,14 +98,16 @@ type Config struct {
 	// Anywhere else it puts the API token on the wire in cleartext.
 	ReportingInsecure bool `env:"TALLY_CONSOLE_REPORTING_INSECURE" envDefault:"false"`
 	// APIToken is the bearer token the console reads the Reporting API with. It
-	// has to carry the admin role, because the dead-letter list the overview
-	// reads is admin-only. It has to be set. Supports the *_FILE convention.
+	// has to carry read_all, the lowest role every route the console reads
+	// accepts. It has to be set. Supports the *_FILE convention.
 	APIToken string `env:"TALLY_CONSOLE_API_TOKEN"`
 	// CAFile is a PEM file holding the CA that signed the Reporting API's
 	// certificate. Empty trusts the system store.
 	CAFile string `env:"TALLY_CONSOLE_CA_FILE"`
 	// EngineDBURL is the PostgreSQL connection string of the engine database,
-	// opened for reads only. It has to be set. Supports the *_FILE convention.
+	// opened for reads only. Its role is meant to be tally_console, the member
+	// of tally_console_reader that tally-engine ensure-console-role provisions.
+	// It has to be set. Supports the *_FILE convention.
 	EngineDBURL string `env:"TALLY_CONSOLE_ENGINE_DB_URL"`
 	// Htpasswd is the one operator allowed to sign in, as one user:bcrypt-hash
 	// line in htpasswd format. It has to be set. Supports the *_FILE convention.
@@ -162,8 +164,8 @@ func Load() (Config, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return Config{}, fmt.Errorf("%s: %q must be an http or https URL", envReportingURL, cfg.ReportingURL)
 	}
-	// The token rides on every call, so a plaintext base URL puts an admin
-	// credential on the wire in the clear. Loopback is exempt: that is where a
+	// The token rides on every call, so a plaintext base URL puts the token on
+	// the wire in the clear. Loopback is exempt: that is where a
 	// test's server and a port-forwarded cluster listen. So is a URL the operator
 	// allowed with TALLY_CONSOLE_REPORTING_INSECURE. This rule lives here and only
 	// here, so the client the console builds takes the URL as given.

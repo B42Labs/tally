@@ -20,10 +20,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/b42labs/tally/internal/console/store"
 	"github.com/b42labs/tally/internal/engine/pricing"
+	enginestore "github.com/b42labs/tally/internal/engine/store"
 	enginesqlcgen "github.com/b42labs/tally/internal/engine/store/sqlcgen"
 	"github.com/b42labs/tally/internal/engine/store/storetest"
 )
@@ -79,11 +81,18 @@ const (
 	statementFile = "../../../internal/engine/export/testdata/golden/regular/statement-os-prod%2Fproj-456.json"
 )
 
+// consolePassword is what the fixture sets on tally_console, the role the
+// store under test connects as.
+const consolePassword = "console-test-password"
+
 // fixture is the seeded database, the store under test, and the log the store
 // writes its skipped rows to.
 type fixture struct {
 	store *store.Store
 	logs  *bytes.Buffer
+	// consoleURL is the connection string the store was opened on: the engine
+	// database as tally_console, the role a deployment gives the console.
+	consoleURL string
 	// regular is the run that billed March, correction the later run that
 	// corrects it.
 	regular    uuid.UUID
@@ -96,18 +105,27 @@ type fixture struct {
 // newFixture starts a database, seeds the March 2026 story into it, and opens
 // the console store on the result. One container serves every subtest: the
 // reads under test share a fixture rather than a database each.
+//
+// The store connects as tally_console, so every read below runs under the
+// grants of engine migration 3: a table the console reads without a grant
+// fails here. The seeding writes as the owner.
 func newFixture(t *testing.T) fixture {
 	t.Helper()
 
 	db := storetest.NewDB(t)
+	if _, err := db.Store.EnsureConsoleRole(t.Context(), consolePassword); err != nil {
+		t.Fatalf("creating the console's login role: %v", err)
+	}
+	consoleURL := storetest.URLAs(t, db.URL, enginestore.ConsoleRole, consolePassword)
+
 	logs := &bytes.Buffer{}
-	s, err := store.New(t.Context(), db.URL, slog.New(slog.NewTextHandler(logs, nil)))
+	s, err := store.New(t.Context(), consoleURL, slog.New(slog.NewTextHandler(logs, nil)))
 	if err != nil {
 		t.Fatalf("opening the console store: %v", err)
 	}
 	t.Cleanup(s.Close)
 
-	f := fixture{store: s, logs: logs, statement: readFile(t, statementFile)}
+	f := fixture{store: s, logs: logs, consoleURL: consoleURL, statement: readFile(t, statementFile)}
 
 	f.regular = seedRun(t, db, runSeed{
 		kind:           "regular",
@@ -610,6 +628,24 @@ func TestStore(t *testing.T) {
 		}
 		if len(deltas) != 0 {
 			t.Fatalf("got %d deltas, want none", len(deltas))
+		}
+	})
+
+	t.Run("the console's role is refused a write", func(t *testing.T) {
+		// The database refuses what the store never issues, so a console whose
+		// credentials leak changes no price.
+		conn, err := pgx.Connect(ctx, f.consoleURL)
+		if err != nil {
+			t.Fatalf("connecting as tally_console: %v", err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+
+		_, err = conn.Exec(ctx,
+			`INSERT INTO pricing_models (version, valid_from, currency, document)
+			 VALUES ('2099-01', '2099-01-01Z', 'EUR', '{}')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Errorf("inserting a pricing model as tally_console: %v, want SQLSTATE 42501", err)
 		}
 	})
 }

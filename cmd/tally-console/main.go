@@ -3,9 +3,8 @@
 // It reads its configuration from the environment, refuses a configuration it
 // cannot honor, and then serves the console's pages on the configured address
 // and port. Every page needs the operator credential, because the process holds
-// an admin token and whoever signs in reads everything the token reads. The
-// token has to carry the admin role, because the dead-letter list the overview
-// reads is admin-only.
+// a read_all token and a connection as a member of tally_console_reader, and
+// whoever signs in reads everything both of them read.
 //
 // A second listener on the same address serves /healthz, /readyz and /metrics
 // without a credential, for a kubelet and a scraper. It has a port of its own
