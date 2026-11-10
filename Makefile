@@ -193,6 +193,37 @@ define kind_node_ip
 	node_ip="$$(docker inspect -f '{{if .State.Running}}{{.NetworkSettings.Networks.kind.IPAddress}}{{end}}' '$(CLUSTER_NAME)-control-plane' 2>/dev/null)" && [ -n "$$node_ip" ] || { echo 'ERROR: the kind node $(CLUSTER_NAME)-control-plane has no address on the kind network; make up creates the cluster' >&2; exit 1; }
 endef
 
+# The Secret the console reads its read_all token from, under the key
+# api-token. No generator carries it, because a token can be issued only
+# against the migrated database.
+CONSOLE_TOKEN_SECRET := tally-console-token
+
+# console_token issues the console's token into that Secret while the Secret is
+# absent, and restarts the console, so a pod that started with an earlier token
+# reads the new one. An existing Secret is left alone: the Secret and the
+# database live and die with the kind cluster, so an existing one was issued
+# against this database, and issuing on every run would leave one api_tokens
+# row per `make up`. A stale token is mended by deleting the Secret and running
+# `make up` again.
+#
+# A failed read of the Secret ends the shell with kubectl's error, so an
+# unreachable cluster is never taken for a missing Secret. The token goes from
+# the shell's own printf into kubectl's stdin, so it reaches no file and no
+# argument list. Every command ends in `|| exit 1`, because make 3.81, the one
+# macOS ships, ignores .SHELLFLAGS and runs the recipe without errexit.
+define console_token
+	secret="$$($(KUBECTL) -n $(NAMESPACE) get secret $(CONSOLE_TOKEN_SECRET) --ignore-not-found -o name)" || exit 1; \
+	if [ -n "$$secret" ]; then \
+		echo '==> the console token is in $(CONSOLE_TOKEN_SECRET) already'; \
+	else \
+		echo '==> issuing a read_all api token for the console'; \
+		token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-api-token --role read_all --description 'in-cluster console')" || exit 1; \
+		[ -n "$$token" ] || { echo 'ERROR: create-api-token printed no token' >&2; exit 1; }; \
+		printf '%s' "$$token" | $(KUBECTL) -n $(NAMESPACE) create secret generic $(CONSOLE_TOKEN_SECRET) --from-file=api-token=/dev/stdin || exit 1; \
+		$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/console || exit 1; \
+	fi
+endef
+
 # prod_context_guard is the first recipe line of every prod target. It stops
 # the target while PROD_CONTEXT is empty, and $@ names the target the operator
 # ran in the example it prints.
