@@ -6,7 +6,7 @@
 # annotation makes kustomize read this ConfigMap for those replacements and
 # never emit it.
 #
-# An operator serving another domain edits the six values below and nothing
+# An operator serving another domain edits the seven values below and nothing
 # else. Each value is a full hostname. The Makefile reads these lines as text,
 # so each stays one unquoted key at two spaces, with no comment after it.
 apiVersion: v1
@@ -22,3 +22,4 @@ data:
   grafana: grafana.tally.demo.b42labs.com
   vmalert: vmalert.tally.demo.b42labs.com
   alertmanager: alertmanager.tally.demo.b42labs.com
+  console: console.tally.demo.b42labs.com

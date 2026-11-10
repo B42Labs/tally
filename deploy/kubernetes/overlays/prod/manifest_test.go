@@ -21,6 +21,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -51,9 +52,10 @@ const (
 	collectorComponentDir = "../../components/openstack-collector"
 	collectorSettingsFile = "collector.env"
 
-	// The components that declare the migration Job and the sync.
+	// The components that declare the migration Job, the sync and the console.
 	migrationsComponentDir     = "../../components/migrations"
 	reconciliationComponentDir = "../../components/reconciliation"
+	consoleComponentDir        = "../../components/console"
 
 	// The ConfigMap every hostname is read from, and the objects the overlay
 	// points at the real ones.
@@ -88,6 +90,13 @@ const (
 	engineRegistry = "ghcr.io/b42labs/tally-engine"
 	adminImage     = "tally-reporting-admin"
 	adminRegistry  = "ghcr.io/b42labs/tally-reporting-admin"
+
+	// The console image the same way, and the Secret of its read_all token,
+	// which no generator carries either: the operator creates it from the
+	// output of create-api-token.
+	consoleImage       = "tally-console"
+	consoleRegistry    = "ghcr.io/b42labs/tally-console"
+	consoleTokenSecret = "tally-console-token"
 
 	// The Secret the Reporting API authenticates against the cloud with and
 	// the one file it is generated from, and the ConfigMap of the cloud it
@@ -214,15 +223,15 @@ type ruleFile struct {
 // absentJobRe finds every job an absent() clause over up names.
 var absentJobRe = regexp.MustCompile(`absent\(up\{job="([^"]+)"\}\)`)
 
-func TestHostsAreSixNamesUnderOneDomain(t *testing.T) {
+func TestHostsAreSevenNamesUnderOneDomain(t *testing.T) {
 	// hosts.yaml is the one place the domain is written, so serving another
-	// domain means editing six values and nothing else. Without the
+	// domain means editing seven values and nothing else. Without the
 	// local-config annotation kustomize emits the ConfigMap into the cluster as
 	// an object nothing reads. A key renamed or dropped leaves a replacement
 	// sourcing a field that is not there. A domain swap that misses one value
 	// leaves that service on a name the new DNS does not answer for, and for a
 	// published name the HTTP-01 challenge fails with it, which fails the one
-	// certificate all four names share. The domain is taken from the file
+	// certificate all five names share. The domain is taken from the file
 	// rather than written here, so the test holds for whichever domain is
 	// served.
 	raw, err := os.ReadFile(hostsFile)
@@ -250,7 +259,7 @@ func TestHostsAreSixNamesUnderOneDomain(t *testing.T) {
 			hostsFile, got)
 	}
 
-	keys := []string{"alertmanager", "api", "grafana", "otlp", "otlp-grpc", "vmalert"}
+	keys := []string{"alertmanager", "api", "console", "grafana", "otlp", "otlp-grpc", "vmalert"}
 	if got := slices.Sorted(maps.Keys(hosts.Data)); !slices.Equal(got, keys) {
 		t.Fatalf("%s holds keys %v, want exactly %v", hostsFile, got, keys)
 	}
@@ -282,18 +291,21 @@ func TestHostsAreSixNamesUnderOneDomain(t *testing.T) {
 }
 
 func TestEveryPublishedRouteTakesItsHostFromHosts(t *testing.T) {
-	// The base's routes match placeholder hostnames nobody resolves. A
-	// replacement that targets another field, or another object, leaves a
-	// route on its placeholder: the Gateway accepts it, the overlay renders,
-	// and the service answers nothing on its real name.
+	// The routes of the base and of the console component match placeholder
+	// hostnames nobody resolves. A replacement that targets another field, or
+	// another object, leaves a route on its placeholder: the Gateway accepts
+	// it, the overlay renders, and the service answers nothing on its real
+	// name.
 	k := kustomizationOf(t)
 	base := baseObjects(t)
+	declared := slices.Concat(base, objectsIn(t, consoleComponentDir))
 
 	routes := []struct{ key, kind, name string }{
 		{"api", "HTTPRoute", "reporting-api"},
 		{"otlp", "HTTPRoute", "otel-collector-http"},
 		{"otlp-grpc", "GRPCRoute", "otel-collector-grpc"},
 		{"grafana", "HTTPRoute", "grafana"},
+		{"console", "HTTPRoute", "console"},
 	}
 	for _, r := range routes {
 		t.Run(r.kind+"/"+r.name, func(t *testing.T) {
@@ -301,11 +313,11 @@ func TestEveryPublishedRouteTakesItsHostFromHosts(t *testing.T) {
 				t.Errorf("no replacement copies data.%s into spec.hostnames.0 of %s %s, so the route keeps the base's placeholder",
 					r.key, r.kind, r.name)
 			}
-			// A target the base does not declare selects nothing, and the
-			// overlay renders without the replacement. The replacement writes
-			// the first hostname, so a second one would keep its placeholder.
-			if got := objectNamed(t, base, r.kind, r.name).Spec.Hostnames; len(got) != 1 {
-				t.Errorf("%s %s carries the hostnames %v in the base, want exactly one", r.kind, r.name, got)
+			// A target nothing declares selects nothing, and the overlay
+			// renders without the replacement. The replacement writes the
+			// first hostname, so a second one would keep its placeholder.
+			if got := objectNamed(t, declared, r.kind, r.name).Spec.Hostnames; len(got) != 1 {
+				t.Errorf("%s %s carries the hostnames %v where it is declared, want exactly one", r.kind, r.name, got)
 			}
 		})
 	}
@@ -356,7 +368,7 @@ func TestTheCertificateNamesThePublishedHostsAndTheAcmeIssuer(t *testing.T) {
 		t.Errorf("Certificate %s in the base has apiVersion %q, want the group cert-manager.io the patch targets", certificate, cert.APIVersion)
 	}
 
-	keys := []string{"api", "otlp", "otlp-grpc", "grafana"}
+	keys := []string{"api", "otlp", "otlp-grpc", "grafana", "console"}
 	var dnsNames, issuer bool
 	for _, op := range ops {
 		switch {
@@ -498,11 +510,13 @@ func TestEveryComponentIsListed(t *testing.T) {
 	// collector, without which the stack stores what nothing sends. The third
 	// migrates both databases, without which the Reporting API stays unready
 	// and every tick fails on the schema. The fourth syncs the cloud, without
-	// which a delete the collector lost is billed until somebody notices. An
-	// entry lost in an edit of this file alone is not an error to kustomize.
+	// which a delete the collector lost is billed until somebody notices. The
+	// fifth runs the console, without which an operator reads costs out of the
+	// engine database with SQL. An entry lost in an edit of this file alone is
+	// not an error to kustomize.
 	k := kustomizationOf(t)
 
-	want := []string{componentDir, collectorComponentDir, migrationsComponentDir, reconciliationComponentDir}
+	want := []string{componentDir, collectorComponentDir, migrationsComponentDir, reconciliationComponentDir, consoleComponentDir}
 	if !slices.Equal(k.Components, want) {
 		t.Errorf("%s lists the components %v, want %v; without one of them the overlay still renders",
 			kustomizationFile, k.Components, want)
@@ -566,7 +580,7 @@ func TestImagesComeFromTheRegistry(t *testing.T) {
 	// cluster cannot pull. The tag has to be one the release workflow publishes
 	// under; any other tag names an image that is not in the registry, and the
 	// pod sits in ImagePullBackOff. The overlay deploys one release, so the
-	// four tags are one: the migration Job applies the chains of its images,
+	// five tags are one: the migration Job applies the chains of its images,
 	// and a Reporting API or a scheduler of another release refuses or misreads
 	// that schema.
 	k := kustomizationOf(t)
@@ -577,6 +591,7 @@ func TestImagesComeFromTheRegistry(t *testing.T) {
 		{collectorImage, collectorRegistry},
 		{engineImage, engineRegistry},
 		{adminImage, adminRegistry},
+		{consoleImage, consoleRegistry},
 	} {
 		var found int
 		for _, image := range k.Images {
@@ -612,7 +627,7 @@ func TestImagesComeFromTheRegistry(t *testing.T) {
 	}
 	slices.Sort(local)
 	local = slices.Compact(local)
-	if want := []string{engineImage, collectorImage, reportingImage, adminImage}; !slices.Equal(local, want) {
+	if want := []string{consoleImage, engineImage, collectorImage, reportingImage, adminImage}; !slices.Equal(local, want) {
 		t.Errorf("the objects this overlay keeps run the locally built images %v, want exactly %v, the names %s maps to the registry",
 			local, want, kustomizationFile)
 	}
@@ -622,7 +637,7 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	// The operator fills the untracked files from the examples. A key missing
 	// from an example is a key missing from the Secret, which the pod that
 	// mounts it fails on at its first start, after the apply succeeded. The
-	// keys are read from the base and from the three components that declare
+	// keys are read from the base and from the four components that declare
 	// objects, less the objects this overlay deletes, so a key one of them
 	// starts to mount is one the example has to carry.
 	k := kustomizationOf(t)
@@ -634,12 +649,15 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	if len(want) == 0 {
 		t.Fatalf("%s and the components mount no secret key, so this test would assert over nothing", baseDir)
 	}
-	// The ingest token is the one mounted Secret without a file. It can be
-	// issued only once make prod-up has migrated the database, and make prod-up
-	// refuses an unfilled file, so a generator for it would ask for a value the
-	// operator cannot have yet.
-	if _, mounted := want[collectorTokenSecret]; !mounted {
-		t.Errorf("%s mounts no secret %s, which this test exempts from the generators", collectorComponentDir, collectorTokenSecret)
+	// The ingest token and the console's token are the mounted Secrets without
+	// a file. Each can be issued only once make prod-up has migrated the
+	// database, and make prod-up refuses an unfilled file, so a generator for
+	// either would ask for a value the operator cannot have yet.
+	handCreated := []string{collectorTokenSecret, consoleTokenSecret}
+	for _, name := range handCreated {
+		if _, mounted := want[name]; !mounted {
+			t.Errorf("no component mounts secret %s, which this test exempts from the generators", name)
+		}
 	}
 	for name, keys := range want {
 		slices.Sort(keys)
@@ -649,8 +667,8 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 	generated := make(map[string]bool, len(k.SecretGenerator))
 	for _, g := range k.SecretGenerator {
 		generated[g.Name] = true
-		if g.Name == collectorTokenSecret {
-			t.Errorf("%s generates secret %s, which has no file: the operator creates it from the output of create-ingest-credential",
+		if slices.Contains(handCreated, g.Name) {
+			t.Errorf("%s generates secret %s, which has no file: the operator creates it from the output of the admin CLI",
 				kustomizationFile, g.Name)
 			continue
 		}
@@ -693,7 +711,7 @@ func TestEverySecretHasAnExampleWithTheKeysTheBaseMounts(t *testing.T) {
 		}
 	}
 	for name, keys := range want {
-		if name != collectorTokenSecret && !generated[name] {
+		if !slices.Contains(handCreated, name) && !generated[name] {
 			t.Errorf("%v is mounted from secret %s, which %s does not generate", keys, name, kustomizationFile)
 		}
 	}
@@ -734,6 +752,43 @@ func checkCloudsExample(t *testing.T, example string) {
 	}
 	if !regexp.MustCompile(`<[a-z-]+>`).Match(raw) {
 		t.Errorf("%s carries no <...> placeholder, so make prod-up cannot tell a copy that was never filled in", example)
+	}
+}
+
+func TestTheConsoleConnectionExampleNamesTheConsoleRole(t *testing.T) {
+	// The operator copies db-url and puts the password in place of the
+	// placeholder. A URL naming another role, host or database is one the
+	// console connects with, and every page that reads the engine database
+	// answers 503 while the pod reports ready. The placeholder is replaced by a
+	// hex value as the operator's is, because net/url refuses < and > in a
+	// password.
+	const (
+		example  = "secrets/tally-console-db.env.example"
+		password = "0a1b"
+	)
+
+	raw, err := os.ReadFile(example)
+	if err != nil {
+		t.Fatalf("reading %s: %v", example, err)
+	}
+	m := regexp.MustCompile(`(?m)^db-url=(\S+)$`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("%s carries no db-url line", example)
+	}
+	u, err := url.Parse(strings.ReplaceAll(string(m[1]), "<password>", password))
+	if err != nil {
+		t.Fatalf("the db-url of %s is no URL once its placeholder is filled: %v", example, err)
+	}
+	got, _ := u.User.Password()
+	for _, c := range []struct{ what, got, want string }{
+		{"role", u.User.Username(), "tally_console"},
+		{"password", got, password},
+		{"host", u.Hostname(), "timescaledb"},
+		{"database", strings.TrimPrefix(u.Path, "/"), "tally_engine"},
+	} {
+		if c.got != c.want {
+			t.Errorf("the db-url of %s names the %s %q, want %q", example, c.what, c.got, c.want)
+		}
 	}
 }
 
@@ -1147,7 +1202,7 @@ func baseObjects(t *testing.T) []object {
 	return objectsIn(t, baseDir)
 }
 
-// keptObjects decodes every object the base and the three components that
+// keptObjects decodes every object the base and the four components that
 // declare objects carry, less the objects the overlay deletes, which is what
 // it renders before its other patches. The patch the reconciliation component
 // carries is among them, so what it mounts counts as well.
@@ -1155,7 +1210,7 @@ func keptObjects(t *testing.T, k kustomization) []object {
 	t.Helper()
 
 	objects := baseObjects(t)
-	for _, dir := range []string{collectorComponentDir, migrationsComponentDir, reconciliationComponentDir} {
+	for _, dir := range []string{collectorComponentDir, migrationsComponentDir, reconciliationComponentDir, consoleComponentDir} {
 		objects = append(objects, objectsIn(t, dir)...)
 	}
 	deleted := deletedObjects(t, k)
