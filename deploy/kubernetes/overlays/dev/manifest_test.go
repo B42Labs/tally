@@ -107,20 +107,20 @@ const (
 	consoleComponent      = "../../components/console"
 
 	// The Secrets the overlay generates for the console, and the development
-	// credential `make up` prints.
+	// credential `make up` and `make demo` print.
 	consoleAuthSecret = "tally-console-auth"
 	consoleDBSecret   = "tally-console-db"
 	consoleUser       = "tally"
 	consolePassword   = "tally-dev-console-password"
+
+	// The address `make up` and `make demo` print: the hostname this overlay
+	// patches into HTTPRoute console, on the port 8443 kind publishes.
+	consoleURL = "https://console.tally.127-0-0-1.nip.io:8443"
 )
 
 // consolePasswordRe is the Makefile line that names the password `make
 // migrate` sets on tally_console.
 var consolePasswordRe = regexp.MustCompile(`(?m)^TALLY_DEV_CONSOLE_DB_PASSWORD \?= (\S+)$`)
-
-// consoleHtpasswdRe is the Makefile line that names the bcrypt line `make
-// console` starts the console with, its $ escaped as $$.
-var consoleHtpasswdRe = regexp.MustCompile(`(?m)^CONSOLE_HTPASSWD := (\S+)$`)
 
 // scrapeConfig is the part of a scrape file these tests assert over. yaml.v3
 // ignores every field not named here, so the discovered jobs decode to their
@@ -636,7 +636,8 @@ func TestTheComponentsAreListed(t *testing.T) {
 func TestTheDevCredentialSignsIn(t *testing.T) {
 	// The console refuses a line that is not bcrypt or is under cost 10 at its
 	// start, and a hash of another password leaves the credential `make up`
-	// prints answering 401. Neither stops kustomize or the apply.
+	// and `make demo` print answering 401. Neither stops kustomize or the
+	// apply.
 	htpasswd := secretLiteral(t, kustomizationOf(t), consoleAuthSecret, "htpasswd")
 
 	basic, err := signin.NewBasic(htpasswd, slog.New(slog.DiscardHandler), nil)
@@ -662,31 +663,35 @@ func TestTheDevCredentialSignsIn(t *testing.T) {
 		}
 	}
 
-	// make up prints the credential, so a password changed in one place and
-	// not the other is one the developer is told and refused.
+	// make up and make demo both print the credential and the address, so a
+	// password changed in the literal and not in a recipe is one the
+	// developer is told and refused.
 	raw, err := os.ReadFile(makefileFile)
 	if err != nil {
 		t.Fatalf("reading %s: %v", makefileFile, err)
 	}
-	_, recipe, found := strings.Cut(string(raw), "\nup:\n")
-	if !found {
-		t.Fatalf("%s declares no target up", makefileFile)
+	for _, target := range []string{"up", "demo"} {
+		recipe := recipeOf(t, raw, target)
+		if !strings.Contains(recipe, consolePassword) {
+			t.Errorf("the %s recipe of %s does not print %s, the password the literal of %s is the hash of", target, makefileFile, consolePassword, consoleAuthSecret)
+		}
+		if !strings.Contains(recipe, consoleURL) {
+			t.Errorf("the %s recipe of %s does not print %s, the address HTTPRoute console answers on in this overlay", target, makefileFile, consoleURL)
+		}
 	}
-	recipe, _, _ = strings.Cut(recipe, "\n## ")
-	if !strings.Contains(recipe, consolePassword) {
-		t.Errorf("the up recipe of %s does not print %s, the password the literal of %s is the hash of", makefileFile, consolePassword, consoleAuthSecret)
-	}
+}
 
-	// make console signs in with CONSOLE_HTPASSWD, so a credential rotated
-	// there and not here leaves make console and the deployed console asking
-	// for two passwords.
-	m := consoleHtpasswdRe.FindSubmatch(raw)
-	if m == nil {
-		t.Fatalf("%s has no line matching %s", makefileFile, consoleHtpasswdRe)
+// recipeOf returns the recipe of target in makefile: the lines after its rule
+// line up to the first blank line, which ends every recipe the tests read. A
+// help comment is no end: the demo-* targets after demo carry none.
+func recipeOf(t *testing.T, makefile []byte, target string) string {
+	t.Helper()
+	_, recipe, found := strings.Cut(string(makefile), "\n"+target+":\n")
+	if !found {
+		t.Fatalf("%s declares no target %s", makefileFile, target)
 	}
-	if want := strings.ReplaceAll(string(m[1]), "$$", "$"); htpasswd != want {
-		t.Errorf("the htpasswd literal of %s is %q, want %q, CONSOLE_HTPASSWD of %s unescaped", consoleAuthSecret, htpasswd, want, makefileFile)
-	}
+	recipe, _, _ = strings.Cut(recipe, "\n\n")
+	return recipe
 }
 
 func TestTheConsoleConnectsAsTheRoleMakeMigrateSets(t *testing.T) {

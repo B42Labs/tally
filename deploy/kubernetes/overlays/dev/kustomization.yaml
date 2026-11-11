@@ -71,9 +71,8 @@ secretGenerator:
     files:
       - reconciliation/clouds.yaml
   # The operator the console lets sign in: user tally, password
-  # tally-dev-console-password. The line is CONSOLE_HTPASSWD of the Makefile
-  # with its $$ unescaped. kustomize keeps every $ of a literal and adds no
-  # newline.
+  # tally-dev-console-password, the credential `make up` and `make demo`
+  # print. kustomize keeps every $ of a literal and adds no newline.
   - name: tally-console-auth
     literals:
       - htpasswd=tally:$2y$10$ozNeOXtuRimnpsNE.5KbUuSGhsattbYTZttj5kimYhssYd.Gjr22K
