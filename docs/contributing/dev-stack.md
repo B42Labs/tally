@@ -428,7 +428,6 @@ The table below is rendered from the `## target: description` comments of the
 | `simulator-up` | run the simulator, the collector, and a broker against the dev cluster |
 | `simulator-down` | stop the simulator stack and drop its volumes |
 | `ca` | print the dev CA certificate, for curl --cacert and browser trust |
-| `console` | run the demo console against the dev cluster |
 | `demo` | prepare the whole demo month and print where the console shows it |
 | `test` | run the test suite |
 | `lint` | run golangci-lint |

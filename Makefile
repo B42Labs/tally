@@ -96,18 +96,6 @@ SIM_OTLP_PASSWORD ?= tally-dev-otlp-password
 # Ceilometer polls at.
 SIM_METRICS_INTERVAL ?= 300s
 
-# The port `console` binds the demo console to on 127.0.0.1. It is passed to
-# the process and printed as its URL, so the two cannot disagree. 8090 and
-# 8091 are the compose stack's.
-CONSOLE_PORT ?= 8095
-
-# The bcrypt line of the development credential `console` starts with: user
-# tally, password tally-dev-console-password. The hash and the password move
-# together, so this is := and not ?=: an override of one could not update the
-# other. deploy/kubernetes/overlays/dev/kustomization.yaml carries the same
-# line, unescaped, as the literal of tally-console-auth.
-CONSOLE_HTPASSWD := tally:$$2y$$10$$ozNeOXtuRimnpsNE.5KbUuSGhsattbYTZttj5kimYhssYd.Gjr22K
-
 COMPOSE := docker compose -f deploy/compose/compose.yaml
 
 # Every kubectl call names the cluster explicitly. Creating a kind cluster
@@ -277,12 +265,10 @@ TALLY_DEV_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.i
 # The engine's database, on the same listener beside the reporting one.
 TALLY_DEV_ENGINE_DB_URL ?= postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 
-# The password `make migrate` sets on tally_console and `make console` connects
-# with. It goes into a URL unencoded, so keep it to letters, digits and -_.~
+# The password `make migrate` sets on tally_console, which the db-url literal
+# of tally-console-db in the dev overlay carries. It goes into that URL
+# unencoded, so keep it to letters, digits and -_.~
 TALLY_DEV_CONSOLE_DB_PASSWORD ?= tally-dev-password
-
-# The engine's database as tally_console, the role that only selects.
-TALLY_DEV_CONSOLE_ENGINE_DB_URL ?= postgres://tally_console:$(TALLY_DEV_CONSOLE_DB_PASSWORD)@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 
 # What `demo` prepares. The month is the one the tutorials pin, so a console
 # demo shows the numbers the documentation describes, and it stays a past month
@@ -365,7 +351,7 @@ VMALERT_IMAGE := $(shell grep -oE 'victoriametrics/vmalert:[A-Za-z0-9._-]+' depl
 ALERTMANAGER_IMAGE := $(shell grep -oE 'prom/alertmanager:[A-Za-z0-9._-]+' deploy/kubernetes/base/alertmanager/alertmanager.yaml | head -n1)
 
 .PHONY: check-tools up down dev ca test lint fmt check-alerting migrate generate \
-	images deb sbom simulator-up simulator-down console demo demo-drain demo-registry \
+	images deb sbom simulator-up simulator-down demo demo-drain demo-registry \
 	demo-bill demo-correct docs docs-build prod-addons prod-up
 
 # What `check-tools` holds the Docker engine to. One kind node runs the whole
@@ -753,39 +739,6 @@ simulator-down:
 ## ca: print the dev CA certificate, for curl --cacert and browser trust
 ca:
 	@$(KUBECTL) -n cert-manager get secret tally-dev-ca -o jsonpath='{.data.tls\.crt}' | base64 -d
-
-# Every route the console reads takes read_all or a lower role, the dead-letter
-# list GET /api/v1/rejected-events included, so the token below carries
-# read_all, which cannot change the registry. The console reads the engine's
-# database as tally_console, which only selects; `make migrate` creates it, so
-# a cluster that has not run `make migrate` since the role was introduced fails
-# the engine's pages until it does. The token is issued fresh on every run for
-# the reason `simulator-up` issues one fresh: the cluster may have been
-# recreated since the last run, and a new database knows none of the tokens the
-# old one handed out.
-#
-# The token comes before the CA, so a machine with no dev cluster fails here,
-# with the admin CLI's connection error, rather than on the kubectl call `ca`
-# makes. It stays in the shell of this recipe and is written to no file, unlike
-# the simulator's, which compose reads out of deploy/compose/.env.
-## console: run the demo console against the dev cluster
-console:
-	@echo '==> issuing a read_all api token for the demo console'
-	@token="$$(TALLY_REPORTING_DB_URL='$(TALLY_DEV_DB_URL)' go run ./cmd/tally-reporting-admin create-api-token --role read_all --description 'demo console')" && \
-	echo '==> writing the dev CA to tally-ca.crt' && \
-	$(MAKE) -s ca > tally-ca.crt && \
-	echo && \
-	echo 'Demo console:' && \
-	echo '  http://127.0.0.1:$(CONSOLE_PORT)/' && \
-	echo '  sign in as tally / tally-dev-console-password' && \
-	echo && \
-	TALLY_CONSOLE_REPORTING_URL=https://api.tally.127-0-0-1.nip.io:8443 \
-	TALLY_CONSOLE_CA_FILE=tally-ca.crt \
-	TALLY_CONSOLE_ENGINE_DB_URL='$(TALLY_DEV_CONSOLE_ENGINE_DB_URL)' \
-	TALLY_CONSOLE_HTTP_PORT='$(CONSOLE_PORT)' \
-	TALLY_CONSOLE_HTPASSWD='$(CONSOLE_HTPASSWD)' \
-	TALLY_CONSOLE_API_TOKEN="$$token" \
-	go run ./cmd/tally-console
 
 # demo_await polls one condition of the demo pipeline until it holds. $(1) is
 # the shell command that answers it, tried once every DEMO_WAIT_SECONDS, and
