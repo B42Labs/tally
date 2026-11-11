@@ -1,6 +1,6 @@
 ---
 title: Console (tally-console)
-description: "What the read-only console serves, how an operator signs in to it, its probes and metrics, the token and the database role it needs, how a cluster runs it and how make console starts it."
+description: "What the read-only console serves, how an operator signs in to it, its probes and metrics, the token and the database role it needs, and how a cluster runs it."
 quadrant: reference
 audience: operator
 ---
@@ -11,9 +11,9 @@ audience: operator
 the projects, resources and lifecycles the Reporting API serves, and the
 billing periods, runs, statements and pricing catalogs the engine stored. It
 runs in the cluster from the released image, writes nothing on either side,
-and answers one signed-in operator. `make console` also runs it on a
-developer's machine. Every page is HTML the process rendered; it ships no
-JavaScript and loads one stylesheet. The
+and answers one signed-in operator. The dev stack deploys it the same way,
+from the image `make up` builds. Every page is HTML the process rendered; it
+ships no JavaScript and loads one stylesheet. The
 process is assembled in
 [`cmd/tally-console/main.go`](https://github.com/B42Labs/tally/blob/main/cmd/tally-console/main.go).
 
@@ -573,23 +573,13 @@ the same Secret.
 The console does not check what its role may do. The pool connects lazily, and
 whoever writes the connection string decides the role.
 
+A console whose role is missing or carries another password still starts. The
+pages that read the engine database answer 503 with `the engine database could
+not be read`, and the console's log carries `password authentication failed for
+user "tally_console"` (SQLSTATE `28P01`). `tally-engine ensure-console-role`
+with the password the connection string carries mends it.
+
 ## Startup
-
-`make console` starts the console against the dev cluster. It issues a token
-with `tally-reporting-admin create-api-token --role read_all`, writes the dev CA
-to `tally-ca.crt`, and runs the process against
-`https://api.tally.127-0-0-1.nip.io:8443` and the dev engine database, which it
-reads as `tally_console` through the URL in the Makefile variable
-`TALLY_DEV_CONSOLE_ENGINE_DB_URL`. It prints `http://127.0.0.1:8095/` and the
-development credential, user `tally` and password `tally-dev-console-password`.
-The token is issued fresh per run and comes before the CA, so on a machine
-without a dev cluster the target fails on the admin CLI's connection error.
-
-`make console` runs neither `make up` nor `make migrate`. On a dev cluster where
-neither ran since the console's role was introduced, the pages that read the
-engine database answer 503 with `the engine database could not be read`, and the
-console's log carries `password authentication failed for user "tally_console"`
-(SQLSTATE `28P01`). `make migrate` creates the role.
 
 The process binds `TALLY_CONSOLE_HTTP_ADDR` on `TALLY_CONSOLE_HTTP_PORT` for the
 pages and on `TALLY_CONSOLE_OPS_PORT` for the probes and metrics. The default

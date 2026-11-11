@@ -204,8 +204,7 @@ machine:
   authenticates the reconciled cloud with. It carries a cloud password, which
   is why it is a Secret rather than part of the ConfigMap below.
 - `tally-console-auth`, the console's operator: the bcrypt line of user
-  `tally` with the password `tally-dev-console-password`, the line of
-  `CONSOLE_HTPASSWD` in the Makefile.
+  `tally` with the password `tally-dev-console-password`.
 - `tally-console-db`, the console's connection to the engine database as
   `tally_console`, with the password `make migrate` sets.
 
@@ -219,15 +218,13 @@ the engine where to measure the egress counter the simulator pushes. Each
 generated name carries a hash of its content, so editing one of these files
 re-rolls the pod that mounts it.
 
-Three Makefile variables carry the URLs a `psql` on the host takes. All three
-reach TimescaleDB through the Gateway's TCP listener, which is the path the
-migration chains take as well. The third connects as `tally_console`, which
-only selects, and is what `make console` reads the engine database through.
+Two Makefile variables carry the URLs a `psql` on the host takes. Both reach
+TimescaleDB through the Gateway's TCP listener, which is the path the
+migration chains take as well.
 
 ```text
-TALLY_DEV_DB_URL                postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
-TALLY_DEV_ENGINE_DB_URL         postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
-TALLY_DEV_CONSOLE_ENGINE_DB_URL postgres://tally_console:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
+TALLY_DEV_DB_URL        postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_reporting?sslmode=disable
+TALLY_DEV_ENGINE_DB_URL postgres://tally:tally-dev-password@db.tally.127-0-0-1.nip.io:5432/tally_engine?sslmode=disable
 ```
 
 ## The Tilt loop
@@ -346,12 +343,13 @@ takes the stack through one month step by step.
 
 `make demo` is the whole demonstration in one target. It brings the cluster up,
 publishes a month, registers what bills it, meters it, finalizes the run, books
-the notifications the simulator held back as a correction, and then serves the
-[demo console](/reference/command-line/tally-console) on all of it. What it
-leaves behind is the state a walk-through needs: a month whose resources and
-events are ingested, a finalized run with its project statements, a correction
-with its credit notes and deltas, and a registry carrying a customer, a partner
-and the two Gardener projects.
+the notifications the simulator held back as a correction, and then prints the
+address of the [console](/reference/command-line/tally-console) `make up`
+deployed, with the development credential, and ends. What it leaves behind is
+the state a walk-through needs: a month whose resources and events are
+ingested, a finalized run with its project statements, a correction with its
+credit notes and deltas, and a registry carrying a customer, a partner and the
+two Gardener projects.
 
 Every step is one the [tutorials](/tutorials/) take by hand, in the order those
 lessons take them.
@@ -376,18 +374,21 @@ lessons take them.
 5. The held-back notifications are released and delivered, and what arrived
    after the finalized run read the period is booked as a correction, which is
    finalized in its turn.
-6. `make console` serves the result until Ctrl-C. Sign in as `tally` with the
-   password `tally-dev-console-password`. The console reads the Reporting API
-   with a `read_all` token it issues on every run and the engine database as
-   `tally_console`. It starts again with `make console` alone, which touches
-   none of the above. A cluster that has not run `make migrate` since
-   `tally_console` was introduced answers the engine's pages with 503 until
-   `make migrate` has created the role.
+6. The target prints `https://console.tally.127-0-0-1.nip.io:8443` and the
+   development credential, user `tally` and password
+   `tally-dev-console-password`, and returns the prompt. The console is
+   Deployment `console`, which `make up` rolled out in step 1 with its
+   `read_all` token and the `tally_console` role, so the demo issues no token
+   and starts no process, and the console keeps running after the demo, across
+   repeated runs, until `make down`. A browser stops on a certificate warning
+   first, because the Gateway's certificate is signed by the dev CA in
+   `tally-ca.crt`, which no browser knows; the
+   [Grafana lesson](/tutorials/watch-the-month-in-grafana) says why that CA is
+   not installed.
 
-The steps between the two `make` calls are four targets of their own,
-`demo-drain`, `demo-registry`, `demo-bill` and `demo-correct`, the first of
-which runs twice, so a demo that is being repeated can run one of them without
-the others.
+Steps 2 to 5 run four targets of their own, `demo-drain`, `demo-registry`,
+`demo-bill` and `demo-correct`, the first of which runs twice, so a demo that
+is being repeated can run one of them without the others.
 
 The target carries on from what stands rather than starting over. The cluster
 is reused, a project that is registered is found in place, a relation that is
@@ -476,10 +477,6 @@ line, as in `make up WAIT_ATTEMPTS=12`.
 - The `SIM_` set belongs to the simulator stack and is in the table above,
   and the `DEMO_` set belongs to `demo` and is in the table under
   [the demo](#the-demo).
-- `CONSOLE_PORT` (`8095`) is the port `console` binds the demo console to on
-  127.0.0.1, and the port of the URL it prints. `make console` also binds
-  127.0.0.1:8096 for the probes and metrics, and `TALLY_CONSOLE_OPS_PORT` in the
-  environment moves it.
 - `PROD_CONTEXT` (no default) is the kubectl context `prod-addons` and
   `prod-up` act on; each of them refuses to run while it is empty.
 - `PROD_MIGRATE_WAIT_S` (`1800`) is how many seconds `prod-up` waits for the
