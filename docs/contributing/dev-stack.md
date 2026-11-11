@@ -429,7 +429,7 @@ The table below is rendered from the `## target: description` comments of the
 | `simulator-down` | stop the simulator stack and drop its volumes |
 | `ca` | print the dev CA certificate, for curl --cacert and browser trust |
 | `console` | run the demo console against the dev cluster |
-| `demo` | prepare the whole demo month and serve the console on it |
+| `demo` | prepare the whole demo month and print where the console shows it |
 | `test` | run the test suite |
 | `lint` | run golangci-lint |
 | `fmt` | format every Go file with gofumpt, through golangci-lint's formatter |

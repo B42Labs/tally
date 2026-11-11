@@ -813,10 +813,15 @@ endef
 # `demo` is the whole demonstration in one target. It brings the cluster up,
 # publishes a month onto the bus and finishes it at once, registers the customer
 # and the partner that bill it, meters the month, finalizes it, books the
-# notifications the simulator held back as a correction, and then serves the
-# console on all of it. Every step is one an operator takes by hand in the
-# tutorials, in the order those lessons take them, so the console shows a month
-# that went through the lifecycle rather than a fixture somebody wrote.
+# notifications the simulator held back as a correction, and then prints the
+# address of the console `make up` deployed, which shows all of it. Every step
+# is one an operator takes by hand in the tutorials, in the order those lessons
+# take them, so the console shows a month that went through the lifecycle
+# rather than a fixture somebody wrote.
+#
+# The demo reaches the console through that address alone: it issues no token
+# and starts no process, so the console keeps running after the demo ends and
+# across repeated runs, until `make down`.
 #
 # It carries on from what stands rather than starting over: `up` reuses the
 # cluster, a project that is registered is found in place, a relation that is
@@ -826,7 +831,7 @@ endef
 #
 # The four steps below are targets of their own so that a repeated demo can run
 # one of them alone, and so the pipeline reads as the steps it is made of.
-## demo: prepare the whole demo month and serve the console on it
+## demo: prepare the whole demo month and print where the console shows it
 demo:
 	$(MAKE) up
 	$(MAKE) simulator-up SIM_PERIOD='$(DEMO_PERIOD)' SIM_FAULTS=held-back SIM_REGISTER_PROJECTS=true
@@ -863,9 +868,10 @@ demo:
 	@echo '  the classic tenants bill under $(DEMO_CUSTOMER), the CI tenant under $(DEMO_PARTNER)'
 	@echo '  the two Gardener projects carry the cost of the tenants their shoots run on'
 	@echo
-	@echo 'The console follows. Ctrl-C ends it, and make console starts it again'
-	@echo 'without touching any of the above.'
-	$(MAKE) console
+	@echo 'The console that make up deployed shows it:'
+	@echo '  https://console.tally.127-0-0-1.nip.io:8443'
+	@echo '  sign in as tally / tally-dev-console-password'
+	@echo '  a browser warns first: the dev CA in tally-ca.crt is in no root store'
 
 # demo-drain waits until nothing of the month is in flight any more: the broker
 # holds no message, and the collector's outbox is empty behind it. `demo` waits
