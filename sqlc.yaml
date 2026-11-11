@@ -46,7 +46,7 @@ sql:
         overrides:
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
-  # The demo console's read view over the engine chain: the console shows what
+  # The console's read view over the engine chain: the console shows what
   # the engine already billed, so every query it compiles is a SELECT and none
   # of them writes. It takes sqlc's default pgtype mappings like the engine
   # entry above, and internal/console/store converts them at its edge.

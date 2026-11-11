@@ -239,12 +239,12 @@ mismatch that would otherwise fail quietly.
   own. It asserts that the overlay lists the `envoy-gateway` and the `console`
   components too: without an entry the overlay renders, and the cluster has no
   GatewayClass or no console. It signs in with the development credential
-  `make up` prints against the generated `tally-console-auth` literal, which
-  the console refuses under bcrypt cost 10, holds that literal to the
-  `CONSOLE_HTPASSWD` line `make console` starts the console with, and holds
-  the `db-url` literal of `tally-console-db` to the role and the password
-  `make migrate` sets, without which every page that reads the engine
-  database answers 503.
+  `make up` and `make demo` print against the generated `tally-console-auth`
+  literal, which the console refuses under bcrypt cost 10, checks that the
+  `up` and `demo` recipes print that credential and the console's address,
+  and holds the `db-url` literal of `tally-console-db` to the role and the
+  password `make migrate` sets, without which every page that reads the
+  engine database answers 503.
 - `deploy/kubernetes/overlays/prod/manifest_test.go` pins where the prod
   overlay's names come from and what it keeps off the internet. A replacement
   aimed at the wrong field, a delete patch lost in an edit, or a listener index
