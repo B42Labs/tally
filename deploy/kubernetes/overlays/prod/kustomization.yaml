@@ -62,13 +62,13 @@ components:
 images:
   - name: tally-reporting
     newName: ghcr.io/b42labs/tally-reporting
-    newTag: v0.7.0
+    newTag: v0.8.0
   - name: tally-openstack-collector
     newName: ghcr.io/b42labs/tally-openstack-collector
     newTag: v0.7.0
   - name: tally-engine
     newName: ghcr.io/b42labs/tally-engine
-    newTag: v0.7.0
+    newTag: v0.8.0
   - name: tally-reporting-admin
     newName: ghcr.io/b42labs/tally-reporting-admin
     newTag: v0.7.0
