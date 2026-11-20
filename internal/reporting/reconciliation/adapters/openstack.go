@@ -21,6 +21,7 @@ import (
 	"iter"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -302,9 +303,21 @@ func (a *openStack) SizeNames(ctx context.Context, cfg map[string]any,
 // authenticate resolves the clouds.yaml entry parsed names and signs in with
 // it. Both calls a run makes go through here, so an entry that is missing or
 // refused reads the same whichever of them met it.
+//
+// The file OS_CLIENT_CONFIG_FILE names is passed on as the one location to
+// read. gophercloud takes the variable for clouds.yaml on its own, but only a
+// location passed in makes it look for secure.yaml beside that file; left to
+// itself it searches the working directory, the user's config directory and
+// /etc/openstack for one. A secure.yaml dropped into the working directory
+// would then be merged over the mounted Secret's entry, auth_url included.
 func authenticate(ctx context.Context, parsed openStackConfig,
 ) (*gophercloud.ProviderClient, gophercloud.EndpointOpts, error) {
-	authOptions, endpointOptions, tlsConfig, err := clouds.Parse(clouds.WithCloudName(parsed.osCloud))
+	options := []clouds.ParseOption{clouds.WithCloudName(parsed.osCloud)}
+	if location := os.Getenv("OS_CLIENT_CONFIG_FILE"); location != "" {
+		options = append(options, clouds.WithLocations(location))
+	}
+
+	authOptions, endpointOptions, tlsConfig, err := clouds.Parse(options...)
 	if err != nil {
 		return nil, gophercloud.EndpointOpts{},
 			fmt.Errorf("reading the clouds.yaml entry %q: %w", parsed.osCloud, err)

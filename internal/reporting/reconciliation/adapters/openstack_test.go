@@ -923,6 +923,43 @@ func TestOpenStackAbortsWhenTheApplicationCredentialHasNoSecret(t *testing.T) {
 	}
 }
 
+func TestOpenStackIgnoresASecureYAMLInTheWorkingDirectory(t *testing.T) {
+	cloud := newCloud(t)
+	writeApplicationCredentialCloudsYAML(t, cloud.URL, "")
+
+	// The file OS_CLIENT_CONFIG_FILE names is the only clouds.yaml read, and
+	// only the secure.yaml beside it may complete its entry. One the working
+	// directory holds is not the Secret's, so it must not supply the secret.
+	planted := t.TempDir()
+	secure := fmt.Sprintf(`clouds:
+  %s:
+    auth:
+      application_credential_secret: planted
+`, testCloud)
+	if err := os.WriteFile(filepath.Join(planted, "secure.yaml"), []byte(secure), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(planted)
+
+	observed, errs := drain(t, adapters.NewOpenStack(discardLogs).ListResources(t.Context(),
+		map[string]any{"os_cloud": testCloud}, nil, time.Now().UTC()))
+
+	if len(observed) != 0 {
+		t.Errorf("ListResources() yielded %d observations, want 0", len(observed))
+	}
+	if len(errs) != 1 {
+		t.Fatalf("ListResources() yielded %d errors, want 1", len(errs))
+	}
+	want := fmt.Sprintf("authenticating against the cloud %q: "+
+		"You must provide an Application Credential Secret", testCloud)
+	if errs[0].Error() != want {
+		t.Errorf("ListResources() error = %q, want %q", errs[0], want)
+	}
+	if bodies := cloud.tokenRequests(); len(bodies) != 0 {
+		t.Errorf("the cloud answered %d token requests, want none", len(bodies))
+	}
+}
+
 func TestOpenStackRefusesAnAccountThatCannotSeeEveryProject(t *testing.T) {
 	cloud := newCloud(t)
 	cloud.serve(t, serversPath, "servers_page1.json", "servers_page2.json")

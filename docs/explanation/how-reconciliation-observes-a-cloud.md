@@ -70,9 +70,12 @@ outranks the Secret. Setting the variable to the file the deployment mounts
 removes the question, because it is then the only location searched; a
 `readOnlyRootFilesystem: true` on the pod is the other half of it.
 
-The first file found is the one used, and a `secure.yaml` beside it is merged
-over it, which is where an entry's password belongs when the clouds.yaml itself
-is not a secret. `/etc/openstack/` is the directory a Kubernetes Secret volume
+The first file found is the one used. A `secure.yaml` is merged over it, which
+is where an entry's password belongs when the clouds.yaml itself is not a
+secret. With the variable set, the adapter reads only the `secure.yaml` beside
+the file it names. Without it, gophercloud searches the same three directories
+for a `secure.yaml` on its own, so the working directory outranks the Secret
+there as well. `/etc/openstack/` is the directory a Kubernetes Secret volume
 mounts at. A deployment with the file in none of those places fails every sync
 of every OpenStack cloud, with the locations it searched named in the error.
 
