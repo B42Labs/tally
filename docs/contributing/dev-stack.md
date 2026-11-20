@@ -255,7 +255,7 @@ rather than in the cluster, which is what the simulator stack is for.
 
 [`deploy/compose/compose.yaml`](https://github.com/B42Labs/tally/blob/main/deploy/compose/compose.yaml)
 runs three containers on the developer's machine: a RabbitMQ broker,
-`rabbitmq:4.3.5-management-alpine` pinned by digest the way the kind node image
+`rabbitmq:4.4.1-management-alpine` pinned by digest the way the kind node image
 is; the collector image `tally-openstack-collector:dev`, running unmodified,
 since nothing in it knows the notifications it consumes are generated; and the
 simulator `tally-openstack-simulator:dev`, which publishes a generated month of
