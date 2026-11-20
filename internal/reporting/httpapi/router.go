@@ -338,8 +338,8 @@ func validationProblem(err error, suggested int) (status int, typ, title string)
 // through, and two cases get this far. One is a repeated query parameter: the
 // validator reads one occurrence of it and checks that one, while the wrapper
 // refuses to pick. The other is a value given once that the two layers parse by
-// different rules, such as a date-time naming a day its month does not have:
-// the validator's format is a pattern rather than a calendar.
+// different rules, such as a date-time at second 60: the validator's pattern
+// takes it for a leap second, and the binding's parser refuses it.
 //
 // Which of the two it is, is read from the request and not from the error,
 // whose text comes from the binding library and can carry a submitted value.

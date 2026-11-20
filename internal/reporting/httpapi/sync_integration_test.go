@@ -240,9 +240,6 @@ func TestSyncCloudOverHTTP(t *testing.T) {
 			}
 		})
 
-		// The contract's date-time format is a pattern rather than a calendar: it
-		// takes any day from 01 to 31 in any month, so an instant that never
-		// happened passes the validator and the handler is what refuses it.
 		t.Run("an instant no calendar has", func(t *testing.T) {
 			const cloud = "os-http-sync-at-impossible"
 			a := newSyncAPIWithAt(t, db.Store, syncerOver(db.Store, cloud, &syncFake{}), true)
@@ -250,9 +247,10 @@ func TestSyncCloudOverHTTP(t *testing.T) {
 			rec := a.call(t, http.MethodPost, syncRoute(cloud), internalToken,
 				[]byte(`{"at":"2026-02-31T00:00:00Z"}`))
 
+			// The contract's date-time format checks that the month has the day,
+			// as RFC 3339 section 5.7 requires, so this answer is the validator's
+			// too. The handler would refuse the instant the same way.
 			assertProblem(t, rec, http.StatusBadRequest, problem.TypeValidation)
-			assertDetail(t, rec,
-				`the request body must be a JSON object whose optional member "at" is an RFC 3339 instant`)
 			if got := runsOf(t, a, cloud); got != 0 {
 				t.Errorf("sync_runs rows = %d, want none", got)
 			}
