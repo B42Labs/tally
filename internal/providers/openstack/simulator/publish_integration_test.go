@@ -718,8 +718,9 @@ func TestRunWaitsForTheCollector(t *testing.T) {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}
 		case <-ctx.Done():
-			<-done
-			t.Fatalf("Run() did not finish within %v with the wait disabled", pollDeadline)
+			err := <-done
+			t.Fatalf("Run() did not finish within %v with the wait disabled; stopped, it returned %v",
+				pollDeadline, err)
 		}
 	})
 

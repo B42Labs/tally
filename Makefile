@@ -19,7 +19,7 @@ CERT_MANAGER_VERSION ?= v1.21.1
 # CI judge the code with one linter; the two pins are moved together.
 OAPI_CODEGEN_VERSION ?= v2.8.0
 SQLC_VERSION ?= v1.31.1
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 # The packager `deb` builds the collector's Debian package with, from the same
 # module cache as the three above.
