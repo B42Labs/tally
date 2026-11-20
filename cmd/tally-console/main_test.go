@@ -580,7 +580,9 @@ func TestAwaitStop(t *testing.T) {
 		if !errors.Is(err, errCloseFailed) || !strings.Contains(err.Error(), "shutting down") {
 			t.Errorf("awaitStop() error = %v, want one wrapping the failure as shutting down", err)
 		}
-		<-served
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve() = %v, want %v: awaitStop shut the server down", err, http.ErrServerClosed)
+		}
 	})
 
 	t.Run("a serving failure and a failed shutdown are both reported", func(t *testing.T) {
@@ -594,7 +596,9 @@ func TestAwaitStop(t *testing.T) {
 		if !errors.Is(err, broken) || !errors.Is(err, errCloseFailed) {
 			t.Errorf("awaitStop() error = %v, want one wrapping both failures", err)
 		}
-		<-served
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve() = %v, want %v: awaitStop shut the server down", err, http.ErrServerClosed)
+		}
 	})
 }
 

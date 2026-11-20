@@ -64,7 +64,7 @@ installed on the host.
 ## Lint and format
 
 `make lint` and `make fmt` run golangci-lint v2 at `GOLANGCI_LINT_VERSION`
-(`v2.13.2`) from the module cache, so neither uses a binary on the host. A
+(`v2.15.0`) from the module cache, so neither uses a binary on the host. A
 golangci-lint built with an older Go than the module's toolchain refuses the
 module, which is why the targets do not call one. The first run compiles the
 linter with the module's toolchain and takes a while; later runs start from the
